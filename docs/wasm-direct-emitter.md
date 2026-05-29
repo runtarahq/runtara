@@ -35,8 +35,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   normal-edge `Filter`/value `Switch`/`GroupBy`/`Log` chains ending in
   `Finish`/`Error` leaves, and routing `Switch` dispatch trees with one static
   edge per route plus a `default` edge whose leaves can be `Finish` or `Error`,
-  plus sequential `Split` subgraphs, including `dontStopOnFailed` per-iteration
-  aggregation.
+  plus non-durable sequential `Split` subgraphs, including `dontStopOnFailed`
+  per-iteration aggregation.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. Breakpoints remain outside the supported direct-control subset.
@@ -166,8 +166,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   staged static stdlib/runtime and agent component bundle.
 - `tests/direct_wasm_ab_execute.rs` now provides the first strict direct-vs-Rust
   artifact execution harness. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles
-  representative `Finish`, `Conditional`, `Filter`, value `Switch`, and
-  `GroupBy` fixtures plus normal-edge condition-priority/default routing
+  representative `Finish`, `Conditional`, `Filter`, value `Switch`, `GroupBy`,
+  non-durable sequential `Split`, and agentless `While` fixtures plus normal-edge
+  condition-priority/default routing
   through both `compile_workflow` and
   `compile_workflow_direct`, runs both final `workflow.wasm` artifacts under
   Wasmtime with the same logical workflow input through each runtime's SDK
@@ -1815,12 +1816,17 @@ Implementation steps:
      accumulation, `_loop_indices`, `_item`, `_index`, `_scope_id`, extra
      variables, result envelopes, and the `dontStopOnFailed`
      success/error/stats envelope;
-   - direct loop lowering: schema-free sequential Split done, including nested
-     direct run-plan emission, per-item source construction, output
+   - direct loop lowering: non-durable schema-free sequential Split done,
+     including nested direct run-plan emission, per-item source construction, output
      accumulation, duplicate nested step-id manifest parsing, schema validation
      calls, validation-failure, nested Agent failure, explicit Error-step
      failure, and mapping/source/control-stdlib failure accumulation for
      `dontStopOnFailed`, and structural core-Wasm lowering tests.
+   - public support gate: enabled for non-durable sequential Split; durable
+     Split remains rejected until checkpoint/replay lowering covers the split
+     final-result checkpoint.
+   - strict A/B execution coverage: done for a non-durable schema-validating
+     sequential Split fixture.
 2. Preserve split behavior:
    - null and non-array handling: done in stdlib;
    - item variable injection: done in stdlib;
@@ -1833,6 +1839,7 @@ Implementation steps:
      routing done; support gate enabled. Runtime cancellation, pause/shutdown,
      and checkpoint infrastructure failures remain fail-fast control flow,
      matching the generated-code split behavior rather than item aggregation;
+   - durable Split checkpoint/replay: pending and gated;
    - Split retry/timeout/breakpoint semantics: pending.
 3. Implement `While`:
    - config/condition manifest records and nested graph link: done;
@@ -1852,6 +1859,7 @@ Implementation steps:
    - gated composed-artifact execution smoke: done for an agentless While loop
      that exercises loop index variables, `_previousOutputs`, final output
      shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
+   - strict A/B execution coverage: done for the same agentless While loop;
    - While timeout, breakpoint, nested loop-local reentrancy, and onError
      routing: pending.
 4. Defer parallel split until runtime support and test coverage are explicit.
@@ -2031,6 +2039,9 @@ Current status:
   `agent::<agentId>::<capabilityId>::<stepId>` key base. Cached Agent replay
   preloads that normalized key and verifies both artifacts return the cached
   output with only the read-only checkpoint lookup.
+- The strict A/B harness now also includes enabled loop/control-flow coverage:
+  a non-durable schema-validating sequential Split fixture and an agentless
+  While loop fixture that exercises loop index variables and `_previousOutputs`.
 - Exact cross-compiler checkpoint id compatibility remains pending. Generated
   Rust currently wraps Agent checkpoint ids with the resilient
   function/workflow-instance prefix, while direct artifacts use the direct

@@ -7380,11 +7380,13 @@ mod tests {
     #[test]
     fn direct_compile_supports_sequential_split_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let mut graph = fixture("split");
+        graph.durable = Some(false);
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split".to_string(),
             version: 1,
             source_checksum: None,
-            execution_graph: fixture("split"),
+            execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
@@ -7449,11 +7451,13 @@ mod tests {
     #[test]
     fn direct_compile_supports_split_schema_validation_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let mut graph = fixture("split_with_schemas");
+        graph.durable = Some(false);
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split-with-schemas".to_string(),
             version: 1,
             source_checksum: None,
-            execution_graph: fixture("split_with_schemas"),
+            execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
@@ -7483,11 +7487,13 @@ mod tests {
     #[test]
     fn direct_compile_supports_split_dont_stop_on_failed_graph() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let mut graph = fixture("split_with_schemas_failing");
+        graph.durable = Some(false);
         let result = compile_direct_workflow(DirectCompilationInput {
             workflow_id: "split-dont-stop".to_string(),
             version: 1,
             source_checksum: None,
-            execution_graph: fixture("split_with_schemas_failing"),
+            execution_graph: graph,
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,

@@ -68,6 +68,15 @@ fn collect_graph_support(
     graph: &ExecutionGraph,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
+    collect_graph_support_inner(graph, true, unsupported);
+}
+
+fn collect_graph_support_inner(
+    graph: &ExecutionGraph,
+    inherited_durable: bool,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let graph_durable = graph.durable.unwrap_or(inherited_durable);
     let direct_control = supports_direct_control_graph(graph);
     if !direct_control {
         for edge in &graph.execution_plan {
@@ -143,7 +152,7 @@ fn collect_graph_support(
     }
 
     for step in graph.steps.values() {
-        collect_step_support(graph, step, direct_control, unsupported);
+        collect_step_support(graph, graph_durable, step, direct_control, unsupported);
     }
 }
 
@@ -644,6 +653,7 @@ fn supports_routing_switch_step(
 
 fn collect_step_support(
     graph: &ExecutionGraph,
+    graph_durable: bool,
     step: &Step,
     direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
@@ -725,13 +735,21 @@ fn collect_step_support(
             }
         }
         Step::Split(split) => {
+            if graph_durable && split.durable.unwrap_or(true) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(split.id.clone()),
+                    step_type: Some("Split".to_string()),
+                    feature: "split-durable".to_string(),
+                    reason: "Durable Split requires direct checkpoint/replay lowering for split final results".to_string(),
+                });
+            }
             if !supports_split_step_baseline(split) {
                 collect_split_step_unsupported(split, unsupported);
             }
-            collect_graph_support(&split.subgraph, unsupported);
+            collect_graph_support_inner(&split.subgraph, graph_durable, unsupported);
         }
         Step::While(while_step) if supports_while_step_baseline(while_step) => {
-            collect_graph_support(&while_step.subgraph, unsupported);
+            collect_graph_support_inner(&while_step.subgraph, graph_durable, unsupported);
         }
         Step::Switch(step)
             if step
@@ -760,7 +778,7 @@ fn collect_step_support(
         ),
         Step::While(while_step) => {
             collect_while_step_unsupported(while_step, unsupported);
-            collect_graph_support(&while_step.subgraph, unsupported);
+            collect_graph_support_inner(&while_step.subgraph, graph_durable, unsupported);
         }
         Step::Log(_) => unsupported_step(
             step,
@@ -795,7 +813,7 @@ fn collect_step_support(
                 unsupported,
             );
             if let Some(on_wait) = &wait.on_wait {
-                collect_graph_support(on_wait, unsupported);
+                collect_graph_support_inner(on_wait, graph_durable, unsupported);
             }
         }
         Step::AiAgent(_) => unsupported_step(
@@ -1430,7 +1448,10 @@ mod tests {
 
     #[test]
     fn sequential_split_normal_flow_is_supported() {
-        let report = analyze_direct_wasm_support(&fixture("split"));
+        let mut graph = fixture("split");
+        graph.durable = Some(false);
+
+        let report = analyze_direct_wasm_support(&graph);
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
@@ -1438,7 +1459,10 @@ mod tests {
 
     #[test]
     fn split_schema_validation_is_supported() {
-        let report = analyze_direct_wasm_support(&fixture("split_with_schemas"));
+        let mut graph = fixture("split_with_schemas");
+        graph.durable = Some(false);
+
+        let report = analyze_direct_wasm_support(&graph);
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
@@ -1447,7 +1471,10 @@ mod tests {
     #[test]
     fn split_dont_stop_on_failed_is_supported() {
         for fixture_name in ["split_with_schemas_failing", "split_with_error"] {
-            let report = analyze_direct_wasm_support(&fixture(fixture_name));
+            let mut graph = fixture(fixture_name);
+            graph.durable = Some(false);
+
+            let report = analyze_direct_wasm_support(&graph);
 
             assert!(report.supported, "{fixture_name}: {:?}", report.unsupported);
             assert!(
@@ -1459,8 +1486,21 @@ mod tests {
     }
 
     #[test]
+    fn durable_split_is_rejected_until_checkpoint_lowering_is_implemented() {
+        let report = analyze_direct_wasm_support(&fixture("split"));
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("split")
+                && feature.step_type.as_deref() == Some("Split")
+                && feature.feature == "split-durable"
+        }));
+    }
+
+    #[test]
     fn split_retry_timeout_and_breakpoint_are_rejected() {
         let mut graph = fixture("split");
+        graph.durable = Some(false);
         let Some(Step::Split(split)) = graph.steps.get_mut("split") else {
             panic!("expected Split fixture step");
         };

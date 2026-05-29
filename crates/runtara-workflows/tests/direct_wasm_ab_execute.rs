@@ -27,10 +27,60 @@ const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
+const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
+  "durable": false,
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true
+      },
+      "inputSchema": {
+        "value": { "type": "string", "required": true }
+      },
+      "outputSchema": {
+        "value": { "type": "string", "required": true }
+      },
+      "subgraph": {
+        "name": "Echo Item",
+        "steps": {
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "value": { "valueType": "reference", "value": "data.value" },
+              "index": { "valueType": "reference", "value": "variables._index" },
+              "indices": { "valueType": "reference", "value": "variables._loop_indices" }
+            }
+          }
+        },
+        "entryPoint": "finish",
+        "executionPlan": []
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
 const AGENT_RETURN_INPUT: &str = r#"{
   "durable": true,
   "steps": {
@@ -887,6 +937,16 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
                 br#"{"status":"active","tier":"basic"}"#,
                 br#"{"status":"inactive","tier":"basic"}"#,
             ],
+        },
+        AbCase {
+            name: "split-schema",
+            graph_json: SPLIT_FINISH_WITH_SCHEMAS,
+            inputs: &[br#"{"items":[{"value":"alpha"},{"value":"beta"}]}"#],
+        },
+        AbCase {
+            name: "while-loop",
+            graph_json: WHILE_DIRECT_INDEX_ONLY,
+            inputs: &[br#"{"count":3}"#],
         },
         AbCase {
             name: "log-events",
