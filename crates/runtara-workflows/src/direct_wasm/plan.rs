@@ -4,8 +4,8 @@
 
 use super::error::DirectCompileError;
 use super::manifest::{
-    DirectAgentManifest, DirectDelayManifest, DirectEdgeManifest, DirectGraphManifest,
-    DirectSplitManifest, DirectWorkflowManifest,
+    DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectDelayManifest, DirectEdgeManifest,
+    DirectGraphManifest, DirectSplitManifest, DirectWorkflowManifest,
 };
 
 #[derive(Debug, Clone)]
@@ -51,6 +51,13 @@ pub(super) enum DirectRunPlan {
         step_id: String,
         while_id: u32,
         nested_plan: Box<DirectRunPlan>,
+        next_plan: Box<DirectRunPlan>,
+    },
+    EmbedWorkflow {
+        step_id: String,
+        input_mapping_id: u32,
+        durable: bool,
+        child_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
     },
     Delay {
@@ -161,11 +168,14 @@ pub(super) fn direct_run_plan(
 
     match entry.step_type.as_str() {
         "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay"
-        | "WaitForSignal" | "Log" | "Agent" | "Error" | "Conditional" => step_run_plan(
-            &manifest.graph,
-            &manifest.graph.entry_point,
-            &mut Vec::new(),
-        ),
+        | "EmbedWorkflow" | "WaitForSignal" | "Log" | "Agent" | "Error" | "Conditional" => {
+            step_run_plan(
+                &manifest.graph,
+                &manifest.child_workflows,
+                &manifest.graph.entry_point,
+                &mut Vec::new(),
+            )
+        }
         other => Err(DirectCompileError::Component(format!(
             "direct run plan does not support entry step type '{other}'"
         ))),
@@ -174,22 +184,25 @@ pub(super) fn direct_run_plan(
 
 fn step_run_plan(
     graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, step_id, stack, true)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, true)
 }
 
 fn step_run_plan_without_on_error(
     graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, step_id, stack, false)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, false)
 }
 
 fn step_run_plan_inner(
     graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
     stack: &mut Vec<String>,
     include_on_error: bool,
@@ -213,7 +226,8 @@ fn step_run_plan_inner(
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Filter {
                 step_id: step_id.to_string(),
@@ -230,15 +244,26 @@ fn step_run_plan_inner(
                 stack.push(step_id.to_string());
                 for label in route_labels {
                     let target = branch_target(graph, step_id, &label)?.to_string();
-                    let plan = step_run_plan_inner(graph, &target, stack, include_on_error)?;
+                    let plan = step_run_plan_inner(
+                        graph,
+                        child_workflows,
+                        &target,
+                        stack,
+                        include_on_error,
+                    )?;
                     branches.push(DirectSwitchRoutePlan {
                         label,
                         plan: Box::new(plan),
                     });
                 }
                 let default_target = branch_target(graph, step_id, "default")?.to_string();
-                let default_plan =
-                    step_run_plan_inner(graph, &default_target, stack, include_on_error)?;
+                let default_plan = step_run_plan_inner(
+                    graph,
+                    child_workflows,
+                    &default_target,
+                    stack,
+                    include_on_error,
+                )?;
                 stack.pop();
 
                 Ok(DirectRunPlan::SwitchRoute {
@@ -248,7 +273,8 @@ fn step_run_plan_inner(
                     default_plan: Box::new(default_plan),
                 })
             } else {
-                let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+                let next_plan =
+                    normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
                 Ok(DirectRunPlan::SwitchValue {
                     step_id: step_id.to_string(),
@@ -259,7 +285,8 @@ fn step_run_plan_inner(
         }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
@@ -271,9 +298,14 @@ fn step_run_plan_inner(
             let split = split_manifest(graph, step_id)?;
             let dont_stop_on_failed = split_dont_stop_on_failed(graph, step_id)?;
             let nested_graph = split_subgraph(graph, step_id)?;
-            let nested_plan =
-                step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let nested_plan = step_run_plan(
+                nested_graph,
+                child_workflows,
+                &nested_graph.entry_point,
+                &mut Vec::new(),
+            )?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Split {
                 step_id: step_id.to_string(),
@@ -287,9 +319,14 @@ fn step_run_plan_inner(
         "While" => {
             let while_id = while_id(graph, step_id)?;
             let nested_graph = while_subgraph(graph, step_id)?;
-            let nested_plan =
-                step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let nested_plan = step_run_plan(
+                nested_graph,
+                child_workflows,
+                &nested_graph.entry_point,
+                &mut Vec::new(),
+            )?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::While {
                 step_id: step_id.to_string(),
@@ -298,9 +335,34 @@ fn step_run_plan_inner(
                 next_plan: Box::new(next_plan),
             })
         }
+        "EmbedWorkflow" => {
+            let child = child_workflow_graph(child_workflows, step_id)?;
+            let child_plan = step_run_plan(
+                &child.graph,
+                child_workflows,
+                &child.graph.entry_point,
+                &mut Vec::new(),
+            )?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+
+            Ok(DirectRunPlan::EmbedWorkflow {
+                step_id: step_id.to_string(),
+                input_mapping_id: embed_workflow_input_mapping_id(graph, step_id)?,
+                durable: graph.durable
+                    && step
+                        .body
+                        .get("durable")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true),
+                child_plan: Box::new(child_plan),
+                next_plan: Box::new(next_plan),
+            })
+        }
         "Delay" => {
             let delay = delay_config(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Delay {
                 step_id: step_id.to_string(),
@@ -312,10 +374,16 @@ fn step_run_plan_inner(
         "WaitForSignal" => {
             let on_wait_plan = wait_on_wait_subgraph(graph, step_id)?
                 .map(|nested_graph| {
-                    step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())
+                    step_run_plan(
+                        nested_graph,
+                        child_workflows,
+                        &nested_graph.entry_point,
+                        &mut Vec::new(),
+                    )
                 })
                 .transpose()?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::WaitForSignal {
                 step_id: step_id.to_string(),
@@ -331,7 +399,8 @@ fn step_run_plan_inner(
         }
         "Log" => {
             let log_id = log_id(graph, step_id)?;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Log {
                 log_id,
@@ -344,9 +413,10 @@ fn step_run_plan_inner(
             let max_retries = agent_effective_max_retries(agent);
             let retry_delay_ms = agent_effective_retry_delay_ms(agent);
             let rate_limit_budget_ms = graph.rate_limit_budget_ms;
-            let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
             let error_plan = if include_on_error {
-                on_error_plan(graph, step_id, stack)?
+                on_error_plan(graph, child_workflows, step_id, stack)?
             } else {
                 None
             };
@@ -386,8 +456,10 @@ fn step_run_plan_inner(
             let false_step = branch_target(graph, step_id, "false")?.to_string();
 
             stack.push(step_id.to_string());
-            let true_plan = step_run_plan_inner(graph, &true_step, stack, include_on_error)?;
-            let false_plan = step_run_plan_inner(graph, &false_step, stack, include_on_error)?;
+            let true_plan =
+                step_run_plan_inner(graph, child_workflows, &true_step, stack, include_on_error)?;
+            let false_plan =
+                step_run_plan_inner(graph, child_workflows, &false_step, stack, include_on_error)?;
             stack.pop();
 
             Ok(DirectRunPlan::Conditional {
@@ -405,6 +477,7 @@ fn step_run_plan_inner(
 
 fn normal_flow_plan(
     graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
     from_step: &str,
     stack: &mut Vec<String>,
     include_on_error: bool,
@@ -434,7 +507,13 @@ fn normal_flow_plan(
             )));
         };
         stack.push(from_step.to_string());
-        let next_plan = step_run_plan_inner(graph, &edge.to_step, stack, include_on_error)?;
+        let next_plan = step_run_plan_inner(
+            graph,
+            child_workflows,
+            &edge.to_step,
+            stack,
+            include_on_error,
+        )?;
         stack.pop();
         return Ok(next_plan);
     }
@@ -467,14 +546,26 @@ fn normal_flow_plan(
                     "missing edge condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan = step_run_plan_inner(graph, &edge.to_step, stack, include_on_error)?;
+            let plan = step_run_plan_inner(
+                graph,
+                child_workflows,
+                &edge.to_step,
+                stack,
+                include_on_error,
+            )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
             })
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
-    let default_plan = step_run_plan_inner(graph, &default_edge.to_step, stack, include_on_error)?;
+    let default_plan = step_run_plan_inner(
+        graph,
+        child_workflows,
+        &default_edge.to_step,
+        stack,
+        include_on_error,
+    )?;
     stack.pop();
 
     Ok(DirectRunPlan::EdgeRoute {
@@ -485,6 +576,7 @@ fn normal_flow_plan(
 
 fn on_error_plan(
     graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
     from_step: &str,
     stack: &mut Vec<String>,
 ) -> Result<Option<DirectErrorRoutePlan>, DirectCompileError> {
@@ -535,7 +627,8 @@ fn on_error_plan(
                     "missing onError condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan = step_run_plan_without_on_error(graph, &edge.to_step, stack)?;
+            let plan =
+                step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack)?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
@@ -543,7 +636,7 @@ fn on_error_plan(
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
     let default_plan = default_edge
-        .map(|edge| step_run_plan_without_on_error(graph, &edge.to_step, stack))
+        .map(|edge| step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack))
         .transpose()?
         .map(Box::new);
     stack.pop();
@@ -857,6 +950,20 @@ fn delay_config<'a>(
         })
 }
 
+fn child_workflow_graph<'a>(
+    child_workflows: &'a [DirectChildWorkflowGraphManifest],
+    step_id: &str,
+) -> Result<&'a DirectChildWorkflowGraphManifest, DirectCompileError> {
+    child_workflows
+        .iter()
+        .find(|child| child.step_id == step_id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing direct child workflow graph for EmbedWorkflow step '{step_id}'"
+            ))
+        })
+}
+
 fn log_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
     if !graph
         .steps
@@ -956,6 +1063,34 @@ fn finish_mapping_id(
         .ok_or_else(|| {
             DirectCompileError::Component(format!(
                 "missing Finish input mapping for step '{step_id}'"
+            ))
+        })
+}
+
+fn embed_workflow_input_mapping_id(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<u32, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "EmbedWorkflow")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not an EmbedWorkflow step"
+        )));
+    }
+
+    graph
+        .mappings
+        .iter()
+        .find(|mapping| {
+            mapping.step_id == step_id && mapping.purpose == "embedWorkflow.inputMapping"
+        })
+        .map(|mapping| mapping.id)
+        .ok_or_else(|| {
+            DirectCompileError::Component(format!(
+                "missing EmbedWorkflow input mapping for step '{step_id}'"
             ))
         })
 }

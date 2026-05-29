@@ -264,6 +264,29 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    embed-workflow-cache-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-variables: func(
+        step-id: string,
+        source: list<u8>,
+        child-input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-result: func(
+        step-id: string,
+        source: list<u8>,
+        child-output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-output-from-result: func(
+        step-id: string,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-output: func(
         agent-id: u32,
         source: list<u8>,

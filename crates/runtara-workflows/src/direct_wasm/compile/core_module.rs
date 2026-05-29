@@ -64,8 +64,9 @@ impl DirectCoreConfig {
         let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
             run_plan: direct_run_plan(manifest)?,
-            static_data: DirectCoreStaticData::new(
+            static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
+                &manifest.child_workflows,
                 manifest_json,
                 &variables_json,
                 DIRECT_EMPTY_STEPS_CONTEXT,
@@ -407,7 +408,7 @@ fn direct_run_function(
         (2, ValType::I64),
         (10, ValType::I32),
         (1, ValType::I64),
-        (6, ValType::I32),
+        (14, ValType::I32),
     ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);

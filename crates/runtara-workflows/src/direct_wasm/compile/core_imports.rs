@@ -77,6 +77,10 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_wait_event: Option<u32>,
     stdlib_wait_debug_start: Option<u32>,
     stdlib_wait_output: Option<u32>,
+    stdlib_embed_workflow_cache_key: Option<u32>,
+    stdlib_embed_workflow_variables: Option<u32>,
+    stdlib_embed_workflow_result: Option<u32>,
+    stdlib_embed_workflow_output_from_result: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
@@ -285,6 +289,22 @@ impl DirectCoreImportIndices {
                 "stdlib.wait-debug-start",
             )?,
             stdlib_wait_output: require_import(self.stdlib_wait_output, "stdlib.wait-output")?,
+            stdlib_embed_workflow_cache_key: require_import(
+                self.stdlib_embed_workflow_cache_key,
+                "stdlib.embed-workflow-cache-key",
+            )?,
+            stdlib_embed_workflow_variables: require_import(
+                self.stdlib_embed_workflow_variables,
+                "stdlib.embed-workflow-variables",
+            )?,
+            stdlib_embed_workflow_result: require_import(
+                self.stdlib_embed_workflow_result,
+                "stdlib.embed-workflow-result",
+            )?,
+            stdlib_embed_workflow_output_from_result: require_import(
+                self.stdlib_embed_workflow_output_from_result,
+                "stdlib.embed-workflow-output-from-result",
+            )?,
             stdlib_agent_output: require_import(self.stdlib_agent_output, "stdlib.agent-output")?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
@@ -398,6 +418,10 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_wait_event: u32,
     pub(super) stdlib_wait_debug_start: u32,
     pub(super) stdlib_wait_output: u32,
+    pub(super) stdlib_embed_workflow_cache_key: u32,
+    pub(super) stdlib_embed_workflow_variables: u32,
+    pub(super) stdlib_embed_workflow_result: u32,
+    pub(super) stdlib_embed_workflow_output_from_result: u32,
     pub(super) stdlib_agent_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
@@ -618,6 +642,19 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-output") {
         import_indices.stdlib_wait_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-cache-key") {
+        import_indices.stdlib_embed_workflow_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-variables") {
+        import_indices.stdlib_embed_workflow_variables = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-result") {
+        import_indices.stdlib_embed_workflow_result = Some(function_index);
+    } else if is_stdlib_import(
+        resolve,
+        interface,
+        function,
+        "embed-workflow-output-from-result",
+    ) {
+        import_indices.stdlib_embed_workflow_output_from_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-output") {
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {

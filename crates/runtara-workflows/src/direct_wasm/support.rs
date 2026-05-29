@@ -5,9 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runtara_dsl::{
-    AgentStep, DelayStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep, WhileStep,
+    AgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep,
+    WhileStep,
 };
 
+use crate::compile::ChildWorkflowInput;
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
 /// Unsupported feature found while deciding whether direct emission can run.
@@ -40,12 +42,41 @@ pub struct DirectWorkflowSupportReport {
 
 /// Analyze whether the current production direct emitter can compile `graph`.
 ///
-/// Initial production scaffolding intentionally supports only finish-only
-/// graphs. All other parsed DSL constructs still serialize into the manifest
-/// but are rejected before emission with exact step ids.
+/// The public report does not receive preloaded child graphs. Callers that
+/// want direct `EmbedWorkflow` support must use the child-aware analyzer so the
+/// gate can inspect the complete static child closure before emission.
 pub fn analyze_direct_wasm_support(graph: &ExecutionGraph) -> DirectWorkflowSupportReport {
+    analyze_direct_wasm_support_inner(graph, DirectSupportChildWorkflows::default())
+}
+
+pub(super) fn analyze_direct_wasm_support_with_child_workflows(
+    graph: &ExecutionGraph,
+    child_workflows: &[ChildWorkflowInput],
+) -> DirectWorkflowSupportReport {
+    analyze_direct_wasm_support_inner(
+        graph,
+        DirectSupportChildWorkflows::from_child_workflows(child_workflows),
+    )
+}
+
+fn analyze_direct_wasm_support_inner(
+    graph: &ExecutionGraph,
+    child_workflows: DirectSupportChildWorkflows<'_>,
+) -> DirectWorkflowSupportReport {
     let mut unsupported = Vec::new();
-    collect_graph_support(graph, &mut unsupported);
+    let embed_step_ids = embed_workflow_step_ids(graph);
+    for step_id in &child_workflows.duplicate_step_ids {
+        if !embed_step_ids.contains(step_id) {
+            continue;
+        }
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step_id.clone()),
+            step_type: Some("EmbedWorkflow".to_string()),
+            feature: "embed-workflow-duplicate-child".to_string(),
+            reason: "direct EmbedWorkflow lowering requires exactly one preloaded child graph per call-site step id".to_string(),
+        });
+    }
+    collect_graph_support(graph, &child_workflows, &mut unsupported);
     unsupported.sort_by(|left, right| {
         (
             left.step_id.as_deref().unwrap_or_default(),
@@ -66,20 +97,69 @@ pub fn analyze_direct_wasm_support(graph: &ExecutionGraph) -> DirectWorkflowSupp
     }
 }
 
+#[derive(Debug, Default)]
+struct DirectSupportChildWorkflows<'a> {
+    by_step_id: BTreeMap<&'a str, &'a ExecutionGraph>,
+    duplicate_step_ids: BTreeSet<String>,
+}
+
+impl<'a> DirectSupportChildWorkflows<'a> {
+    fn from_child_workflows(child_workflows: &'a [ChildWorkflowInput]) -> Self {
+        let mut by_step_id = BTreeMap::new();
+        let mut duplicate_step_ids = BTreeSet::new();
+        for child in child_workflows {
+            if by_step_id
+                .insert(child.step_id.as_str(), &child.execution_graph)
+                .is_some()
+            {
+                duplicate_step_ids.insert(child.step_id.clone());
+            }
+        }
+
+        Self {
+            by_step_id,
+            duplicate_step_ids,
+        }
+    }
+
+    fn get(&self, step_id: &str) -> Option<&'a ExecutionGraph> {
+        self.by_step_id.get(step_id).copied()
+    }
+}
+
+fn embed_workflow_step_ids(graph: &ExecutionGraph) -> BTreeSet<String> {
+    let mut step_ids = BTreeSet::new();
+    collect_embed_workflow_step_ids(graph, &mut step_ids);
+    step_ids
+}
+
+fn collect_embed_workflow_step_ids(graph: &ExecutionGraph, step_ids: &mut BTreeSet<String>) {
+    for step in graph.steps.values() {
+        if let Step::EmbedWorkflow(step) = step {
+            step_ids.insert(step.id.clone());
+        }
+        for nested in nested_step_graphs(step) {
+            collect_embed_workflow_step_ids(nested, step_ids);
+        }
+    }
+}
+
 fn collect_graph_support(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    collect_graph_support_inner(graph, true, unsupported);
+    collect_graph_support_inner(graph, true, child_workflows, unsupported);
 }
 
 fn collect_graph_support_inner(
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
     let graph_durable = graph.durable.unwrap_or(inherited_durable);
-    let direct_control = supports_direct_control_graph(graph);
+    let direct_control = supports_direct_control_graph(graph, child_workflows);
     if !direct_control {
         for edge in &graph.execution_plan {
             unsupported.push(UnsupportedWorkflowFeature {
@@ -154,16 +234,27 @@ fn collect_graph_support_inner(
     }
 
     for step in graph.steps.values() {
-        collect_step_support(graph, graph_durable, step, direct_control, unsupported);
+        collect_step_support(
+            graph,
+            graph_durable,
+            child_workflows,
+            step,
+            direct_control,
+            unsupported,
+        );
     }
 }
 
-fn supports_direct_control_graph(graph: &ExecutionGraph) -> bool {
+fn supports_direct_control_graph(
+    graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
     let mut reachable = BTreeSet::new();
     let mut used_edges = BTreeSet::new();
     let mut stack = Vec::new();
     if !supports_direct_control_step(
         graph,
+        child_workflows,
         &graph.entry_point,
         &mut reachable,
         &mut used_edges,
@@ -177,16 +268,26 @@ fn supports_direct_control_graph(graph: &ExecutionGraph) -> bool {
 
 fn supports_direct_control_step(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step_id: &str,
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
     stack: &mut Vec<String>,
 ) -> bool {
-    supports_direct_control_step_inner(graph, step_id, reachable, used_edges, stack, true)
+    supports_direct_control_step_inner(
+        graph,
+        child_workflows,
+        step_id,
+        reachable,
+        used_edges,
+        stack,
+        true,
+    )
 }
 
 fn supports_direct_control_step_inner(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step_id: &str,
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
@@ -234,6 +335,7 @@ fn supports_direct_control_step_inner(
             stack.push(step_id.to_string());
             let true_supported = supports_direct_control_step_inner(
                 graph,
+                child_workflows,
                 &true_edge.to_step,
                 reachable,
                 used_edges,
@@ -242,6 +344,7 @@ fn supports_direct_control_step_inner(
             );
             let false_supported = supports_direct_control_step_inner(
                 graph,
+                child_workflows,
                 &false_edge.to_step,
                 reachable,
                 used_edges,
@@ -254,6 +357,7 @@ fn supports_direct_control_step_inner(
         }
         Step::Filter(_) => supports_normal_flow_step(
             graph,
+            child_workflows,
             step_id,
             reachable,
             used_edges,
@@ -268,6 +372,7 @@ fn supports_direct_control_step_inner(
         {
             supports_routing_switch_step(
                 graph,
+                child_workflows,
                 step_id,
                 step,
                 reachable,
@@ -278,6 +383,7 @@ fn supports_direct_control_step_inner(
         }
         Step::Switch(_) => supports_normal_flow_step(
             graph,
+            child_workflows,
             step_id,
             reachable,
             used_edges,
@@ -286,6 +392,7 @@ fn supports_direct_control_step_inner(
         ),
         Step::GroupBy(_) => supports_normal_flow_step(
             graph,
+            child_workflows,
             step_id,
             reachable,
             used_edges,
@@ -293,9 +400,10 @@ fn supports_direct_control_step_inner(
             include_on_error,
         ),
         Step::Split(step) if supports_split_step_baseline(step) => {
-            supports_direct_control_graph(&step.subgraph)
+            supports_direct_control_graph(&step.subgraph, child_workflows)
                 && supports_normal_flow_step(
                     graph,
+                    child_workflows,
                     step_id,
                     reachable,
                     used_edges,
@@ -304,9 +412,10 @@ fn supports_direct_control_step_inner(
                 )
         }
         Step::While(step) if supports_while_step_baseline(step) => {
-            supports_direct_control_graph(&step.subgraph)
+            supports_direct_control_graph(&step.subgraph, child_workflows)
                 && supports_normal_flow_step(
                     graph,
+                    child_workflows,
                     step_id,
                     reachable,
                     used_edges,
@@ -317,6 +426,7 @@ fn supports_direct_control_step_inner(
         Step::Delay(step) if supports_delay_step_baseline(graph, step) => {
             supports_normal_flow_step(
                 graph,
+                child_workflows,
                 step_id,
                 reachable,
                 used_edges,
@@ -324,9 +434,12 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
-        Step::WaitForSignal(step) if supports_wait_for_signal_step_baseline(step) => {
+        Step::WaitForSignal(step)
+            if supports_wait_for_signal_step_baseline(step, child_workflows) =>
+        {
             supports_normal_flow_step(
                 graph,
+                child_workflows,
                 step_id,
                 reachable,
                 used_edges,
@@ -336,16 +449,31 @@ fn supports_direct_control_step_inner(
         }
         Step::Log(_) => supports_normal_flow_step(
             graph,
+            child_workflows,
             step_id,
             reachable,
             used_edges,
             stack,
             include_on_error,
         ),
+        Step::EmbedWorkflow(step)
+            if supports_embed_workflow_step_baseline(step, child_workflows) =>
+        {
+            supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                include_on_error,
+            )
+        }
         Step::Agent(step) => {
             supports_agent_step_baseline(graph, step)
                 && supports_normal_flow_step(
                     graph,
+                    child_workflows,
                     step_id,
                     reachable,
                     used_edges,
@@ -353,7 +481,14 @@ fn supports_direct_control_step_inner(
                     include_on_error,
                 )
                 && (!include_on_error
-                    || supports_on_error_flow_step(graph, step_id, reachable, used_edges, stack))
+                    || supports_on_error_flow_step(
+                        graph,
+                        child_workflows,
+                        step_id,
+                        reachable,
+                        used_edges,
+                        stack,
+                    ))
         }
         _ => false,
     }
@@ -367,15 +502,44 @@ fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bo
     !step.breakpoint.unwrap_or(false)
 }
 
-fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
+fn supports_wait_for_signal_step_baseline(
+    step: &WaitForSignalStep,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
     step.on_wait
         .as_ref()
-        .is_none_or(|graph| supports_wait_for_signal_on_wait_graph_baseline(graph))
+        .is_none_or(|graph| supports_wait_for_signal_on_wait_graph_baseline(graph, child_workflows))
 }
 
-fn supports_wait_for_signal_on_wait_graph_baseline(graph: &ExecutionGraph) -> bool {
-    supports_direct_control_graph(graph)
+fn supports_wait_for_signal_on_wait_graph_baseline(
+    graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
+    supports_direct_control_graph(graph, child_workflows)
         && !graph_contains_step(graph, |step| matches!(step, Step::WaitForSignal(_)))
+}
+
+fn supports_embed_workflow_step_baseline(
+    step: &EmbedWorkflowStep,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
+    !step.breakpoint.unwrap_or(false)
+        && step.timeout.is_none()
+        && step.retry_delay.is_none()
+        && step.max_retries.is_none_or(|max_retries| max_retries == 0)
+        && child_workflows.get(&step.id).is_some_and(|child| {
+            supports_embed_workflow_child_graph_baseline(child, child_workflows)
+        })
+}
+
+fn supports_embed_workflow_child_graph_baseline(
+    graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
+    supports_direct_control_graph(graph, child_workflows)
+        && !graph_contains_step(graph, |step| {
+            !matches!(step, Step::Finish(_) | Step::Conditional(_))
+        })
 }
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
@@ -422,6 +586,7 @@ fn nested_step_graphs(step: &Step) -> impl Iterator<Item = &ExecutionGraph> {
 
 fn supports_normal_flow_step(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step_id: &str,
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
@@ -452,6 +617,7 @@ fn supports_normal_flow_step(
         stack.push(step_id.to_string());
         let supported = supports_direct_control_step_inner(
             graph,
+            child_workflows,
             &edge.to_step,
             reachable,
             used_edges,
@@ -472,6 +638,7 @@ fn supports_normal_flow_step(
         used_edges.insert(edge_index);
         if !supports_direct_control_step_inner(
             graph,
+            child_workflows,
             &edge.to_step,
             reachable,
             used_edges,
@@ -484,6 +651,7 @@ fn supports_normal_flow_step(
     used_edges.insert(*default_index);
     if !supports_direct_control_step_inner(
         graph,
+        child_workflows,
         &default_edge.to_step,
         reachable,
         used_edges,
@@ -587,6 +755,7 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
 
 fn supports_on_error_flow_step(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step_id: &str,
     reachable: &mut BTreeSet<String>,
     used_edges: &mut BTreeSet<usize>,
@@ -606,6 +775,7 @@ fn supports_on_error_flow_step(
         used_edges.insert(edge_index);
         if !supports_direct_control_step_inner(
             graph,
+            child_workflows,
             &edge.to_step,
             reachable,
             used_edges,
@@ -620,8 +790,10 @@ fn supports_on_error_flow_step(
     supported
 }
 
+#[allow(clippy::too_many_arguments)]
 fn supports_routing_switch_step(
     graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step_id: &str,
     step: &runtara_dsl::SwitchStep,
     reachable: &mut BTreeSet<String>,
@@ -676,6 +848,7 @@ fn supports_routing_switch_step(
         used_edges.insert(*edge_index);
         if !supports_direct_control_step_inner(
             graph,
+            child_workflows,
             &edge.to_step,
             reachable,
             used_edges,
@@ -693,6 +866,7 @@ fn supports_routing_switch_step(
 fn collect_step_support(
     graph: &ExecutionGraph,
     graph_durable: bool,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     step: &Step,
     direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
@@ -777,10 +951,20 @@ fn collect_step_support(
             if !supports_split_step_baseline(split) {
                 collect_split_step_unsupported(split, unsupported);
             }
-            collect_graph_support_inner(&split.subgraph, graph_durable, unsupported);
+            collect_graph_support_inner(
+                &split.subgraph,
+                graph_durable,
+                child_workflows,
+                unsupported,
+            );
         }
         Step::While(while_step) if supports_while_step_baseline(while_step) => {
-            collect_graph_support_inner(&while_step.subgraph, graph_durable, unsupported);
+            collect_graph_support_inner(
+                &while_step.subgraph,
+                graph_durable,
+                child_workflows,
+                unsupported,
+            );
         }
         Step::Switch(step)
             if step
@@ -801,15 +985,24 @@ fn collect_step_support(
             "Switch steps require value-switch stdlib lowering",
             unsupported,
         ),
-        Step::EmbedWorkflow(_) => unsupported_step(
-            step,
-            "child-workflow",
-            "EmbedWorkflow steps require child workflow static composition",
-            unsupported,
-        ),
+        Step::EmbedWorkflow(embed)
+            if supports_embed_workflow_step_baseline(embed, child_workflows) =>
+        {
+            if let Some(child) = child_workflows.get(&embed.id) {
+                collect_graph_support_inner(child, graph_durable, child_workflows, unsupported);
+            }
+        }
+        Step::EmbedWorkflow(embed) => {
+            collect_embed_workflow_step_unsupported(embed, child_workflows, unsupported);
+        }
         Step::While(while_step) => {
             collect_while_step_unsupported(while_step, unsupported);
-            collect_graph_support_inner(&while_step.subgraph, graph_durable, unsupported);
+            collect_graph_support_inner(
+                &while_step.subgraph,
+                graph_durable,
+                child_workflows,
+                unsupported,
+            );
         }
         Step::Log(_) => unsupported_step(
             step,
@@ -836,9 +1029,12 @@ fn collect_step_support(
             unsupported,
         ),
         Step::Delay(step) => collect_delay_step_unsupported(graph, step, unsupported),
-        Step::WaitForSignal(wait) => {
-            collect_wait_for_signal_step_unsupported(wait, graph_durable, unsupported)
-        }
+        Step::WaitForSignal(wait) => collect_wait_for_signal_step_unsupported(
+            wait,
+            graph_durable,
+            child_workflows,
+            unsupported,
+        ),
         Step::AiAgent(_) => unsupported_step(
             step,
             "ai-agent",
@@ -851,6 +1047,7 @@ fn collect_step_support(
 fn collect_wait_for_signal_step_unsupported(
     step: &WaitForSignalStep,
     graph_durable: bool,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
     let mut push = |feature: &str, reason: &str| {
@@ -869,13 +1066,62 @@ fn collect_wait_for_signal_step_unsupported(
                 "WaitForSignal onWait subgraphs cannot contain nested WaitForSignal steps yet",
             );
         }
-        if !supports_direct_control_graph(on_wait) {
+        if !supports_direct_control_graph(on_wait, child_workflows) {
             push(
                 "wait-for-signal-on-wait-shape",
                 "WaitForSignal onWait subgraphs must use a direct-control supported shape",
             );
         }
-        collect_graph_support_inner(on_wait, graph_durable, unsupported);
+        collect_graph_support_inner(on_wait, graph_durable, child_workflows, unsupported);
+    }
+}
+
+fn collect_embed_workflow_step_unsupported(
+    step: &EmbedWorkflowStep,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+) {
+    let mut push = |feature: &str, reason: &str| {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("EmbedWorkflow".to_string()),
+            feature: feature.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+
+    if step.breakpoint.unwrap_or(false) {
+        push(
+            "embed-workflow-breakpoint",
+            "EmbedWorkflow breakpoints require direct child workflow checkpoint/pause propagation",
+        );
+    }
+    if step.timeout.is_some() {
+        push(
+            "embed-workflow-timeout",
+            "EmbedWorkflow timeout requires direct child execution deadline enforcement",
+        );
+    }
+    if step.retry_delay.is_some() || step.max_retries.is_some_and(|max_retries| max_retries > 0) {
+        push(
+            "embed-workflow-retry",
+            "EmbedWorkflow retry/backoff requires direct child failure wrapping and retry checkpoints",
+        );
+    }
+
+    let Some(child) = child_workflows.get(&step.id) else {
+        push(
+            "embed-workflow-missing-child",
+            "direct EmbedWorkflow lowering requires a preloaded static child graph for this call-site",
+        );
+        return;
+    };
+
+    if !supports_embed_workflow_child_graph_baseline(child, child_workflows) {
+        push(
+            "embed-workflow-child-shape",
+            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish and Conditional steps",
+        );
     }
 }
 
@@ -1106,6 +1352,7 @@ mod tests {
             "wait_on_wait_error" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
             }
+            "embed_workflow" => include_str!("../../tests/fixtures/embed_workflow_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
         serde_json::from_str(json).expect("fixture should parse")
@@ -1241,6 +1488,34 @@ mod tests {
     #[test]
     fn nested_conditional_finish_branches_are_supported() {
         let report = analyze_direct_wasm_support(&fixture("conditional_nested"));
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_requires_static_child_closure_for_public_support_check() {
+        let report = analyze_direct_wasm_support(&fixture("embed_workflow"));
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("call_child")
+                && feature.feature == "embed-workflow-missing-child"
+        }));
+    }
+
+    #[test]
+    fn embed_workflow_with_finish_child_is_supported_by_child_aware_check() {
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow"),
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("simple"),
+            }],
+        );
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());

@@ -46,6 +46,19 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   direct pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
+- The direct core emitter now has the first static `EmbedWorkflow` lowering
+  slice. `compile_direct_workflow` uses a child-aware support gate and accepts
+  `EmbedWorkflow` only when the call site has one preloaded static child graph,
+  no breakpoint/timeout/custom retry behavior, and the child graph is limited
+  to direct-control `Finish`/`Conditional` steps. The lowerer maps parent input
+  through the manifest `EmbedWorkflow.inputMapping`, builds isolated child
+  variables/source with generated-compatible scope and cache-prefix values,
+  runs the child run-plan inline, wraps the child output as the parent
+  `EmbedWorkflow` step result, writes/replays the durable final-result
+  checkpoint for the call site, rebuilds the parent source, checks runtime
+  signals, and continues normal flow. Retry/backoff, child failure wrapping,
+  child terminal `Error`, parent `onError`, nested child workflows, and strict
+  A/B execution parity remain Phase 10 hardening work.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
   emits a valid component-format artifact for the currently supported direct
   graph shapes,
@@ -185,6 +198,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `direct_wasm::compile::wait`, covering breakpoint pause, signal-id and
   timeout setup, external-input events, polling/timeout loops, onWait nested
   execution, and onWait failure conversion shared by ABI/Split paths. The
+  first static EmbedWorkflow lowering slice moved into
+  `direct_wasm::compile::embed_workflow`, covering parent input mapping,
+  child variable/source setup, inline child run-plan dispatch, final-result
+  checkpoint replay/save, parent step-result insertion, and continuation. The
   central run-plan variant match moved into `direct_wasm::compile::dispatcher`,
   so step-family lowering now goes through a dedicated dispatcher boundary.
   Direct artifact dependency/provenance sidecar structs, initial metadata
@@ -856,6 +873,11 @@ Emitter module boundaries should stay readable as support broadens:
   breakpoint pause, signal-id/timeout setup, external-input custom events,
   polling and timeout checks, onWait variable/source restoration, and onWait
   failure conversion shared by ABI and Split failure paths.
+- `compile/embed_workflow.rs` owns static EmbedWorkflow lowering, including
+  parent-to-child input mapping, child variable/source construction, inline
+  child run-plan dispatch, generated-compatible parent step-result wrapping,
+  durable final-result checkpoint replay/save, parent source restoration, and
+  continuation into the next run plan.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
@@ -2152,15 +2174,15 @@ Goal: support embedded child workflows with correct isolation and durability.
 Implementation steps:
 
 1. Inline preloaded child graphs into the direct component, matching current
-   compiler behavior: input plumbing and static child closure metadata are
-   partially done. `DirectCompilationInput` now carries preloaded children from
+   compiler behavior: `DirectCompilationInput` carries preloaded children from
    `compile_workflow_direct`, `artifact-metadata.json` schema v2 records
    deterministic child graph metadata, and direct manifest schema v2 serializes
    static child graph manifests with the same mapping/config ID namespace as
-   the parent graph. The remaining work in this phase is direct run-plan
-   construction and Wasm lowering for the `EmbedWorkflow` step itself.
-2. Generate separate child graph functions or state-machine regions.
-3. Preserve:
+   the parent graph. Initial direct run-plan construction and inline Wasm
+   lowering are implemented for a success-path child graph subset.
+2. Keep child graph execution inline in the same direct run-plan state machine
+   until profiling or readability requires separate child graph functions.
+3. Preserve and harden:
    - child input validation;
    - child default variables;
    - parent scope id;
@@ -2173,9 +2195,11 @@ Implementation steps:
 
 Checkpoint 10:
 
-- Child workflow fixtures pass.
+- Static child workflow structural compile fixtures pass.
 - Nested child workflows pass.
 - Child failure and parent `onError` behavior match current path.
+- Strict direct-vs-generated A/B execution passes for fresh and cached durable
+  child calls.
 
 Rollback:
 
@@ -2197,9 +2221,20 @@ Current status:
 - The direct JSON stdlib parser collects root, nested, and static child graph
   mappings/configs from the single initialized manifest. This keeps the static
   inline design compatible with the existing `init-manifest` contract.
-- Direct execution support for `EmbedWorkflow` remains gated until run-plan
-  construction, child variable/source setup, child result wrapping, and
-  durability/cache behavior are lowered and covered by parity tests.
+- The direct JSON stdlib now exposes `EmbedWorkflow` helpers for
+  generated-compatible call-site cache keys, isolated child variables, child
+  input-schema validation, child output wrapping, and parent step-result
+  insertion.
+- Direct run-plan construction and Wasm lowering now support the first static
+  `EmbedWorkflow` subset: one preloaded child graph per call site, no
+  breakpoint/timeout/custom retry behavior, child graphs made of
+  direct-control `Finish`/`Conditional` steps, and durable final-result
+  checkpoint replay/save at the parent call site.
+- Tests currently cover stdlib child variable/result helpers, child-aware
+  support gating, and structural component validation for a parent workflow
+  with a static finish-only child. Remaining work is retry/backoff parity,
+  child failure wrapping, terminal child `Error` propagation, parent `onError`,
+  nested child workflows, and gated A/B execution parity.
 
 ### Phase 11: WaitForSignal
 

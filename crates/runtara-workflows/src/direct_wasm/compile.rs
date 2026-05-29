@@ -20,6 +20,7 @@ mod debug;
 mod delay;
 mod dispatcher;
 mod edge_route;
+mod embed_workflow;
 mod error_step;
 mod log;
 mod mapping;
@@ -77,7 +78,9 @@ use super::static_data::{
     DIRECT_EMPTY_STEPS_CONTEXT, DirectCoreStaticData, DirectDataSegment, WASM_PAGE_SIZE,
     direct_core_variables_json,
 };
-use super::support::{DirectWorkflowSupportReport, analyze_direct_wasm_support};
+use super::support::{
+    DirectWorkflowSupportReport, analyze_direct_wasm_support_with_child_workflows,
+};
 
 /// Direct workflow artifact ABI version.
 pub const DIRECT_WORKFLOW_ABI_VERSION: u32 = 1;
@@ -188,6 +191,14 @@ const DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL: u32 = 31;
 const DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL: u32 = 32;
 const DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL: u32 = 33;
 const DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL: u32 = 34;
+const DIRECT_EMBED_CHILD_DATA_PTR_LOCAL: u32 = 35;
+const DIRECT_EMBED_CHILD_DATA_LEN_LOCAL: u32 = 36;
+const DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL: u32 = 37;
+const DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL: u32 = 38;
+const DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL: u32 = 39;
+const DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL: u32 = 40;
+const DIRECT_EMBED_STEP_RESULT_PTR_LOCAL: u32 = 41;
+const DIRECT_EMBED_STEP_RESULT_LEN_LOCAL: u32 = 42;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -408,7 +419,10 @@ pub fn compile_direct_workflow(
         &child_manifest_inputs,
         agent_catalog,
     )?;
-    let support_report = analyze_direct_wasm_support(&input.execution_graph);
+    let support_report = analyze_direct_wasm_support_with_child_workflows(
+        &input.execution_graph,
+        &input.child_workflows,
+    );
     if !support_report.supported {
         return Err(DirectCompileError::Unsupported {
             report: Box::new(support_report),

@@ -9,6 +9,7 @@ use super::agent::emit_agent_plan;
 use super::debug::emit_step_debug_event;
 use super::delay::emit_delay_plan;
 use super::edge_route::emit_edge_route_dispatch;
+use super::embed_workflow::emit_embed_workflow_plan;
 use super::error_step::emit_error_plan;
 use super::log::emit_log_plan;
 use super::mapping::emit_apply_mapping;
@@ -282,6 +283,39 @@ pub(super) fn emit_run_plan_mapping(
                 step_id,
                 *while_id,
                 nested_plan,
+                next_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+            );
+        }
+        DirectRunPlan::EmbedWorkflow {
+            step_id,
+            input_mapping_id,
+            durable,
+            child_plan,
+            next_plan,
+        } => {
+            emit_embed_workflow_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *input_mapping_id,
+                *durable,
+                child_plan,
                 next_plan,
                 data_ptr_local,
                 data_len_local,

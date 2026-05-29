@@ -659,6 +659,58 @@ mod component {
             })
         }
 
+        fn embed_workflow_cache_key(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_cache_key(&step_id, &source)
+            })
+        }
+
+        fn embed_workflow_variables(
+            step_id: String,
+            source: Vec<u8>,
+            child_input: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_variables(&step_id, &source, &child_input)
+            })
+        }
+
+        fn embed_workflow_result(
+            step_id: String,
+            source: Vec<u8>,
+            child_output: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_result(&step_id, &source, &child_output)
+            })
+        }
+
+        fn embed_workflow_output_from_result(
+            step_id: String,
+            source: Vec<u8>,
+            step_result: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_output_from_result(&step_id, &source, &step_result)
+            })
+        }
+
         fn agent_output(
             agent_id: u32,
             source: Vec<u8>,

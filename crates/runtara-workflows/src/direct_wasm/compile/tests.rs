@@ -46,6 +46,7 @@ fn fixture(name: &str) -> ExecutionGraph {
         "wait_on_wait_error" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
         }
+        "embed_workflow" => include_str!("../../../tests/fixtures/embed_workflow_workflow.json"),
         "transform" => include_str!("../../../tests/fixtures/transform_workflow.json"),
         other => panic!("unknown fixture {other}"),
     };
@@ -302,6 +303,16 @@ fn collect_run_plan_ids(
             ..
         } => {
             collect_run_plan_ids(nested_plan, condition_ids, mapping_ids);
+            collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+        }
+        DirectRunPlan::EmbedWorkflow {
+            input_mapping_id,
+            child_plan,
+            next_plan,
+            ..
+        } => {
+            mapping_ids.push(*input_mapping_id);
+            collect_run_plan_ids(child_plan, condition_ids, mapping_ids);
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
         DirectRunPlan::Delay { next_plan, .. } => {
@@ -719,6 +730,50 @@ fn direct_compile_supports_nested_conditional_tree() {
             .expect("manifest json");
     assert_eq!(manifest.graph.conditions.len(), 2);
     assert_eq!(manifest.graph.mappings.len(), 3);
+}
+
+#[test]
+fn direct_compile_supports_static_embed_workflow_with_finish_child() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_workflow"),
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: fixture("simple"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct EmbedWorkflow compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct EmbedWorkflow artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.entry_point, "call_child");
+    assert_eq!(manifest.child_workflows.len(), 1);
+    assert_eq!(manifest.child_workflows[0].step_id, "call_child");
+    assert_eq!(manifest.child_workflows[0].graph.entry_point, "finish");
+    assert_eq!(manifest.graph.mappings.len(), 2);
+
+    assert_eq!(result.artifact_metadata.child_workflows.len(), 1);
+    assert_eq!(
+        result.artifact_metadata.child_workflows[0].workflow_id,
+        "child_workflow"
+    );
 }
 
 #[test]

@@ -25,6 +25,7 @@ use crate::template::render_template;
 #[derive(Debug, Clone)]
 pub struct DirectJsonManifest {
     steps: BTreeMap<String, DirectJsonStep>,
+    child_workflows: BTreeMap<String, DirectJsonChildWorkflow>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
     splits: BTreeMap<u32, DirectJsonSplit>,
@@ -55,10 +56,29 @@ impl DirectJsonManifest {
         let mut collections = DirectJsonManifestCollections::default();
         collect_graph_manifest(&manifest.graph, &mut collections)?;
         for child in &manifest.child_workflows {
+            if collections
+                .child_workflows
+                .insert(
+                    child.step_id.clone(),
+                    DirectJsonChildWorkflow {
+                        step_id: child.step_id.clone(),
+                        workflow_id: child.workflow_id.clone(),
+                        variables: child.graph.variables.clone(),
+                        input_schema: child.graph.input_schema.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate direct child workflow step id '{}'",
+                    child.step_id
+                ));
+            }
             collect_graph_manifest(&child.graph, &mut collections)?;
         }
         Ok(Self {
             steps: collections.steps,
+            child_workflows: collections.child_workflows,
             mappings: collections.mappings,
             conditions: collections.conditions,
             splits: collections.splits,
@@ -889,6 +909,78 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize wait steps context: {err}"))
     }
 
+    /// Build the generated-code-compatible durable cache key for an
+    /// `EmbedWorkflow` call site.
+    pub fn embed_workflow_cache_key(
+        &self,
+        step_id: &str,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
+        self.embed_workflow_step(step_id)?;
+        Ok(embed_workflow_cache_key(step_id, &source).into_bytes())
+    }
+
+    /// Build isolated child variables for an `EmbedWorkflow` call site and
+    /// validate mapped child inputs against the child graph input schema.
+    pub fn embed_workflow_variables(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        child_input: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
+        let child_input: Value = serde_json::from_slice(child_input)
+            .map_err(|err| format!("failed to parse EmbedWorkflow child input: {err}"))?;
+        let child = self.child_workflow(step_id)?;
+        validate_embed_child_inputs(child, &child_input)?;
+        let variables = embed_child_variables(step_id, child, &source);
+        serde_json::to_vec(&Value::Object(variables))
+            .map_err(|err| format!("failed to serialize EmbedWorkflow child variables: {err}"))
+    }
+
+    /// Wrap a child workflow output in the generated-code-compatible
+    /// `EmbedWorkflow` step result envelope.
+    pub fn embed_workflow_result(
+        &self,
+        step_id: &str,
+        _source: &[u8],
+        child_output: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let child_output: Value = serde_json::from_slice(child_output)
+            .map_err(|err| format!("failed to parse EmbedWorkflow child output: {err}"))?;
+        let step = self.embed_workflow_step(step_id)?;
+        let child = self.child_workflow(step_id)?;
+        let result = embed_workflow_step_value(step, child, child_output);
+        serde_json::to_vec(&result)
+            .map_err(|err| format!("failed to serialize EmbedWorkflow result: {err}"))
+    }
+
+    /// Insert a generated-code-compatible `EmbedWorkflow` step result into the
+    /// parent steps context.
+    pub fn embed_workflow_output_from_result(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        step_result: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
+        let step_result: Value = serde_json::from_slice(step_result)
+            .map_err(|err| format!("failed to parse EmbedWorkflow result: {err}"))?;
+        self.embed_workflow_step(step_id)?;
+        let mut steps = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        steps.insert(step_id.to_string(), step_result);
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize EmbedWorkflow steps context: {err}"))
+    }
+
     /// Store an Agent capability output in the generated-code-compatible steps context.
     pub fn agent_output(
         &self,
@@ -1396,6 +1488,20 @@ impl DirectJsonManifest {
                         .then(|| mapping.value.clone()),
                 ))
             }
+            "EmbedWorkflow" => {
+                let mapping = self.embed_workflow_mapping(step.id.as_str());
+                let inputs = mapping
+                    .map(|mapping| apply_input_mapping(&mapping.value, source))
+                    .transpose()?
+                    .unwrap_or_else(|| Value::Object(Map::new()));
+                Ok((
+                    inputs,
+                    mapping.and_then(|mapping| {
+                        (!mapping.value.as_object().is_some_and(Map::is_empty))
+                            .then(|| mapping.value.clone())
+                    }),
+                ))
+            }
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
@@ -1486,6 +1592,10 @@ impl DirectJsonManifest {
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct Agent output for '{}'", step.id)),
+            "EmbedWorkflow" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct EmbedWorkflow output for '{}'", step.id)),
             "WaitForSignal" => source
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
@@ -1513,6 +1623,12 @@ impl DirectJsonManifest {
         self.mappings
             .values()
             .find(|mapping| mapping.step_id == step_id && mapping.purpose == "finish.inputMapping")
+    }
+
+    fn embed_workflow_mapping(&self, step_id: &str) -> Option<&DirectJsonMapping> {
+        self.mappings.values().find(|mapping| {
+            mapping.step_id == step_id && mapping.purpose == "embedWorkflow.inputMapping"
+        })
     }
 
     fn conditional_condition(&self, step_id: &str) -> Option<&Value> {
@@ -1571,6 +1687,27 @@ impl DirectJsonManifest {
                 step.step_type
             ))
         }
+    }
+
+    fn embed_workflow_step(&self, step_id: &str) -> Result<&DirectJsonStep, String> {
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct EmbedWorkflow step '{step_id}'"))?;
+        if step.step_type == "EmbedWorkflow" {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not EmbedWorkflow",
+                step.step_type
+            ))
+        }
+    }
+
+    fn child_workflow(&self, step_id: &str) -> Result<&DirectJsonChildWorkflow, String> {
+        self.child_workflows
+            .get(step_id)
+            .ok_or_else(|| format!("missing direct child workflow graph for step '{step_id}'"))
     }
 }
 
@@ -1693,6 +1830,7 @@ fn split_cache_key(split: &DirectJsonSplit, source: &Value) -> String {
 #[derive(Default)]
 struct DirectJsonManifestCollections {
     steps: BTreeMap<String, DirectJsonStep>,
+    child_workflows: BTreeMap<String, DirectJsonChildWorkflow>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
     splits: BTreeMap<u32, DirectJsonSplit>,
@@ -2758,6 +2896,169 @@ fn wait_loop_indices_suffix(source: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
+    let variables = source.get("variables").and_then(Value::as_object);
+    let prefix = variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let indices_suffix = variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("::[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    let base = format!("embed_workflow::{step_id}");
+    if prefix.is_empty() {
+        format!("{base}{indices_suffix}")
+    } else {
+        format!("{prefix}::{base}{indices_suffix}")
+    }
+}
+
+fn embed_child_variables(
+    step_id: &str,
+    child: &DirectJsonChildWorkflow,
+    source: &Value,
+) -> Map<String, Value> {
+    let parent_variables = source.get("variables").and_then(Value::as_object);
+    let parent_scope_id = parent_variables
+        .and_then(|vars| vars.get("_scope_id"))
+        .and_then(Value::as_str);
+    let child_scope_id = parent_scope_id
+        .map(|parent| format!("{parent}_{step_id}"))
+        .unwrap_or_else(|| format!("sc_{step_id}"));
+
+    let mut variables = Map::new();
+    variables.insert("_scope_id".to_string(), Value::String(child_scope_id));
+
+    if let Some(workflow_id) = parent_variables
+        .and_then(|vars| vars.get("_workflow_id"))
+        .and_then(Value::as_str)
+    {
+        variables.insert(
+            "_workflow_id".to_string(),
+            Value::String(workflow_id.to_string()),
+        );
+    }
+    if let Some(instance_id) = parent_variables.and_then(|vars| vars.get("_instance_id")) {
+        variables.insert("_instance_id".to_string(), instance_id.clone());
+    }
+    if let Some(tenant_id) = parent_variables.and_then(|vars| vars.get("_tenant_id")) {
+        variables.insert("_tenant_id".to_string(), tenant_id.clone());
+    }
+
+    let loop_indices_suffix = parent_variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    let child_cache_prefix = match parent_variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+    {
+        Some(prefix) if !prefix.is_empty() => {
+            format!("{prefix}__{step_id}{loop_indices_suffix}")
+        }
+        _ => {
+            let workflow_id = parent_variables
+                .and_then(|vars| vars.get("_workflow_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("root");
+            format!("{workflow_id}::{step_id}{loop_indices_suffix}")
+        }
+    };
+    variables.insert(
+        "_cache_key_prefix".to_string(),
+        Value::String(child_cache_prefix),
+    );
+
+    if let Some(defaults) = child.variables.as_object() {
+        for (name, variable) in defaults {
+            if name.starts_with('_') {
+                continue;
+            }
+            let value = variable
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| variable.clone());
+            variables.entry(name.clone()).or_insert(value);
+        }
+    }
+
+    variables
+}
+
+fn validate_embed_child_inputs(
+    child: &DirectJsonChildWorkflow,
+    child_input: &Value,
+) -> Result<(), String> {
+    let input_object = child_input.as_object();
+    let mut missing = Vec::new();
+    if let Some(schema) = child.input_schema.as_object() {
+        for (name, field) in schema {
+            if !field
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let reason = match input_object.and_then(|input| input.get(name)) {
+                None => Some("not provided"),
+                Some(Value::Null) => Some("was null"),
+                Some(_) => None,
+            };
+            if let Some(reason) = reason {
+                let field_type = field
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let description = field.get("description").and_then(Value::as_str);
+                missing.push((name.as_str(), field_type, description, reason));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "EmbedWorkflow step '{}' is missing required inputs for child workflow '{}':\n",
+        child.step_id, child.workflow_id
+    );
+    for (name, field_type, description, reason) in missing {
+        message.push_str(&format!("  - {name} ({field_type})"));
+        if let Some(description) = description {
+            message.push_str(&format!(": {description}"));
+        }
+        message.push_str(&format!(" [{reason}]\n"));
+    }
+    Err(message)
+}
+
+fn embed_workflow_step_value(
+    step: &DirectJsonStep,
+    child: &DirectJsonChildWorkflow,
+    output: Value,
+) -> Value {
+    serde_json::json!({
+        "stepId": step.id,
+        "stepName": step.name.as_deref().unwrap_or("Unnamed"),
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": child.workflow_id,
+        "outputs": output,
+    })
+}
+
 fn wait_action_mapping(
     action: Option<&Map<String, Value>>,
     field: &str,
@@ -3208,12 +3509,18 @@ struct ManifestWire {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChildWorkflowWire {
+    step_id: String,
+    workflow_id: String,
     graph: GraphWire,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphWire {
+    #[serde(default)]
+    variables: Value,
+    #[serde(default)]
+    input_schema: Value,
     #[serde(default)]
     mappings: Vec<MappingWire>,
     #[serde(default)]
@@ -3417,6 +3724,14 @@ struct DirectJsonStep {
     step_type: String,
     name: Option<String>,
     body: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DirectJsonChildWorkflow {
+    step_id: String,
+    workflow_id: String,
+    variables: Value,
+    input_schema: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -3894,6 +4209,131 @@ mod tests {
             .expect("child finish mapping");
         let output: Value = serde_json::from_slice(&output).expect("output json");
         assert_eq!(output, json!({ "result": "child" }));
+    }
+
+    #[test]
+    fn embed_workflow_helpers_build_child_scope_and_parent_step_result() {
+        let manifest = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "call_child",
+                    "stepType": "EmbedWorkflow",
+                    "purpose": "embedWorkflow.inputMapping",
+                    "value": {
+                        "childInput": {
+                            "valueType": "reference",
+                            "value": "data.input"
+                        }
+                    }
+                }],
+                "steps": [{
+                    "id": "call_child",
+                    "stepType": "EmbedWorkflow",
+                    "name": "Call child",
+                    "body": {
+                        "id": "call_child",
+                        "stepType": "EmbedWorkflow",
+                        "name": "Call child"
+                    }
+                }]
+            },
+            "childWorkflows": [{
+                "stepId": "call_child",
+                "workflowId": "child_workflow",
+                "versionRequested": "latest",
+                "versionResolved": 3,
+                "graph": {
+                    "variables": {
+                        "child_default": {
+                            "type": "string",
+                            "value": "from-child"
+                        },
+                        "_internal": {
+                            "type": "string",
+                            "value": "ignored"
+                        }
+                    },
+                    "inputSchema": {
+                        "childInput": {
+                            "type": "string",
+                            "required": true,
+                            "description": "Child input"
+                        }
+                    },
+                    "steps": [{
+                        "id": "finish",
+                        "stepType": "Finish",
+                        "body": { "id": "finish", "stepType": "Finish" }
+                    }]
+                }
+            }]
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest).expect("manifest");
+        let source = build_source(
+            br#"{"input":"parent"}"#,
+            br#"{
+                "_scope_id":"scope",
+                "_workflow_id":"parent_workflow",
+                "_instance_id":"instance-1",
+                "_tenant_id":"tenant-1",
+                "_cache_key_prefix":"root-prefix",
+                "_loop_indices":[2,3]
+            }"#,
+            b"{}",
+        )
+        .expect("source");
+        let child_input = manifest
+            .apply_mapping(0, &source)
+            .expect("child input mapping");
+
+        let cache_key = manifest
+            .embed_workflow_cache_key("call_child", &source)
+            .expect("cache key");
+        assert_eq!(
+            std::str::from_utf8(&cache_key).expect("cache key utf8"),
+            "root-prefix::embed_workflow::call_child::[2,3]"
+        );
+
+        let child_variables = manifest
+            .embed_workflow_variables("call_child", &source, &child_input)
+            .expect("child variables");
+        let child_variables: Value =
+            serde_json::from_slice(&child_variables).expect("child variables json");
+        assert_eq!(child_variables["_scope_id"], "scope_call_child");
+        assert_eq!(child_variables["_workflow_id"], "parent_workflow");
+        assert_eq!(child_variables["_instance_id"], "instance-1");
+        assert_eq!(child_variables["_tenant_id"], "tenant-1");
+        assert_eq!(
+            child_variables["_cache_key_prefix"],
+            "root-prefix__call_child[2,3]"
+        );
+        assert_eq!(child_variables["child_default"], "from-child");
+        assert!(child_variables.get("_internal").is_none());
+
+        let step_result = manifest
+            .embed_workflow_result("call_child", &source, br#"{"result":"child-ok"}"#)
+            .expect("step result");
+        let step_result_json: Value =
+            serde_json::from_slice(&step_result).expect("step result json");
+        assert_eq!(step_result_json["stepId"], "call_child");
+        assert_eq!(step_result_json["stepName"], "Call child");
+        assert_eq!(step_result_json["stepType"], "EmbedWorkflow");
+        assert_eq!(step_result_json["childWorkflowId"], "child_workflow");
+        assert_eq!(step_result_json["outputs"]["result"], "child-ok");
+
+        let steps = manifest
+            .embed_workflow_output_from_result("call_child", &source, &step_result)
+            .expect("parent steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        assert_eq!(steps["call_child"], step_result_json);
+
+        let err = manifest
+            .embed_workflow_variables("call_child", &source, b"{}")
+            .expect_err("missing child input should fail");
+        assert!(err.contains("missing required inputs"));
+        assert!(err.contains("childInput (string): Child input [not provided]"));
     }
 
     #[test]

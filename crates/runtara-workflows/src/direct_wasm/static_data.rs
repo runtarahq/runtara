@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::error::DirectCompileError;
-use super::manifest::DirectGraphManifest;
+use super::manifest::{DirectChildWorkflowGraphManifest, DirectGraphManifest};
 
 pub(super) const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
@@ -77,8 +77,19 @@ pub(super) struct DirectCoreStaticData {
 }
 
 impl DirectCoreStaticData {
+    #[cfg(test)]
     pub(super) fn new(
         graph: &DirectGraphManifest,
+        manifest_json: &[u8],
+        variables_json: &[u8],
+        steps_json: &[u8],
+    ) -> Result<Self, DirectCompileError> {
+        Self::new_with_child_workflows(graph, &[], manifest_json, variables_json, steps_json)
+    }
+
+    pub(super) fn new_with_child_workflows(
+        graph: &DirectGraphManifest,
+        child_workflows: &[DirectChildWorkflowGraphManifest],
         manifest_json: &[u8],
         variables_json: &[u8],
         steps_json: &[u8],
@@ -163,6 +174,9 @@ impl DirectCoreStaticData {
 
         let mut step_ids = BTreeMap::new();
         collect_static_step_ids(graph, &mut offset, &mut step_ids)?;
+        for child in child_workflows {
+            collect_static_step_ids(&child.graph, &mut offset, &mut step_ids)?;
+        }
 
         let mut agent_capability_ids = BTreeMap::new();
         let mut agent_connection_ids = BTreeMap::new();
@@ -172,6 +186,14 @@ impl DirectCoreStaticData {
             &mut agent_capability_ids,
             &mut agent_connection_ids,
         )?;
+        for child in child_workflows {
+            collect_static_agent_data(
+                &child.graph,
+                &mut offset,
+                &mut agent_capability_ids,
+                &mut agent_connection_ids,
+            )?;
+        }
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
