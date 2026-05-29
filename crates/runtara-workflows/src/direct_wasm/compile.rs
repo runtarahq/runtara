@@ -145,6 +145,12 @@ const DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL: u32 = DIRECT_SPLIT_PARENT_SOURCE_LEN
 const DIRECT_WHILE_VARIABLES_PTR_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_PTR_LOCAL;
 const DIRECT_WHILE_VARIABLES_LEN_LOCAL: u32 = DIRECT_SPLIT_VARIABLES_LEN_LOCAL;
 const DIRECT_WAIT_TIMEOUT_MS_LOCAL: u32 = 28;
+const DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL: u32 = 29;
+const DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL: u32 = 30;
+const DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL: u32 = 31;
+const DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL: u32 = 32;
+const DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL: u32 = 33;
+const DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL: u32 = 34;
 const DIRECT_EMPTY_STEPS_CONTEXT: &[u8] = b"{}";
 const DIRECT_EMPTY_SPLIT_RESULTS: &[u8] = b"[]";
 const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
@@ -1061,6 +1067,7 @@ enum DirectRunPlan {
     },
     WaitForSignal {
         step_id: String,
+        on_wait_plan: Option<Box<DirectRunPlan>>,
         next_plan: Box<DirectRunPlan>,
     },
     Log {
@@ -1577,10 +1584,16 @@ fn step_run_plan_inner(
             })
         }
         "WaitForSignal" => {
+            let on_wait_plan = wait_on_wait_subgraph(graph, step_id)?
+                .map(|nested_graph| {
+                    step_run_plan(nested_graph, &nested_graph.entry_point, &mut Vec::new())
+                })
+                .transpose()?;
             let next_plan = normal_flow_plan(graph, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::WaitForSignal {
                 step_id: step_id.to_string(),
+                on_wait_plan: on_wait_plan.map(Box::new),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -2063,6 +2076,32 @@ fn while_subgraph<'a>(
         })
 }
 
+fn wait_on_wait_subgraph<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<Option<&'a DirectGraphManifest>, DirectCompileError> {
+    if !graph
+        .steps
+        .iter()
+        .any(|step| step.id == step_id && step.step_type == "WaitForSignal")
+    {
+        return Err(DirectCompileError::Component(format!(
+            "direct step '{step_id}' is not a WaitForSignal step"
+        )));
+    }
+
+    Ok(graph
+        .steps
+        .iter()
+        .find(|step| step.id == step_id && step.step_type == "WaitForSignal")
+        .and_then(|step| {
+            step.nested_graphs
+                .iter()
+                .find(|nested| nested.role == "waitForSignal.onWait")
+        })
+        .map(|nested| nested.graph.as_ref()))
+}
+
 fn delay_config<'a>(
     graph: &'a DirectGraphManifest,
     step_id: &str,
@@ -2453,6 +2492,7 @@ struct DirectCoreImportIndices {
     stdlib_wait_signal_id: Option<u32>,
     stdlib_wait_timeout_ms: Option<u32>,
     stdlib_wait_timeout_error: Option<u32>,
+    stdlib_wait_on_wait_variables: Option<u32>,
     stdlib_wait_poll_interval_ms: Option<u32>,
     stdlib_wait_event: Option<u32>,
     stdlib_wait_output: Option<u32>,
@@ -2630,6 +2670,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_wait_timeout_error,
                 "stdlib.wait-timeout-error",
             )?,
+            stdlib_wait_on_wait_variables: require_import(
+                self.stdlib_wait_on_wait_variables,
+                "stdlib.wait-on-wait-variables",
+            )?,
             stdlib_wait_poll_interval_ms: require_import(
                 self.stdlib_wait_poll_interval_ms,
                 "stdlib.wait-poll-interval-ms",
@@ -2739,6 +2783,7 @@ struct DirectCoreFunctionIndices {
     stdlib_wait_signal_id: u32,
     stdlib_wait_timeout_ms: u32,
     stdlib_wait_timeout_error: u32,
+    stdlib_wait_on_wait_variables: u32,
     stdlib_wait_poll_interval_ms: u32,
     stdlib_wait_event: u32,
     stdlib_wait_output: u32,
@@ -2900,6 +2945,8 @@ fn import_core_function(
         import_indices.stdlib_wait_timeout_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error") {
         import_indices.stdlib_wait_timeout_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-variables") {
+        import_indices.stdlib_wait_on_wait_variables = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms") {
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
@@ -3106,6 +3153,7 @@ fn direct_run_function(
         (2, ValType::I64),
         (10, ValType::I32),
         (1, ValType::I64),
+        (6, ValType::I32),
     ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
@@ -3474,7 +3522,11 @@ fn emit_run_plan_mapping(
                 failure_target,
             );
         }
-        DirectRunPlan::WaitForSignal { step_id, next_plan } => {
+        DirectRunPlan::WaitForSignal {
+            step_id,
+            on_wait_plan,
+            next_plan,
+        } => {
             emit_wait_for_signal_plan(
                 body,
                 indices,
@@ -3482,6 +3534,7 @@ fn emit_run_plan_mapping(
                 track_events,
                 variables,
                 step_id,
+                on_wait_plan.as_deref(),
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -4709,6 +4762,7 @@ fn emit_wait_for_signal_plan(
     track_events: bool,
     variables: DirectVariables<'_>,
     step_id: &str,
+    on_wait_plan: Option<&DirectRunPlan>,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -4731,11 +4785,11 @@ fn emit_wait_for_signal_plan(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_instance_id));
     return_if_retptr_error(body);
-    load_retptr_list(body, route_ptr_local, route_len_local);
+    load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, step_id_segment);
-    body.instruction(&Instruction::LocalGet(route_ptr_local));
-    body.instruction(&Instruction::LocalGet(route_len_local));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
@@ -4748,6 +4802,10 @@ fn emit_wait_for_signal_plan(
         output_len_local,
     );
     load_retptr_list(body, route_ptr_local, route_len_local);
+    body.instruction(&Instruction::LocalGet(route_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(route_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -4778,6 +4836,31 @@ fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::I64Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::End);
+
+    if let Some(on_wait_plan) = on_wait_plan {
+        emit_wait_on_wait_plan(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            step_id_segment,
+            on_wait_plan,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            failure_target,
+        );
+    }
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(route_ptr_local));
@@ -4911,6 +4994,121 @@ fn emit_wait_for_signal_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        failure_target,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_wait_on_wait_plan(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    parent_variables: DirectVariables<'_>,
+    step_id_segment: &DirectDataSegment,
+    on_wait_plan: &DirectRunPlan,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
+) {
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_on_wait_variables));
+    emit_retptr_error_or_return(
+        body,
+        indices,
+        failure_target,
+        route_ptr_local,
+        route_len_local,
+    );
+    load_retptr_list(
+        body,
+        DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+        DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
+    );
+
+    body.instruction(&Instruction::LocalGet(steps_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(steps_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL));
+    body.instruction(&Instruction::I32Const(static_data.steps.offset));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+
+    let on_wait_variables = DirectVariables::Locals {
+        ptr_local: DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+        len_local: DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
+    };
+    emit_build_source(
+        body,
+        indices,
+        on_wait_variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        failure_target,
+    );
+    emit_run_plan_mapping(
+        body,
+        indices,
+        static_data,
+        track_events,
+        on_wait_variables,
+        on_wait_plan,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        None,
+    );
+
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_len_local));
+
+    emit_build_source(
+        body,
+        indices,
+        parent_variables,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
         failure_target,
     );
 }
@@ -7085,6 +7283,9 @@ mod tests {
             "wait_timeout" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_timeout.json")
             }
+            "wait_on_wait" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait.json")
+            }
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             other => panic!("unknown fixture {other}"),
         };
@@ -7346,7 +7547,14 @@ mod tests {
             DirectRunPlan::Delay { next_plan, .. } => {
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
-            DirectRunPlan::WaitForSignal { next_plan, .. } => {
+            DirectRunPlan::WaitForSignal {
+                on_wait_plan,
+                next_plan,
+                ..
+            } => {
+                if let Some(on_wait_plan) = on_wait_plan {
+                    collect_run_plan_ids(on_wait_plan, condition_ids, mapping_ids);
+                }
                 collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
             }
             DirectRunPlan::Log { next_plan, .. } => {
@@ -12136,7 +12344,10 @@ mod tests {
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
-        let DirectRunPlan::WaitForSignal { step_id, next_plan } = &core_config.run_plan else {
+        let DirectRunPlan::WaitForSignal {
+            step_id, next_plan, ..
+        } = &core_config.run_plan
+        else {
             panic!("expected WaitForSignal run plan");
         };
         assert_eq!(step_id, "wait");
@@ -12299,6 +12510,139 @@ mod tests {
                 .count(),
             2,
             "WaitForSignal run should rebuild source after updating steps context"
+        );
+    }
+
+    #[test]
+    fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
+        let graph = fixture("wait_on_wait");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::WaitForSignal {
+            step_id,
+            on_wait_plan: Some(on_wait_plan),
+            next_plan,
+        } = &core_config.run_plan
+        else {
+            panic!("expected WaitForSignal run plan with onWait callback");
+        };
+        assert_eq!(step_id, "wait");
+        let DirectRunPlan::Log {
+            next_plan: on_wait_next,
+            ..
+        } = on_wait_plan.as_ref()
+        else {
+            panic!("expected onWait callback to start with Log");
+        };
+        let DirectRunPlan::Finish { .. } = on_wait_next.as_ref() else {
+            panic!("expected onWait callback to finish");
+        };
+        let DirectRunPlan::Finish { .. } = next_plan.as_ref() else {
+            panic!("expected WaitForSignal to flow into parent Finish");
+        };
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("WaitForSignal onWait core module validates");
+
+        let mut next_function_index = 0;
+        let mut build_source_index = None;
+        let mut wait_on_wait_variables_index = None;
+        let mut log_event_index = None;
+        let mut log_index = None;
+        let mut wait_event_index = None;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                    build_source_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                    "wait-on-wait-variables",
+                                ) => wait_on_wait_variables_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "log-event") => {
+                                    log_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
+                                    log_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
+                                    wait_event_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                run_calls.push(function_index);
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let build_source_index = build_source_index.expect("build-source import");
+        let wait_on_wait_variables_index =
+            wait_on_wait_variables_index.expect("wait-on-wait-variables import");
+        let log_event_index = log_event_index.expect("log-event import");
+        let log_index = log_index.expect("log import");
+        let wait_event_index = wait_event_index.expect("wait-event import");
+        let wait_on_wait_variables_position = run_calls
+            .iter()
+            .position(|&index| index == wait_on_wait_variables_index)
+            .expect("wait-on-wait variables call");
+        let log_event_position = run_calls
+            .iter()
+            .position(|&index| index == log_event_index)
+            .expect("Log event call");
+        let log_position = run_calls
+            .iter()
+            .position(|&index| index == log_index)
+            .expect("Log step call");
+        let wait_event_position = run_calls
+            .iter()
+            .position(|&index| index == wait_event_index)
+            .expect("WaitForSignal event call");
+
+        assert_eq!(
+            run_calls
+                .iter()
+                .filter(|&&index| index == build_source_index)
+                .count(),
+            5,
+            "WaitForSignal onWait should build initial, callback, restored parent, and resumed sources"
+        );
+        assert!(
+            wait_on_wait_variables_position < log_event_position,
+            "onWait variables must be prepared before executing the callback"
+        );
+        assert!(
+            log_event_position < log_position,
+            "Log callback should emit its event before updating nested steps"
+        );
+        assert!(
+            log_position < wait_event_position,
+            "onWait callback should complete before external input is requested"
         );
     }
 

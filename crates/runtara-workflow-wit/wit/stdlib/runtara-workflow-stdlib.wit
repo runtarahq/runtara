@@ -218,6 +218,13 @@ interface json {
         timeout-ms: u64,
     ) -> result<list<u8>, string>;
 
+    wait-on-wait-variables: func(
+        step-id: string,
+        instance-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     wait-poll-interval-ms: func(
         step-id: string,
     ) -> result<u64, string>;

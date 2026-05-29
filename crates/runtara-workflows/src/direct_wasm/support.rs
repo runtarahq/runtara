@@ -368,7 +368,18 @@ fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bo
 }
 
 fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
-    step.on_wait.is_none() && !step.breakpoint.unwrap_or(false)
+    !step.breakpoint.unwrap_or(false)
+        && step
+            .on_wait
+            .as_ref()
+            .is_none_or(|graph| supports_wait_for_signal_on_wait_graph_baseline(graph))
+}
+
+fn supports_wait_for_signal_on_wait_graph_baseline(graph: &ExecutionGraph) -> bool {
+    supports_direct_control_graph(graph)
+        && !graph_contains_step(graph, |step| {
+            matches!(step, Step::Error(_) | Step::WaitForSignal(_))
+        })
 }
 
 fn supports_split_step_baseline(step: &SplitStep) -> bool {
@@ -391,10 +402,26 @@ fn supports_while_step_baseline(step: &WhileStep) -> bool {
 }
 
 fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
-    graph
-        .steps
-        .values()
-        .any(|step| matches!(step, Step::Split(_) | Step::While(_)))
+    graph_contains_step(graph, |step| {
+        matches!(step, Step::Split(_) | Step::While(_))
+    })
+}
+
+fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
+    graph.steps.values().any(|step| {
+        predicate(step)
+            || nested_step_graphs(step).any(|graph| graph_contains_step(graph, predicate))
+    })
+}
+
+fn nested_step_graphs(step: &Step) -> impl Iterator<Item = &ExecutionGraph> {
+    let graph = match step {
+        Step::Split(step) => Some(&step.subgraph),
+        Step::While(step) => Some(&step.subgraph),
+        Step::WaitForSignal(step) => step.on_wait.as_ref(),
+        _ => None,
+    };
+    graph.map(Box::as_ref).into_iter()
 }
 
 fn supports_normal_flow_step(
@@ -847,10 +874,24 @@ fn collect_wait_for_signal_step_unsupported(
     }
 
     if let Some(on_wait) = &step.on_wait {
-        push(
-            "wait-for-signal-on-wait",
-            "WaitForSignal onWait subgraphs require direct nested notification lowering",
-        );
+        if graph_contains_step(on_wait, |step| matches!(step, Step::WaitForSignal(_))) {
+            push(
+                "wait-for-signal-on-wait-nested-wait",
+                "WaitForSignal onWait subgraphs cannot contain nested WaitForSignal steps yet",
+            );
+        }
+        if graph_contains_step(on_wait, |step| matches!(step, Step::Error(_))) {
+            push(
+                "wait-for-signal-on-wait-error",
+                "WaitForSignal onWait failure wrapping is pending",
+            );
+        }
+        if !supports_direct_control_graph(on_wait) {
+            push(
+                "wait-for-signal-on-wait-shape",
+                "WaitForSignal onWait subgraphs must use a direct-control supported shape",
+            );
+        }
         collect_graph_support_inner(on_wait, graph_durable, unsupported);
     }
 }
@@ -1075,6 +1116,9 @@ mod tests {
             }
             "wait_timeout" => {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_timeout.json")
+            }
+            "wait_on_wait" => {
+                include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait.json")
             }
             other => panic!("unknown fixture {other}"),
         };
@@ -1922,19 +1966,52 @@ mod tests {
     }
 
     #[test]
-    fn wait_rejection_includes_nested_on_wait_graph() {
+    fn wait_with_on_wait_log_callback_is_supported() {
         let report = analyze_direct_wasm_support(&fixture("wait"));
 
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn wait_on_wait_error_remains_rejected_until_wrapped_failure_lowering() {
+        let graph = serde_json::from_str::<ExecutionGraph>(
+            r#"{
+              "steps": {
+                "wait": {
+                  "stepType": "WaitForSignal",
+                  "id": "wait",
+                  "onWait": {
+                    "entryPoint": "fail",
+                    "steps": {
+                      "fail": {
+                        "stepType": "Error",
+                        "id": "fail",
+                        "code": "ON_WAIT_FAILED",
+                        "message": "on wait failure"
+                      }
+                    },
+                    "executionPlan": []
+                  }
+                },
+                "finish": {
+                  "stepType": "Finish",
+                  "id": "finish"
+                }
+              },
+              "entryPoint": "wait",
+              "executionPlan": [
+                { "fromStep": "wait", "toStep": "finish" }
+              ]
+            }"#,
+        )
+        .expect("graph");
+
+        let report = analyze_direct_wasm_support(&graph);
+
         assert!(!report.supported);
-        assert!(
-            report
-                .unsupported
-                .iter()
-                .any(|feature| feature.step_id.as_deref() == Some("wait")
-                    && feature.feature == "wait-for-signal-on-wait")
-        );
-        assert!(!report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("log") && feature.feature == "log-event"
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("wait")
+                && feature.feature == "wait-for-signal-on-wait-error"
         }));
     }
 

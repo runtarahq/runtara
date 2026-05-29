@@ -691,6 +691,34 @@ impl DirectJsonManifest {
         .into_bytes())
     }
 
+    /// Build generated-code-compatible inputs for a WaitForSignal `onWait` graph.
+    pub fn wait_on_wait_variables(
+        &self,
+        step_id: &str,
+        instance_id: &str,
+        signal_id: &str,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        self.wait_step(step_id)?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-on-wait source: {err}"))?;
+        let mut variables = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        variables.insert(
+            "_signal_id".to_string(),
+            Value::String(signal_id.to_string()),
+        );
+        variables.insert(
+            "_instance_id".to_string(),
+            Value::String(instance_id.to_string()),
+        );
+        serde_json::to_vec(&Value::Object(variables))
+            .map_err(|err| format!("failed to serialize wait-on-wait variables: {err}"))
+    }
+
     /// Return the configured WaitForSignal poll interval, defaulting to 1000ms.
     pub fn wait_poll_interval_ms(&self, step_id: &str) -> Result<u64, String> {
         let step = self.wait_step(step_id)?;
@@ -4825,6 +4853,31 @@ mod tests {
             String::from_utf8(error).expect("utf8 error"),
             "WaitForSignal step 'wait' timed out after 500ms waiting for signal 'inst-1/root/wait'"
         );
+    }
+
+    #[test]
+    fn wait_on_wait_variables_match_generated_input_shape() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"value":"in"}"#,
+            br#"{"tenant":"t1","_signal_id":"old","_instance_id":"old"}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let variables = manifest
+            .wait_on_wait_variables("wait", "inst-1", "inst-1/root/wait", &source)
+            .expect("on-wait variables");
+        let variables: Value = serde_json::from_slice(&variables).expect("variables json");
+
+        assert_eq!(variables["tenant"], json!("t1"));
+        assert_eq!(variables["_signal_id"], json!("inst-1/root/wait"));
+        assert_eq!(variables["_instance_id"], json!("inst-1"));
     }
 
     #[test]

@@ -35,6 +35,8 @@ const WAIT_FOR_SIGNAL_DIRECT_SIMPLE: &str =
     include_str!("fixtures/wait_for_signal_direct_simple.json");
 const WAIT_FOR_SIGNAL_DIRECT_TIMEOUT: &str =
     include_str!("fixtures/wait_for_signal_direct_timeout.json");
+const WAIT_FOR_SIGNAL_DIRECT_ON_WAIT: &str =
+    include_str!("fixtures/wait_for_signal_direct_on_wait.json");
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const SPLIT_CACHE_KEY: &str = "split::split";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
@@ -269,6 +271,9 @@ fn shared_components_dir() -> Option<PathBuf> {
             || !stdlib_bytes
                 .windows(b"wait-timeout-error".len())
                 .any(|window| window == b"wait-timeout-error")
+            || !stdlib_bytes
+                .windows(b"wait-on-wait-variables".len())
+                .any(|window| window == b"wait-on-wait-variables")
         {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
@@ -1271,6 +1276,51 @@ fn direct_wasm_matches_components_wait_for_signal_resume() {
     assert_eq!(
         direct.output_json,
         Some(serde_json::json!({"approved": true}))
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_on_wait_callback() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal-on-wait", WAIT_FOR_SIGNAL_DIRECT_ON_WAIT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal-on-wait",
+        WAIT_FOR_SIGNAL_DIRECT_ON_WAIT,
+    );
+    let workflow_input = br#"{"case_id":"case-onwait","summary":"Notify before wait"}"#;
+    let signal_payload = br#"{"approved":true}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components = execute_artifact_with_custom_signal(
+        &components_artifact,
+        "ab-components-wait-signal-on-wait-0",
+        &components_input,
+        signal_payload,
+    );
+    let direct = execute_artifact_with_custom_signal(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-on-wait-0",
+        workflow_input,
+        signal_payload,
+    );
+
+    assert_success_parity("wait-signal-on-wait", 0, &components, &direct);
+    assert_eq!(
+        direct.output_json,
+        Some(serde_json::json!({"approved": true}))
+    );
+    assert_eq!(
+        normalized_events(&direct.events)
+            .iter()
+            .map(|(subtype, _)| subtype.as_str())
+            .collect::<Vec<_>>(),
+        vec!["workflow_log", "external_input_requested"]
     );
 }
 
