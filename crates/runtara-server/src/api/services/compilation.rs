@@ -19,7 +19,7 @@ use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::compile::ProgressCallback;
 use runtara_workflows::direct_wasm::{
-    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata,
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata, analyze_direct_wasm_support,
 };
 use runtara_workflows::{
     ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
@@ -66,12 +66,25 @@ fn image_template_major(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
-/// Whether `image` is a cache hit for the current source + compiler major.
-/// Both must match — pre-existing images lack `templateMajor` so they always
-/// miss, forcing a recompile through the components path.
-fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
+fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/compilerMode"))
+        .and_then(|v| v.as_str())
+}
+
+/// Whether `image` is a cache hit for the current source, compiler major, and
+/// desired compiler mode. Older images that lack either provenance field miss
+/// once and are refreshed through the selected compile path.
+fn image_cache_hits(
+    image: &ImageSummary,
+    source_checksum: &str,
+    compiler_mode: WorkflowCompilerMode,
+) -> bool {
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        && image_compiler_mode(image) == Some(compiler_mode.as_str())
 }
 
 fn workflow_image_metadata(
@@ -387,6 +400,26 @@ fn compile_workflow_with_direct_fallback(
     })
 }
 
+fn desired_cache_compiler_mode(
+    input: &CompilationInput,
+    settings: &DirectCompilationSettings,
+) -> WorkflowCompilerMode {
+    if !settings.enabled {
+        return WorkflowCompilerMode::ComponentsCodegen;
+    }
+
+    if direct_compile_skip_reason(input, settings).is_some() || settings.components_dir.is_none() {
+        return WorkflowCompilerMode::ComponentsCodegen;
+    }
+
+    let support = analyze_direct_wasm_support(&input.execution_graph);
+    if support.supported {
+        WorkflowCompilerMode::DirectWasm
+    } else {
+        WorkflowCompilerMode::ComponentsCodegen
+    }
+}
+
 fn direct_compile_skip_reason(
     input: &CompilationInput,
     settings: &DirectCompilationSettings,
@@ -676,6 +709,8 @@ impl CompilationService {
             agent_catalog: self.agent_catalog.clone(),
             progress_callback,
         };
+        let desired_compiler_mode =
+            desired_cache_compiler_mode(&compilation_input, &self.direct_compilation);
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
         // This prevents FK constraint violations when re-compiling workflows that are already registered.
@@ -685,7 +720,12 @@ impl CompilationService {
             None
         } else {
             self.repository
-                .get_fresh_registered_image_id(tenant_id, workflow_id, version)
+                .get_fresh_registered_image_id_for_compiler(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    desired_compiler_mode.as_str(),
+                )
                 .await
                 .map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
@@ -694,6 +734,7 @@ impl CompilationService {
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
             found = existing_image_id.is_some(),
+            desired_compiler_mode = desired_compiler_mode.as_str(),
             "compile: step 5 completed - database check done"
         );
 
@@ -729,8 +770,13 @@ impl CompilationService {
                 .await
             {
                 Ok(Some(existing_image))
-                    if image_cache_hits(&existing_image, source_checksum.as_str()) =>
+                    if image_cache_hits(
+                        &existing_image,
+                        source_checksum.as_str(),
+                        desired_compiler_mode,
+                    ) =>
                 {
+                    let compiler_mode = image_compiler_mode(&existing_image).map(str::to_string);
                     let existing_id = existing_image.image_id;
                     info!(
                         duration_ms = step_start.elapsed().as_millis(),
@@ -749,6 +795,7 @@ impl CompilationService {
                             version,
                             &existing_id,
                             Some(&source_checksum),
+                            compiler_mode.as_deref(),
                         )
                         .await;
                     if let Some(r) = &progress_reporter {
@@ -766,7 +813,8 @@ impl CompilationService {
                 Ok(Some(_)) => {
                     debug!(
                         duration_ms = step_start.elapsed().as_millis(),
-                        "compile: step 5b found image name but source checksum differed or was absent; rebuilding"
+                        desired_compiler_mode = desired_compiler_mode.as_str(),
+                        "compile: step 5b found image name but source checksum, template major, or compiler mode differed or was absent; rebuilding"
                     );
                 }
                 Ok(None) => {
@@ -852,6 +900,7 @@ impl CompilationService {
                 package_size: result.package_size as i32,
                 binary_checksum: &result.binary_checksum,
                 source_checksum: &source_checksum,
+                compiler_mode: result.compiler_mode.as_str(),
             })
             .await
             .map_err(|e| {
@@ -912,6 +961,7 @@ impl CompilationService {
                 version,
                 &image_id,
                 Some(&source_checksum),
+                Some(result.compiler_mode.as_str()),
             )
             .await
             .map_err(|e| {
@@ -1358,6 +1408,75 @@ mod tests {
     }
 
     #[test]
+    fn desired_cache_compiler_mode_uses_direct_only_when_gate_can_select_it() {
+        let input = direct_skip_input("tenant-a", "workflow-a");
+
+        assert_eq!(
+            desired_cache_compiler_mode(&input, &DirectCompilationSettings::disabled()),
+            WorkflowCompilerMode::ComponentsCodegen
+        );
+        assert_eq!(
+            desired_cache_compiler_mode(
+                &input,
+                &DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+            ),
+            WorkflowCompilerMode::DirectWasm
+        );
+        assert_eq!(
+            desired_cache_compiler_mode(&input, &DirectCompilationSettings::enabled(None)),
+            WorkflowCompilerMode::ComponentsCodegen
+        );
+        assert_eq!(
+            desired_cache_compiler_mode(
+                &input,
+                &DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()))
+                    .with_workflow_allowlist(Some(BTreeSet::from(["workflow-b".to_string()])))
+            ),
+            WorkflowCompilerMode::ComponentsCodegen
+        );
+    }
+
+    #[test]
+    fn image_cache_hit_requires_matching_compiler_mode() {
+        let metadata = serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+                "compilerMode": "direct-wasm"
+            }
+        });
+        let image = image_summary_with_metadata(metadata);
+
+        assert!(image_cache_hits(
+            &image,
+            "source-sha256",
+            WorkflowCompilerMode::DirectWasm
+        ));
+        assert!(!image_cache_hits(
+            &image,
+            "source-sha256",
+            WorkflowCompilerMode::ComponentsCodegen
+        ));
+        assert!(!image_cache_hits(
+            &image,
+            "other-source",
+            WorkflowCompilerMode::DirectWasm
+        ));
+
+        let missing_mode = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION
+            }
+        }));
+        assert!(!image_cache_hits(
+            &missing_mode,
+            "source-sha256",
+            WorkflowCompilerMode::DirectWasm
+        ));
+    }
+
+    #[test]
     fn direct_compile_fallback_reason_classifies_unsupported() {
         let unsupported = std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported");
         let other = std::io::Error::other("wac failed");
@@ -1581,6 +1700,18 @@ mod tests {
             child_dependencies: vec![],
             default_variables: serde_json::json!({}),
             compiler_mode,
+        }
+    }
+
+    fn image_summary_with_metadata(metadata: serde_json::Value) -> ImageSummary {
+        ImageSummary {
+            image_id: "image-a".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            name: "workflow-a:7".to_string(),
+            description: None,
+            runner_type: RunnerType::Wasm,
+            created_at: chrono::Utc::now(),
+            metadata: Some(metadata),
         }
     }
 

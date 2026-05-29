@@ -37,6 +37,8 @@ pub struct CompilationSuccessRecord<'a> {
     pub package_size: i32,
     pub binary_checksum: &'a str,
     pub source_checksum: &'a str,
+    /// Stable compiler-mode metadata value stored with the compilation row.
+    pub compiler_mode: &'a str,
 }
 
 /// Repository for workflow CRUD operations
@@ -975,8 +977,8 @@ impl WorkflowRepository {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -987,7 +989,8 @@ impl WorkflowRepository {
                 wasm_checksum = $6,
                 runtara_version = $7,
                 source_checksum = $8,
-                package_size = $9
+                package_size = $9,
+                compiler_mode = $10
             "#,
         )
         .bind(record.tenant_id)
@@ -999,6 +1002,7 @@ impl WorkflowRepository {
         .bind(env!("BUILD_VERSION"))
         .bind(record.source_checksum)
         .bind(record.package_size)
+        .bind(record.compiler_mode)
         .execute(&self.pool)
         .await?;
 
@@ -1017,19 +1021,21 @@ impl WorkflowRepository {
         version: i32,
         image_id: &str,
         source_checksum: Option<&str>,
+        compiler_mode: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
                 compilation_status = 'success',
                 error_message = NULL,
                 runtara_version = $5,
-                source_checksum = COALESCE($6, workflow_compilations.source_checksum)
+                source_checksum = COALESCE($6, workflow_compilations.source_checksum),
+                compiler_mode = COALESCE($7, workflow_compilations.compiler_mode)
             "#,
         )
         .bind(tenant_id)
@@ -1038,6 +1044,7 @@ impl WorkflowRepository {
         .bind(image_id)
         .bind(env!("BUILD_VERSION"))
         .bind(source_checksum)
+        .bind(compiler_mode)
         .execute(&self.pool)
         .await?;
 
@@ -1110,6 +1117,54 @@ impl WorkflowRepository {
 
         Ok(match (image_id, stored_checksum) {
             (Some(image_id), Some(stored)) if stored == current_checksum => Some(image_id),
+            _ => None,
+        })
+    }
+
+    pub async fn get_fresh_registered_image_id_for_compiler(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        compiler_mode: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT sc.registered_image_id, sc.source_checksum, sc.compiler_mode, wd.definition
+            FROM workflow_definitions wd
+            LEFT JOIN workflow_compilations sc
+              ON sc.tenant_id = wd.tenant_id
+             AND sc.workflow_id = wd.workflow_id
+             AND sc.version = wd.version
+             AND sc.compilation_status = 'success'
+            WHERE wd.tenant_id = $1
+              AND wd.workflow_id = $2
+              AND wd.version = $3
+              AND wd.deleted_at IS NULL
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let image_id: Option<String> = row.try_get("registered_image_id")?;
+        let stored_checksum: Option<String> = row.try_get("source_checksum")?;
+        let stored_compiler_mode: Option<String> = row.try_get("compiler_mode")?;
+        let definition: Value = row.try_get("definition")?;
+        let current_checksum = workflow_definition_checksum(&definition);
+
+        Ok(match (image_id, stored_checksum, stored_compiler_mode) {
+            (Some(image_id), Some(stored_checksum), Some(stored_compiler_mode))
+                if stored_checksum == current_checksum && stored_compiler_mode == compiler_mode =>
+            {
+                Some(image_id)
+            }
             _ => None,
         })
     }

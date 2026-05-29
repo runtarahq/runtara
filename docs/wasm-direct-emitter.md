@@ -148,6 +148,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   and support-report checksums, workflow-logic/composed artifact identity, and
   shared/agent component dependency checksums captured during static
   composition.
+- Workflow compilation rows now persist `compiler_mode`, and compile cache
+  checks use the desired direct-vs-Rust compiler mode in addition to source
+  checksum and template major. When direct mode is enabled, queue/worker
+  source-only prechecks defer to the compilation service so direct rollout can
+  replace stale Rust-codegen artifacts and rollback can prefer Rust artifacts.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2025,8 +2030,10 @@ Current status:
 - Direct compile outcome/duration metrics are emitted with outcome/reason
   labels, including fail-fast required-direct failures.
 - Registered image metadata now includes compiler mode for direct-vs-fallback
-  provenance. Cache matching still uses source checksum plus template major;
-  mode-aware cache policy remains a later rollout decision.
+  provenance, and compilation cache matching includes the desired compiler mode
+  as well as source checksum and template major. Existing rows without
+  `compiler_mode` miss once and are refreshed on the next compile/register
+  path.
 - Registered image metadata also includes direct gate diagnostics (`enabled`,
   `outcome`, and `reason`), covering operator inspection of disabled direct
   mode, allowlist skips, direct success, missing components, unsupported

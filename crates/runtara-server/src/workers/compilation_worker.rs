@@ -159,8 +159,13 @@ pub async fn run(
                     "Processing compilation request"
                 );
 
-                // Check if already compiled (skip if successful compilation exists)
-                let should_compile = if request.force_recompile {
+                // Check if already compiled (skip if successful compilation exists).
+                // When the direct gate is enabled, defer cache decisions to
+                // CompilationService so it can account for the desired compiler
+                // mode instead of relying on this older source-only check.
+                let should_compile = if request.force_recompile
+                    || crate::config::direct_wasm_compile_enabled()
+                {
                     true
                 } else {
                     match check_compilation_status(
