@@ -735,14 +735,6 @@ fn collect_step_support(
             }
         }
         Step::Split(split) => {
-            if graph_durable && split.durable.unwrap_or(true) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(split.id.clone()),
-                    step_type: Some("Split".to_string()),
-                    feature: "split-durable".to_string(),
-                    reason: "Durable Split requires direct checkpoint/replay lowering for split final results".to_string(),
-                });
-            }
             if !supports_split_step_baseline(split) {
                 collect_split_step_unsupported(split, unsupported);
             }
@@ -1486,15 +1478,11 @@ mod tests {
     }
 
     #[test]
-    fn durable_split_is_rejected_until_checkpoint_lowering_is_implemented() {
+    fn durable_split_is_supported_with_checkpoint_lowering() {
         let report = analyze_direct_wasm_support(&fixture("split"));
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("split")
-                && feature.step_type.as_deref() == Some("Split")
-                && feature.feature == "split-durable"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]

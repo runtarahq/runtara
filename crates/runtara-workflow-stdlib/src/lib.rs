@@ -318,6 +318,44 @@ mod component {
             })
         }
 
+        fn split_cache_key(split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_cache_key(split_id, &source)
+            })
+        }
+
+        fn split_result(
+            split_id: u32,
+            source: Vec<u8>,
+            results: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_result(split_id, &source, &results)
+            })
+        }
+
+        fn split_output_from_result(
+            split_id: u32,
+            source: Vec<u8>,
+            step_result: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.split_output_from_result(split_id, &source, &step_result)
+            })
+        }
+
         fn while_max_iterations(while_id: u32) -> Result<u32, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

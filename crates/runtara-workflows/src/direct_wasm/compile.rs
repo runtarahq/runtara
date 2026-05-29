@@ -35,7 +35,7 @@ use super::component::{
 };
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectAgentManifest, DirectDelayManifest, DirectEdgeManifest,
-    DirectGraphManifest, DirectManifestError, DirectWorkflowManifest,
+    DirectGraphManifest, DirectManifestError, DirectSplitManifest, DirectWorkflowManifest,
     build_direct_workflow_manifest_with_agent_catalog,
 };
 use super::support::{
@@ -1033,6 +1033,7 @@ enum DirectRunPlan {
     Split {
         step_id: String,
         split_id: u32,
+        durable: bool,
         dont_stop_on_failed: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
@@ -1512,7 +1513,7 @@ fn step_run_plan_inner(
             })
         }
         "Split" => {
-            let split_id = split_id(graph, step_id)?;
+            let split = split_manifest(graph, step_id)?;
             let dont_stop_on_failed = split_dont_stop_on_failed(graph, step_id)?;
             let nested_graph = split_subgraph(graph, step_id)?;
             let nested_plan =
@@ -1521,7 +1522,8 @@ fn step_run_plan_inner(
 
             Ok(DirectRunPlan::Split {
                 step_id: step_id.to_string(),
-                split_id,
+                split_id: split.id,
+                durable: split.durable,
                 dont_stop_on_failed,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
@@ -1925,7 +1927,10 @@ fn group_by_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, Direct
         })
 }
 
-fn split_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCompileError> {
+fn split_manifest<'a>(
+    graph: &'a DirectGraphManifest,
+    step_id: &str,
+) -> Result<&'a DirectSplitManifest, DirectCompileError> {
     if !graph
         .steps
         .iter()
@@ -1940,7 +1945,6 @@ fn split_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCom
         .splits
         .iter()
         .find(|split| split.step_id == step_id && split.purpose == "split.config")
-        .map(|split| split.id)
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Split config for step '{step_id}'"))
         })
@@ -2400,6 +2404,9 @@ struct DirectCoreImportIndices {
     stdlib_split_append_output: Option<u32>,
     stdlib_split_append_error: Option<u32>,
     stdlib_split_output: Option<u32>,
+    stdlib_split_cache_key: Option<u32>,
+    stdlib_split_result: Option<u32>,
+    stdlib_split_output_from_result: Option<u32>,
     stdlib_while_max_iterations: Option<u32>,
     stdlib_while_initial_state: Option<u32>,
     stdlib_while_condition_source: Option<u32>,
@@ -2526,6 +2533,15 @@ impl DirectCoreImportIndices {
                 "stdlib.split-append-error",
             )?,
             stdlib_split_output: require_import(self.stdlib_split_output, "stdlib.split-output")?,
+            stdlib_split_cache_key: require_import(
+                self.stdlib_split_cache_key,
+                "stdlib.split-cache-key",
+            )?,
+            stdlib_split_result: require_import(self.stdlib_split_result, "stdlib.split-result")?,
+            stdlib_split_output_from_result: require_import(
+                self.stdlib_split_output_from_result,
+                "stdlib.split-output-from-result",
+            )?,
             stdlib_while_max_iterations: require_import(
                 self.stdlib_while_max_iterations,
                 "stdlib.while-max-iterations",
@@ -2641,6 +2657,9 @@ struct DirectCoreFunctionIndices {
     stdlib_split_append_output: u32,
     stdlib_split_append_error: u32,
     stdlib_split_output: u32,
+    stdlib_split_cache_key: u32,
+    stdlib_split_result: u32,
+    stdlib_split_output_from_result: u32,
     stdlib_while_max_iterations: u32,
     stdlib_while_initial_state: u32,
     stdlib_while_condition_source: u32,
@@ -2772,6 +2791,12 @@ fn import_core_function(
         import_indices.stdlib_split_append_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "split-output") {
         import_indices.stdlib_split_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-cache-key") {
+        import_indices.stdlib_split_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-result") {
+        import_indices.stdlib_split_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "split-output-from-result") {
+        import_indices.stdlib_split_output_from_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "while-max-iterations") {
         import_indices.stdlib_while_max_iterations = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "while-initial-state") {
@@ -3259,6 +3284,7 @@ fn emit_run_plan_mapping(
         DirectRunPlan::Split {
             step_id,
             split_id,
+            durable,
             dont_stop_on_failed,
             nested_plan,
             next_plan,
@@ -3271,6 +3297,7 @@ fn emit_run_plan_mapping(
                 variables,
                 step_id,
                 *split_id,
+                *durable,
                 *dont_stop_on_failed,
                 nested_plan,
                 next_plan,
@@ -3802,6 +3829,7 @@ fn emit_split_plan(
     variables: DirectVariables<'_>,
     step_id: &str,
     split_id: u32,
+    durable: bool,
     dont_stop_on_failed: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
@@ -3836,6 +3864,26 @@ fn emit_split_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+
+    if durable {
+        body.instruction(&Instruction::I32Const(split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_cache_key));
+        return_if_retptr_error(body);
+        load_retptr_list(body, route_ptr_local, route_len_local);
+
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::Else);
+    }
 
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
@@ -4015,15 +4063,55 @@ fn emit_split_plan(
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 
-    body.instruction(&Instruction::I32Const(split_id as i32));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_split_output));
-    return_if_retptr_error(body);
-    load_retptr_list(body, steps_ptr_local, steps_len_local);
+    if durable {
+        body.instruction(&Instruction::I32Const(split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_result));
+        return_if_retptr_error(body);
+        load_retptr_list(body, output_ptr_local, output_len_local);
+
+        body.instruction(&Instruction::I32Const(split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_cache_key));
+        return_if_retptr_error(body);
+        load_retptr_list(body, route_ptr_local, route_len_local);
+
+        emit_checkpoint_save(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+
+        body.instruction(&Instruction::I32Const(split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_output_from_result));
+        return_if_retptr_error(body);
+        load_retptr_list(body, steps_ptr_local, steps_len_local);
+    } else {
+        body.instruction(&Instruction::I32Const(split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_output));
+        return_if_retptr_error(body);
+        load_retptr_list(body, steps_ptr_local, steps_len_local);
+    }
 
     emit_build_source(
         body,
@@ -4673,7 +4761,7 @@ fn emit_agent_plan(
             route_ptr_local,
             route_len_local,
         );
-        emit_agent_checkpoint_lookup(
+        emit_checkpoint_lookup(
             body,
             indices,
             route_ptr_local,
@@ -4813,7 +4901,7 @@ fn emit_agent_plan(
     }
 
     if durable_checkpoint {
-        emit_agent_checkpoint_save(
+        emit_checkpoint_save(
             body,
             indices,
             route_ptr_local,
@@ -5388,7 +5476,7 @@ fn emit_agent_cache_key(
     load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
 }
 
-fn emit_agent_checkpoint_lookup(
+fn emit_checkpoint_lookup(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     cache_key_ptr_local: u32,
@@ -5406,7 +5494,7 @@ fn emit_agent_checkpoint_lookup(
     load_retptr_option_list(body, output_ptr_local, output_len_local);
 }
 
-fn emit_agent_checkpoint_save(
+fn emit_checkpoint_save(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     cache_key_ptr_local: u32,
@@ -5420,13 +5508,10 @@ fn emit_agent_checkpoint_save(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-    emit_agent_checkpoint_signal_handling(body, indices);
+    emit_checkpoint_signal_handling(body, indices);
 }
 
-fn emit_agent_checkpoint_signal_handling(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-) {
+fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -10547,7 +10632,8 @@ mod tests {
 
     #[test]
     fn direct_core_run_lowers_split_loop_through_stdlib() {
-        let graph = fixture("split");
+        let mut graph = fixture("split");
+        graph.durable = Some(false);
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
@@ -10698,6 +10784,247 @@ mod tests {
             "Split run should call split-append-output"
         );
         assert!(saw_split_output_call, "Split run should call split-output");
+    }
+
+    #[test]
+    fn direct_core_lowers_durable_split_checkpoint_path() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum SplitCheckpointOp {
+            CallSplitCacheKey,
+            CallGetCheckpoint,
+            CallSplitItemCount,
+            CallSplitResult,
+            CallCheckpoint,
+            CallSplitOutputFromResult,
+            Else,
+            LoadCachedPtr,
+            LoadCachedLen,
+        }
+
+        let graph: ExecutionGraph = serde_json::from_str(
+            r#"{
+              "entryPoint": "split",
+              "durable": true,
+              "steps": {
+                "split": {
+                  "id": "split",
+                  "stepType": "Split",
+                  "config": {
+                    "value": { "valueType": "reference", "value": "data.items" },
+                    "sequential": true
+                  },
+                  "subgraph": {
+                    "entryPoint": "finish-item",
+                    "steps": {
+                      "finish-item": {
+                        "id": "finish-item",
+                        "stepType": "Finish",
+                        "inputMapping": {
+                          "value": { "valueType": "reference", "value": "data.value" }
+                        }
+                      }
+                    },
+                    "executionPlan": []
+                  }
+                },
+                "finish": {
+                  "id": "finish",
+                  "stepType": "Finish",
+                  "inputMapping": {
+                    "results": { "valueType": "reference", "value": "steps.split.outputs" }
+                  }
+                }
+              },
+              "executionPlan": [
+                { "fromStep": "split", "toStep": "finish" }
+              ]
+            }"#,
+        )
+        .expect("durable split graph");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+
+        let DirectRunPlan::Split { durable, .. } = &core_config.run_plan else {
+            panic!("expected Split run plan");
+        };
+        assert!(*durable, "Split run plan should be durable");
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("durable Split core module validates");
+
+        let mut next_function_index = 0;
+        let mut split_cache_key_index = None;
+        let mut get_checkpoint_index = None;
+        let mut split_item_count_index = None;
+        let mut split_result_index = None;
+        let mut checkpoint_index = None;
+        let mut split_output_from_result_index = None;
+        let mut code_body_index = 0;
+        let mut ops = Vec::new();
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (module, "split-cache-key")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    split_cache_key_index = Some(next_function_index);
+                                }
+                                (module, "get-checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    get_checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "split-item-count")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    split_item_count_index = Some(next_function_index);
+                                }
+                                (module, "split-result")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    split_result_index = Some(next_function_index);
+                                }
+                                (module, "checkpoint")
+                                    if module.contains("runtara:workflow-runtime/runtime") =>
+                                {
+                                    checkpoint_index = Some(next_function_index);
+                                }
+                                (module, "split-output-from-result")
+                                    if module.contains("runtara:workflow-stdlib/json") =>
+                                {
+                                    split_output_from_result_index = Some(next_function_index);
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            match operator.expect("operator") {
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_cache_key_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallSplitCacheKey);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == get_checkpoint_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallGetCheckpoint);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_item_count_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallSplitItemCount);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_result_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallSplitResult);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == checkpoint_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallCheckpoint);
+                                }
+                                Operator::Call { function_index }
+                                    if Some(function_index) == split_output_from_result_index =>
+                                {
+                                    ops.push(SplitCheckpointOp::CallSplitOutputFromResult);
+                                }
+                                Operator::Else => ops.push(SplitCheckpointOp::Else),
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                                {
+                                    ops.push(SplitCheckpointOp::LoadCachedPtr);
+                                }
+                                Operator::I32Load { memarg }
+                                    if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                                {
+                                    ops.push(SplitCheckpointOp::LoadCachedLen);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let lookup_index = ops
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallGetCheckpoint)
+            .expect("checkpoint lookup");
+        let cached_ptr_index = ops[lookup_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::LoadCachedPtr)
+            .map(|offset| lookup_index + 1 + offset)
+            .expect("cached Split payload pointer load");
+        let replay_else_index = ops[cached_ptr_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::Else)
+            .map(|offset| cached_ptr_index + 1 + offset)
+            .expect("checkpoint replay else branch");
+        let first_cache_key_index = ops
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallSplitCacheKey)
+            .expect("first Split cache key");
+        assert!(
+            first_cache_key_index < lookup_index,
+            "Split cache key should be computed before checkpoint lookup"
+        );
+        assert!(
+            ops[cached_ptr_index..replay_else_index].contains(&SplitCheckpointOp::LoadCachedPtr),
+            "cached Split branch should load checkpoint payload pointer"
+        );
+        assert!(
+            ops[cached_ptr_index..replay_else_index].contains(&SplitCheckpointOp::LoadCachedLen),
+            "cached Split branch should load checkpoint payload length"
+        );
+        assert!(
+            !ops[lookup_index + 1..replay_else_index]
+                .contains(&SplitCheckpointOp::CallSplitItemCount),
+            "cached Split branch must not enter the iteration loop"
+        );
+
+        let item_count_index = ops[replay_else_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallSplitItemCount)
+            .map(|offset| replay_else_index + 1 + offset)
+            .expect("fresh Split item count");
+        let split_result_index = ops[item_count_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallSplitResult)
+            .map(|offset| item_count_index + 1 + offset)
+            .expect("fresh Split result");
+        let checkpoint_index = ops[split_result_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallCheckpoint)
+            .map(|offset| split_result_index + 1 + offset)
+            .expect("fresh Split checkpoint save");
+        let output_from_result_index = ops[checkpoint_index + 1..]
+            .iter()
+            .position(|op| *op == SplitCheckpointOp::CallSplitOutputFromResult)
+            .map(|offset| checkpoint_index + 1 + offset)
+            .expect("Split output-from-result");
+        assert!(
+            checkpoint_index < output_from_result_index,
+            "Split final result should be checkpointed before steps context insertion"
+        );
     }
 
     #[test]
@@ -10904,7 +11231,8 @@ mod tests {
 
     #[test]
     fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() {
-        let graph = fixture("split_with_schemas_failing");
+        let mut graph = fixture("split_with_schemas_failing");
+        graph.durable = Some(false);
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
@@ -11036,7 +11364,8 @@ mod tests {
 
     #[test]
     fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
-        let graph = fixture("split_with_error");
+        let mut graph = fixture("split_with_error");
+        graph.durable = Some(false);
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =

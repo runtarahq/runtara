@@ -166,6 +166,24 @@ fn shared_components_dir() -> Option<PathBuf> {
         })
         .collect();
     if missing.is_empty() {
+        let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
+        let Ok(stdlib_bytes) = std::fs::read(&stdlib_wasm) else {
+            eprintln!(
+                "SKIP: direct shared workflow stdlib component is not readable: {:?}",
+                stdlib_wasm
+            );
+            return None;
+        };
+        if !stdlib_bytes
+            .windows(b"split-cache-key".len())
+            .any(|window| window == b"split-cache-key")
+        {
+            eprintln!(
+                "SKIP: direct shared workflow stdlib component is stale: {:?}",
+                stdlib_wasm
+            );
+            return None;
+        }
         Some(dir)
     } else {
         eprintln!(

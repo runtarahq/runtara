@@ -100,6 +100,23 @@ interface json {
         results: list<u8>,
     ) -> result<list<u8>, string>;
 
+    split-cache-key: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-result: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-output-from-result: func(
+        split-id: u32,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
     while-max-iterations: func(
         while-id: u32,
     ) -> result<u32, string>;

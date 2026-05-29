@@ -345,6 +345,63 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize Split steps context: {err}"))
     }
 
+    /// Build the generated-code-compatible durable cache key for a Split step.
+    pub fn split_cache_key(&self, split_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse Split cache-key source: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+
+        Ok(split_cache_key(split, &source).into_bytes())
+    }
+
+    /// Build the final generated-code-compatible Split step result.
+    pub fn split_result(
+        &self,
+        split_id: u32,
+        source: &[u8],
+        results: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse Split result source: {err}"))?;
+        let results: Value = serde_json::from_slice(results)
+            .map_err(|err| format!("failed to parse Split results: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let result = split_result(split, &source, results)?;
+        serde_json::to_vec(&result)
+            .map_err(|err| format!("failed to serialize Split step result: {err}"))
+    }
+
+    /// Store a previously computed Split step result in the steps context.
+    pub fn split_output_from_result(
+        &self,
+        split_id: u32,
+        source: &[u8],
+        step_result: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse Split output source: {err}"))?;
+        let step_result: Value = serde_json::from_slice(step_result)
+            .map_err(|err| format!("failed to parse Split step result: {err}"))?;
+        let split = self
+            .splits
+            .get(&split_id)
+            .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
+        let mut steps = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        steps.insert(split.step_id.clone(), step_result);
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize Split steps context: {err}"))
+    }
+
     /// Return the configured While maximum iterations, or the generated-code default.
     pub fn while_max_iterations(&self, while_id: u32) -> Result<u32, String> {
         let while_step = self
@@ -1332,6 +1389,34 @@ fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
     }
 }
 
+fn split_cache_key(split: &DirectJsonSplit, source: &Value) -> String {
+    let variables = source.get("variables").and_then(Value::as_object);
+    let prefix = variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let indices_suffix = variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("::[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    let base = format!("split::{}", split.step_id);
+
+    if prefix.is_empty() {
+        let workflow_id = variables
+            .and_then(|vars| vars.get("_workflow_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        format!("{workflow_id}::{base}{indices_suffix}")
+    } else {
+        format!("{prefix}::{base}{indices_suffix}")
+    }
+}
+
 #[derive(Default)]
 struct DirectJsonManifestCollections {
     steps: BTreeMap<String, DirectJsonStep>,
@@ -1733,6 +1818,19 @@ fn split_dont_stop_result(
         },
         "outputs": success
     }))
+}
+
+fn split_result(split: &DirectJsonSplit, source: &Value, results: Value) -> Result<Value, String> {
+    if split_dont_stop_on_failed(split) {
+        split_dont_stop_result(split, source, results)
+    } else {
+        let step = DirectJsonStep {
+            id: split.step_id.clone(),
+            step_type: "Split".to_string(),
+            name: split.name.clone(),
+        };
+        Ok(step_output_envelope(&step, results, None))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3856,6 +3954,52 @@ mod tests {
         assert_eq!(steps["split"]["stepName"], json!("Process Items"));
         assert_eq!(steps["split"]["stepType"], json!("Split"));
         assert_eq!(steps["split"]["outputs"], json!([{ "ok": true }]));
+    }
+
+    #[test]
+    fn split_cache_key_uses_workflow_id_prefix_and_loop_indices() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"items":[{"id":1}]}"#,
+            br#"{"_workflow_id":"wf-42","_loop_indices":[1,"x"]}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let key = manifest.split_cache_key(0, &source).expect("cache key");
+
+        assert_eq!(
+            String::from_utf8(key).expect("utf8"),
+            "wf-42::split::split::[1,\"x\"]"
+        );
+    }
+
+    #[test]
+    fn split_result_can_be_inserted_into_steps_context() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[{"id":1}]}"#, b"{}", b"{}").expect("source");
+
+        let result = manifest
+            .split_result(0, &source, br#"[{"ok":true}]"#)
+            .expect("Split result");
+        let steps = manifest
+            .split_output_from_result(0, &source, &result)
+            .expect("Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["split"]["stepId"], json!("split"));
+        assert_eq!(steps["split"]["stepType"], json!("Split"));
+        assert_eq!(steps["split"]["outputs"], json!([{ "ok": true }]));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result).expect("result json"),
+            steps["split"]
+        );
     }
 
     #[test]

@@ -32,8 +32,9 @@ const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
+const SPLIT_CACHE_KEY: &str = "split::split";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
-  "durable": false,
+  "durable": true,
   "steps": {
     "split": {
       "stepType": "Split",
@@ -224,6 +225,24 @@ fn shared_components_dir() -> Option<PathBuf> {
         })
         .collect();
     if missing.is_empty() {
+        let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
+        let Ok(stdlib_bytes) = std::fs::read(&stdlib_wasm) else {
+            eprintln!(
+                "SKIP: direct shared workflow stdlib component is not readable: {:?}",
+                stdlib_wasm
+            );
+            return None;
+        };
+        if !stdlib_bytes
+            .windows(b"split-cache-key".len())
+            .any(|window| window == b"split-cache-key")
+        {
+            eprintln!(
+                "SKIP: direct shared workflow stdlib component is stale: {:?}",
+                stdlib_wasm
+            );
+            return None;
+        }
         Some(dir)
     } else {
         eprintln!(
@@ -770,13 +789,14 @@ fn normalized_events(events: &[RuntimeEvent]) -> Vec<(String, Value)> {
 }
 
 fn normalized_checkpoint_id(checkpoint_id: &str) -> String {
-    // Rust-generated components wrap Agent checkpoint ids with the resilient
+    // Rust-generated components wrap checkpoint ids with the resilient
     // function and workflow instance prefix; direct artifacts own only the
-    // stable Agent key suffix today. If the step id itself is "agent", direct
+    // stable step key suffix today. If the step id itself is "agent", direct
     // keys can surface as "<step>::agent::<agent-id>::<capability>::<step>";
     // compare from the generated-Rust cache key base onward.
     let suffix = checkpoint_id
         .find("agent::")
+        .or_else(|| checkpoint_id.find("split::"))
         .map(|index| checkpoint_id[index..].to_string())
         .unwrap_or_else(|| checkpoint_id.to_string());
     let segments = suffix.split("::").collect::<Vec<_>>();
@@ -1029,6 +1049,58 @@ fn direct_wasm_matches_components_cached_durable_agent_checkpoint_replay() {
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
 
     let expected_lookup = vec![(AGENT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_cached_durable_split_checkpoint_replay() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("durable-split-cached", SPLIT_FINISH_WITH_SCHEMAS);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "durable-split-cached",
+        SPLIT_FINISH_WITH_SCHEMAS,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"items":[{"value":"fresh"}]}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let cached_split_output =
+        br#"{"stepId":"split","stepName":"Unnamed","stepType":"Split","outputs":[{"value":"cached","index":9,"indices":[9]}]}"#.to_vec();
+    let components = execute_artifact_with_preloaded_checkpoints(
+        &components_artifact,
+        "ab-components-durable-split-cached",
+        &components_input,
+        vec![(SPLIT_CACHE_KEY.to_string(), cached_split_output.clone())],
+    );
+    let direct = execute_artifact_with_preloaded_checkpoints(
+        &direct_artifact.path,
+        "ab-direct-durable-split-cached",
+        workflow_input,
+        vec![(SPLIT_CACHE_KEY.to_string(), cached_split_output)],
+    );
+
+    assert_success_parity("durable-split-cached", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({
+        "results": [{ "value": "cached", "index": 9, "indices": [9] }]
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(SPLIT_CACHE_KEY.to_string(), Vec::new())];
     assert_eq!(
         normalized_checkpoints(&components.checkpoints),
         expected_lookup
