@@ -169,7 +169,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   The remaining Agent step state-machine lowering moved into
   `direct_wasm::compile::agent`, so `compile.rs` dispatches Agent run-plan
   entries without owning their validation, retry, checkpoint, output, and
-  continuation details inline.
+  continuation details inline. Shared conditional edge-route lowering moved
+  into `direct_wasm::compile::edge_route`.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -777,6 +778,9 @@ Emitter module boundaries should stay readable as support broadens:
   input validation, connection enrichment, durable checkpoint/cache handling,
   retry/no-retry dispatch, output envelope insertion, debug start/end events,
   source rebuild, and continuation into the next run plan.
+- `compile/edge_route.rs` owns priority-ordered conditional edge dispatch for
+  normal edges with a default fallback, including stdlib condition evaluation
+  and nested failure-target depth handling.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while

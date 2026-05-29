@@ -15,6 +15,7 @@ mod agent_retry;
 mod checkpoint;
 mod debug;
 mod delay;
+mod edge_route;
 mod error_step;
 mod log;
 mod mapping;
@@ -54,6 +55,7 @@ use agent::emit_agent_plan;
 use checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
 use delay::emit_delay_plan;
+use edge_route::emit_edge_route_dispatch;
 use error_step::emit_error_plan;
 use log::emit_log_plan;
 use mapping::{emit_apply_mapping, emit_build_source};
@@ -2536,121 +2538,6 @@ fn emit_run_plan_mapping(
             body.instruction(&Instruction::End);
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_edge_route_dispatch(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    track_events: bool,
-    variables: DirectVariables<'_>,
-    branches: &[DirectEdgeConditionPlan],
-    default_plan: &DirectRunPlan,
-    data_ptr_local: u32,
-    data_len_local: u32,
-    steps_ptr_local: u32,
-    steps_len_local: u32,
-    source_ptr_local: u32,
-    source_len_local: u32,
-    output_ptr_local: u32,
-    output_len_local: u32,
-    route_ptr_local: u32,
-    route_len_local: u32,
-    workflow_log_kind: &DirectDataSegment,
-    workflow_error_kind: &DirectDataSegment,
-    failure_target: Option<DirectFailureTarget>,
-) {
-    let Some((branch, remaining)) = branches.split_first() else {
-        emit_run_plan_mapping(
-            body,
-            indices,
-            static_data,
-            track_events,
-            variables,
-            default_plan,
-            data_ptr_local,
-            data_len_local,
-            steps_ptr_local,
-            steps_len_local,
-            source_ptr_local,
-            source_len_local,
-            output_ptr_local,
-            output_len_local,
-            route_ptr_local,
-            route_len_local,
-            workflow_log_kind,
-            workflow_error_kind,
-            failure_target,
-        );
-        return;
-    };
-
-    body.instruction(&Instruction::I32Const(branch.condition_id as i32));
-    body.instruction(&Instruction::LocalGet(source_ptr_local));
-    body.instruction(&Instruction::LocalGet(source_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-
-    body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-    body.instruction(&Instruction::I32Load8U(MemArg {
-        offset: 4,
-        align: 0,
-        memory_index: 0,
-    }));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    emit_run_plan_mapping(
-        body,
-        indices,
-        static_data,
-        track_events,
-        variables,
-        &branch.plan,
-        data_ptr_local,
-        data_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-        route_ptr_local,
-        route_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        failure_target.map(|target| target.nested(1)),
-    );
-    body.instruction(&Instruction::Else);
-    emit_edge_route_dispatch(
-        body,
-        indices,
-        static_data,
-        track_events,
-        variables,
-        remaining,
-        default_plan,
-        data_ptr_local,
-        data_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-        route_ptr_local,
-        route_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        failure_target.map(|target| target.nested(1)),
-    );
-    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
