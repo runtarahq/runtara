@@ -173,7 +173,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   into `direct_wasm::compile::edge_route`. Split step lowering moved into
   `direct_wasm::compile::split`, including durable Split checkpoint
   replay/save, per-item source construction, and dontStopOnFailed failure
-  aggregation shared by nested Agent/Error/Wait paths.
+  aggregation shared by nested Agent/Error/Wait paths. While loop lowering
+  moved into `direct_wasm::compile::while_loop`, covering condition source
+  construction, loop control, heartbeat/signal checks, state advancement, and
+  continuation.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -787,6 +790,10 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/split.rs` owns Split step lowering, durable Split checkpoint
   replay/save, per-item source/variable construction, output accumulation, and
   dontStopOnFailed failure aggregation helpers shared by nested step lowerers.
+- `compile/while_loop.rs` owns While step lowering, including condition-source
+  construction, max-iteration loop control, per-iteration variables,
+  heartbeat/check-signals calls, state advancement, final output construction,
+  and continuation into the next run plan.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
 - `compile/log.rs` owns Log step lowering and custom-event emission order while
