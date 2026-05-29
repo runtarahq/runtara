@@ -15,13 +15,15 @@ use std::time::Duration;
 use base64::Engine;
 use runtara_workflows::direct_wasm::DIRECT_SHARED_COMPONENT_REQUIREMENTS;
 use runtara_workflows::{
-    CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
-    compile_workflow, compile_workflow_direct,
+    ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph,
+    WorkflowCompilerMode, compile_workflow, compile_workflow_direct,
 };
 use serde_json::Value;
 use tempfile::TempDir;
 
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
+const EMBED_WORKFLOW: &str = include_str!("fixtures/embed_workflow_workflow.json");
+const EMBED_WORKFLOW_FINISH_CHILD: &str = include_str!("fixtures/embed_workflow_finish_child.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
@@ -95,6 +97,7 @@ const WAIT_FOR_SIGNAL_DIRECT_BREAKPOINT: &str = r#"{
 }"#;
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const SPLIT_CACHE_KEY: &str = "split::split";
+const EMBED_WORKFLOW_CACHE_KEY: &str = "embed_workflow::call_child";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
   "durable": true,
   "steps": {
@@ -324,34 +327,26 @@ fn shared_components_dir() -> Option<PathBuf> {
             );
             return None;
         };
-        if !stdlib_bytes
-            .windows(b"split-cache-key".len())
-            .any(|window| window == b"split-cache-key")
-            || !stdlib_bytes
-                .windows(b"wait-signal-id".len())
-                .any(|window| window == b"wait-signal-id")
-            || !stdlib_bytes
-                .windows(b"wait-output".len())
-                .any(|window| window == b"wait-output")
-            || !stdlib_bytes
-                .windows(b"wait-debug-start".len())
-                .any(|window| window == b"wait-debug-start")
-            || !stdlib_bytes
-                .windows(b"wait-timeout-error".len())
-                .any(|window| window == b"wait-timeout-error")
-            || !stdlib_bytes
-                .windows(b"wait-on-wait-variables".len())
-                .any(|window| window == b"wait-on-wait-variables")
-            || !stdlib_bytes
-                .windows(b"wait-on-wait-error".len())
-                .any(|window| window == b"wait-on-wait-error")
-            || !stdlib_bytes
-                .windows(b"breakpoint-key".len())
-                .any(|window| window == b"breakpoint-key")
-            || !stdlib_bytes
-                .windows(b"breakpoint-event".len())
-                .any(|window| window == b"breakpoint-event")
-        {
+        let required_stdlib_markers: &[&[u8]] = &[
+            b"split-cache-key",
+            b"wait-signal-id",
+            b"wait-output",
+            b"wait-debug-start",
+            b"wait-timeout-error",
+            b"wait-on-wait-variables",
+            b"wait-on-wait-error",
+            b"breakpoint-key",
+            b"breakpoint-event",
+            b"embed-workflow-cache-key",
+            b"embed-workflow-variables",
+            b"embed-workflow-result",
+            b"embed-workflow-output-from-result",
+        ];
+        if !required_stdlib_markers.iter().all(|marker| {
+            stdlib_bytes
+                .windows(marker.len())
+                .any(|window| window == *marker)
+        }) {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
                 stdlib_wasm
@@ -437,6 +432,16 @@ fn graph_from_fixture(graph_json: &str) -> ExecutionGraph {
     serde_json::from_str(graph_json).expect("fixture parses")
 }
 
+fn embed_workflow_child_workflows() -> Vec<ChildWorkflowInput> {
+    vec![ChildWorkflowInput {
+        step_id: "call_child".to_string(),
+        workflow_id: "child_workflow".to_string(),
+        version_requested: "latest".to_string(),
+        version_resolved: 3,
+        execution_graph: graph_from_fixture(EMBED_WORKFLOW_FINISH_CHILD),
+    }]
+}
+
 fn compile_components_artifact(workflow_id: &str, graph_json: &str) -> PathBuf {
     compile_components_artifact_with_tracking(workflow_id, graph_json, false)
 }
@@ -446,13 +451,40 @@ fn compile_components_artifact_with_tracking(
     graph_json: &str,
     track_events: bool,
 ) -> PathBuf {
+    compile_components_artifact_with_child_workflows_and_tracking(
+        workflow_id,
+        graph_json,
+        track_events,
+        &[],
+    )
+}
+
+fn compile_components_artifact_with_child_workflows(
+    workflow_id: &str,
+    graph_json: &str,
+    child_workflows: &[ChildWorkflowInput],
+) -> PathBuf {
+    compile_components_artifact_with_child_workflows_and_tracking(
+        workflow_id,
+        graph_json,
+        false,
+        child_workflows,
+    )
+}
+
+fn compile_components_artifact_with_child_workflows_and_tracking(
+    workflow_id: &str,
+    graph_json: &str,
+    track_events: bool,
+    child_workflows: &[ChildWorkflowInput],
+) -> PathBuf {
     let compiled = compile_workflow(CompilationInput {
         tenant_id: "direct-wasm-ab".to_string(),
         workflow_id: format!("ab-components-{workflow_id}"),
         version: 1,
         execution_graph: graph_from_fixture(graph_json),
         track_events,
-        child_workflows: vec![],
+        child_workflows: child_workflows.to_vec(),
         connection_service_url: None,
         agent_catalog: None,
         progress_callback: None,
@@ -481,6 +513,37 @@ fn compile_direct_artifact_with_tracking(
     graph_json: &str,
     track_events: bool,
 ) -> DirectArtifact {
+    compile_direct_artifact_with_child_workflows_and_tracking(
+        components_dir,
+        workflow_id,
+        graph_json,
+        track_events,
+        &[],
+    )
+}
+
+fn compile_direct_artifact_with_child_workflows(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    child_workflows: &[ChildWorkflowInput],
+) -> DirectArtifact {
+    compile_direct_artifact_with_child_workflows_and_tracking(
+        components_dir,
+        workflow_id,
+        graph_json,
+        false,
+        child_workflows,
+    )
+}
+
+fn compile_direct_artifact_with_child_workflows_and_tracking(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    track_events: bool,
+    child_workflows: &[ChildWorkflowInput],
+) -> DirectArtifact {
     let temp = TempDir::new().expect("tempdir");
     let compiled = compile_workflow_direct(
         CompilationInput {
@@ -489,7 +552,7 @@ fn compile_direct_artifact_with_tracking(
             version: 1,
             execution_graph: graph_from_fixture(graph_json),
             track_events,
-            child_workflows: vec![],
+            child_workflows: child_workflows.to_vec(),
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
@@ -1155,6 +1218,7 @@ fn normalized_checkpoint_id(checkpoint_id: &str) -> String {
     let suffix = checkpoint_id
         .find("agent::")
         .or_else(|| checkpoint_id.find("split::"))
+        .or_else(|| checkpoint_id.find("embed_workflow::"))
         .or_else(|| checkpoint_id.find("breakpoint::"))
         .map(|index| checkpoint_id[index..].to_string())
         .unwrap_or_else(|| checkpoint_id.to_string());
@@ -2214,6 +2278,139 @@ fn direct_wasm_matches_components_cached_durable_split_checkpoint_replay() {
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
 
     let expected_lookup = vec![(SPLIT_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_static_child() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-static-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-static-child",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"fresh-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-static-child",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-static-child",
+        workflow_input,
+    );
+
+    assert_success_parity("embed-workflow-static-child", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({
+        "result": { "result": "fresh-child" }
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_step_result = serde_json::to_vec(&serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "child_workflow",
+        "outputs": { "result": "fresh-child" }
+    }))
+    .expect("checkpoint json");
+    let expected_checkpoint_traffic = vec![
+        (EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new()),
+        (EMBED_WORKFLOW_CACHE_KEY.to_string(), expected_step_result),
+    ];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_checkpoint_traffic
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct.checkpoints),
+        expected_checkpoint_traffic
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_cached_embed_workflow_checkpoint_replay() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-cached",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-cached",
+        EMBED_WORKFLOW,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"fresh-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let cached_step_result = serde_json::to_vec(&serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "child_workflow",
+        "outputs": { "result": "cached-child" }
+    }))
+    .expect("checkpoint json");
+    let components = execute_artifact_with_preloaded_checkpoints(
+        &components_artifact,
+        "ab-components-embed-workflow-cached",
+        &components_input,
+        vec![(
+            EMBED_WORKFLOW_CACHE_KEY.to_string(),
+            cached_step_result.clone(),
+        )],
+    );
+    let direct = execute_artifact_with_preloaded_checkpoints(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-cached",
+        workflow_input,
+        vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), cached_step_result)],
+    );
+
+    assert_success_parity("embed-workflow-cached", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({
+        "result": { "result": "cached-child" }
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
     assert_eq!(
         normalized_checkpoints(&components.checkpoints),
         expected_lookup

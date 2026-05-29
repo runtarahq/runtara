@@ -174,10 +174,18 @@ fn shared_components_dir() -> Option<PathBuf> {
             );
             return None;
         };
-        if !stdlib_bytes
-            .windows(b"split-cache-key".len())
-            .any(|window| window == b"split-cache-key")
-        {
+        let required_stdlib_markers: &[&[u8]] = &[
+            b"split-cache-key",
+            b"embed-workflow-cache-key",
+            b"embed-workflow-variables",
+            b"embed-workflow-result",
+            b"embed-workflow-output-from-result",
+        ];
+        if !required_stdlib_markers.iter().all(|marker| {
+            stdlib_bytes
+                .windows(marker.len())
+                .any(|window| window == *marker)
+        }) {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
                 stdlib_wasm
