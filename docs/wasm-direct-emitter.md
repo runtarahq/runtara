@@ -171,7 +171,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   through both `compile_workflow` and
   `compile_workflow_direct`, runs both final `workflow.wasm` artifacts under
   Wasmtime with the same logical workflow input through each runtime's SDK
-  input envelope, and diffs the captured `/completed` payloads.
+  input envelope, and diffs the captured `/completed` payloads. The same A/B
+  harness now also compares custom-event payloads for `Log` workflows and
+  `/failed` plus `workflow_error` payloads for terminal `Error` workflows,
+  normalizing timestamp fields before comparison.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2015,8 +2018,10 @@ Current status:
   matching the direct emitter and the validation contract. This fixed the A/B
   mismatch where Rust previously followed execution-plan order and could pick a
   lower-priority branch first.
-- Expanding the A/B harness to durable, agent, event, and failure fixtures
-  remains pending.
+- The strict A/B harness now covers custom-event parity for `Log` workflows and
+  failure/event parity for terminal `Error` workflows, with timestamp fields
+  normalized out of the comparison.
+- Expanding the A/B harness to durable and agent fixtures remains pending.
 
 ### Phase 14: Controlled Production Enablement
 

@@ -26,6 +26,8 @@ const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
+const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 
 #[derive(Debug)]
 struct Completed {
@@ -38,15 +40,23 @@ struct Failed {
 }
 
 #[derive(Debug)]
+struct RuntimeEvent {
+    subtype: String,
+    payload_json: Value,
+}
+
+#[derive(Debug)]
 enum CapturedMessage {
     Completed(Completed),
     Failed(Failed),
+    Event(RuntimeEvent),
 }
 
 #[derive(Debug)]
 struct CapturedRun {
     output_json: Option<Value>,
     error_json: Option<Value>,
+    events: Vec<RuntimeEvent>,
     status_success: bool,
     stderr: String,
 }
@@ -367,7 +377,10 @@ fn route(
                 capture_failed(body, sink);
                 return (200, serde_json::json!({"success": true}));
             }
-            ("POST", "events") => return (200, serde_json::json!({"success": true})),
+            ("POST", "events") => {
+                capture_event(body, sink);
+                return (200, serde_json::json!({"success": true}));
+            }
             ("POST", "checkpoint") => {
                 return (
                     200,
@@ -404,6 +417,21 @@ fn capture_failed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
         let error_json =
             serde_json::from_str::<Value>(error).unwrap_or_else(|_| Value::String(error.into()));
         let _ = sink.send(CapturedMessage::Failed(Failed { error_json }));
+    }
+}
+
+fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
+        && parsed.get("event_type").and_then(Value::as_str) == Some("custom")
+        && let Some(subtype) = parsed.get("subtype").and_then(Value::as_str)
+        && let Some(b64) = parsed.get("payload").and_then(Value::as_str)
+        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
+        && let Ok(payload_json) = serde_json::from_slice::<Value>(&bytes)
+    {
+        let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
+            subtype: subtype.to_string(),
+            payload_json,
+        }));
     }
 }
 
@@ -476,16 +504,19 @@ fn execute_artifact(binary_path: &Path, instance_id: &str, workflow_input: &[u8]
 
     let mut output_json = None;
     let mut error_json = None;
+    let mut events = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
             CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
             CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
+            CapturedMessage::Event(event) => events.push(event),
         }
     }
 
     CapturedRun {
         output_json,
         error_json,
+        events,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
@@ -498,6 +529,25 @@ fn components_sdk_input(workflow_input: &[u8]) -> Vec<u8> {
         "variables": {},
     }))
     .expect("components sdk input serializes")
+}
+
+fn normalized_event_payload(mut payload: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("timestamp_ms");
+    }
+    payload
+}
+
+fn normalized_events(events: &[RuntimeEvent]) -> Vec<(String, Value)> {
+    events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                normalized_event_payload(event.payload_json.clone()),
+            )
+        })
+        .collect()
 }
 
 fn assert_success_parity(
@@ -533,6 +583,50 @@ fn assert_success_parity(
     assert!(
         components.output_json.is_some(),
         "components artifact did not POST /completed for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        normalized_events(&components.events),
+        normalized_events(&direct.events),
+        "custom-event payload mismatch for {case_name}[{input_index}]"
+    );
+}
+
+fn assert_failure_parity(
+    case_name: &str,
+    input_index: usize,
+    components: &CapturedRun,
+    direct: &CapturedRun,
+) {
+    assert!(
+        !components.status_success,
+        "components artifact should have failed for {case_name}[{input_index}]"
+    );
+    assert!(
+        !direct.status_success,
+        "direct artifact should have failed for {case_name}[{input_index}]"
+    );
+    assert!(
+        components.output_json.is_none(),
+        "components artifact unexpectedly completed for {case_name}[{input_index}]: {:?}",
+        components.output_json
+    );
+    assert!(
+        direct.output_json.is_none(),
+        "direct artifact unexpectedly completed for {case_name}[{input_index}]: {:?}",
+        direct.output_json
+    );
+    assert_eq!(
+        components.error_json, direct.error_json,
+        "failure payload mismatch for {case_name}[{input_index}]"
+    );
+    assert!(
+        components.error_json.is_some(),
+        "components artifact did not POST /failed for {case_name}[{input_index}]"
+    );
+    assert_eq!(
+        normalized_events(&components.events),
+        normalized_events(&direct.events),
+        "failure custom-event payload mismatch for {case_name}[{input_index}]"
     );
 }
 
@@ -578,6 +672,11 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
                 br#"{"status":"inactive","tier":"basic"}"#,
             ],
         },
+        AbCase {
+            name: "log-events",
+            graph_json: LOG_ALL_LEVELS,
+            inputs: &[br#"{"message":"hello"}"#],
+        },
     ];
 
     for case in CASES {
@@ -603,4 +702,30 @@ fn direct_wasm_matches_components_execution_for_supported_json_fixtures() {
             assert_success_parity(case.name, input_index, &components, &direct);
         }
     }
+}
+
+#[test]
+fn direct_wasm_matches_components_failure_for_error_fixture() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("error", ERROR_DIRECT_SIMPLE);
+    let direct_artifact = compile_direct_artifact(&components_dir, "error", ERROR_DIRECT_SIMPLE);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"requestId":"req-123"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-error",
+        &components_input,
+    );
+    let direct = execute_artifact(&direct_artifact.path, "ab-direct-error", workflow_input);
+
+    assert_failure_parity("error", 0, &components, &direct);
 }
