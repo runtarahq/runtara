@@ -305,6 +305,7 @@ pub(super) fn emit_run_plan_mapping(
             durable,
             child_plan,
             next_plan,
+            error_plan,
         } => {
             emit_embed_workflow_plan(
                 body,
@@ -317,6 +318,7 @@ pub(super) fn emit_run_plan_mapping(
                 *durable,
                 child_plan,
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,

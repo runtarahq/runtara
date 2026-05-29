@@ -27,6 +27,8 @@ const EMBED_WORKFLOW_FINISH_CHILD: &str = include_str!("fixtures/embed_workflow_
 const EMBED_WORKFLOW_ERROR_CHILD: &str = include_str!("fixtures/embed_workflow_error_child.json");
 const EMBED_WORKFLOW_CONDITIONAL_ERROR_CHILD: &str =
     include_str!("fixtures/embed_workflow_conditional_error_child.json");
+const EMBED_WORKFLOW_ON_ERROR_PARENT: &str =
+    include_str!("fixtures/embed_workflow_on_error_parent.json");
 const EMBED_WORKFLOW_NESTED_PARENT: &str =
     include_str!("fixtures/embed_workflow_nested_parent.json");
 const EMBED_WORKFLOW_NESTED_CHILD: &str = include_str!("fixtures/embed_workflow_nested_child.json");
@@ -34,6 +36,8 @@ const EMBED_WORKFLOW_NESTED_GRANDCHILD: &str =
     include_str!("fixtures/embed_workflow_nested_grandchild.json");
 const EMBED_WORKFLOW_NESTED_GREAT_GRANDCHILD: &str =
     include_str!("fixtures/embed_workflow_nested_great_grandchild.json");
+const EMBED_WORKFLOW_NESTED_ERROR_GREAT_GRANDCHILD: &str =
+    include_str!("fixtures/embed_workflow_nested_error_great_grandchild.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
@@ -458,6 +462,20 @@ fn embed_workflow_conditional_error_child_workflows() -> Vec<ChildWorkflowInput>
 }
 
 fn embed_workflow_nested_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_nested_child_workflows_with_great_grandchild(
+        EMBED_WORKFLOW_NESTED_GREAT_GRANDCHILD,
+    )
+}
+
+fn embed_workflow_nested_error_child_workflows() -> Vec<ChildWorkflowInput> {
+    embed_workflow_nested_child_workflows_with_great_grandchild(
+        EMBED_WORKFLOW_NESTED_ERROR_GREAT_GRANDCHILD,
+    )
+}
+
+fn embed_workflow_nested_child_workflows_with_great_grandchild(
+    great_grandchild_graph: &str,
+) -> Vec<ChildWorkflowInput> {
     vec![
         ChildWorkflowInput {
             step_id: "call_child".to_string(),
@@ -478,7 +496,7 @@ fn embed_workflow_nested_child_workflows() -> Vec<ChildWorkflowInput> {
             workflow_id: "great_grandchild_workflow".to_string(),
             version_requested: "latest".to_string(),
             version_resolved: 11,
-            execution_graph: graph_from_fixture(EMBED_WORKFLOW_NESTED_GREAT_GRANDCHILD),
+            execution_graph: graph_from_fixture(great_grandchild_graph),
         },
     ]
 }
@@ -2547,6 +2565,63 @@ fn direct_wasm_matches_components_embed_workflow_terminal_error_child() {
 }
 
 #[test]
+fn direct_wasm_matches_components_embed_workflow_parent_on_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-parent-on-error",
+        EMBED_WORKFLOW_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-parent-on-error",
+        EMBED_WORKFLOW_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"failing-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-parent-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-parent-on-error",
+        workflow_input,
+    );
+
+    assert_success_parity("embed-workflow-parent-on-error", 0, &components, &direct);
+
+    let expected_output = serde_json::json!({
+        "handled": true,
+        "code": "CHILD_WORKFLOW_FAILED",
+        "category": "permanent",
+        "childCode": "CHILD_FAILED",
+        "childStep": "fail"
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+
+    let expected_lookup = vec![(EMBED_WORKFLOW_CACHE_KEY.to_string(), Vec::new())];
+    assert_eq!(
+        normalized_checkpoints(&components.checkpoints),
+        expected_lookup
+    );
+    assert_eq!(normalized_checkpoints(&direct.checkpoints), expected_lookup);
+}
+
+#[test]
 fn direct_wasm_matches_components_embed_workflow_conditional_error_child() {
     let Some(components_dir) = direct_ab_components_dir() else {
         return;
@@ -2843,6 +2918,103 @@ fn direct_wasm_matches_components_nested_embed_workflow_static_child_closure() {
             "embed_workflow::call_greatgrandchild",
             "embed_workflow::call_grandchild",
             "embed_workflow::call_child",
+        ]
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_nested_embed_workflow_failure_closure() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_nested_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-nested-error",
+        EMBED_WORKFLOW_NESTED_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-nested-error",
+        EMBED_WORKFLOW_NESTED_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"nested-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-nested-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-nested-error",
+        workflow_input,
+    );
+
+    assert_failure_parity("embed-workflow-nested-error", 0, &components, &direct);
+
+    let expected_error = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "category": "permanent",
+        "code": "CHILD_WORKFLOW_FAILED",
+        "message": "Child workflow child_workflow failed",
+        "severity": "critical",
+        "childWorkflowId": "child_workflow",
+        "childError": {
+            "stepId": "call_grandchild",
+            "stepName": "Unnamed",
+            "stepType": "EmbedWorkflow",
+            "category": "permanent",
+            "code": "CHILD_WORKFLOW_FAILED",
+            "message": "Child workflow grandchild_workflow failed",
+            "severity": "critical",
+            "childWorkflowId": "grandchild_workflow",
+            "childError": {
+                "stepId": "call_greatgrandchild",
+                "stepName": "Unnamed",
+                "stepType": "EmbedWorkflow",
+                "category": "permanent",
+                "code": "CHILD_WORKFLOW_FAILED",
+                "message": "Child workflow great_grandchild_workflow failed",
+                "severity": "critical",
+                "childWorkflowId": "great_grandchild_workflow",
+                "childError": {
+                    "stepId": "fail_great_grandchild",
+                    "stepName": "Great Grandchild Failure",
+                    "category": "permanent",
+                    "code": "GREAT_GRANDCHILD_FAILED",
+                    "message": "Great grandchild workflow failed",
+                    "severity": "critical",
+                    "context": { "greatGrandchildInput": "nested-child" }
+                }
+            }
+        }
+    });
+    assert_eq!(components.error_json.as_ref(), Some(&expected_error));
+    assert_eq!(direct.error_json.as_ref(), Some(&expected_error));
+
+    let component_checkpoints = normalized_checkpoints(&components.checkpoints);
+    let direct_checkpoints = normalized_checkpoints(&direct.checkpoints);
+    assert_eq!(direct_checkpoints, component_checkpoints);
+    assert_eq!(
+        component_checkpoints
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "embed_workflow::call_child",
+            "embed_workflow::call_grandchild",
+            "embed_workflow::call_greatgrandchild",
         ]
     );
 }

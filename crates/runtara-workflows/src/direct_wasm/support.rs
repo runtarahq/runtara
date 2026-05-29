@@ -238,7 +238,7 @@ fn collect_graph_support_inner(
         };
         if edge.condition.is_some() && !condition_route_supported {
             let reason = if edge.label.as_deref() == Some("onError") {
-                "direct emitter supports onError edge conditions only for Agent sources with at most one default fallback"
+                "direct emitter supports onError edge conditions only for Agent and EmbedWorkflow sources with at most one default fallback"
             } else {
                 "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
             };
@@ -264,7 +264,7 @@ fn collect_graph_support_inner(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "direct onError routing currently supports Agent sources with at most one default handler".to_string(),
+                reason: "direct onError routing currently supports Agent and EmbedWorkflow sources with at most one default handler".to_string(),
             });
         }
     }
@@ -529,7 +529,16 @@ fn supports_direct_control_step_inner(
                 stack,
                 child_stack,
                 include_on_error,
-            )
+            ) && (!include_on_error
+                || supports_on_error_flow_step(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                ))
         }
         Step::Agent(step) => {
             supports_agent_step_baseline(graph, step)
@@ -614,6 +623,7 @@ fn supports_embed_workflow_child_graph_baseline(
     child_stack: &mut Vec<String>,
 ) -> bool {
     supports_direct_control_graph_inner(graph, child_workflows, child_stack)
+        && !graph_contains_on_error_edge(graph)
         && !graph_contains_step(graph, |step| {
             !matches!(
                 step,
@@ -647,6 +657,17 @@ fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
     graph_contains_step(graph, |step| {
         matches!(step, Step::Split(_) | Step::While(_))
     })
+}
+
+fn graph_contains_on_error_edge(graph: &ExecutionGraph) -> bool {
+    graph
+        .execution_plan
+        .iter()
+        .any(|edge| edge.label.as_deref() == Some("onError"))
+        || graph
+            .steps
+            .values()
+            .any(|step| nested_step_graphs(step).any(graph_contains_on_error_edge))
 }
 
 fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
@@ -821,12 +842,14 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
 }
 
 fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool {
-    let Some(Step::Agent(step)) = graph.steps.get(step_id) else {
+    let Some(step) = graph.steps.get(step_id) else {
         return false;
     };
-    if !supports_agent_step_baseline(graph, step) {
-        return false;
-    }
+    match step {
+        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::EmbedWorkflow(_) => {}
+        _ => return false,
+    };
 
     let edges = on_error_edges(graph, step_id);
     if edges.is_empty() {
@@ -1221,7 +1244,7 @@ fn collect_embed_workflow_step_unsupported(
     if !supports_embed_workflow_child_graph_baseline(child, child_workflows, &mut child_stack) {
         push(
             "embed-workflow-child-shape",
-            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, Error, and statically preloaded nested EmbedWorkflow steps",
+            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, Error, and statically preloaded nested EmbedWorkflow steps without child-local onError edges",
         );
     }
 }
@@ -1462,6 +1485,9 @@ mod tests {
                 include_str!("../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
             }
             "embed_workflow" => include_str!("../../tests/fixtures/embed_workflow_workflow.json"),
+            "embed_workflow_on_error_parent" => {
+                include_str!("../../tests/fixtures/embed_workflow_on_error_parent.json")
+            }
             "embed_workflow_error_child" => {
                 include_str!("../../tests/fixtures/embed_workflow_error_child.json")
             }
@@ -1479,6 +1505,11 @@ mod tests {
             }
             "embed_workflow_nested_great_grandchild" => {
                 include_str!("../../tests/fixtures/embed_workflow_nested_great_grandchild.json")
+            }
+            "embed_workflow_nested_error_great_grandchild" => {
+                include_str!(
+                    "../../tests/fixtures/embed_workflow_nested_error_great_grandchild.json"
+                )
             }
             other => panic!("unknown fixture {other}"),
         };
@@ -1680,6 +1711,77 @@ mod tests {
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_parent_on_error_is_supported_by_child_aware_check() {
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow_on_error_parent"),
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_error_child"),
+            }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_child_local_on_error_remains_rejected() {
+        let child_with_on_error = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "inner_child": {
+                    "stepType": "EmbedWorkflow",
+                    "id": "inner_child",
+                    "childWorkflowId": "grandchild_workflow",
+                    "childVersion": "latest",
+                    "inputMapping": {
+                        "childInput": { "valueType": "reference", "value": "data.childInput" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" },
+                "handled": { "stepType": "Finish", "id": "handled" }
+            },
+            "entryPoint": "inner_child",
+            "executionPlan": [
+                { "fromStep": "inner_child", "toStep": "finish" },
+                { "fromStep": "inner_child", "toStep": "handled", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("child graph parses");
+
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow"),
+            &[
+                ChildWorkflowInput {
+                    step_id: "call_child".to_string(),
+                    workflow_id: "child_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 3,
+                    execution_graph: child_with_on_error,
+                },
+                ChildWorkflowInput {
+                    step_id: "inner_child".to_string(),
+                    workflow_id: "grandchild_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 7,
+                    execution_graph: fixture("embed_workflow_error_child"),
+                },
+            ],
+        );
+
+        assert!(!report.supported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("call_child")
+                && feature.feature == "embed-workflow-child-shape"
+        }));
     }
 
     #[test]

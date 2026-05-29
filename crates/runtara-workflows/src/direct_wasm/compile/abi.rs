@@ -7,7 +7,7 @@ use wasm_encoder::{
 };
 use wit_parser::abi::WasmType;
 
-use super::embed_workflow::emit_embed_workflow_child_error_and_fail;
+use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
 use super::split::emit_split_append_retptr_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
@@ -120,10 +120,9 @@ pub(super) fn emit_retptr_error_target_or_return(
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
             load_retptr_list(function, error_ptr_local, error_len_local);
-            emit_embed_workflow_child_error_and_fail(
+            emit_embed_workflow_child_error_and_continue(
                 function,
-                indices,
-                failure_target,
+                failure_target.nested(1),
                 error_ptr_local,
                 error_len_local,
             );

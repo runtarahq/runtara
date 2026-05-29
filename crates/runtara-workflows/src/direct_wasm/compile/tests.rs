@@ -49,6 +49,9 @@ fn fixture(name: &str) -> ExecutionGraph {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
         }
         "embed_workflow" => include_str!("../../../tests/fixtures/embed_workflow_workflow.json"),
+        "embed_workflow_on_error_parent" => {
+            include_str!("../../../tests/fixtures/embed_workflow_on_error_parent.json")
+        }
         "embed_workflow_error_child" => {
             include_str!("../../../tests/fixtures/embed_workflow_error_child.json")
         }
@@ -66,6 +69,11 @@ fn fixture(name: &str) -> ExecutionGraph {
         }
         "embed_workflow_nested_great_grandchild" => {
             include_str!("../../../tests/fixtures/embed_workflow_nested_great_grandchild.json")
+        }
+        "embed_workflow_nested_error_great_grandchild" => {
+            include_str!(
+                "../../../tests/fixtures/embed_workflow_nested_error_great_grandchild.json"
+            )
         }
         "transform" => include_str!("../../../tests/fixtures/transform_workflow.json"),
         other => panic!("unknown fixture {other}"),
@@ -329,11 +337,21 @@ fn collect_run_plan_ids(
             input_mapping_id,
             child_plan,
             next_plan,
+            error_plan,
             ..
         } => {
             mapping_ids.push(*input_mapping_id);
             collect_run_plan_ids(child_plan, condition_ids, mapping_ids);
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
+            if let Some(error_plan) = error_plan {
+                for branch in &error_plan.branches {
+                    condition_ids.push(branch.condition_id);
+                    collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
+                }
+                if let Some(default_plan) = &error_plan.default_plan {
+                    collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
+                }
+            }
         }
         DirectRunPlan::Delay { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
@@ -895,6 +913,51 @@ fn direct_compile_supports_static_embed_workflow_with_conditional_error_child() 
 }
 
 #[test]
+fn direct_compile_supports_static_embed_workflow_parent_on_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_workflow_on_error_parent"),
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: fixture("embed_workflow_error_child"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct EmbedWorkflow parent onError compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct EmbedWorkflow parent onError artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow { error_plan, .. } = &core_config.run_plan else {
+        panic!("expected EmbedWorkflow run plan");
+    };
+    let error_plan = error_plan.as_ref().expect("EmbedWorkflow onError plan");
+    assert!(error_plan.branches.is_empty());
+    assert!(error_plan.default_plan.is_some());
+}
+
+#[test]
 fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {
@@ -981,6 +1044,59 @@ fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
         child_plan.as_ref(),
         DirectRunPlan::EmbedWorkflow { .. }
     ));
+}
+
+#[test]
+fn direct_compile_supports_nested_static_embed_workflow_failure_closure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_workflow_nested_parent"),
+        child_workflows: vec![
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_nested_child"),
+            },
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_grandchild".to_string(),
+                workflow_id: "grandchild_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 7,
+                execution_graph: fixture("embed_workflow_nested_grandchild"),
+            },
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_greatgrandchild".to_string(),
+                workflow_id: "great_grandchild_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 11,
+                execution_graph: fixture("embed_workflow_nested_error_great_grandchild"),
+            },
+        ],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct nested EmbedWorkflow failure compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct nested EmbedWorkflow failure artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert!(manifest.child_workflows.iter().any(|child| {
+        child.step_id == "call_greatgrandchild"
+            && child.graph.entry_point == "fail_great_grandchild"
+    }));
 }
 
 #[test]

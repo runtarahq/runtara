@@ -1,0 +1,69 @@
+{
+  "name": "EmbedWorkflow OnError Parent",
+  "description": "A workflow that handles a static child workflow failure from EmbedWorkflow onError",
+  "steps": {
+    "call_child": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_child",
+      "childWorkflowId": "child_workflow",
+      "childVersion": "latest",
+      "inputMapping": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_child.outputs"
+        }
+      }
+    },
+    "handled": {
+      "stepType": "Finish",
+      "id": "handled",
+      "inputMapping": {
+        "handled": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "code": {
+          "valueType": "reference",
+          "value": "steps.__error.code"
+        },
+        "category": {
+          "valueType": "reference",
+          "value": "steps.__error.category"
+        },
+        "childCode": {
+          "valueType": "reference",
+          "value": "steps.__error.childError.code"
+        },
+        "childStep": {
+          "valueType": "reference",
+          "value": "steps.__error.childError.stepId"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [
+    {
+      "fromStep": "call_child",
+      "toStep": "finish"
+    },
+    {
+      "fromStep": "call_child",
+      "toStep": "handled",
+      "label": "onError"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

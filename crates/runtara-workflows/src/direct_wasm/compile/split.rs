@@ -11,7 +11,7 @@ use super::abi::{
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
 use super::dispatcher::emit_run_plan_mapping;
-use super::embed_workflow::emit_embed_workflow_child_error_and_fail;
+use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
 use super::mapping::emit_build_source;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
@@ -446,9 +446,8 @@ pub(super) fn emit_split_append_error_payload_and_continue(
                 );
             }
             DirectFailureTarget::EmbedWorkflow { .. } => {
-                emit_embed_workflow_child_error_and_fail(
+                emit_embed_workflow_child_error_and_continue(
                     body,
-                    indices,
                     target,
                     error_ptr_local,
                     error_len_local,

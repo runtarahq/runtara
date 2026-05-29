@@ -59,6 +59,7 @@ pub(super) enum DirectRunPlan {
         durable: bool,
         child_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     Delay {
         step_id: String,
@@ -129,8 +130,7 @@ pub(super) enum DirectFailureTarget {
         step_id_len: i32,
     },
     EmbedWorkflow {
-        step_id_offset: i32,
-        step_id_len: i32,
+        branch_depth: u32,
     },
 }
 
@@ -151,12 +151,8 @@ impl DirectFailureTarget {
                 step_id_offset,
                 step_id_len,
             },
-            Self::EmbedWorkflow {
-                step_id_offset,
-                step_id_len,
-            } => Self::EmbedWorkflow {
-                step_id_offset,
-                step_id_len,
+            Self::EmbedWorkflow { branch_depth } => Self::EmbedWorkflow {
+                branch_depth: branch_depth + extra_depth,
             },
         }
     }
@@ -356,6 +352,11 @@ fn step_run_plan_inner(
             )?;
             let next_plan =
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, child_workflows, step_id, stack)?
+            } else {
+                None
+            };
 
             Ok(DirectRunPlan::EmbedWorkflow {
                 step_id: step_id.to_string(),
@@ -368,6 +369,7 @@ fn step_run_plan_inner(
                         .unwrap_or(true),
                 child_plan: Box::new(child_plan),
                 next_plan: Box::new(next_plan),
+                error_plan,
             })
         }
         "Delay" => {

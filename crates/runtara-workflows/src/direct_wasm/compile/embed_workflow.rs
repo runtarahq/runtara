@@ -8,61 +8,67 @@ use super::abi::{
     emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_u8_load,
     push_segment_args, return_if_retptr_error,
 };
+use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::emit_step_debug_event;
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
     DIRECT_EMBED_CHILD_DATA_LEN_LOCAL, DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
-    DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL, DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
-    DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL, DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
-    DIRECT_EMBED_STEP_RESULT_LEN_LOCAL, DIRECT_EMBED_STEP_RESULT_PTR_LOCAL,
-    DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectFailureTarget, DirectRunPlan, DirectVariables,
+    DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL, DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL,
+    DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL, DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL, DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
+    DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectRunPlan, DirectVariables,
 };
 
-pub(super) fn emit_embed_workflow_child_error_and_fail(
+pub(super) fn emit_embed_workflow_child_error_and_continue(
     body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
     target: DirectFailureTarget,
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
-    let DirectFailureTarget::EmbedWorkflow {
-        step_id_offset,
-        step_id_len,
-    } = target
-    else {
+    let DirectFailureTarget::EmbedWorkflow { branch_depth } = target else {
         panic!("EmbedWorkflow child failure target expected");
     };
 
-    body.instruction(&Instruction::I32Const(step_id_offset));
-    body.instruction(&Instruction::I32Const(step_id_len));
     body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(error_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
-    return_if_retptr_error(body);
-    load_retptr_list(body, error_ptr_local, error_len_local);
-
-    body.instruction(&Instruction::LocalGet(error_ptr_local));
-    body.instruction(&Instruction::LocalGet(error_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_fail));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
     body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::Br(branch_depth));
 }
 
-fn push_embed_workflow_frame(body: &mut WasmFunction, route_ptr_local: u32, route_len_local: u32) {
+fn push_embed_workflow_frame(
+    body: &mut WasmFunction,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(steps_ptr_local));
+    body.instruction(&Instruction::LocalGet(steps_len_local));
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
 }
 
-fn pop_embed_workflow_frame(body: &mut WasmFunction, route_ptr_local: u32, route_len_local: u32) {
+fn pop_embed_workflow_frame(
+    body: &mut WasmFunction,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
     body.instruction(&Instruction::LocalSet(route_len_local));
     body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalSet(steps_len_local));
+    body.instruction(&Instruction::LocalSet(steps_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
 }
@@ -79,6 +85,7 @@ pub(super) fn emit_embed_workflow_plan(
     durable: bool,
     child_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -166,6 +173,14 @@ pub(super) fn emit_embed_workflow_plan(
         DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
     );
 
+    push_embed_workflow_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     body.instruction(&Instruction::I32Const(static_data.steps.offset));
     body.instruction(&Instruction::LocalSet(steps_ptr_local));
     body.instruction(&Instruction::I32Const(static_data.steps.len_i32()));
@@ -188,7 +203,9 @@ pub(super) fn emit_embed_workflow_plan(
         failure_target,
     );
 
-    push_embed_workflow_frame(body, route_ptr_local, route_len_local);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
         indices,
@@ -208,12 +225,51 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        Some(DirectFailureTarget::EmbedWorkflow {
-            step_id_offset: step_id_segment.offset,
-            step_id_len: step_id_segment.len_i32(),
-        }),
+        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
     );
-    pop_embed_workflow_frame(body, route_ptr_local, route_len_local);
+    body.instruction(&Instruction::End);
+    pop_embed_workflow_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+    emit_agent_error_route_or_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        step_id,
+        output_ptr_local,
+        output_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        error_plan,
+        data_ptr_local,
+        data_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        failure_target.map(|target| target.nested(1)),
+    );
+    body.instruction(&Instruction::End);
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
