@@ -142,6 +142,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   diagnostics (`enabled`, `outcome`, `reason`) so direct rollout decisions and
   fallback reasons remain visible on the final runnable image, not only in
   transient logs and metrics.
+- Direct-compiled image metadata now embeds the direct artifact sidecar under
+  `workflow.directArtifact`, carrying direct ABI/manifest versions, manifest
+  and support-report checksums, workflow-logic/composed artifact identity, and
+  shared/agent component dependency checksums captured during static
+  composition.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -2020,8 +2025,13 @@ Current status:
 - Registered image metadata also includes direct gate diagnostics (`enabled`,
   `outcome`, and `reason`), covering operator inspection of disabled direct
   mode, allowlist skips, direct success, missing components, unsupported
-  graphs, and direct infrastructure fallback. Direct compiler version and
-  shared component checksum metadata remain pending.
+  graphs, and direct infrastructure fallback.
+- Direct-compiled image metadata embeds the direct artifact sidecar as
+  `workflow.directArtifact`, so direct ABI/manifest versions, manifest and
+  support-report checksums, workflow-logic/composed artifact identity, and
+  static shared/agent component dependency checksums are available from the
+  registered image. A compact operator-facing summary can still be added later
+  if the full sidecar is too verbose for dashboards.
 
 ### Phase 15: Default Direct Mode
 

@@ -18,9 +18,12 @@ use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::compile::ProgressCallback;
+use runtara_workflows::direct_wasm::{
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata,
+};
 use runtara_workflows::{
     ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
-    compile_workflow, compile_workflow_direct,
+    WorkflowCompilerMode, compile_workflow, compile_workflow_direct,
 };
 
 /// Global semaphore limiting concurrent compilations across all code paths.
@@ -77,24 +80,65 @@ fn workflow_image_metadata(
     version: u32,
     source_checksum: &str,
     direct_diagnostics: DirectCompilationDiagnostics,
+    direct_artifact: Option<&DirectArtifactMetadata>,
 ) -> serde_json::Value {
+    let mut workflow = serde_json::json!({
+        "workflowId": workflow_id,
+        "version": version,
+        "sourceChecksum": source_checksum,
+        // Major version of `runtara-workflows`. Cache miss on major
+        // bump invalidates every workflow on next deploy.
+        "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+        "compilerMode": compilation_result.compiler_mode.as_str(),
+        "directWasm": {
+            "enabled": direct_diagnostics.enabled,
+            "outcome": direct_diagnostics.outcome.as_str(),
+            "reason": direct_diagnostics.reason,
+        },
+    });
+
+    if let Some(direct_artifact) = direct_artifact {
+        workflow["directArtifact"] = serde_json::to_value(direct_artifact)
+            .expect("direct artifact metadata should serialize");
+    }
+
     serde_json::json!({
         "variables": compilation_result.default_variables,
-        "workflow": {
-            "workflowId": workflow_id,
-            "version": version,
-            "sourceChecksum": source_checksum,
-            // Major version of `runtara-workflows`. Cache miss on major
-            // bump invalidates every workflow on next deploy.
-            "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
-            "compilerMode": compilation_result.compiler_mode.as_str(),
-            "directWasm": {
-                "enabled": direct_diagnostics.enabled,
-                "outcome": direct_diagnostics.outcome.as_str(),
-                "reason": direct_diagnostics.reason,
-            },
-        }
+        "workflow": workflow
     })
+}
+
+async fn direct_artifact_metadata_for_image(
+    compilation_result: &NativeCompilationResult,
+) -> Option<DirectArtifactMetadata> {
+    if compilation_result.compiler_mode != WorkflowCompilerMode::DirectWasm {
+        return None;
+    }
+
+    let path = compilation_result
+        .build_dir
+        .join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => match serde_json::from_slice::<DirectArtifactMetadata>(&bytes) {
+            Ok(metadata) => Some(metadata),
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to parse direct workflow artifact metadata; image registration will omit direct artifact provenance"
+                );
+                None
+            }
+        },
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "Failed to read direct workflow artifact metadata; image registration will omit direct artifact provenance"
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1077,6 +1121,7 @@ impl CompilationService {
         // Create registration options with workflow variables as metadata.
         // Every compile produces a components-mode `workflow.wasm`, so the
         // runner type is always `Wasm` now.
+        let direct_artifact = direct_artifact_metadata_for_image(compilation_result).await;
         let options =
             RegisterImageStreamOptions::new(registration.tenant_id, &image_name, binary_size)
                 .with_description(format!(
@@ -1091,6 +1136,7 @@ impl CompilationService {
                     registration.version,
                     registration.source_checksum,
                     registration.direct_diagnostics,
+                    direct_artifact.as_ref(),
                 ));
 
         // Open the binary file for streaming
@@ -1157,7 +1203,9 @@ impl std::error::Error for ServiceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtara_workflows::WorkflowCompilerMode;
+    use runtara_workflows::direct_wasm::{
+        DirectArtifactFileMetadata, DirectComponentDependencyMetadata,
+    };
 
     // =========================================================================
     // ServiceError Display tests
@@ -1314,6 +1362,7 @@ mod tests {
             7,
             "source-sha256",
             DirectCompilationDiagnostics::success(),
+            None,
         );
 
         assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
@@ -1350,6 +1399,7 @@ mod tests {
             7,
             "source-sha256",
             DirectCompilationDiagnostics::fallback("unsupported"),
+            None,
         );
 
         assert_eq!(
@@ -1359,6 +1409,68 @@ mod tests {
         assert_eq!(metadata["workflow"]["directWasm"]["enabled"], true);
         assert_eq!(metadata["workflow"]["directWasm"]["outcome"], "fallback");
         assert_eq!(metadata["workflow"]["directWasm"]["reason"], "unsupported");
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_direct_artifact_provenance() {
+        let result = native_result_with_mode(WorkflowCompilerMode::DirectWasm, "/tmp/build".into());
+        let artifact = direct_artifact_metadata_fixture();
+
+        let metadata = workflow_image_metadata(
+            &result,
+            "workflow-a",
+            7,
+            "source-sha256",
+            DirectCompilationDiagnostics::success(),
+            Some(&artifact),
+        );
+
+        let direct_artifact = &metadata["workflow"]["directArtifact"];
+        assert_eq!(direct_artifact["schemaVersion"], 1);
+        assert_eq!(direct_artifact["directAbiVersion"], 1);
+        assert_eq!(direct_artifact["manifestVersion"], 1);
+        assert_eq!(direct_artifact["manifestChecksum"], "manifest-sha256");
+        assert_eq!(
+            direct_artifact["sharedComponents"][0]["package"],
+            "runtara:workflow-stdlib"
+        );
+        assert_eq!(
+            direct_artifact["sharedComponents"][0]["wasm"]["sha256"],
+            "stdlib-sha256"
+        );
+        assert_eq!(
+            direct_artifact["agentComponents"][0]["agentId"],
+            "transform"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_artifact_metadata_for_image_reads_only_direct_sidecars() {
+        let build_dir = unique_test_dir("direct-artifact-metadata");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        let artifact = direct_artifact_metadata_fixture();
+        std::fs::write(
+            build_dir.join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME),
+            serde_json::to_vec(&artifact).expect("serialize artifact metadata"),
+        )
+        .expect("write artifact metadata");
+
+        let direct_result =
+            native_result_with_mode(WorkflowCompilerMode::DirectWasm, build_dir.clone());
+        let loaded = direct_artifact_metadata_for_image(&direct_result)
+            .await
+            .expect("direct artifact metadata should load");
+        assert_eq!(loaded, artifact);
+
+        let rust_result =
+            native_result_with_mode(WorkflowCompilerMode::ComponentsCodegen, build_dir.clone());
+        assert!(
+            direct_artifact_metadata_for_image(&rust_result)
+                .await
+                .is_none()
+        );
+
+        let _ = std::fs::remove_dir_all(build_dir);
     }
 
     fn direct_skip_input(tenant_id: &str, workflow_id: &str) -> CompilationInput {
@@ -1388,6 +1500,74 @@ mod tests {
             agent_catalog: None,
             progress_callback: None,
         }
+    }
+
+    fn native_result_with_mode(
+        compiler_mode: WorkflowCompilerMode,
+        build_dir: std::path::PathBuf,
+    ) -> NativeCompilationResult {
+        NativeCompilationResult {
+            binary_path: build_dir.join("workflow.wasm"),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir,
+            package_size: 99,
+            has_side_effects: false,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({}),
+            compiler_mode,
+        }
+    }
+
+    fn direct_artifact_metadata_fixture() -> DirectArtifactMetadata {
+        let wasm = |filename: &str, sha256: &str| DirectArtifactFileMetadata {
+            filename: filename.to_string(),
+            sha256: sha256.to_string(),
+            size_bytes: 42,
+        };
+
+        DirectArtifactMetadata {
+            schema_version: 1,
+            artifact_kind: "direct-workflow-component".to_string(),
+            workflow_id: "workflow-a".to_string(),
+            workflow_version: 7,
+            source_checksum: Some("source-sha256".to_string()),
+            direct_abi_version: 1,
+            manifest_version: 1,
+            template_major_version: runtara_workflows::TEMPLATE_MAJOR_VERSION.to_string(),
+            manifest_checksum: "manifest-sha256".to_string(),
+            support_report_checksum: "support-sha256".to_string(),
+            workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
+            composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            shared_components: vec![DirectComponentDependencyMetadata {
+                kind: "shared".to_string(),
+                agent_id: None,
+                package: "runtara:workflow-stdlib".to_string(),
+                package_with_version: "runtara:workflow-stdlib@0.1.0".to_string(),
+                wasm_filename: "runtara_workflow_stdlib.wasm".to_string(),
+                wasm: Some(wasm("runtara_workflow_stdlib.wasm", "stdlib-sha256")),
+                meta_filename: "runtara_workflow_stdlib.meta.json".to_string(),
+                meta: None,
+            }],
+            agent_components: vec![DirectComponentDependencyMetadata {
+                kind: "agent".to_string(),
+                agent_id: Some("transform".to_string()),
+                package: "runtara:agent-transform".to_string(),
+                package_with_version: "runtara:agent-transform@0.3.0".to_string(),
+                wasm_filename: "runtara_agent_transform.wasm".to_string(),
+                wasm: Some(wasm("runtara_agent_transform.wasm", "agent-sha256")),
+                meta_filename: "runtara_agent_transform.meta.json".to_string(),
+                meta: None,
+            }],
+        }
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("runtara-{label}-{nanos}"))
     }
 
     // =========================================================================
