@@ -207,7 +207,6 @@ Run shell-based end-to-end checks:
 ```
 
 ## Workflow DSL
-
 Runtara workflows are described as JSON execution graphs. A minimal workflow:
 
 ```json
