@@ -132,15 +132,17 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   composition with separate stdlib and runtime components plus any required
   agents.
 - Emitter maintainability is now an explicit production gate. The current
-  direct core emitter still has too much lowering code concentrated in
-  `direct_wasm/compile.rs`; future implementation slices should extract stable
-  lowering families into focused modules with small public surfaces and tests,
-  instead of continuing to grow the file.
-- The first decomposition step has started: the direct core run-plan data model
-  now lives in `direct_wasm::plan`, leaving `compile.rs` to consume the plan
-  instead of owning every planning/lowering type inline. The next extraction
-  checkpoint is to move run-plan construction or a stable step-family lowerer
-  behind the same kind of focused module boundary.
+  direct core emitter still has substantial lowering code concentrated in
+  `direct_wasm/compile.rs`; future implementation slices should continue to
+  extract stable lowering families into focused modules with small public
+  surfaces and tests.
+- The first decomposition checkpoint is complete: `direct_wasm::plan` owns the
+  direct core run-plan data model plus graph-to-run-plan construction, and
+  `direct_wasm::error` owns the shared direct compile error type. `compile.rs`
+  now consumes `direct_run_plan` and keeps artifact orchestration/core emission
+  responsibilities instead of owning every planning type and helper inline. The
+  next extraction checkpoint is static-data/memory-layout helpers or a stable
+  step-family lowerer behind the same kind of focused module boundary.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -712,6 +714,10 @@ Emitter module boundaries should stay readable as support broadens:
 
 - `compile.rs` owns the public compile/compose entry points and module assembly
   orchestration.
+- `plan.rs` owns deterministic graph-to-run-plan construction and the run-plan
+  data model consumed by the core emitter.
+- `error.rs` owns the direct compile error surface shared by planning,
+  emission, composition, and artifact-writing code.
 - Step-family lowering should live in focused modules once stable
   (`wait`, `agent`, `split`, `while`, `delay`, and pure control flow).
 - Shared ABI/import/static-data helpers should live behind reusable helper

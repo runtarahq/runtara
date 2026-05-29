@@ -9,6 +9,8 @@
 pub mod compile;
 #[cfg(feature = "compiler")]
 pub mod component;
+#[cfg(feature = "compiler")]
+mod error;
 pub mod manifest;
 #[cfg(feature = "compiler")]
 mod plan;
@@ -19,7 +21,7 @@ pub use compile::{
     DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION,
     DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
     DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
-    DirectArtifactMetadata, DirectCompilationInput, DirectCompilationResult, DirectCompileError,
+    DirectArtifactMetadata, DirectCompilationInput, DirectCompilationResult,
     DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, compile_direct_workflow,
     compile_direct_workflow_composed, compose_direct_workflow,
 };
@@ -29,6 +31,8 @@ pub use component::{
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
     emit_direct_component_artifacts,
 };
+#[cfg(feature = "compiler")]
+pub use error::DirectCompileError;
 pub use manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectConditionManifest, DirectEdgeManifest,
     DirectGraphManifest, DirectManifestError, DirectNestedGraphManifest, DirectStepManifest,
