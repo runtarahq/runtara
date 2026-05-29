@@ -187,7 +187,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   moved into `direct_wasm::compile::artifact_metadata`. Direct core module
   assembly, WIT import/export discovery, import index validation,
   realloc/initialize shims, and direct run-entry assembly moved into
-  `direct_wasm::compile::core_module`.
+  `direct_wasm::compile::core_module`. The large structural compiler test suite
+  moved out of the production entry module and into
+  `direct_wasm::compile::tests`, leaving `compile.rs` focused on public
+  compile/compose entry points and artifact orchestration.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -760,6 +763,9 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile.rs` owns the public compile/compose entry points, component artifact
   orchestration, runtime-fail helper used by nested failure lowerers, and
   artifact custom sections.
+- `compile/tests.rs` owns the structural direct compiler tests that inspect
+  emitted component sections, core import order, support rejection, composition
+  metadata, and step-family lowering call order.
 - `compile/core_module.rs` owns direct core Wasm module assembly, WIT
   import/export discovery, `DirectCoreConfig`, `DirectCoreFunctionIndices`,
   `DirectVariables`, direct run-entry assembly, realloc/initialize exports, and
