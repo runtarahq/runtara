@@ -144,8 +144,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   second decomposition checkpoint is also complete: `direct_wasm::static_data`
   owns static byte-segment layout, heap/page sizing, static step/Agent segment
   collection, and compile-time workflow variable serialization. The next
-  extraction checkpoint has started with Delay, Log, and terminal Error
-  lowering moved into `direct_wasm::compile::{delay,log,error_step}`.
+  extraction checkpoint has started with Delay, Log, terminal Error, and the
+  shared pure step-context lowering moved into
+  `direct_wasm::compile::{delay,log,error_step,step_context}`.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -732,6 +733,9 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/error_step.rs` owns terminal Error step lowering, including
   `workflow_error` custom-event emission, runtime failure, and Split
   aggregation routing for nested failures.
+- `compile/step_context.rs` owns the shared Filter/value Switch/GroupBy
+  lowering pattern that calls one stdlib helper, stores the returned `steps`
+  context, rebuilds source, and continues normal flow.
 - Step-family lowering should live in focused modules once stable
   (`wait`, `agent`, `split`, `while`, `delay`, and pure control flow).
 - Shared ABI/import/static-data helpers should live behind reusable helper

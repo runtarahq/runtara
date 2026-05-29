@@ -9,6 +9,7 @@
 mod delay;
 mod error_step;
 mod log;
+mod step_context;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -36,6 +37,7 @@ use wit_parser::{
 use delay::emit_delay_plan;
 use error_step::emit_error_plan;
 use log::emit_log_plan;
+use step_context::emit_step_context_plan;
 
 use super::component::{
     DIRECT_AGENT_WIT_VERSION, DirectAgentComponentRequirement, DirectComponentArtifacts,
@@ -2806,105 +2808,6 @@ fn emit_edge_route_dispatch(
         failure_target.map(|target| target.nested(1)),
     );
     body.instruction(&Instruction::End);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_step_context_plan(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    track_events: bool,
-    variables: DirectVariables<'_>,
-    step_id: &str,
-    step_function_index: u32,
-    step_config_id: u32,
-    next_plan: &DirectRunPlan,
-    data_ptr_local: u32,
-    data_len_local: u32,
-    steps_ptr_local: u32,
-    steps_len_local: u32,
-    source_ptr_local: u32,
-    source_len_local: u32,
-    output_ptr_local: u32,
-    output_len_local: u32,
-    route_ptr_local: u32,
-    route_len_local: u32,
-    workflow_log_kind: &DirectDataSegment,
-    workflow_error_kind: &DirectDataSegment,
-    failure_target: Option<DirectFailureTarget>,
-) {
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        true,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
-    body.instruction(&Instruction::I32Const(step_config_id as i32));
-    body.instruction(&Instruction::LocalGet(source_ptr_local));
-    body.instruction(&Instruction::LocalGet(source_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(step_function_index));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-    load_retptr_list(body, steps_ptr_local, steps_len_local);
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        false,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
-
-    emit_build_source(
-        body,
-        indices,
-        variables,
-        data_ptr_local,
-        data_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        failure_target,
-    );
-
-    emit_run_plan_mapping(
-        body,
-        indices,
-        static_data,
-        track_events,
-        variables,
-        next_plan,
-        data_ptr_local,
-        data_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-        route_ptr_local,
-        route_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        failure_target,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
