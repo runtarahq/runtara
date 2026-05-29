@@ -10,6 +10,8 @@ pub mod compile;
 #[cfg(feature = "compiler")]
 pub mod component;
 pub mod manifest;
+#[cfg(feature = "compiler")]
+mod plan;
 pub mod support;
 
 #[cfg(feature = "compiler")]

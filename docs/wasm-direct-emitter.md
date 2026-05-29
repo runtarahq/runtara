@@ -136,6 +136,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `direct_wasm/compile.rs`; future implementation slices should extract stable
   lowering families into focused modules with small public surfaces and tests,
   instead of continuing to grow the file.
+- The first decomposition step has started: the direct core run-plan data model
+  now lives in `direct_wasm::plan`, leaving `compile.rs` to consume the plan
+  instead of owning every planning/lowering type inline. The next extraction
+  checkpoint is to move run-plan construction or a stable step-family lowerer
+  behind the same kind of focused module boundary.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
