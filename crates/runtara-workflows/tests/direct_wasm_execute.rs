@@ -36,6 +36,7 @@ const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
+const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
   "durable": true,
   "steps": {
@@ -1026,6 +1027,34 @@ fn direct_wasm_execute_while_loop_reports_completion() {
     assert!(
         result.checkpoints.is_empty(),
         "normal While execution should not use durable checkpoints"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // The 50ms per-iteration body delay drives the loop past its 10ms timeout, so
+    // the While step fails with the static WHILE_TIMEOUT payload. Generated Rust
+    // parses but does not enforce the timeout; this proves direct mode honors the
+    // documented "if exceeded, step fails" behavior at runtime.
+    let result = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-while-timeout",
+        WHILE_TIMEOUT,
+        br#"{}"#,
+    );
+
+    assert_eq!(
+        result.error_json,
+        serde_json::json!({
+            "code": "WHILE_TIMEOUT",
+            "message": "While step exceeded its configured timeout",
+            "category": "timeout",
+            "severity": "error"
+        })
     );
 }
 

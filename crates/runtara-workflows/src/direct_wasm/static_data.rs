@@ -19,6 +19,12 @@ const DIRECT_EXTERNAL_INPUT_REQUESTED_KIND: &[u8] = b"external_input_requested";
 const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
 const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
 pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
+/// Structured failure payload emitted when a `While` step exceeds its configured
+/// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
+/// direct mode is the first to honor the documented "if exceeded, step fails"
+/// behavior, so this payload is owned by the direct emitter rather than mirrored
+/// from generated code.
+pub(super) const DIRECT_WHILE_TIMEOUT_ERROR: &[u8] = br#"{"code":"WHILE_TIMEOUT","message":"While step exceeded its configured timeout","category":"timeout","severity":"error"}"#;
 
 pub(super) const WASM_PAGE_SIZE: i32 = 65_536;
 const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
@@ -69,6 +75,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) agent_empty_integration_id: DirectDataSegment,
     pub(super) agent_empty_parameters: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
+    pub(super) while_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
@@ -172,6 +179,12 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let while_timeout_error = DirectDataSegment::new(offset, DIRECT_WHILE_TIMEOUT_ERROR);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_WHILE_TIMEOUT_ERROR.len())?,
+            16,
+        );
+
         let mut step_ids = BTreeMap::new();
         collect_static_step_ids(graph, &mut offset, &mut step_ids)?;
         for child in child_workflows {
@@ -211,6 +224,7 @@ impl DirectCoreStaticData {
             agent_empty_integration_id,
             agent_empty_parameters,
             agent_rate_limit_wait,
+            while_timeout_error,
             step_ids,
             agent_capability_ids,
             agent_connection_ids,
@@ -256,6 +270,7 @@ impl DirectCoreStaticData {
             &self.agent_empty_integration_id,
             &self.agent_empty_parameters,
             &self.agent_rate_limit_wait,
+            &self.while_timeout_error,
         ];
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());

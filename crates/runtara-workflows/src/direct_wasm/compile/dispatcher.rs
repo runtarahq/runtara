@@ -310,6 +310,7 @@ pub(super) fn emit_run_plan_mapping(
             nested_plan,
             next_plan,
             error_plan,
+            timeout_ms,
         } => {
             emit_while_plan(
                 body,
@@ -323,6 +324,7 @@ pub(super) fn emit_run_plan_mapping(
                 nested_plan,
                 next_plan,
                 error_plan.as_ref(),
+                *timeout_ms,
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,

@@ -239,6 +239,10 @@ const DIRECT_STEP_ERROR_PTR_LOCAL: u32 = 76;
 const DIRECT_STEP_ERROR_LEN_LOCAL: u32 = 77;
 const DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL: u32 = 78;
 const DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL: u32 = 79;
+/// Wall-clock deadline (ms since epoch) for an active `While` step timeout.
+/// i64 local, saved/restored with the While frame so nested loops do not clobber
+/// an outer loop's deadline.
+const DIRECT_WHILE_DEADLINE_MS_LOCAL: u32 = 80;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

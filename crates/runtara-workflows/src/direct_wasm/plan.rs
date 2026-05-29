@@ -62,6 +62,7 @@ pub(super) enum DirectRunPlan {
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
+        timeout_ms: Option<u64>,
     },
     EmbedWorkflow {
         step_id: String,
@@ -408,6 +409,7 @@ fn step_run_plan_inner(
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
+                timeout_ms: while_timeout_ms(graph, step_id),
             })
         }
         "EmbedWorkflow" => {
@@ -965,6 +967,21 @@ fn while_id(graph: &DirectGraphManifest, step_id: &str) -> Result<u32, DirectCom
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing While config for step '{step_id}'"))
         })
+}
+
+/// Resolve a `While` step's configured timeout in milliseconds, if any.
+///
+/// `WhileConfig.timeout` is a static config value. A zero (or absent) timeout is
+/// treated as "no timeout", matching the degenerate config and the generated
+/// Rust path that does not enforce the field at all.
+fn while_timeout_ms(graph: &DirectGraphManifest, step_id: &str) -> Option<u64> {
+    graph
+        .whiles
+        .iter()
+        .find(|while_step| while_step.step_id == step_id && while_step.purpose == "while.config")
+        .and_then(|while_step| while_step.value.get("timeout"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|ms| *ms > 0)
 }
 
 fn while_subgraph<'a>(

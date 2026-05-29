@@ -6,23 +6,24 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
-    push_retptr_u8_load, push_variables_args,
+    push_retptr_i64_load, push_retptr_u8_load, push_variables_args,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
+use super::split::emit_split_append_error_payload_and_continue;
 use super::step_error::{pop_step_error_frame, push_step_error_frame};
 use super::{
-    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_STEP_ERROR_FLAG_LOCAL,
-    DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WHILE_INDEX_LOCAL,
-    DIRECT_WHILE_MAX_ITERATIONS_LOCAL, DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL, DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL,
-    DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL, DIRECT_WHILE_STATE_LEN_LOCAL,
-    DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
+    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
+    DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
+    DIRECT_WHILE_DEADLINE_MS_LOCAL, DIRECT_WHILE_INDEX_LOCAL, DIRECT_WHILE_MAX_ITERATIONS_LOCAL,
+    DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL, DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL,
+    DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL, DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL,
+    DIRECT_WHILE_STATE_LEN_LOCAL, DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
     DIRECT_WHILE_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectVariables,
+    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 fn push_while_frame(body: &mut WasmFunction) {
@@ -34,9 +35,11 @@ fn push_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
 }
 
 fn pop_while_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
@@ -60,6 +63,7 @@ pub(super) fn emit_while_plan(
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
+    timeout_ms: Option<u64>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -165,6 +169,26 @@ pub(super) fn emit_while_plan(
         DIRECT_WHILE_STATE_LEN_LOCAL,
     );
 
+    // Resolve the timeout deadline once, before the loop. `timeout_ms` is a static
+    // config value; generated Rust parses but does not enforce it, so direct mode
+    // is the first to honor the documented "if exceeded, step fails" contract.
+    // The deadline is part of the While frame, so nested loops cannot clobber it.
+    if let Some(timeout_ms) = timeout_ms {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_now_ms));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            internal_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+        body.instruction(&Instruction::I64Const(timeout_ms as i64));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
+    }
+
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
@@ -174,6 +198,46 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
+
+    // Enforce the wall-clock timeout before each iteration. On expiry the While
+    // step fails with the static WHILE_TIMEOUT payload, routed through the same
+    // failure target as any other in-loop failure: an onError handler when
+    // present, otherwise the enclosing aggregation or `runtime.fail`.
+    if timeout_ms.is_some() {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_now_ms));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
+        body.instruction(&Instruction::I64GeU);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I32Const(
+            static_data.while_timeout_error.offset,
+        ));
+        body.instruction(&Instruction::LocalSet(output_ptr_local));
+        body.instruction(&Instruction::I32Const(
+            static_data.while_timeout_error.len_i32(),
+        ));
+        body.instruction(&Instruction::LocalSet(output_len_local));
+        if let Some(timeout_failure_target) = loop_failure_target {
+            emit_split_append_error_payload_and_continue(
+                body,
+                indices,
+                timeout_failure_target.nested(1),
+                output_ptr_local,
+                output_len_local,
+            );
+        } else {
+            emit_runtime_fail_return(body, indices, output_ptr_local, output_len_local);
+        }
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));

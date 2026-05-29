@@ -50,8 +50,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
   durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
   call-site breakpoints plus durable `Agent` breakpoints now have direct
-  pause/resume lowering. While `onError` routing is now supported; While timeout
-  remains gated.
+  pause/resume lowering. While `onError` routing and timeout enforcement are now
+  supported.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -116,8 +116,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   nested direct run plan, advances loop state, and writes the final While step
   envelope before continuing normal flow. It also calls runtime cancellation,
   heartbeat, and signal-check helpers around each iteration body. Public While
-  support is enabled for normal-flow loops with durable breakpoint pause/resume
-  and `onError` routing, while timeout remains gated. The breakpoint lowerer pauses before
+  support is enabled for normal-flow loops with durable breakpoint pause/resume,
+  `onError` routing, and timeout enforcement. The breakpoint lowerer pauses before
   `while-max-iterations`, condition evaluation, debug-start, and nested body
   execution after resolving generated-compatible breakpoint inputs. Nested
   `Split`/`While` bodies restore loop scratch frames across nested execution.
@@ -677,6 +677,21 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `crates/runtara-workflows/tests/fixtures/while_on_error.json`, structural
   coverage lives in `direct_compile_supports_while_on_error_graph`, and A/B
   coverage in `direct_wasm_matches_components_while_on_error`.
+- While `timeout` is now enforced. `WhileConfig.timeout` is documented as "if
+  exceeded, step fails", but generated Rust parses the field without enforcing a
+  deadline, so direct mode is the first correct implementation rather than a
+  parity match. The lowerer resolves the deadline once (`runtime.now-ms` plus the
+  static timeout) before the loop, saves it in the While frame so nested loops
+  cannot clobber an outer deadline, and checks it before each iteration. On expiry
+  the step fails with a static `WHILE_TIMEOUT` payload routed through the same
+  failure target as any other in-loop failure — an onError handler when present,
+  otherwise the enclosing aggregation or `runtime.fail`. Because there is no
+  generated-Rust baseline to diff against, coverage is direct-only:
+  `direct_compile_supports_while_timeout_graph` validates the Wasm,
+  `while_timeout_is_supported` covers the gate, and gated execution test
+  `direct_wasm_execute_while_timeout_fails_with_timeout_error` proves the loop
+  exceeds its timeout and fails with `WHILE_TIMEOUT`. Fixture:
+  `crates/runtara-workflows/tests/fixtures/while_timeout.json`.
 
 Current remaining action items:
 
@@ -684,9 +699,9 @@ Current remaining action items:
   behavior or direct mode intentionally becomes the first implementation. The
   current Rust `EmbedWorkflow` codegen appears to parse the field without
   enforcing a deadline.
-- Keep Split timeout gated until generated Rust defines timeout behavior or
-  product intentionally makes direct mode the first implementation.
-- Implement While timeout semantics with structural and gated A/B coverage.
+- Decide whether Split and `EmbedWorkflow` timeout should follow the precedent
+  set by While timeout (direct mode enforcing the documented "if exceeded, step
+  fails" behavior that generated Rust parses but ignores), or stay gated.
 - Close Agent hardening gaps: timeout/compensation policy, retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
@@ -770,9 +785,9 @@ Deep nesting invariants for future work:
 
 Recommended next implementation slices:
 
-1. Keep Split, While, and EmbedWorkflow timeout fields gated until generated
-   Rust defines timeout behavior or product intentionally makes direct mode the
-   first implementation for those deadlines.
+1. Decide whether Split and EmbedWorkflow timeout should follow the While
+   timeout precedent (direct mode enforcing the documented deadline that
+   generated Rust parses but ignores) or stay gated.
 2. Continue Agent hardening after loop durability is stable: timeout,
    compensation policy, retry/failure differential tests, and long-running
    cancellation coverage.
@@ -2427,8 +2442,8 @@ Implementation steps:
      evaluation, debug-start emission, and nested body execution;
    - public support gate: enabled for normal-flow While loops with durable
      breakpoint pause/resume, including nested Split/While loop bodies with
-     reentrant loop scratch frames; While timeout remains gated while `onError`
-     routing is now supported;
+     reentrant loop scratch frames; While `onError` routing and timeout
+     enforcement are now supported;
    - gated composed-artifact execution smoke: done for an agentless While loop
      that exercises loop index variables, `_previousOutputs`, final output
      shape, heartbeat/signal polling, and no checkpoint/sleep traffic;
@@ -2438,7 +2453,9 @@ Implementation steps:
      checkpoint resume parity;
    - While `onError` routing: done through the shared step-error capture and
      `error-steps`/route-dispatch machinery, with a default handler fixture and
-     gated A/B parity coverage; While timeout: pending.
+     gated A/B parity coverage; While timeout: done through direct-only deadline
+     enforcement (`runtime.now-ms` + frame-saved deadline + static
+     `WHILE_TIMEOUT` failure), since generated Rust does not enforce the field.
 4. Reentrant loop scratch frames are implemented for normal nested Split/While
    execution:
    - Split preserves its caller loop frame across the whole Split step and its

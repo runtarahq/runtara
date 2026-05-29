@@ -46,6 +46,7 @@ fn fixture(name: &str) -> ExecutionGraph {
         "while_simple" => include_str!("../../../tests/fixtures/while_simple.json"),
         "while_nested_split" => include_str!("../../../tests/fixtures/while_nested_split.json"),
         "while_on_error" => include_str!("../../../tests/fixtures/while_on_error.json"),
+        "while_timeout" => include_str!("../../../tests/fixtures/while_timeout.json"),
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -1947,6 +1948,39 @@ fn direct_compile_supports_simple_while_graph() {
             .expect("manifest json");
     assert_eq!(manifest.graph.whiles.len(), 1);
     assert_eq!(manifest.graph.whiles[0].step_id, "loop");
+}
+
+#[test]
+fn direct_compile_supports_while_timeout_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "while-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("while_timeout"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct While timeout compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct While timeout artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert_eq!(manifest.graph.whiles.len(), 1);
+    assert_eq!(manifest.graph.whiles[0].value["timeout"], 10);
 }
 
 #[test]

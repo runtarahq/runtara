@@ -641,9 +641,11 @@ fn supports_split_step_baseline(step: &SplitStep) -> bool {
     config.is_none_or(|config| config.timeout.is_none())
 }
 
-fn supports_while_step_baseline(step: &WhileStep) -> bool {
-    let config = step.config.as_ref();
-    config.is_none_or(|config| config.timeout.is_none())
+fn supports_while_step_baseline(_step: &WhileStep) -> bool {
+    // While timeout and onError routing are both lowered by the direct emitter,
+    // so there is no remaining While-specific baseline restriction. Kept as an
+    // extension point for future While config gating.
+    true
 }
 
 fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
@@ -1212,29 +1214,11 @@ fn collect_split_step_unsupported(
 }
 
 fn collect_while_step_unsupported(
-    step: &WhileStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    _step: &WhileStep,
+    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    let mut push = |feature: &str, reason: &str| {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("While".to_string()),
-            feature: feature.to_string(),
-            reason: reason.to_string(),
-        });
-    };
-
-    if step
-        .config
-        .as_ref()
-        .and_then(|config| config.timeout)
-        .is_some()
-    {
-        push(
-            "while-timeout",
-            "While timeout requires direct timeout enforcement",
-        );
-    }
+    // While timeout and onError routing are both supported, so there are no
+    // While-specific unsupported features to report.
 }
 
 fn unsupported_step(
@@ -1320,6 +1304,7 @@ mod tests {
             "while_simple" => include_str!("../../tests/fixtures/while_simple.json"),
             "while_nested_split" => include_str!("../../tests/fixtures/while_nested_split.json"),
             "while_on_error" => include_str!("../../tests/fixtures/while_on_error.json"),
+            "while_timeout" => include_str!("../../tests/fixtures/while_timeout.json"),
             "transform" => include_str!("../../tests/fixtures/transform_workflow.json"),
             "wait" => include_str!("../../tests/fixtures/wait_for_signal_with_callback.json"),
             "wait_simple" => {
@@ -2287,7 +2272,7 @@ mod tests {
     }
 
     #[test]
-    fn while_timeout_is_rejected() {
+    fn while_timeout_is_supported() {
         let mut graph = fixture("while_simple");
         let Some(Step::While(while_step)) = graph.steps.get_mut("loop") else {
             panic!("expected While fixture step");
@@ -2297,15 +2282,8 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(
-            report.unsupported.iter().any(|unsupported| {
-                unsupported.step_id.as_deref() == Some("loop")
-                    && unsupported.feature == "while-timeout"
-            }),
-            "{:?}",
-            report.unsupported
-        );
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]
