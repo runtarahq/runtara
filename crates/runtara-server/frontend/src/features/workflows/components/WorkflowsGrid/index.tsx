@@ -43,6 +43,7 @@ import { parseSchema } from '@/features/workflows/utils/schema';
 import { useFolders } from '../../hooks/useFolders';
 
 const DEFAULT_PAGE_SIZE = 10;
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 interface WorkflowFolderItem {
   name: string;
@@ -475,7 +476,7 @@ export function WorkflowsGrid({
           </TableBody>
         </Table>
         {/* Pagination footer (built into the table container) */}
-        {totalElements > 0 && (
+        {totalElements > PAGE_SIZE_OPTIONS[0] && (
           <div className="px-3 py-2.5 border-t bg-muted/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>
@@ -493,7 +494,7 @@ export function WorkflowsGrid({
                   setPage(1); // Reset to first page when changing page size
                 }}
               >
-                {[10, 20, 50, 100].map((size) => (
+                {PAGE_SIZE_OPTIONS.map((size) => (
                   <option key={size} value={size}>
                     {size} / page
                   </option>

@@ -67,6 +67,7 @@ interface DataTableProps<TData, TValue> {
 }
 
 const DEFAULT_COLUMN_WIDTH = 150;
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 export function DataTable<TData, TValue>({
   columns,
@@ -300,7 +301,7 @@ export function DataTable<TData, TValue>({
         </Table>
       </div>
       {beforePaginationSlot}
-      {shouldRenderPagination && (
+      {shouldRenderPagination && totalRowCount > PAGE_SIZE_OPTIONS[0] && (
         <div className="px-3 py-2.5 border-t bg-muted/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>
@@ -317,7 +318,7 @@ export function DataTable<TData, TValue>({
                   pagination.onPageSizeChange?.(Number(event.target.value))
                 }
               >
-                {[10, 20, 50, 100].map((size) => (
+                {PAGE_SIZE_OPTIONS.map((size) => (
                   <option key={size} value={size}>
                     {size} / page
                   </option>
