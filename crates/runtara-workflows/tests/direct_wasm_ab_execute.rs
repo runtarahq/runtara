@@ -36,6 +36,10 @@ const EMBED_WORKFLOW_NO_RETRY_PARENT: &str =
     include_str!("fixtures/embed_workflow_no_retry_parent.json");
 const EMBED_WORKFLOW_RETRY_ON_ERROR_PARENT: &str =
     include_str!("fixtures/embed_workflow_retry_on_error_parent.json");
+const EMBED_WORKFLOW_CHILD_LOCAL_ON_ERROR_PARENT: &str =
+    include_str!("fixtures/embed_workflow_child_local_on_error_parent.json");
+const EMBED_WORKFLOW_CHILD_LOCAL_ON_ERROR_CHILD: &str =
+    include_str!("fixtures/embed_workflow_child_local_on_error_child.json");
 const EMBED_WORKFLOW_CONDITIONAL_ERROR_CHILD: &str =
     include_str!("fixtures/embed_workflow_conditional_error_child.json");
 const EMBED_WORKFLOW_ON_ERROR_PARENT: &str =
@@ -494,6 +498,25 @@ fn embed_workflow_nested_retry_child_workflows() -> Vec<ChildWorkflowInput> {
             version_requested: "latest".to_string(),
             version_resolved: 3,
             execution_graph: graph_from_fixture(EMBED_WORKFLOW_RETRY_NESTED_CHILD),
+        },
+        ChildWorkflowInput {
+            step_id: "call_grandchild".to_string(),
+            workflow_id: "grandchild_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 7,
+            execution_graph: graph_from_fixture(EMBED_WORKFLOW_TRANSIENT_ERROR_GRANDCHILD),
+        },
+    ]
+}
+
+fn embed_workflow_child_local_on_error_child_workflows() -> Vec<ChildWorkflowInput> {
+    vec![
+        ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: graph_from_fixture(EMBED_WORKFLOW_CHILD_LOCAL_ON_ERROR_CHILD),
         },
         ChildWorkflowInput {
             step_id: "call_grandchild".to_string(),
@@ -2995,6 +3018,77 @@ fn direct_wasm_matches_components_embed_workflow_parent_on_error_after_retry_exh
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
+}
+
+#[test]
+fn direct_wasm_matches_components_embed_workflow_child_local_on_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = embed_workflow_child_local_on_error_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-child-local-on-error",
+        EMBED_WORKFLOW_CHILD_LOCAL_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-child-local-on-error",
+        EMBED_WORKFLOW_CHILD_LOCAL_ON_ERROR_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"child-local-on-error"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-child-local-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-child-local-on-error",
+        workflow_input,
+    );
+
+    assert_success_parity(
+        "embed-workflow-child-local-on-error",
+        0,
+        &components,
+        &direct,
+    );
+
+    let expected_child_output = serde_json::json!({
+        "handled": true,
+        "code": "CHILD_WORKFLOW_FAILED",
+        "category": "transient",
+        "childCode": "GRANDCHILD_TEMPORARY",
+        "childStep": "fail_grandchild",
+        "childInput": "child-local-on-error"
+    });
+    let expected_child_step_result = serde_json::json!({
+        "stepId": "call_child",
+        "stepName": "Unnamed",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "child_workflow",
+        "outputs": expected_child_output.clone()
+    });
+    let expected_output = serde_json::json!({
+        "result": expected_child_output,
+        "stepsSnapshot": {
+            "call_child": expected_child_step_result
+        }
+    });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+    assert!(components.retry_attempts.is_empty());
+    assert!(direct.retry_attempts.is_empty());
 }
 
 #[test]

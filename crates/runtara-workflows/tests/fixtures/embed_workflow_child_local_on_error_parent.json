@@ -1,0 +1,44 @@
+{
+  "name": "EmbedWorkflow Child Local OnError Parent",
+  "description": "A parent workflow whose static child handles a nested child failure locally",
+  "steps": {
+    "call_child": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_child",
+      "childWorkflowId": "child_workflow",
+      "childVersion": "latest",
+      "maxRetries": 0,
+      "retryDelay": 0,
+      "inputMapping": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_child.outputs"
+        },
+        "stepsSnapshot": {
+          "valueType": "reference",
+          "value": "steps"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [
+    {
+      "fromStep": "call_child",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

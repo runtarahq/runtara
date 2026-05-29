@@ -67,6 +67,12 @@ fn fixture(name: &str) -> ExecutionGraph {
         "embed_workflow_retry_on_error_parent" => {
             include_str!("../../../tests/fixtures/embed_workflow_retry_on_error_parent.json")
         }
+        "embed_workflow_child_local_on_error_parent" => {
+            include_str!("../../../tests/fixtures/embed_workflow_child_local_on_error_parent.json")
+        }
+        "embed_workflow_child_local_on_error_child" => {
+            include_str!("../../../tests/fixtures/embed_workflow_child_local_on_error_child.json")
+        }
         "embed_workflow_retry_nested_child" => {
             include_str!("../../../tests/fixtures/embed_workflow_retry_nested_child.json")
         }
@@ -1123,6 +1129,63 @@ fn direct_compile_supports_static_embed_workflow_parent_on_error() {
         panic!("expected EmbedWorkflow run plan");
     };
     let error_plan = error_plan.as_ref().expect("EmbedWorkflow onError plan");
+    assert!(error_plan.branches.is_empty());
+    assert!(error_plan.default_plan.is_some());
+}
+
+#[test]
+fn direct_compile_supports_static_embed_workflow_child_local_on_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent-child-local-on-error".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_workflow_child_local_on_error_parent"),
+        child_workflows: vec![
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("embed_workflow_child_local_on_error_child"),
+            },
+            crate::compile::ChildWorkflowInput {
+                step_id: "call_grandchild".to_string(),
+                workflow_id: "grandchild_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 7,
+                execution_graph: fixture("embed_workflow_transient_error_grandchild"),
+            },
+        ],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct EmbedWorkflow child-local onError compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct EmbedWorkflow child-local onError artifact should validate");
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow { child_plan, .. } = &core_config.run_plan else {
+        panic!("expected root EmbedWorkflow run plan");
+    };
+    let DirectRunPlan::EmbedWorkflow { error_plan, .. } = child_plan.as_ref() else {
+        panic!("expected child-local EmbedWorkflow run plan");
+    };
+    let error_plan = error_plan.as_ref().expect("child-local onError plan");
     assert!(error_plan.branches.is_empty());
     assert!(error_plan.default_plan.is_some());
 }

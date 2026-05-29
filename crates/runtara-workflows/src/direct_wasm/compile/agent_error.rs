@@ -278,6 +278,7 @@ pub(super) fn emit_agent_error_route_or_fail(
             route_len_local,
             workflow_log_kind,
             workflow_error_kind,
+            embed_workflow_handled_target(failure_target),
         );
     }
 
@@ -291,6 +292,15 @@ pub(super) fn emit_agent_error_route_or_fail(
         );
     } else {
         emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
+    }
+}
+
+fn embed_workflow_handled_target(
+    failure_target: Option<DirectFailureTarget>,
+) -> Option<DirectFailureTarget> {
+    match failure_target {
+        Some(DirectFailureTarget::EmbedWorkflow { .. }) => failure_target,
+        _ => None,
     }
 }
 
@@ -339,6 +349,7 @@ fn emit_error_route_dispatch(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    handled_target: Option<DirectFailureTarget>,
 ) {
     emit_error_route_dispatch_inner(
         body,
@@ -360,6 +371,8 @@ fn emit_error_route_dispatch(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        handled_target,
+        0,
     );
 }
 
@@ -384,6 +397,8 @@ fn emit_error_route_dispatch_inner(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    handled_target: Option<DirectFailureTarget>,
+    enclosing_if_depth: u32,
 ) {
     let Some((branch, remaining)) = branches.split_first() else {
         if let Some(default_plan) = default_plan {
@@ -406,6 +421,7 @@ fn emit_error_route_dispatch_inner(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                handled_target.map(|target| target.nested(enclosing_if_depth)),
             );
         }
         return;
@@ -444,6 +460,7 @@ fn emit_error_route_dispatch_inner(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        handled_target.map(|target| target.nested(enclosing_if_depth + 1)),
     );
     body.instruction(&Instruction::Else);
     emit_error_route_dispatch_inner(
@@ -466,6 +483,8 @@ fn emit_error_route_dispatch_inner(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
+        handled_target,
+        enclosing_if_depth + 1,
     );
     body.instruction(&Instruction::End);
 }
@@ -490,6 +509,7 @@ fn emit_terminal_run_plan_mapping(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    handled_target: Option<DirectFailureTarget>,
 ) {
     emit_run_plan_mapping(
         body,
@@ -510,15 +530,19 @@ fn emit_terminal_run_plan_mapping(
         route_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        None,
+        handled_target,
     );
 
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::LocalGet(output_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_complete));
-    load_retptr_tag(body);
-    body.instruction(&Instruction::Return);
+    if let Some(DirectFailureTarget::EmbedWorkflow { branch_depth }) = handled_target {
+        body.instruction(&Instruction::Br(branch_depth));
+    } else {
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_complete));
+        load_retptr_tag(body);
+        body.instruction(&Instruction::Return);
+    }
 }
 
 fn emit_agent_error(

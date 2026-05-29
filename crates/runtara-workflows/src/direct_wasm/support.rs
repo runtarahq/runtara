@@ -621,7 +621,6 @@ fn supports_embed_workflow_child_graph_baseline(
     child_stack: &mut Vec<String>,
 ) -> bool {
     supports_direct_control_graph_inner(graph, child_workflows, child_stack)
-        && !graph_contains_on_error_edge(graph)
         && !graph_contains_step(graph, |step| {
             !matches!(
                 step,
@@ -655,17 +654,6 @@ fn graph_contains_loop_step(graph: &ExecutionGraph) -> bool {
     graph_contains_step(graph, |step| {
         matches!(step, Step::Split(_) | Step::While(_))
     })
-}
-
-fn graph_contains_on_error_edge(graph: &ExecutionGraph) -> bool {
-    graph
-        .execution_plan
-        .iter()
-        .any(|edge| edge.label.as_deref() == Some("onError"))
-        || graph
-            .steps
-            .values()
-            .any(|step| nested_step_graphs(step).any(graph_contains_on_error_edge))
 }
 
 fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
@@ -1235,7 +1223,7 @@ fn collect_embed_workflow_step_unsupported(
     if !supports_embed_workflow_child_graph_baseline(child, child_workflows, &mut child_stack) {
         push(
             "embed-workflow-child-shape",
-            "initial direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, Error, and statically preloaded nested EmbedWorkflow steps without child-local onError edges",
+            "direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, Error, and statically preloaded nested EmbedWorkflow steps",
         );
     }
 }
@@ -1493,6 +1481,12 @@ mod tests {
             }
             "embed_workflow_retry_on_error_parent" => {
                 include_str!("../../tests/fixtures/embed_workflow_retry_on_error_parent.json")
+            }
+            "embed_workflow_child_local_on_error_parent" => {
+                include_str!("../../tests/fixtures/embed_workflow_child_local_on_error_parent.json")
+            }
+            "embed_workflow_child_local_on_error_child" => {
+                include_str!("../../tests/fixtures/embed_workflow_child_local_on_error_child.json")
             }
             "embed_workflow_retry_nested_child" => {
                 include_str!("../../tests/fixtures/embed_workflow_retry_nested_child.json")
@@ -1790,57 +1784,29 @@ mod tests {
     }
 
     #[test]
-    fn embed_workflow_child_local_on_error_remains_rejected() {
-        let child_with_on_error = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
-            "steps": {
-                "inner_child": {
-                    "stepType": "EmbedWorkflow",
-                    "id": "inner_child",
-                    "childWorkflowId": "grandchild_workflow",
-                    "childVersion": "latest",
-                    "inputMapping": {
-                        "childInput": { "valueType": "reference", "value": "data.childInput" }
-                    }
-                },
-                "finish": { "stepType": "Finish", "id": "finish" },
-                "handled": { "stepType": "Finish", "id": "handled" }
-            },
-            "entryPoint": "inner_child",
-            "executionPlan": [
-                { "fromStep": "inner_child", "toStep": "finish" },
-                { "fromStep": "inner_child", "toStep": "handled", "label": "onError" }
-            ],
-            "variables": {},
-            "inputSchema": {},
-            "outputSchema": {}
-        }))
-        .expect("child graph parses");
-
+    fn embed_workflow_child_local_on_error_is_supported_by_child_aware_check() {
         let report = analyze_direct_wasm_support_with_child_workflows(
-            &fixture("embed_workflow"),
+            &fixture("embed_workflow_child_local_on_error_parent"),
             &[
                 ChildWorkflowInput {
                     step_id: "call_child".to_string(),
                     workflow_id: "child_workflow".to_string(),
                     version_requested: "latest".to_string(),
                     version_resolved: 3,
-                    execution_graph: child_with_on_error,
+                    execution_graph: fixture("embed_workflow_child_local_on_error_child"),
                 },
                 ChildWorkflowInput {
-                    step_id: "inner_child".to_string(),
+                    step_id: "call_grandchild".to_string(),
                     workflow_id: "grandchild_workflow".to_string(),
                     version_requested: "latest".to_string(),
                     version_resolved: 7,
-                    execution_graph: fixture("embed_workflow_error_child"),
+                    execution_graph: fixture("embed_workflow_transient_error_grandchild"),
                 },
             ],
         );
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("call_child")
-                && feature.feature == "embed-workflow-child-shape"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
     }
 
     #[test]
