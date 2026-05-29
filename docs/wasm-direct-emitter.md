@@ -39,7 +39,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   including `dontStopOnFailed` per-iteration aggregation.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
-  fallback. Breakpoints remain outside the supported direct-control subset.
+  fallback. General step breakpoints remain outside the supported
+  direct-control subset, while durable `WaitForSignal` breakpoints now have
+  direct pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - `direct_wasm::compile::compile_direct_workflow` is an opt-in entry point that
@@ -90,17 +92,20 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   from environment variables and exports the first runtime lifecycle surface:
   input loading, completion/failure, custom events, heartbeat, cancellation
   polling, durable sleep, blocking sleep, wall-clock millisecond access,
-  runtime instance id access, and checkpoint-scoped custom signal polling needed
-  by direct `WaitForSignal` lowering.
+  runtime instance id access, checkpoint-scoped custom signal polling, debug mode
+  detection, and best-effort breakpoint suspension needed by direct
+  `WaitForSignal` lowering.
 - `runtara-workflow-stdlib` now exposes WaitForSignal JSON helpers for direct
   lowering: deterministic signal id construction, timeout and poll interval
   resolution, generated-code-compatible timeout error formatting,
   generated-code-compatible waiting event payloads including response
   schema/action metadata, generated-code-compatible wait debug-start payloads,
   and generated-code-compatible step output insertion after a signal payload is
-  received.
+  received. It also exposes generated-compatible breakpoint key and event
+  helpers used by durable direct breakpoint lowering.
 - The direct core emitter now lowers the baseline `WaitForSignal` path with
-  no `onWait` and no breakpoint, including timeout handling. It calls
+  no `onWait`, plus durable `WaitForSignal` breakpoint pause/resume behavior,
+  including timeout handling. It calls
   `runtime.instance-id`, builds the generated-compatible signal id through
   stdlib, emits `external_input_requested`, polls `runtime.poll-custom-signal`
   in a runtime signal-aware loop, checks elapsed time through `runtime.now-ms`,
@@ -109,7 +114,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   through stdlib, rebuilds the source envelope, and continues normal flow. It
   emits WaitForSignal `step_debug_start` after signal id/timeout resolution and
   `step_debug_end` after received payload insertion when event tracking is
-  enabled.
+  enabled. For durable `WaitForSignal` breakpoints, direct lowering checks
+  `DEBUG_MODE`, writes the generated-compatible `breakpoint::<step>` checkpoint
+  state, emits the `breakpoint_hit` event, acknowledges pause/suspends, and
+  resumes normally when the checkpoint already exists.
   also lowers successful direct-control `onWait` callbacks by building the
   generated-compatible callback variables, running the nested callback before
   `external_input_requested`, wrapping nested callback failures with the same
@@ -123,6 +131,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 - `direct_wasm::component` emits component-facing sidecars for static
   composition with separate stdlib and runtime components plus any required
   agents.
+- Emitter maintainability is now an explicit production gate. The current
+  direct core emitter still has too much lowering code concentrated in
+  `direct_wasm/compile.rs`; future implementation slices should extract stable
+  lowering families into focused modules with small public surfaces and tests,
+  instead of continuing to grow the file.
 - `direct_wasm::compile::compose_direct_workflow` now performs the first
   direct static composition path: it maps the direct `workflow-logic.wasm`
   component plus prebuilt stdlib/runtime/agent components into `wac compose`,
@@ -689,6 +702,17 @@ The direct emitter should emit:
 - calls into agent imports for `Agent` steps;
 - calls into runtime imports for lifecycle completion/failure/suspension;
 - stable cache keys and scope ids, but not the checkpoint implementation.
+
+Emitter module boundaries should stay readable as support broadens:
+
+- `compile.rs` owns the public compile/compose entry points and module assembly
+  orchestration.
+- Step-family lowering should live in focused modules once stable
+  (`wait`, `agent`, `split`, `while`, `delay`, and pure control flow).
+- Shared ABI/import/static-data helpers should live behind reusable helper
+  modules rather than being duplicated inside step lowerers.
+- Each extraction must preserve structural tests for call order and validation,
+  so refactors do not rely only on end-to-end parity tests.
 
 The direct emitter should not reimplement:
 
@@ -2022,14 +2046,19 @@ Implementation steps:
    - resume with signal payload: stdlib output helper done through
      `wait-output`;
    - cancellation: runtime signal check is wired in the polling loop, with
-     gated A/B parity for cancel, pause, and shutdown.
+     gated A/B parity for cancel, pause, and shutdown;
+   - debug-mode breakpoint pause: runtime helpers done through
+     `debug-mode-enabled` and `breakpoint-pause`, with generated-compatible
+     checkpoint key/state and event payload helpers done through
+     `breakpoint-key` and `breakpoint-event`.
 2. Implement `WaitForSignal` lowering:
-   - baseline no-`onWait`/no-breakpoint lowering: done, including timeout;
+   - baseline no-`onWait` lowering: done, including timeout;
    - `onWait` nested graph lowering: direct-control subset done, including
      wrapped explicit failure parity;
    - timeout failure parity: done for immediate timeout with no signal;
    - debug event parity: done for WaitForSignal start/end events;
-   - breakpoint pause/resume parity: pending and still gated.
+   - durable breakpoint pause/resume parity: done for first-hit pause and
+     checkpoint-backed resume.
 3. Add tests for:
    - normal signal resume: structural core test and gated A/B test are in
      place;
@@ -2042,6 +2071,9 @@ Implementation steps:
      A/B tests are in place;
    - debug events: stdlib payload test, structural core call-order test, and
      gated tracking A/B resume test are in place;
+   - durable breakpoint pause/resume: stdlib key/event unit test, runtime
+     debug/pause unit tests, structural core call-order test, support gate test,
+     and gated A/B first-hit/resume parity test are in place;
    - action metadata and response schema.
 
 Checkpoint 11:
@@ -2057,20 +2089,23 @@ Rollback:
 Current status:
 
 - The runtime ABI prerequisite is in place. `runtara:workflow-runtime` now
-  exposes `instance-id`, `poll-custom-signal`, and `now-ms`, matching the SDK
-  and generated Rust behavior needed to construct deterministic wait keys,
-  retrieve checkpoint-scoped custom signal payloads, and enforce elapsed
-  timeout checks without moving branch predicates into stdlib.
+  exposes `instance-id`, `poll-custom-signal`, `now-ms`,
+  `debug-mode-enabled`, and `breakpoint-pause`, matching the SDK and generated
+  Rust behavior needed to construct deterministic wait keys, retrieve
+  checkpoint-scoped custom signal payloads, enforce elapsed timeout checks, and
+  pause/suspend on durable breakpoint hits without moving branch predicates into
+  stdlib.
 - The stdlib prerequisite is in place. `runtara:workflow-stdlib/json` now owns
   the JSON-heavy WaitForSignal semantics needed by direct lowering:
   `wait-signal-id`, `wait-timeout-ms`, `wait-timeout-error`,
   `wait-poll-interval-ms`, `wait-event`, `wait-debug-start`, and
-  `wait-output`.
-- Baseline direct core lowering is in place for waits without `onWait` or
-  breakpoint. Host-level gated A/B coverage is added for immediate
-  custom-signal resume, normal completion, and generated-compatible timeout
-  failure. Host-level gated A/B lifecycle coverage now proves cancel, pause,
-  and shutdown behavior while waiting.
+  `wait-output`, plus `breakpoint-key` and `breakpoint-event` for generated
+  Rust-compatible breakpoint checkpoint/event data.
+- Baseline direct core lowering is in place for waits without `onWait`.
+  Host-level gated A/B coverage is added for immediate custom-signal resume,
+  normal completion, and generated-compatible timeout failure. Host-level gated
+  A/B lifecycle coverage now proves cancel, pause, and shutdown behavior while
+  waiting.
 - Direct core lowering now supports successful `onWait` callbacks that use the
   direct-control subset. The stdlib helper `wait-on-wait-variables` mirrors the
   generated Rust input shape by cloning parent variables, injecting
@@ -2087,9 +2122,17 @@ Current status:
   Direct lowering emits wait-specific debug start after resolving signal id and
   timeout, emits debug end after storing the signal payload in `steps`, and
   compares against generated Rust in a gated tracking A/B resume test with
-  volatile timestamp/duration/signal-id fields normalized. Nested
-  `WaitForSignal` callbacks, breakpoint pause/resume parity, and durable
-  suspension semantics remain pending.
+  volatile timestamp/duration/signal-id fields normalized.
+- Durable WaitForSignal breakpoint pause/resume parity is now lowered for the
+  first supported step family. Direct lowering matches generated Rust by
+  checking `DEBUG_MODE`, checkpointing `breakpoint::<step>` with
+  `"breakpoint_hit"`, treating existing checkpoints as resume, emitting only the
+  `breakpoint_hit` custom event on first hit, acknowledging pause, and
+  best-effort suspending before any wait request/onWait/polling side effects.
+  Structural coverage verifies the breakpoint call order, and gated A/B
+  coverage compares generated Rust and direct artifacts for both first-hit pause
+  and resumed signal completion. Nested `WaitForSignal` callbacks and broader
+  durable suspension semantics remain pending.
 
 ### Phase 12: AiAgent
 

@@ -149,6 +149,16 @@ pub fn custom_event(kind: &str, payload: Vec<u8>) -> Result<(), String> {
     with_sdk(|sdk| sdk.custom_event(kind, payload).map_err(sdk_error))
 }
 
+pub fn debug_mode_enabled() -> Result<bool, String> {
+    Ok(std::env::var("DEBUG_MODE").unwrap_or_default() == "true")
+}
+
+pub fn breakpoint_pause() -> Result<(), String> {
+    runtara_sdk::acknowledge_pause();
+    let _ = with_sdk(|sdk| sdk.suspended().map_err(sdk_error));
+    Ok(())
+}
+
 pub fn heartbeat() -> Result<(), String> {
     with_sdk(|sdk| sdk.heartbeat().map_err(sdk_error))
 }
@@ -316,6 +326,14 @@ mod component {
             super::custom_event(&kind, payload)
         }
 
+        fn debug_mode_enabled() -> Result<bool, String> {
+            super::debug_mode_enabled()
+        }
+
+        fn breakpoint_pause() -> Result<(), String> {
+            super::breakpoint_pause()
+        }
+
         fn heartbeat() -> Result<(), String> {
             super::heartbeat()
         }
@@ -383,8 +401,9 @@ mod tests {
     use runtara_sdk::{CheckpointResult, CustomSignal, Signal, SignalType};
 
     use super::{
-        CheckpointSignalAction, blocking_sleep, checkpoint_signal_action, now_ms,
-        runtime_checkpoint_result, sdk_error, signal_is_cancel, signal_type_name,
+        CheckpointSignalAction, blocking_sleep, breakpoint_pause, checkpoint_signal_action,
+        debug_mode_enabled, now_ms, runtime_checkpoint_result, sdk_error, signal_is_cancel,
+        signal_type_name,
     };
 
     #[test]
@@ -413,6 +432,32 @@ mod tests {
 
         assert!(actual >= before);
         assert!(actual <= after);
+    }
+
+    #[test]
+    fn debug_mode_enabled_reads_debug_mode_env() {
+        // SAFETY: this unit test does not spawn threads or depend on concurrent
+        // environment reads.
+        unsafe {
+            std::env::remove_var("DEBUG_MODE");
+        }
+        assert!(!debug_mode_enabled().expect("debug mode disabled"));
+
+        // SAFETY: see note above.
+        unsafe {
+            std::env::set_var("DEBUG_MODE", "true");
+        }
+        assert!(debug_mode_enabled().expect("debug mode enabled"));
+
+        // SAFETY: see note above.
+        unsafe {
+            std::env::remove_var("DEBUG_MODE");
+        }
+    }
+
+    #[test]
+    fn breakpoint_pause_is_best_effort_without_sdk() {
+        breakpoint_pause().expect("breakpoint pause should ignore missing SDK state");
     }
 
     #[test]

@@ -38,6 +38,10 @@ interface runtime {
         payload: list<u8>,
     ) -> result<_, string>;
 
+    debug-mode-enabled: func() -> result<bool, string>;
+
+    breakpoint-pause: func() -> result<_, string>;
+
     heartbeat: func() -> result<_, string>;
 
     is-cancelled: func() -> result<bool, string>;

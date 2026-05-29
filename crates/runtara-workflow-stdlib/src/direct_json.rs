@@ -635,6 +635,59 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize delay steps context: {err}"))
     }
 
+    /// Build the generated-code-compatible checkpoint key for a step breakpoint.
+    pub fn breakpoint_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse breakpoint-key source: {err}"))?;
+        self.steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct breakpoint step '{step_id}'"))?;
+
+        let loop_indices = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_loop_indices"))
+            .and_then(Value::as_array)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join("_")
+            })
+            .unwrap_or_default();
+        if loop_indices.is_empty() {
+            Ok(format!("breakpoint::{step_id}"))
+        } else {
+            Ok(format!("breakpoint::{step_id}::{loop_indices}"))
+        }
+    }
+
+    /// Build the generated-code-compatible custom event payload for a step breakpoint.
+    pub fn breakpoint_event(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse breakpoint-event source: {err}"))?;
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct breakpoint step '{step_id}'"))?;
+        let steps_context = source
+            .get("steps")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+
+        serde_json::to_vec(&serde_json::json!({
+            "step_id": step.id.clone(),
+            "step_name": step.name.clone(),
+            "step_type": step.step_type.clone(),
+            "inputs": Value::Null,
+            "steps_context": Value::Object(steps_context),
+        }))
+        .map_err(|err| format!("failed to serialize breakpoint event payload: {err}"))
+    }
+
     /// Build the deterministic signal id used by generated WaitForSignal code.
     pub fn wait_signal_id(
         &self,
@@ -4827,6 +4880,38 @@ mod tests {
         assert_eq!(start["input_mapping"]["value"], json!(10));
         assert_eq!(end["outputs"]["duration_ms"], json!(10));
         assert!(end["outputs"].get("outputs").is_none());
+    }
+
+    #[test]
+    fn breakpoint_key_and_event_match_generated_shape() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input",
+            "breakpoint": true
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"case_id":"case-42"}"#,
+            br#"{"_loop_indices":[1,2,"ignored"]}"#,
+            br#"{"before":{"stepId":"before","outputs":1}}"#,
+        )
+        .expect("source");
+
+        let key = manifest
+            .breakpoint_key("wait", &source)
+            .expect("breakpoint key");
+        let event = manifest
+            .breakpoint_event("wait", &source)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(key, "breakpoint::wait::1_2");
+        assert_eq!(event["step_id"], json!("wait"));
+        assert_eq!(event["step_name"], json!("Review Input"));
+        assert_eq!(event["step_type"], json!("WaitForSignal"));
+        assert_eq!(event["inputs"], Value::Null);
+        assert_eq!(event["steps_context"]["before"]["outputs"], json!(1));
     }
 
     #[test]

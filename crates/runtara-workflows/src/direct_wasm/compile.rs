@@ -80,6 +80,7 @@ const DIRECT_RESULT_OPTION_U64_TAG_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_U64_VALUE_OFFSET: u64 = 16;
 const DIRECT_RESULT_OPTION_LIST_PTR_OFFSET: u64 = 8;
 const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
+const DIRECT_CHECKPOINT_FOUND_OFFSET: u64 = 4;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET: u64 = 20;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET: u64 = 24;
@@ -157,6 +158,8 @@ const DIRECT_WORKFLOW_LOG_KIND: &[u8] = b"workflow_log";
 const DIRECT_WORKFLOW_ERROR_KIND: &[u8] = b"workflow_error";
 const DIRECT_STEP_DEBUG_START_KIND: &[u8] = b"step_debug_start";
 const DIRECT_STEP_DEBUG_END_KIND: &[u8] = b"step_debug_end";
+const DIRECT_BREAKPOINT_HIT_KIND: &[u8] = b"breakpoint_hit";
+const DIRECT_BREAKPOINT_HIT_STATE: &[u8] = b"\"breakpoint_hit\"";
 const DIRECT_EXTERNAL_INPUT_REQUESTED_KIND: &[u8] = b"external_input_requested";
 const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
 const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
@@ -1067,6 +1070,7 @@ enum DirectRunPlan {
     },
     WaitForSignal {
         step_id: String,
+        breakpoint: bool,
         on_wait_plan: Option<Box<DirectRunPlan>>,
         next_plan: Box<DirectRunPlan>,
     },
@@ -1228,6 +1232,8 @@ struct DirectCoreStaticData {
     workflow_error_kind: DirectDataSegment,
     step_debug_start_kind: DirectDataSegment,
     step_debug_end_kind: DirectDataSegment,
+    breakpoint_hit_kind: DirectDataSegment,
+    breakpoint_hit_state: DirectDataSegment,
     external_input_requested_kind: DirectDataSegment,
     agent_empty_integration_id: DirectDataSegment,
     agent_empty_parameters: DirectDataSegment,
@@ -1286,6 +1292,18 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let breakpoint_hit_kind = DirectDataSegment::new(offset, DIRECT_BREAKPOINT_HIT_KIND);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_BREAKPOINT_HIT_KIND.len())?,
+            16,
+        );
+
+        let breakpoint_hit_state = DirectDataSegment::new(offset, DIRECT_BREAKPOINT_HIT_STATE);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_BREAKPOINT_HIT_STATE.len())?,
+            16,
+        );
+
         let external_input_requested_kind =
             DirectDataSegment::new(offset, DIRECT_EXTERNAL_INPUT_REQUESTED_KIND);
         offset = align_i32(
@@ -1334,6 +1352,8 @@ impl DirectCoreStaticData {
             workflow_error_kind,
             step_debug_start_kind,
             step_debug_end_kind,
+            breakpoint_hit_kind,
+            breakpoint_hit_state,
             external_input_requested_kind,
             agent_empty_integration_id,
             agent_empty_parameters,
@@ -1611,6 +1631,12 @@ fn step_run_plan_inner(
 
             Ok(DirectRunPlan::WaitForSignal {
                 step_id: step_id.to_string(),
+                breakpoint: graph.durable
+                    && step
+                        .body
+                        .get("breakpoint")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                 on_wait_plan: on_wait_plan.map(Box::new),
                 next_plan: Box::new(next_plan),
             })
@@ -2424,6 +2450,8 @@ fn emit_direct_core_module(
         &config.static_data.workflow_error_kind,
         &config.static_data.step_debug_start_kind,
         &config.static_data.step_debug_end_kind,
+        &config.static_data.breakpoint_hit_kind,
+        &config.static_data.breakpoint_hit_state,
         &config.static_data.external_input_requested_kind,
         &config.static_data.agent_empty_integration_id,
         &config.static_data.agent_empty_parameters,
@@ -2460,6 +2488,8 @@ struct DirectCoreImportIndices {
     runtime_complete: Option<u32>,
     runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
+    runtime_debug_mode_enabled: Option<u32>,
+    runtime_breakpoint_pause: Option<u32>,
     runtime_heartbeat: Option<u32>,
     runtime_instance_id: Option<u32>,
     runtime_is_cancelled: Option<u32>,
@@ -2507,6 +2537,8 @@ struct DirectCoreImportIndices {
     stdlib_while_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
+    stdlib_breakpoint_key: Option<u32>,
+    stdlib_breakpoint_event: Option<u32>,
     stdlib_wait_signal_id: Option<u32>,
     stdlib_wait_timeout_ms: Option<u32>,
     stdlib_wait_timeout_error: Option<u32>,
@@ -2543,6 +2575,14 @@ impl DirectCoreImportIndices {
             runtime_custom_event: require_import(
                 self.runtime_custom_event,
                 "runtime.custom-event",
+            )?,
+            runtime_debug_mode_enabled: require_import(
+                self.runtime_debug_mode_enabled,
+                "runtime.debug-mode-enabled",
+            )?,
+            runtime_breakpoint_pause: require_import(
+                self.runtime_breakpoint_pause,
+                "runtime.breakpoint-pause",
             )?,
             runtime_heartbeat: require_import(self.runtime_heartbeat, "runtime.heartbeat")?,
             runtime_instance_id: require_import(self.runtime_instance_id, "runtime.instance-id")?,
@@ -2678,6 +2718,14 @@ impl DirectCoreImportIndices {
                 "stdlib.delay-duration-ms",
             )?,
             stdlib_delay: require_import(self.stdlib_delay, "stdlib.delay")?,
+            stdlib_breakpoint_key: require_import(
+                self.stdlib_breakpoint_key,
+                "stdlib.breakpoint-key",
+            )?,
+            stdlib_breakpoint_event: require_import(
+                self.stdlib_breakpoint_event,
+                "stdlib.breakpoint-event",
+            )?,
             stdlib_wait_signal_id: require_import(
                 self.stdlib_wait_signal_id,
                 "stdlib.wait-signal-id",
@@ -2761,6 +2809,8 @@ struct DirectCoreFunctionIndices {
     runtime_complete: u32,
     runtime_fail: u32,
     runtime_custom_event: u32,
+    runtime_debug_mode_enabled: u32,
+    runtime_breakpoint_pause: u32,
     runtime_heartbeat: u32,
     runtime_instance_id: u32,
     runtime_is_cancelled: u32,
@@ -2808,6 +2858,8 @@ struct DirectCoreFunctionIndices {
     stdlib_while_output: u32,
     stdlib_delay_duration_ms: u32,
     stdlib_delay: u32,
+    stdlib_breakpoint_key: u32,
+    stdlib_breakpoint_event: u32,
     stdlib_wait_signal_id: u32,
     stdlib_wait_timeout_ms: u32,
     stdlib_wait_timeout_error: u32,
@@ -2875,6 +2927,10 @@ fn import_core_function(
         import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "debug-mode-enabled") {
+        import_indices.runtime_debug_mode_enabled = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "breakpoint-pause") {
+        import_indices.runtime_breakpoint_pause = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "heartbeat") {
         import_indices.runtime_heartbeat = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "instance-id") {
@@ -2969,6 +3025,10 @@ fn import_core_function(
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
         import_indices.stdlib_delay = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "breakpoint-key") {
+        import_indices.stdlib_breakpoint_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "breakpoint-event") {
+        import_indices.stdlib_breakpoint_event = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-signal-id") {
         import_indices.stdlib_wait_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-timeout-ms") {
@@ -3558,6 +3618,7 @@ fn emit_run_plan_mapping(
         }
         DirectRunPlan::WaitForSignal {
             step_id,
+            breakpoint,
             on_wait_plan,
             next_plan,
         } => {
@@ -3568,6 +3629,7 @@ fn emit_run_plan_mapping(
                 track_events,
                 variables,
                 step_id,
+                *breakpoint,
                 on_wait_plan.as_deref(),
                 next_plan,
                 data_ptr_local,
@@ -3867,6 +3929,81 @@ fn emit_wait_debug_start_event(
         output_ptr_local,
         output_len_local,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_step_breakpoint(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    breakpoint: bool,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    if !breakpoint {
+        return;
+    }
+
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_debug_mode_enabled));
+    load_retptr_tag(body);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_breakpoint_key));
+    return_if_retptr_error(body);
+    load_retptr_list(body, route_ptr_local, route_len_local);
+
+    body.instruction(&Instruction::LocalGet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(route_len_local));
+    push_segment_args(body, &static_data.breakpoint_hit_state);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    load_retptr_tag(body);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_u8_load(body, DIRECT_CHECKPOINT_FOUND_OFFSET);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_breakpoint_event));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    push_segment_args(body, &static_data.breakpoint_hit_kind);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_breakpoint_pause));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Return);
+
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4889,6 +5026,7 @@ fn emit_wait_for_signal_plan(
     track_events: bool,
     variables: DirectVariables<'_>,
     step_id: &str,
+    breakpoint: bool,
     on_wait_plan: Option<&DirectRunPlan>,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
@@ -4908,6 +5046,20 @@ fn emit_wait_for_signal_plan(
     let step_id_segment = static_data
         .step_id(step_id)
         .expect("run plan step ids are present in static data");
+
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_instance_id));
@@ -12837,6 +12989,137 @@ mod tests {
     }
 
     #[test]
+    fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
+        let mut graph = fixture("wait_simple");
+        graph.durable = Some(true);
+        let Some(runtara_dsl::Step::WaitForSignal(wait)) = graph.steps.get_mut("wait") else {
+            panic!("expected WaitForSignal fixture step");
+        };
+        wait.breakpoint = Some(true);
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let DirectRunPlan::WaitForSignal {
+            breakpoint,
+            next_plan,
+            ..
+        } = &core_config.run_plan
+        else {
+            panic!("expected WaitForSignal run plan");
+        };
+        assert!(*breakpoint, "durable WaitForSignal breakpoint should lower");
+        assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("WaitForSignal breakpoint core module validates");
+
+        let mut next_function_index = 0;
+        let mut runtime_debug_mode_enabled_index = None;
+        let mut stdlib_breakpoint_key_index = None;
+        let mut runtime_checkpoint_index = None;
+        let mut stdlib_breakpoint_event_index = None;
+        let mut runtime_custom_event_index = None;
+        let mut runtime_breakpoint_pause_index = None;
+        let mut runtime_instance_id_index = None;
+        let mut run_calls = Vec::new();
+        let mut code_body_index = 0;
+
+        for payload in Parser::new(0).parse_all(&core) {
+            match payload.expect("core wasm payload") {
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.expect("core import");
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            match (import.module, import.name) {
+                                (
+                                    "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                    "debug-mode-enabled",
+                                ) => runtime_debug_mode_enabled_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                                    stdlib_breakpoint_key_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                                    runtime_checkpoint_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                                    stdlib_breakpoint_event_index = Some(next_function_index)
+                                }
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                    runtime_custom_event_index = Some(next_function_index)
+                                }
+                                (
+                                    "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                    "breakpoint-pause",
+                                ) => runtime_breakpoint_pause_index = Some(next_function_index),
+                                ("cm32p2|runtara:workflow-runtime/runtime@0.1", "instance-id") => {
+                                    runtime_instance_id_index = Some(next_function_index)
+                                }
+                                _ => {}
+                            }
+                            next_function_index += 1;
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    if code_body_index == 0 {
+                        for operator in body.get_operators_reader().expect("operators") {
+                            if let Operator::Call { function_index } = operator.expect("operator") {
+                                run_calls.push(function_index);
+                            }
+                        }
+                    }
+                    code_body_index += 1;
+                }
+                _ => {}
+            }
+        }
+
+        let runtime_debug_mode_enabled_index =
+            runtime_debug_mode_enabled_index.expect("debug-mode-enabled import");
+        let stdlib_breakpoint_key_index =
+            stdlib_breakpoint_key_index.expect("breakpoint-key import");
+        let runtime_checkpoint_index = runtime_checkpoint_index.expect("checkpoint import");
+        let stdlib_breakpoint_event_index =
+            stdlib_breakpoint_event_index.expect("breakpoint-event import");
+        let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
+        let runtime_breakpoint_pause_index =
+            runtime_breakpoint_pause_index.expect("breakpoint-pause import");
+        let runtime_instance_id_index = runtime_instance_id_index.expect("instance-id import");
+
+        let position = |index| {
+            run_calls
+                .iter()
+                .position(|call| *call == index)
+                .expect("expected WaitForSignal breakpoint call")
+        };
+        let debug_mode_position = position(runtime_debug_mode_enabled_index);
+        let breakpoint_key_position = position(stdlib_breakpoint_key_index);
+        let checkpoint_position = position(runtime_checkpoint_index);
+        let breakpoint_event_position = position(stdlib_breakpoint_event_index);
+        let breakpoint_pause_position = position(runtime_breakpoint_pause_index);
+        let instance_id_position = position(runtime_instance_id_index);
+        let first_custom_event_position = run_calls
+            .iter()
+            .position(|&index| index == runtime_custom_event_index)
+            .expect("breakpoint custom-event call");
+
+        assert!(
+            debug_mode_position < breakpoint_key_position
+                && breakpoint_key_position < checkpoint_position
+                && checkpoint_position < breakpoint_event_position
+                && breakpoint_event_position < first_custom_event_position
+                && first_custom_event_position < breakpoint_pause_position
+                && breakpoint_pause_position < instance_id_position,
+            "WaitForSignal breakpoint should pause before wait setup: {run_calls:?}"
+        );
+    }
+
+    #[test]
     fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
         let graph = fixture("wait_on_wait");
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -12847,6 +13130,7 @@ mod tests {
             step_id,
             on_wait_plan: Some(on_wait_plan),
             next_plan,
+            ..
         } = &core_config.run_plan
         else {
             panic!("expected WaitForSignal run plan with onWait callback");

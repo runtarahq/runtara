@@ -344,6 +344,98 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_debug_mode_enabled_cabi<T: Guest>() -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::debug_mode_enabled();
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(e) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match e {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec2 = (e.into_bytes()).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_debug_mode_enabled<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_breakpoint_pause_cabi<T: Guest>() -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let result0 = T::breakpoint_pause();
+                    let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result0 {
+                        Ok(_) => {
+                            *ptr1.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr1.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec2 = (e.into_bytes()).into_boxed_slice();
+                            let ptr2 = vec2.as_ptr().cast::<u8>();
+                            let len2 = vec2.len();
+                            ::core::mem::forget(vec2);
+                            *ptr1
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len2;
+                            *ptr1
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr2.cast_mut();
+                        }
+                    };
+                    ptr1
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_breakpoint_pause<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_heartbeat_cabi<T: Guest>() -> *mut u8 {
                     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
                     let result0 = T::heartbeat();
@@ -1236,6 +1328,8 @@ pub mod exports {
                         kind: _rt::String,
                         payload: _rt::Vec<u8>,
                     ) -> Result<(), _rt::String>;
+                    fn debug_mode_enabled() -> Result<bool, _rt::String>;
+                    fn breakpoint_pause() -> Result<(), _rt::String>;
                     fn heartbeat() -> Result<(), _rt::String>;
                     fn is_cancelled() -> Result<bool, _rt::String>;
                     fn check_signals() -> Result<bool, _rt::String>;
@@ -1311,6 +1405,25 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_custom_event(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_custom_event::<$ty
                         > (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#debug-mode-enabled")]
+                        unsafe extern "C" fn export_debug_mode_enabled() -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_debug_mode_enabled_cabi::<$ty > () } } #[unsafe
+                        (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#debug-mode-enabled")]
+                        unsafe extern "C" fn _post_return_debug_mode_enabled(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_debug_mode_enabled::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-runtime/runtime@0.1.0#breakpoint-pause")]
+                        unsafe extern "C" fn export_breakpoint_pause() -> * mut u8 {
+                        unsafe { $($path_to_types)*:: _export_breakpoint_pause_cabi::<$ty
+                        > () } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-runtime/runtime@0.1.0#breakpoint-pause")]
+                        unsafe extern "C" fn _post_return_breakpoint_pause(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_breakpoint_pause::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-runtime/runtime@0.1.0#heartbeat")] unsafe
                         extern "C" fn export_heartbeat() -> * mut u8 { unsafe {
                         $($path_to_types)*:: _export_heartbeat_cabi::<$ty > () } }
@@ -1528,29 +1641,30 @@ pub(crate) use __export_workflow_runtime_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-runtime@0.1.0:workflow-runtime:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1007] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe8\x06\x01A\x02\x01\
-A\x02\x01B1\x01p}\x01ks\x01r\x03\x0bsignal-types\x07payload\0\x0dcheckpoint-id\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1051] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x94\x07\x01A\x02\x01\
+A\x02\x01B3\x01p}\x01ks\x01r\x03\x0bsignal-types\x07payload\0\x0dcheckpoint-id\x01\
 \x04\0\x0bsignal-info\x03\0\x02\x01r\x02\x0dcheckpoint-ids\x07payload\0\x04\0\x12\
 custom-signal-info\x03\0\x04\x01k\x03\x01k\x05\x01r\x04\x05found\x7f\x05state\0\x0e\
 pending-signal\x06\x0dcustom-signal\x07\x04\0\x11checkpoint-result\x03\0\x08\x01\
 j\x01\0\x01s\x01@\0\0\x0a\x04\0\x0aload-input\x01\x0b\x01j\x01s\x01s\x01@\0\0\x0c\
 \x04\0\x0binstance-id\x01\x0d\x01j\0\x01s\x01@\x01\x06output\0\0\x0e\x04\0\x08co\
 mplete\x01\x0f\x01@\x01\x05error\0\0\x0e\x04\0\x04fail\x01\x10\x01@\x02\x04kinds\
-\x07payload\0\0\x0e\x04\0\x0ccustom-event\x01\x11\x01@\0\0\x0e\x04\0\x09heartbea\
-t\x01\x12\x01j\x01\x7f\x01s\x01@\0\0\x13\x04\0\x0cis-cancelled\x01\x14\x04\0\x0d\
-check-signals\x01\x14\x01k\0\x01j\x01\x15\x01s\x01@\x01\x0dcheckpoint-ids\0\x16\x04\
-\0\x12poll-custom-signal\x01\x17\x01j\x01w\x01s\x01@\0\0\x18\x04\0\x06now-ms\x01\
-\x19\x01@\x01\x02msw\0\x0e\x04\0\x0ddurable-sleep\x01\x1a\x04\0\x0eblocking-slee\
-p\x01\x1a\x04\0\x0eget-checkpoint\x01\x17\x01j\x01\x09\x01s\x01@\x02\x0dcheckpoi\
-nt-ids\x05state\0\0\x1b\x04\0\x0acheckpoint\x01\x1c\x01@\x01\x0bsignal-types\0\x13\
-\x04\0\x18handle-checkpoint-signal\x01\x1d\x01@\x03\x0dcheckpoint-ids\x0eattempt\
--numbery\x0derror-message\x01\0\x0e\x04\0\x14record-retry-attempt\x01\x1e\x01@\x03\
-\x0dcheckpoint-ids\x05state\0\x02msw\0\x0e\x04\0\x18durable-sleep-checkpoint\x01\
-\x1f\x04\0&runtara:workflow-runtime/runtime@0.1.0\x05\0\x04\0/runtara:workflow-r\
-untime/workflow-runtime@0.1.0\x04\0\x0b\x16\x01\0\x10workflow-runtime\x03\0\0\0G\
-\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen\
--rust\x060.41.0";
+\x07payload\0\0\x0e\x04\0\x0ccustom-event\x01\x11\x01j\x01\x7f\x01s\x01@\0\0\x12\
+\x04\0\x12debug-mode-enabled\x01\x13\x01@\0\0\x0e\x04\0\x10breakpoint-pause\x01\x14\
+\x04\0\x09heartbeat\x01\x14\x04\0\x0cis-cancelled\x01\x13\x04\0\x0dcheck-signals\
+\x01\x13\x01k\0\x01j\x01\x15\x01s\x01@\x01\x0dcheckpoint-ids\0\x16\x04\0\x12poll\
+-custom-signal\x01\x17\x01j\x01w\x01s\x01@\0\0\x18\x04\0\x06now-ms\x01\x19\x01@\x01\
+\x02msw\0\x0e\x04\0\x0ddurable-sleep\x01\x1a\x04\0\x0eblocking-sleep\x01\x1a\x04\
+\0\x0eget-checkpoint\x01\x17\x01j\x01\x09\x01s\x01@\x02\x0dcheckpoint-ids\x05sta\
+te\0\0\x1b\x04\0\x0acheckpoint\x01\x1c\x01@\x01\x0bsignal-types\0\x12\x04\0\x18h\
+andle-checkpoint-signal\x01\x1d\x01@\x03\x0dcheckpoint-ids\x0eattempt-numbery\x0d\
+error-message\x01\0\x0e\x04\0\x14record-retry-attempt\x01\x1e\x01@\x03\x0dcheckp\
+oint-ids\x05state\0\x02msw\0\x0e\x04\0\x18durable-sleep-checkpoint\x01\x1f\x04\0\
+&runtara:workflow-runtime/runtime@0.1.0\x05\0\x04\0/runtara:workflow-runtime/wor\
+kflow-runtime@0.1.0\x04\0\x0b\x16\x01\0\x10workflow-runtime\x03\0\0\0G\x09produc\
+ers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060\
+.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

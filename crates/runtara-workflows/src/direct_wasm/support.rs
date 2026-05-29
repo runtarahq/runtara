@@ -368,11 +368,9 @@ fn supports_delay_step_baseline(_graph: &ExecutionGraph, step: &DelayStep) -> bo
 }
 
 fn supports_wait_for_signal_step_baseline(step: &WaitForSignalStep) -> bool {
-    !step.breakpoint.unwrap_or(false)
-        && step
-            .on_wait
-            .as_ref()
-            .is_none_or(|graph| supports_wait_for_signal_on_wait_graph_baseline(graph))
+    step.on_wait
+        .as_ref()
+        .is_none_or(|graph| supports_wait_for_signal_on_wait_graph_baseline(graph))
 }
 
 fn supports_wait_for_signal_on_wait_graph_baseline(graph: &ExecutionGraph) -> bool {
@@ -863,13 +861,6 @@ fn collect_wait_for_signal_step_unsupported(
             reason: reason.to_string(),
         });
     };
-
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "wait-for-signal-breakpoint",
-            "WaitForSignal breakpoints require direct debug pause lowering",
-        );
-    }
 
     if let Some(on_wait) = &step.on_wait {
         if graph_contains_step(on_wait, |step| matches!(step, Step::WaitForSignal(_))) {
@@ -2011,6 +2002,26 @@ mod tests {
         let report = analyze_direct_wasm_support(&fixture("wait_simple"));
 
         assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn wait_breakpoints_are_supported_with_direct_pause_lowering() {
+        let mut graph = fixture("wait_simple");
+        graph.durable = Some(true);
+        let Some(Step::WaitForSignal(wait)) = graph.steps.get_mut("wait") else {
+            panic!("expected WaitForSignal fixture step");
+        };
+        wait.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "wait-for-signal-breakpoint")
+        );
     }
 
     #[test]

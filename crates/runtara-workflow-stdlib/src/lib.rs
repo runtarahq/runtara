@@ -522,6 +522,26 @@ mod component {
             })
         }
 
+        fn breakpoint_key(step_id: String, source: Vec<u8>) -> Result<String, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.breakpoint_key(&step_id, &source)
+            })
+        }
+
+        fn breakpoint_event(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.breakpoint_event(&step_id, &source)
+            })
+        }
+
         fn wait_signal_id(
             step_id: String,
             instance_id: String,

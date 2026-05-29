@@ -201,6 +201,16 @@ interface json {
         duration-ms: u64,
     ) -> result<list<u8>, string>;
 
+    breakpoint-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    breakpoint-event: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     wait-signal-id: func(
         step-id: string,
         instance-id: string,

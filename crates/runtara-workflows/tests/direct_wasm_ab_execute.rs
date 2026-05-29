@@ -39,6 +39,60 @@ const WAIT_FOR_SIGNAL_DIRECT_ON_WAIT: &str =
     include_str!("fixtures/wait_for_signal_direct_on_wait.json");
 const WAIT_FOR_SIGNAL_DIRECT_ON_WAIT_ERROR: &str =
     include_str!("fixtures/wait_for_signal_direct_on_wait_error.json");
+const WAIT_FOR_SIGNAL_DIRECT_BREAKPOINT: &str = r#"{
+  "name": "Wait for Signal Direct Breakpoint",
+  "durable": true,
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "breakpoint": true,
+      "pollIntervalMs": 0,
+      "responseSchema": {
+        "approved": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "action": {
+        "key": "approval_decision",
+        "correlation": {
+          "case_id": {
+            "valueType": "reference",
+            "value": "data.case_id"
+          }
+        },
+        "context": {
+          "summary": {
+            "valueType": "reference",
+            "value": "data.summary"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": {
+          "valueType": "reference",
+          "value": "steps.wait.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    {
+      "fromStep": "wait",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
 const AGENT_CACHE_KEY: &str = "agent::utils::return-input::agent";
 const SPLIT_CACHE_KEY: &str = "split::split";
 const SPLIT_FINISH_WITH_SCHEMAS: &str = r#"{
@@ -186,6 +240,15 @@ struct ServerState {
     custom_signal_payload: Mutex<Option<Vec<u8>>>,
 }
 
+#[derive(Default)]
+struct ExecuteOptions {
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    pending_signal: Option<String>,
+    pending_checkpoint_signal: Option<String>,
+    custom_signal_payload: Option<Vec<u8>>,
+    debug_mode: bool,
+}
+
 impl ServerState {
     fn new(
         preloaded_checkpoints: Vec<(String, Vec<u8>)>,
@@ -282,6 +345,12 @@ fn shared_components_dir() -> Option<PathBuf> {
             || !stdlib_bytes
                 .windows(b"wait-on-wait-error".len())
                 .any(|window| window == b"wait-on-wait-error")
+            || !stdlib_bytes
+                .windows(b"breakpoint-key".len())
+                .any(|window| window == b"breakpoint-key")
+            || !stdlib_bytes
+                .windows(b"breakpoint-event".len())
+                .any(|window| window == b"breakpoint-event")
         {
             eprintln!(
                 "SKIP: direct shared workflow stdlib component is stale: {:?}",
@@ -835,14 +904,14 @@ fn execute_artifact_with_preloaded_checkpoints(
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
 ) -> CapturedRun {
-    execute_artifact_with_state(
+    execute_artifact_with_options(
         binary_path,
         instance_id,
         workflow_input,
-        preloaded_checkpoints,
-        None,
-        None,
-        None,
+        ExecuteOptions {
+            preloaded_checkpoints,
+            ..ExecuteOptions::default()
+        },
     )
 }
 
@@ -852,14 +921,14 @@ fn execute_artifact_with_checkpoint_signal(
     workflow_input: &[u8],
     signal_type: &str,
 ) -> CapturedRun {
-    execute_artifact_with_state(
+    execute_artifact_with_options(
         binary_path,
         instance_id,
         workflow_input,
-        Vec::new(),
-        None,
-        Some(signal_type.to_string()),
-        None,
+        ExecuteOptions {
+            pending_checkpoint_signal: Some(signal_type.to_string()),
+            ..ExecuteOptions::default()
+        },
     )
 }
 
@@ -869,14 +938,14 @@ fn execute_artifact_with_signal(
     workflow_input: &[u8],
     signal_type: &str,
 ) -> CapturedRun {
-    execute_artifact_with_state(
+    execute_artifact_with_options(
         binary_path,
         instance_id,
         workflow_input,
-        Vec::new(),
-        Some(signal_type.to_string()),
-        None,
-        None,
+        ExecuteOptions {
+            pending_signal: Some(signal_type.to_string()),
+            ..ExecuteOptions::default()
+        },
     )
 }
 
@@ -886,41 +955,75 @@ fn execute_artifact_with_custom_signal(
     workflow_input: &[u8],
     signal_payload: &[u8],
 ) -> CapturedRun {
-    execute_artifact_with_state(
+    execute_artifact_with_options(
         binary_path,
         instance_id,
         workflow_input,
-        Vec::new(),
-        None,
-        None,
-        Some(signal_payload.to_vec()),
+        ExecuteOptions {
+            custom_signal_payload: Some(signal_payload.to_vec()),
+            ..ExecuteOptions::default()
+        },
     )
 }
 
-fn execute_artifact_with_state(
+fn execute_artifact_with_debug_mode(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+) -> CapturedRun {
+    execute_artifact_with_options(
+        binary_path,
+        instance_id,
+        workflow_input,
+        ExecuteOptions {
+            debug_mode: true,
+            ..ExecuteOptions::default()
+        },
+    )
+}
+
+fn execute_artifact_with_checkpoint_and_custom_signal_debug_mode(
     binary_path: &Path,
     instance_id: &str,
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
-    pending_signal: Option<String>,
-    pending_checkpoint_signal: Option<String>,
-    custom_signal_payload: Option<Vec<u8>>,
+    signal_payload: &[u8],
+) -> CapturedRun {
+    execute_artifact_with_options(
+        binary_path,
+        instance_id,
+        workflow_input,
+        ExecuteOptions {
+            preloaded_checkpoints,
+            custom_signal_payload: Some(signal_payload.to_vec()),
+            debug_mode: true,
+            ..ExecuteOptions::default()
+        },
+    )
+}
+
+fn execute_artifact_with_options(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    options: ExecuteOptions,
 ) -> CapturedRun {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server_state = Arc::new(ServerState::new(
-        preloaded_checkpoints,
-        pending_signal,
-        pending_checkpoint_signal,
-        custom_signal_payload,
+        options.preloaded_checkpoints,
+        options.pending_signal,
+        options.pending_checkpoint_signal,
+        options.custom_signal_payload,
     ));
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, stop_rx, server_state, workflow_input));
 
-    let output = Command::new(wasmtime_binary())
+    let mut command = Command::new(wasmtime_binary());
+    command
         .arg("run")
         .arg("--wasi")
         .arg("http")
@@ -935,7 +1038,12 @@ fn execute_artifact_with_state(
         .arg("--env")
         .arg("RUNTARA_TENANT_ID=direct-wasm-ab")
         .arg("--env")
-        .arg("RUST_LOG=warn")
+        .arg("RUST_LOG=warn");
+    if options.debug_mode {
+        command.arg("--env").arg("DEBUG_MODE=true");
+    }
+
+    let output = command
         .arg(binary_path)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -1047,6 +1155,7 @@ fn normalized_checkpoint_id(checkpoint_id: &str) -> String {
     let suffix = checkpoint_id
         .find("agent::")
         .or_else(|| checkpoint_id.find("split::"))
+        .or_else(|| checkpoint_id.find("breakpoint::"))
         .map(|index| checkpoint_id[index..].to_string())
         .unwrap_or_else(|| checkpoint_id.to_string());
     let segments = suffix.split("::").collect::<Vec<_>>();
@@ -1368,6 +1477,126 @@ fn direct_wasm_matches_components_wait_for_signal_track_events_resume() {
         }),
         "tracked direct WaitForSignal run should emit a wait debug-end event"
     );
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_breakpoint_pause_resume() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal-breakpoint", WAIT_FOR_SIGNAL_DIRECT_BREAKPOINT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal-breakpoint",
+        WAIT_FOR_SIGNAL_DIRECT_BREAKPOINT,
+    );
+    let workflow_input = br#"{"case_id":"case-42","summary":"Needs approval"}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components_paused = execute_artifact_with_debug_mode(
+        &components_artifact,
+        "ab-components-wait-signal-breakpoint-pause",
+        &components_input,
+    );
+    let direct_paused = execute_artifact_with_debug_mode(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-breakpoint-pause",
+        workflow_input,
+    );
+
+    assert!(
+        components_paused.status_success,
+        "components artifact did not suspend cleanly:\n{}",
+        components_paused.stderr
+    );
+    assert!(
+        direct_paused.status_success,
+        "direct artifact did not suspend cleanly:\n{}",
+        direct_paused.stderr
+    );
+    assert!(components_paused.output_json.is_none());
+    assert!(direct_paused.output_json.is_none());
+    assert!(components_paused.error_json.is_none());
+    assert!(direct_paused.error_json.is_none());
+
+    let expected_checkpoint = vec![(
+        "breakpoint::wait".to_string(),
+        br#""breakpoint_hit""#.to_vec(),
+    )];
+    assert_eq!(
+        normalized_checkpoints(&components_paused.checkpoints),
+        expected_checkpoint
+    );
+    assert_eq!(
+        normalized_checkpoints(&direct_paused.checkpoints),
+        expected_checkpoint
+    );
+    assert_eq!(
+        normalized_events(&components_paused.events),
+        normalized_events(&direct_paused.events)
+    );
+    let direct_pause_events = normalized_events(&direct_paused.events);
+    let breakpoint_events = direct_pause_events
+        .iter()
+        .filter(|(subtype, _)| subtype == "breakpoint_hit")
+        .collect::<Vec<_>>();
+    assert_eq!(breakpoint_events.len(), 1);
+    assert_eq!(breakpoint_events[0].1["step_type"], "WaitForSignal");
+    assert_eq!(breakpoint_events[0].1["step_name"], "Approval");
+    assert!(breakpoint_events[0].1["inputs"].is_null());
+    assert!(
+        direct_pause_events
+            .iter()
+            .all(|(subtype, _)| subtype != "external_input_requested"),
+        "first breakpoint hit should pause before WaitForSignal request emission"
+    );
+    assert_eq!(components_paused.suspended_count, 1);
+    assert_eq!(direct_paused.suspended_count, 1);
+    let expected_pause_ack = vec![SignalAckRequest {
+        signal_type: "pause".to_string(),
+    }];
+    assert_eq!(components_paused.signal_acks, expected_pause_ack);
+    assert_eq!(direct_paused.signal_acks, expected_pause_ack);
+
+    let signal_payload = br#"{"approved":true}"#;
+    let components_resumed = execute_artifact_with_checkpoint_and_custom_signal_debug_mode(
+        &components_artifact,
+        "ab-components-wait-signal-breakpoint-resume",
+        &components_input,
+        expected_checkpoint.clone(),
+        signal_payload,
+    );
+    let direct_resumed = execute_artifact_with_checkpoint_and_custom_signal_debug_mode(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-breakpoint-resume",
+        workflow_input,
+        expected_checkpoint,
+        signal_payload,
+    );
+
+    assert_success_parity(
+        "wait-signal-breakpoint-resume",
+        0,
+        &components_resumed,
+        &direct_resumed,
+    );
+    assert_eq!(
+        direct_resumed.output_json,
+        Some(serde_json::json!({"approved": true}))
+    );
+    assert!(
+        normalized_events(&direct_resumed.events)
+            .iter()
+            .all(|(subtype, _)| subtype != "breakpoint_hit"),
+        "resume from breakpoint checkpoint should not emit a second breakpoint event"
+    );
+    assert_eq!(components_resumed.suspended_count, 0);
+    assert_eq!(direct_resumed.suspended_count, 0);
+    assert!(components_resumed.signal_acks.is_empty());
+    assert!(direct_resumed.signal_acks.is_empty());
 }
 
 #[test]
