@@ -222,6 +222,46 @@ impl EntitlementSnapshot {
             "entitlement snapshot resolved"
         );
     }
+
+    /// Pure predicate: `true` when `mcp` is enabled but `api` is disabled.
+    ///
+    /// This combination is *valid* (boot succeeds) but behaves surprisingly:
+    /// the hosted MCP transport at `/mcp/*` is only reachable via API-key
+    /// auth, and the API-key bypass guard (`api_key_auth_guard`) rejects
+    /// every API-key-authenticated request when `api` is off — *before* the
+    /// `mcp` transport gate ever runs. So a tenant reading "mcp: true,
+    /// api: false" expects MCP to work, but every hosted MCP client gets
+    /// `ENTITLEMENT_REQUIRED`. See SYN-433 Finding 5.
+    ///
+    /// Pulled out as a pure function so the detection is unit-testable
+    /// against constructed snapshots without spinning up `tracing`.
+    pub fn mcp_unreachable_without_api(&self) -> bool {
+        self.is_feature_enabled(FeatureKey::Mcp) && !self.is_feature_enabled(FeatureKey::Api)
+    }
+
+    /// Emit operator `warn` lines for entitlement combinations that boot
+    /// cleanly but behave in surprising ways. Called once at startup, right
+    /// after [`log_summary`](Self::log_summary).
+    ///
+    /// Currently covers the `mcp=true` + `api=false` collision (SYN-433
+    /// Finding 5). Kept separate from `log_summary` so the always-on `info`
+    /// summary stays uncluttered and each risky combination is one greppable
+    /// `warn` line an operator sees during the deploy that introduced it.
+    pub fn warn_risky_combinations(&self) {
+        if self.mcp_unreachable_without_api() {
+            tracing::warn!(
+                tenant_id = %self.tenant_id,
+                feature_mcp = true,
+                feature_api = false,
+                "Entitlement combination mcp=true, api=false: hosted \
+                 MCP-over-HTTP requires API-key auth, which the api gate \
+                 blocks. MCP appears enabled in the snapshot but every \
+                 request from an API-key MCP client will fail with \
+                 ENTITLEMENT_REQUIRED. Either enable `api`, or treat `mcp` \
+                 as effectively disabled for hosted clients."
+            );
+        }
+    }
 }
 
 /// Plain-data shape of the startup entitlement summary. Returned by
@@ -833,5 +873,48 @@ mod tests {
 
         assert!(s.agents_explicit);
         assert_eq!(s.agents_allowlist_size, 0);
+    }
+
+    // ── mcp_unreachable_without_api (SYN-433 Finding 5) ─────────────────
+
+    #[test]
+    fn mcp_without_api_is_flagged() {
+        // mcp=true, api=false → the surprising combination that silently
+        // breaks hosted MCP-over-HTTP.
+        let snap = parse(None, Some(r#"{"features":{"mcp":true,"api":false}}"#), None).unwrap();
+        assert!(
+            snap.mcp_unreachable_without_api(),
+            "mcp=true + api=false must be flagged"
+        );
+    }
+
+    #[test]
+    fn mcp_with_api_is_not_flagged() {
+        // Both on (default) → no warning. This is the healthy combination.
+        let snap = parse(None, None, None).unwrap();
+        assert!(snap.is_feature_enabled(Mcp));
+        assert!(snap.is_feature_enabled(Api));
+        assert!(!snap.mcp_unreachable_without_api());
+    }
+
+    #[test]
+    fn api_without_mcp_is_not_flagged() {
+        // api on, mcp off → nothing surprising; API works, MCP is just off.
+        let snap = parse(None, Some(r#"{"features":{"mcp":false,"api":true}}"#), None).unwrap();
+        assert!(!snap.mcp_unreachable_without_api());
+    }
+
+    #[test]
+    fn both_mcp_and_api_off_is_not_flagged() {
+        // Both off → MCP is intentionally disabled, no false reassurance to
+        // warn about. The warning is specifically about mcp *appearing*
+        // enabled while being unreachable.
+        let snap = parse(
+            None,
+            Some(r#"{"features":{"mcp":false,"api":false}}"#),
+            None,
+        )
+        .unwrap();
+        assert!(!snap.mcp_unreachable_without_api());
     }
 }

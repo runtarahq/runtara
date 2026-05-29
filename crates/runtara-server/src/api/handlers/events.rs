@@ -70,6 +70,7 @@ pub async fn capture_http_event(
     State(pool): State<PgPool>,
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
     State(trigger_stream): State<Option<std::sync::Arc<TriggerStreamPublisher>>>,
+    State(engine): State<std::sync::Arc<crate::workers::execution_engine::ExecutionEngine>>,
     Path((trigger_id, action)): Path<(String, String)>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
@@ -231,6 +232,14 @@ pub async fn capture_http_event(
             header_pairs,
             debug,
         );
+
+        // Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
+        // This handler bypasses ExecutionEngine::queue, so consult the same
+        // runtime-count gate explicitly. Returns the documented
+        // ENTITLEMENT_LIMIT_EXCEEDED 403 when the tenant is at/over the cap.
+        if let Err(denial) = engine.check_concurrency_gate(&tenant_id).await {
+            return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+        }
 
         // Publish to trigger stream (reuses shared connection manager).
         match trigger_stream.publish(&tenant_id, &event).await {

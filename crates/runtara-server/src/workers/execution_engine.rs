@@ -82,6 +82,11 @@ pub enum ExecutionError {
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
+    /// Per-tenant entitlement gate denied the request
+    /// (`maxConcurrentExecutions` or similar). Carries the full
+    /// `EntitlementDenial` so the handler can render the standard
+    /// `ENTITLEMENT_LIMIT_EXCEEDED` body via `denial.json_body()`.
+    EntitlementDenied(crate::entitlement_error::EntitlementDenial),
 }
 
 impl std::fmt::Display for ExecutionError {
@@ -113,6 +118,7 @@ impl std::fmt::Display for ExecutionError {
             ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
+            ExecutionError::EntitlementDenied(denial) => write!(f, "{}", denial.message()),
         }
     }
 }
@@ -139,6 +145,7 @@ impl ExecutionError {
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ExecutionError::EntitlementDenied(_) => StatusCode::FORBIDDEN,
         }
     }
 }
@@ -288,6 +295,73 @@ impl ExecutionEngine {
         }
     }
 
+    /// Count the tenant's currently in-flight executions (Running + Pending)
+    /// as reported by the runtime — the source of truth. Two cheap
+    /// `total_count` lookups (limit 1) rather than fetching rows.
+    ///
+    /// SYN-433 Finding 1: we query the runtime instead of maintaining our own
+    /// counter precisely because the runtime reflects real completion — an
+    /// execution drops out of this count the instant it terminates, so the
+    /// gate means "N concurrent", not "N started recently".
+    async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+        let Some(client) = self.runtime_client.as_ref() else {
+            // No runtime wired (e.g. trigger worker engine) — can't count.
+            return Ok(0);
+        };
+        let mut total: u64 = 0;
+        for status in [InstanceStatus::Running, InstanceStatus::Pending] {
+            let result = client
+                .list_instances_with_options(
+                    ListInstancesOptions::new()
+                        .with_tenant_id(tenant_id)
+                        .with_status(status)
+                        .with_limit(1),
+                )
+                .await
+                .map_err(|e| {
+                    ExecutionError::RuntimeError(format!("Failed to count active instances: {e}"))
+                })?;
+            total += u64::from(result.total_count);
+        }
+        Ok(total)
+    }
+
+    /// Enforce `maxConcurrentExecutions` at intake. Returns the
+    /// `EntitlementDenial` to surface when the tenant's live active-instance
+    /// count is at/over the effective cap; `Ok(())` otherwise.
+    ///
+    /// Only queries the runtime when the tenant has an explicit
+    /// `maxConcurrentExecutions` entitlement — with no tenant cap there's
+    /// nothing to enforce (the infra default is effectively unlimited), so we
+    /// skip the round-trip entirely. Fails **open** if the count query errors:
+    /// a transient runtime/count failure should not wedge execution.
+    pub(crate) async fn check_concurrency_gate(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+        let snapshot = crate::config::entitlements();
+        if snapshot.limits.max_concurrent_executions.is_none() {
+            return Ok(());
+        }
+        let active = match self.active_execution_count(tenant_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "concurrency gate: failed to count active instances, allowing execution"
+                );
+                return Ok(());
+            }
+        };
+        crate::middleware::entitlement::concurrent_executions_decision(
+            snapshot,
+            active,
+            crate::config::raw_max_concurrent_executions(),
+        )
+        .inspect_err(|denial| denial.audit_log(tenant_id))
+    }
+
     /// Check if the runtime client is available.
     #[allow(dead_code)]
     pub fn has_runtime(&self) -> bool {
@@ -422,6 +496,15 @@ impl ExecutionEngine {
             ),
         };
 
+        // 7.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
+        //
+        // Counts the tenant's actually-active instances (Running + Pending)
+        // from the runtime — the source of truth — and rejects when at/over
+        // the effective cap. See `check_concurrency_gate`.
+        self.check_concurrency_gate(req.tenant_id)
+            .await
+            .map_err(ExecutionError::EntitlementDenied)?;
+
         // 8. Publish to stream
         trigger_stream
             .publish(req.tenant_id, &event)
@@ -509,6 +592,16 @@ impl ExecutionEngine {
                     req.workflow_id, version
                 ))
             })?;
+
+        // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
+        // Same runtime-count gate as the async path — the running instance
+        // this call is about to create counts against the tenant's live
+        // Running + Pending total, and the runtime drops it from that total
+        // the moment it finishes (which for a sync run is when the
+        // `execute_sync` call below returns). No bookkeeping to release.
+        self.check_concurrency_gate(req.tenant_id)
+            .await
+            .map_err(ExecutionError::EntitlementDenied)?;
 
         // 6. Execute via runtime client (no debug for sync executions)
         let execution_result = runtime_client

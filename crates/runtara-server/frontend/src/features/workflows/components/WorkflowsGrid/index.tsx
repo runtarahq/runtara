@@ -8,7 +8,11 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
-import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
+import {
+  useCustomMutation,
+  useCustomQuery,
+  isEntitlementDenial,
+} from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
 import { queryClient } from '@/main.tsx';
 import {
@@ -190,6 +194,11 @@ export function WorkflowsGrid({
           {
             onSettled: () => setPendingAction(null),
             onError: (error: any) => {
+              // Entitlement-shaped 403s are already surfaced by the shared
+              // useCustomMutation handler (handleEntitlementDenial) with a
+              // proper message — don't toast them again here, or the user
+              // sees the denial twice (SYN-433: entitlement double-popup).
+              if (isEntitlementDenial(error)) return;
               const apiError =
                 error?.response?.data?.error ||
                 error?.response?.data?.message ||
@@ -218,11 +227,16 @@ export function WorkflowsGrid({
         });
         setExecuteTarget(null);
       } catch (error: any) {
-        const apiError =
-          error?.response?.data?.error ||
-          error?.response?.data?.message ||
-          error?.message;
-        setExecuteError(apiError || 'Failed to start workflow');
+        // Entitlement denials already get a proper toast from the shared
+        // mutation handler; don't also show the raw summary inline
+        // (SYN-433: entitlement double-popup).
+        if (!isEntitlementDenial(error)) {
+          const apiError =
+            error?.response?.data?.error ||
+            error?.response?.data?.message ||
+            error?.message;
+          setExecuteError(apiError || 'Failed to start workflow');
+        }
       } finally {
         setPendingAction(null);
       }

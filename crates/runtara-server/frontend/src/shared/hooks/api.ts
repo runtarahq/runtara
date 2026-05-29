@@ -193,6 +193,23 @@ export function handleEntitlementDenial(error: ApiError): boolean {
   }
 }
 
+/**
+ * True when an error is an entitlement-shaped 403 (`ENTITLEMENT_REQUIRED`,
+ * `AGENT_NOT_ENABLED`, `ENTITLEMENT_LIMIT_EXCEEDED`) — i.e. one the shared
+ * `useCustomMutation` error handler already surfaces via
+ * [`handleEntitlementDenial`].
+ *
+ * Component-level `onError` / `catch` blocks that show their own toast or
+ * inline error should call this and bail for these cases; otherwise the user
+ * sees the denial twice — the shared, message-bearing toast plus the
+ * component's own surfacing of the raw `error` summary. Accepts a loose type
+ * so `error: any` call sites can pass straight through.
+ */
+export function isEntitlementDenial(error: unknown): boolean {
+  const e = error as ApiError | undefined;
+  return e?.response?.status === 403 && !!e?.response?.data?.code;
+}
+
 export function useCustomMutation<TData = unknown, TVariables = unknown>({
   mutationFn,
   suppressValidationToasts = false,

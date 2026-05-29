@@ -1,7 +1,11 @@
 import { useParams, useSearchParams } from 'react-router';
 import { useReactFlow } from '@xyflow/react';
 import { toast } from 'sonner';
-import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
+import {
+  useCustomMutation,
+  useCustomQuery,
+  isEntitlementDenial,
+} from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { WorkflowEditor } from '@/features/workflows/components/WorkflowEditor';
 import { WorkflowActionsForm } from '@/features/workflows/pages/Workflow/WorkflowActionsForm';
@@ -1544,6 +1548,11 @@ export function Workflow() {
       });
       setExecuteDialogOpen(false);
     } catch (error: any) {
+      // Entitlement-shaped 403s (e.g. maxConcurrentExecutions) are already
+      // surfaced by the shared useCustomMutation handler with a proper
+      // message — bail so we don't show the raw summary a second time
+      // (SYN-433: entitlement double-popup).
+      if (isEntitlementDenial(error)) return;
       const apiError =
         error?.response?.data?.error ||
         error?.response?.data?.message ||
@@ -1600,6 +1609,9 @@ export function Workflow() {
       });
       setDebugExecuteDialogOpen(false);
     } catch (error: any) {
+      // See note in handleExecuteSubmit — shared handler already toasted any
+      // entitlement denial (SYN-433: entitlement double-popup).
+      if (isEntitlementDenial(error)) return;
       const apiError =
         error?.response?.data?.error ||
         error?.response?.data?.message ||
