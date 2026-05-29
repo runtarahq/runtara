@@ -42,10 +42,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   per-iteration aggregation for non-nested-loop bodies.
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
-  fallback. General step breakpoints remain outside the supported
-  direct-control subset, while durable `Finish`, durable `Delay`, durable
-  `WaitForSignal`, and static `EmbedWorkflow` call-site breakpoints now have
-  direct pause/resume lowering.
+  fallback. Agent, Split, and While breakpoints remain outside the supported
+  subset, while durable direct-control breakpoints for `Finish`,
+  `Conditional`, `Filter`, `Switch`, `GroupBy`, `Log`, terminal `Error`,
+  durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
+  call-site breakpoints now have direct pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -326,9 +327,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   durable `/sleep` and `/checkpoint` requests, with durable Delay, fresh and
   cached durable Agent, checkpoint-returned `pause`/`cancel`/`shutdown`
   lifecycle coverage for durable Agent, fresh/cached plus checkpoint-returned
-  pause/resume durable Split fixtures, and durable Finish breakpoint first-hit
-  pause/resume included in the strict A/B suite. Static `EmbedWorkflow` is now
-  covered for fresh and cached
+  pause/resume durable Split fixtures, durable Finish breakpoint first-hit
+  pause/resume, and durable direct-control breakpoint first-hit pause/resume
+  for Conditional, Filter, value/routing Switch, GroupBy, Log, and terminal
+  Error included in the strict A/B suite. Static `EmbedWorkflow` is now covered
+  for fresh and cached
   durable finish-only child calls plus generated-compatible wrapping of child
   `Error` failures reached directly or through child `Conditional` control
   flow, parent `EmbedWorkflow.onError` handling for child failures, nested static
@@ -447,7 +450,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
   `Log` remains intentionally limited to its existing `workflow_log` events,
   matching the generated Rust path. Breakpoint pauses remain gated per step
-  family; durable `Finish`, durable `Delay`, durable `WaitForSignal`, and
+  family; durable `Finish`, `Conditional`, `Filter`, `Switch`, `GroupBy`,
+  `Log`, terminal `Error`, durable `Delay`, durable `WaitForSignal`, and
   static `EmbedWorkflow` call-site breakpoints now have persisted pause/resume
   lowering and host-level parity coverage.
 - Phase 6 routing scope is now explicit: direct mode supports deterministic
@@ -580,6 +584,17 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   breakpoint event. Structural coverage verifies call order, stdlib coverage
   pins raw mapped-event payloads before final `outputs` unwrapping, and gated
   A/B coverage compares pause/resume behavior against generated Rust.
+- Durable direct-control breakpoints are now supported for `Conditional`,
+  `Filter`, value and routing `Switch`, `GroupBy`, `Log`, and terminal `Error`
+  steps. Direct mode pauses before debug-start emission, step helper execution,
+  workflow log/error custom events, branch dispatch, or terminal failure, which
+  matches the generated Rust placement after each step's breakpoint input
+  resolution. The shared stdlib now builds generated-compatible breakpoint
+  inputs for full Conditional sources, raw Filter/GroupBy inputs, Switch
+  input/case/default payloads, Log context, and Error context. Structural tests
+  pin call order before each side-effecting helper, support tests remove the
+  previous gates, and gated A/B coverage checks first-hit pause plus checkpoint
+  resume across all of these step families.
 
 Current remaining action items:
 
@@ -593,9 +608,10 @@ Current remaining action items:
   breakpoint semantics; each needs explicit durability/error aggregation tests.
 - Implement While timeout, While breakpoint, and While `onError` routing
   semantics with structural and gated A/B coverage.
-- Decide and implement the remaining general step breakpoint policy for
-  Filter, Switch, GroupBy, Log, Error, and Agent. Durable Finish, Delay,
-  WaitForSignal, and static EmbedWorkflow call-site breakpoints are now done.
+- Decide and implement the remaining Agent breakpoint policy. Durable
+  direct-control step breakpoints, Delay, WaitForSignal, and static
+  EmbedWorkflow call-site breakpoints are now done; Split and While breakpoint
+  semantics remain tracked with their loop-specific durability items above.
 - Close Agent hardening gaps: timeout/compensation/breakpoint policy,
   retry/failure differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability

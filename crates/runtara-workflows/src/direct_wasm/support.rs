@@ -979,61 +979,11 @@ fn collect_step_support(
             "Conditional steps require stdlib condition evaluation and branch lowering",
             unsupported,
         ),
-        Step::Filter(step) if direct_control => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("Filter".to_string()),
-                    feature: "filter-breakpoint".to_string(),
-                    reason: "Filter breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
-        Step::Switch(step) if direct_control => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("Switch".to_string()),
-                    feature: "switch-breakpoint".to_string(),
-                    reason: "Switch breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
-        Step::GroupBy(step) if direct_control => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("GroupBy".to_string()),
-                    feature: "group-by-breakpoint".to_string(),
-                    reason: "GroupBy breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
-        Step::Log(step) if direct_control => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("Log".to_string()),
-                    feature: "log-breakpoint".to_string(),
-                    reason: "Log breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
-        Step::Error(step) if direct_control => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("Error".to_string()),
-                    feature: "error-breakpoint".to_string(),
-                    reason: "Error breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
+        Step::Filter(_) if direct_control => {}
+        Step::Switch(_) if direct_control => {}
+        Step::GroupBy(_) if direct_control => {}
+        Step::Log(_) if direct_control => {}
+        Step::Error(_) if direct_control => {}
         Step::Split(split) => {
             if !supports_split_step_baseline(split) {
                 collect_split_step_unsupported(split, unsupported);
@@ -1924,8 +1874,9 @@ mod tests {
     }
 
     #[test]
-    fn value_switch_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn value_switch_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("switch_value");
+        graph.durable = Some(true);
         let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
             panic!("expected Switch fixture step");
         };
@@ -1933,10 +1884,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "switch-breakpoint")
+        );
     }
 
     #[test]
@@ -1948,8 +1902,9 @@ mod tests {
     }
 
     #[test]
-    fn routing_switch_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn routing_switch_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("switch_routing");
+        graph.durable = Some(true);
         let Some(Step::Switch(switch)) = graph.steps.get_mut("switch") else {
             panic!("expected Switch fixture step");
         };
@@ -1957,10 +1912,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("switch") && feature.feature == "switch-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "switch-breakpoint")
+        );
     }
 
     #[test]
@@ -1988,8 +1946,9 @@ mod tests {
     }
 
     #[test]
-    fn log_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn log_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("log");
+        graph.durable = Some(true);
         let Some(Step::Log(log)) = graph.steps.get_mut("simple_log") else {
             panic!("expected Log fixture step");
         };
@@ -1997,10 +1956,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("simple_log") && feature.feature == "log-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "log-breakpoint")
+        );
     }
 
     #[test]
@@ -2053,8 +2015,29 @@ mod tests {
     }
 
     #[test]
-    fn error_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn conditional_breakpoints_are_supported_with_direct_pause_lowering() {
+        let mut graph = fixture("conditional");
+        graph.durable = Some(true);
+        let Some(Step::Conditional(conditional)) = graph.steps.get_mut("check") else {
+            panic!("expected Conditional fixture step");
+        };
+        conditional.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "conditional-breakpoint")
+        );
+    }
+
+    #[test]
+    fn error_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("error");
+        graph.durable = Some(true);
         let Some(Step::Error(error)) = graph.steps.get_mut("fail") else {
             panic!("expected Error fixture step");
         };
@@ -2062,10 +2045,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("fail") && feature.feature == "error-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "error-breakpoint")
+        );
     }
 
     #[test]
@@ -2134,8 +2120,9 @@ mod tests {
     }
 
     #[test]
-    fn filter_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn filter_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("filter");
+        graph.durable = Some(true);
         let Some(Step::Filter(filter)) = graph.steps.get_mut("filter") else {
             panic!("expected Filter fixture step");
         };
@@ -2143,15 +2130,19 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("filter") && feature.feature == "filter-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "filter-breakpoint")
+        );
     }
 
     #[test]
-    fn group_by_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn group_by_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("group_by");
+        graph.durable = Some(true);
         let Some(Step::GroupBy(group_by)) = graph.steps.get_mut("group") else {
             panic!("expected GroupBy fixture step");
         };
@@ -2159,10 +2150,13 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("group") && feature.feature == "group-by-breakpoint"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "group-by-breakpoint")
+        );
     }
 
     #[test]

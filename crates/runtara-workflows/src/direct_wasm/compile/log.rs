@@ -5,6 +5,7 @@
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
 use super::abi::{load_retptr_list, push_retptr_arg, push_segment_args, return_if_retptr_error};
+use super::debug::emit_step_breakpoint;
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
@@ -19,7 +20,9 @@ pub(super) fn emit_log_plan(
     static_data: &DirectCoreStaticData,
     track_events: bool,
     variables: DirectVariables<'_>,
+    step_id: &str,
     log_id: u32,
+    breakpoint: bool,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -35,6 +38,20 @@ pub(super) fn emit_log_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
 ) {
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     body.instruction(&Instruction::I32Const(log_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));

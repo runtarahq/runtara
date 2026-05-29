@@ -56,6 +56,7 @@ const EMBED_WORKFLOW_NESTED_ERROR_GREAT_GRANDCHILD: &str =
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
+const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
@@ -478,18 +479,19 @@ fn graph_from_fixture(graph_json: &str) -> ExecutionGraph {
     serde_json::from_str(graph_json).expect("fixture parses")
 }
 
-fn finish_breakpoint_json() -> String {
-    let mut graph: Value = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+fn direct_breakpoint_json(graph_json: &str, step_id: &str) -> String {
+    let mut graph: Value = serde_json::from_str(graph_json).expect("fixture parses");
     graph["durable"] = serde_json::json!(true);
-    graph["steps"]["finish"]["breakpoint"] = serde_json::json!(true);
+    graph["steps"][step_id]["breakpoint"] = serde_json::json!(true);
     serde_json::to_string(&graph).expect("fixture serializes")
 }
 
+fn finish_breakpoint_json() -> String {
+    direct_breakpoint_json(SIMPLE_PASSTHROUGH, "finish")
+}
+
 fn delay_breakpoint_json() -> String {
-    let mut graph: Value = serde_json::from_str(DELAY_DYNAMIC).expect("fixture parses");
-    graph["durable"] = serde_json::json!(true);
-    graph["steps"]["delay"]["breakpoint"] = serde_json::json!(true);
-    serde_json::to_string(&graph).expect("fixture serializes")
+    direct_breakpoint_json(DELAY_DYNAMIC, "delay")
 }
 
 fn embed_workflow_breakpoint_parent_json() -> String {
@@ -1350,6 +1352,18 @@ fn components_sdk_input(workflow_input: &[u8]) -> Vec<u8> {
     .expect("components sdk input serializes")
 }
 
+fn remove_direct_workflow_id_variable(value: &mut Value) {
+    if let Some(variables) = value.get_mut("variables").and_then(Value::as_object_mut) {
+        variables.remove("_workflow_id");
+    }
+    if let Some(variables) = value
+        .pointer_mut("/workflow/inputs/variables")
+        .and_then(Value::as_object_mut)
+    {
+        variables.remove("_workflow_id");
+    }
+}
+
 fn normalized_event_payload(subtype: &str, mut payload: Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("timestamp_ms");
@@ -1358,6 +1372,11 @@ fn normalized_event_payload(subtype: &str, mut payload: Value) -> Value {
         }
         if subtype == "external_input_requested" {
             object.remove("signal_id");
+        }
+        if subtype == "breakpoint_hit"
+            && let Some(inputs) = object.get_mut("inputs")
+        {
+            remove_direct_workflow_id_variable(inputs);
         }
         if object.get("step_type").and_then(Value::as_str) == Some("WaitForSignal") {
             if let Some(inputs) = object.get_mut("inputs").and_then(Value::as_object_mut) {
@@ -1777,6 +1796,210 @@ fn direct_wasm_matches_components_finish_breakpoint_pause_resume() {
     assert_eq!(direct_resumed.suspended_count, 0);
     assert!(components_resumed.signal_acks.is_empty());
     assert!(direct_resumed.signal_acks.is_empty());
+}
+
+#[test]
+fn direct_wasm_matches_components_direct_control_breakpoint_pause_resume() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    struct BreakpointCase {
+        name: &'static str,
+        graph_json: &'static str,
+        step_id: &'static str,
+        step_type: &'static str,
+        workflow_input: &'static [u8],
+        input_pointer: &'static str,
+        input_value: Value,
+        resumes_with_failure: bool,
+    }
+
+    let cases = vec![
+        BreakpointCase {
+            name: "conditional-breakpoint",
+            graph_json: CONDITIONAL_WORKFLOW,
+            step_id: "check",
+            step_type: "Conditional",
+            workflow_input: br#"{"flag":true}"#,
+            input_pointer: "/data/flag",
+            input_value: serde_json::json!(true),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "filter-breakpoint",
+            graph_json: FILTER_SIMPLE,
+            step_id: "filter",
+            step_type: "Filter",
+            workflow_input: br#"{"items":[{"status":"active"},{"status":"archived"}]}"#,
+            input_pointer: "/0/status",
+            input_value: serde_json::json!("active"),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "switch-value-breakpoint",
+            graph_json: SWITCH_VALUE_SIMPLE,
+            step_id: "switch",
+            step_type: "Switch",
+            workflow_input: br#"{"status":"active"}"#,
+            input_pointer: "/value",
+            input_value: serde_json::json!("active"),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "switch-routing-breakpoint",
+            graph_json: SWITCH_ROUTING_SIMPLE,
+            step_id: "switch",
+            step_type: "Switch",
+            workflow_input: br#"{"status":"active"}"#,
+            input_pointer: "/value",
+            input_value: serde_json::json!("active"),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "group-by-breakpoint",
+            graph_json: GROUP_BY_SIMPLE,
+            step_id: "group",
+            step_type: "GroupBy",
+            workflow_input: br#"{"items":[{"status":"active"},{"status":"archived"}]}"#,
+            input_pointer: "/0/status",
+            input_value: serde_json::json!("active"),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "log-breakpoint",
+            graph_json: LOG_ALL_LEVELS,
+            step_id: "log_debug",
+            step_type: "Log",
+            workflow_input: br#"{"message":"hello"}"#,
+            input_pointer: "/debugData/message",
+            input_value: serde_json::json!("hello"),
+            resumes_with_failure: false,
+        },
+        BreakpointCase {
+            name: "error-breakpoint",
+            graph_json: ERROR_DIRECT_SIMPLE,
+            step_id: "fail",
+            step_type: "Error",
+            workflow_input: br#"{"requestId":"r-1"}"#,
+            input_pointer: "/requestId",
+            input_value: serde_json::json!("r-1"),
+            resumes_with_failure: true,
+        },
+    ];
+
+    for case in cases {
+        let graph_json = direct_breakpoint_json(case.graph_json, case.step_id);
+        let components_artifact = compile_components_artifact(case.name, &graph_json);
+        let direct_artifact = compile_direct_artifact(&components_dir, case.name, &graph_json);
+        assert_eq!(
+            direct_artifact.compiler_mode,
+            WorkflowCompilerMode::DirectWasm
+        );
+
+        let components_input = components_sdk_input(case.workflow_input);
+        let components_paused = execute_artifact_with_debug_mode(
+            &components_artifact,
+            &format!("ab-components-{}-pause", case.name),
+            &components_input,
+        );
+        let direct_paused = execute_artifact_with_debug_mode(
+            &direct_artifact.path,
+            &format!("ab-direct-{}-pause", case.name),
+            case.workflow_input,
+        );
+
+        assert!(
+            components_paused.status_success,
+            "components artifact did not suspend cleanly for {}:\n{}",
+            case.name, components_paused.stderr
+        );
+        assert!(
+            direct_paused.status_success,
+            "direct artifact did not suspend cleanly for {}:\n{}",
+            case.name, direct_paused.stderr
+        );
+        assert!(components_paused.output_json.is_none());
+        assert!(direct_paused.output_json.is_none());
+        assert!(components_paused.error_json.is_none());
+        assert!(direct_paused.error_json.is_none());
+
+        let expected_checkpoint = vec![(
+            format!("breakpoint::{}", case.step_id),
+            br#""breakpoint_hit""#.to_vec(),
+        )];
+        assert_eq!(
+            normalized_checkpoints(&components_paused.checkpoints),
+            expected_checkpoint
+        );
+        assert_eq!(
+            normalized_checkpoints(&direct_paused.checkpoints),
+            expected_checkpoint
+        );
+        assert_eq!(
+            normalized_events(&components_paused.events),
+            normalized_events(&direct_paused.events)
+        );
+        let direct_pause_events = normalized_events(&direct_paused.events);
+        let breakpoint_events = direct_pause_events
+            .iter()
+            .filter(|(subtype, _)| subtype == "breakpoint_hit")
+            .collect::<Vec<_>>();
+        assert_eq!(breakpoint_events.len(), 1);
+        assert_eq!(breakpoint_events[0].1["step_type"], case.step_type);
+        assert_eq!(
+            breakpoint_events[0].1["inputs"].pointer(case.input_pointer),
+            Some(&case.input_value),
+            "{} breakpoint inputs should match generated code",
+            case.name
+        );
+        assert_eq!(components_paused.suspended_count, 1);
+        assert_eq!(direct_paused.suspended_count, 1);
+        let expected_pause_ack = vec![SignalAckRequest {
+            signal_type: "pause".to_string(),
+        }];
+        assert_eq!(components_paused.signal_acks, expected_pause_ack);
+        assert_eq!(direct_paused.signal_acks, expected_pause_ack);
+
+        let components_resumed = execute_artifact_with_options(
+            &components_artifact,
+            &format!("ab-components-{}-resume", case.name),
+            &components_input,
+            ExecuteOptions {
+                preloaded_checkpoints: expected_checkpoint.clone(),
+                debug_mode: true,
+                ..ExecuteOptions::default()
+            },
+        );
+        let direct_resumed = execute_artifact_with_options(
+            &direct_artifact.path,
+            &format!("ab-direct-{}-resume", case.name),
+            case.workflow_input,
+            ExecuteOptions {
+                preloaded_checkpoints: expected_checkpoint,
+                debug_mode: true,
+                ..ExecuteOptions::default()
+            },
+        );
+
+        if case.resumes_with_failure {
+            assert_failure_parity(case.name, 0, &components_resumed, &direct_resumed);
+        } else {
+            assert_success_parity(case.name, 0, &components_resumed, &direct_resumed);
+        }
+        assert!(
+            normalized_events(&direct_resumed.events)
+                .iter()
+                .all(|(subtype, _)| subtype != "breakpoint_hit"),
+            "resume from breakpoint checkpoint should not emit a second breakpoint event for {}",
+            case.name
+        );
+        assert_eq!(components_resumed.suspended_count, 0);
+        assert_eq!(direct_resumed.suspended_count, 0);
+        assert!(components_resumed.signal_acks.is_empty());
+        assert!(direct_resumed.signal_acks.is_empty());
+    }
 }
 
 #[test]

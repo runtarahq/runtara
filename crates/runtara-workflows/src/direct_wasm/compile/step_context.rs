@@ -5,7 +5,7 @@
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
 use super::abi::{emit_retptr_error_or_return, load_retptr_list, push_retptr_arg};
-use super::debug::emit_step_debug_event;
+use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
@@ -23,6 +23,7 @@ pub(super) fn emit_step_context_plan(
     step_id: &str,
     step_function_index: u32,
     step_config_id: u32,
+    breakpoint: bool,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -38,6 +39,19 @@ pub(super) fn emit_step_context_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
 ) {
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
     emit_step_debug_event(
         body,
         indices,

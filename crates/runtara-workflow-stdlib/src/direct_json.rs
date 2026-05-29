@@ -708,11 +708,50 @@ impl DirectJsonManifest {
             .cloned()
             .unwrap_or_default();
         let inputs = match step.step_type.as_str() {
+            "Conditional" => source.clone(),
             "Finish" => self
                 .finish_mapping(step.id.as_str())
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
                 .transpose()?
                 .unwrap_or_else(|| Value::Object(Map::new())),
+            "Filter" => {
+                let filter = self
+                    .filter_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
+                filter
+                    .value
+                    .get("value")
+                    .ok_or_else(|| "Filter config missing value".to_string())
+                    .and_then(|value| apply_mapping_value(value, &source))?
+            }
+            "Switch" => {
+                let switch = self
+                    .switch_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
+                switch_debug_inputs(&switch.value, &source)?
+            }
+            "GroupBy" => {
+                let group_by = self
+                    .group_by_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
+                group_by
+                    .value
+                    .get("value")
+                    .ok_or_else(|| "GroupBy config missing value".to_string())
+                    .and_then(|value| apply_mapping_value(value, &source))?
+            }
+            "Log" => {
+                let log = self
+                    .log_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
+                apply_log(&log.value, &source)?.context
+            }
+            "Error" => {
+                let error = self
+                    .error_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
+                apply_error(&error.value, &source)?.context
+            }
             "EmbedWorkflow" => source.get("data").cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         };
@@ -5621,6 +5660,207 @@ mod tests {
         assert_eq!(event["step_type"], json!("Finish"));
         assert_eq!(event["inputs"], json!({ "outputs": { "value": "mapped" } }));
         assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
+    }
+
+    #[test]
+    fn direct_control_breakpoint_events_use_generated_step_inputs() {
+        let source = build_source(
+            br#"{"status":"active","items":[{"status":"active"},{"status":"archived"}],"input":"hello"}"#,
+            br#"{"tenant":"t1"}"#,
+            br#"{"before":{"outputs":true}}"#,
+        )
+        .expect("source");
+
+        let cases = [
+            (
+                "Conditional",
+                "check",
+                json!({
+                    "conditions": [{
+                        "id": 0,
+                        "ownerId": "check",
+                        "ownerType": "Conditional",
+                        "purpose": "conditional.condition",
+                        "value": {
+                            "type": "operation",
+                            "op": "EQ",
+                            "arguments": [
+                                { "valueType": "reference", "value": "data.status" },
+                                { "valueType": "immediate", "value": "active" }
+                            ]
+                        }
+                    }]
+                }),
+                json!({
+                    "data": {
+                        "status": "active",
+                        "items": [
+                            { "status": "active" },
+                            { "status": "archived" }
+                        ],
+                        "input": "hello"
+                    },
+                    "variables": { "tenant": "t1" },
+                    "steps": { "before": { "outputs": true } },
+                    "workflow": {
+                        "inputs": {
+                            "data": {
+                                "status": "active",
+                                "items": [
+                                    { "status": "active" },
+                                    { "status": "archived" }
+                                ],
+                                "input": "hello"
+                            },
+                            "variables": { "tenant": "t1" }
+                        }
+                    }
+                }),
+            ),
+            (
+                "Filter",
+                "filter",
+                json!({
+                    "filters": [{
+                        "id": 0,
+                        "stepId": "filter",
+                        "name": "Filter Active Items",
+                        "stepType": "Filter",
+                        "purpose": "filter.config",
+                        "value": {
+                            "value": { "valueType": "reference", "value": "data.items" },
+                            "condition": {
+                                "type": "operation",
+                                "op": "EQ",
+                                "arguments": [
+                                    { "valueType": "reference", "value": "item.status" },
+                                    { "valueType": "immediate", "value": "active" }
+                                ]
+                            }
+                        }
+                    }]
+                }),
+                json!([
+                    { "status": "active" },
+                    { "status": "archived" }
+                ]),
+            ),
+            (
+                "Switch",
+                "switch",
+                json!({
+                    "switches": [{
+                        "id": 0,
+                        "stepId": "switch",
+                        "name": "Classify Status",
+                        "stepType": "Switch",
+                        "purpose": "switch.config",
+                        "value": {
+                            "value": { "valueType": "reference", "value": "data.status" },
+                            "cases": [{
+                                "matchType": "EQ",
+                                "match": "active",
+                                "output": { "bucket": "ready" }
+                            }],
+                            "default": { "bucket": "other" }
+                        }
+                    }]
+                }),
+                json!({
+                    "value": "active",
+                    "cases": [{
+                        "matchType": "EQ",
+                        "match": "active",
+                        "output": { "bucket": "ready" }
+                    }],
+                    "default": { "bucket": "other" }
+                }),
+            ),
+            (
+                "GroupBy",
+                "group",
+                json!({
+                    "groupBys": [{
+                        "id": 0,
+                        "stepId": "group",
+                        "name": "Group by Status",
+                        "stepType": "GroupBy",
+                        "purpose": "groupBy.config",
+                        "value": {
+                            "value": { "valueType": "reference", "value": "data.items" },
+                            "key": "status"
+                        }
+                    }]
+                }),
+                json!([
+                    { "status": "active" },
+                    { "status": "archived" }
+                ]),
+            ),
+            (
+                "Log",
+                "log",
+                json!({
+                    "logs": [{
+                        "id": 0,
+                        "stepId": "log",
+                        "name": "Log Start",
+                        "stepType": "Log",
+                        "purpose": "log.config",
+                        "value": {
+                            "id": "log",
+                            "stepType": "Log",
+                            "message": "Starting workflow",
+                            "context": {
+                                "input": { "valueType": "reference", "value": "data.input" },
+                                "static": { "valueType": "immediate", "value": 42 }
+                            }
+                        }
+                    }]
+                }),
+                json!({ "input": "hello", "static": 42 }),
+            ),
+            (
+                "Error",
+                "fail",
+                json!({
+                    "errors": [{
+                        "id": 0,
+                        "stepId": "fail",
+                        "name": "Fail Fast",
+                        "stepType": "Error",
+                        "purpose": "error.config",
+                        "value": {
+                            "id": "fail",
+                            "stepType": "Error",
+                            "code": "TEMPORARY_FAILURE",
+                            "message": "Try again later",
+                            "context": {
+                                "input": { "valueType": "reference", "value": "data.input" },
+                                "static": { "valueType": "immediate", "value": 42 }
+                            }
+                        }
+                    }]
+                }),
+                json!({ "input": "hello", "static": 42 }),
+            ),
+        ];
+
+        for (step_type, step_id, collections, expected_inputs) in cases {
+            let manifest =
+                DirectJsonManifest::parse(&debug_manifest(step_type, step_id, None, collections))
+                    .expect("manifest");
+            let event = manifest
+                .breakpoint_event(step_id, &source)
+                .expect("breakpoint event");
+            let event: Value = serde_json::from_slice(&event).expect("event json");
+
+            assert_eq!(
+                event["inputs"], expected_inputs,
+                "{step_type} breakpoint inputs should match generated code"
+            );
+            assert_eq!(event["step_type"], json!(step_type));
+        }
     }
 
     #[test]

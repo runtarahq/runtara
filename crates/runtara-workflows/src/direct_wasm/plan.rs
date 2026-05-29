@@ -18,16 +18,19 @@ pub(super) enum DirectRunPlan {
     Filter {
         step_id: String,
         filter_id: u32,
+        breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
     },
     SwitchValue {
         step_id: String,
         switch_id: u32,
+        breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
     },
     SwitchRoute {
         step_id: String,
         switch_id: u32,
+        breakpoint: bool,
         branches: Vec<DirectSwitchRoutePlan>,
         default_plan: Box<DirectRunPlan>,
     },
@@ -38,6 +41,7 @@ pub(super) enum DirectRunPlan {
     GroupBy {
         step_id: String,
         group_id: u32,
+        breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
     },
     Split {
@@ -79,7 +83,9 @@ pub(super) enum DirectRunPlan {
         next_plan: Box<DirectRunPlan>,
     },
     Log {
+        step_id: String,
         log_id: u32,
+        breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
     },
     Agent {
@@ -97,10 +103,12 @@ pub(super) enum DirectRunPlan {
     Error {
         step_id: String,
         error_id: u32,
+        breakpoint: bool,
     },
     Conditional {
         step_id: String,
         condition_id: u32,
+        breakpoint: bool,
         true_plan: Box<DirectRunPlan>,
         false_plan: Box<DirectRunPlan>,
     },
@@ -212,6 +220,15 @@ fn step_run_plan_without_on_error(
     step_run_plan_inner(graph, child_workflows, step_id, stack, false)
 }
 
+fn step_breakpoint_enabled(graph: &DirectGraphManifest, step: &DirectStepManifest) -> bool {
+    graph.durable
+        && step
+            .body
+            .get("breakpoint")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn step_run_plan_inner(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -235,12 +252,7 @@ fn step_run_plan_inner(
         "Finish" => Ok(DirectRunPlan::Finish {
             step_id: step_id.to_string(),
             mapping_id: finish_mapping_id(graph, step_id)?,
-            breakpoint: graph.durable
-                && step
-                    .body
-                    .get("breakpoint")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
+            breakpoint: step_breakpoint_enabled(graph, step),
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;
@@ -250,6 +262,7 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::Filter {
                 step_id: step_id.to_string(),
                 filter_id,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -287,6 +300,7 @@ fn step_run_plan_inner(
                 Ok(DirectRunPlan::SwitchRoute {
                     step_id: step_id.to_string(),
                     switch_id,
+                    breakpoint: step_breakpoint_enabled(graph, step),
                     branches,
                     default_plan: Box::new(default_plan),
                 })
@@ -297,6 +311,7 @@ fn step_run_plan_inner(
                 Ok(DirectRunPlan::SwitchValue {
                     step_id: step_id.to_string(),
                     switch_id,
+                    breakpoint: step_breakpoint_enabled(graph, step),
                     next_plan: Box::new(next_plan),
                 })
             }
@@ -309,6 +324,7 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
                 group_id,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -378,12 +394,7 @@ fn step_run_plan_inner(
                         .get("durable")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(true),
-                breakpoint: graph.durable
-                    && step
-                        .body
-                        .get("breakpoint")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                breakpoint: step_breakpoint_enabled(graph, step),
                 max_retries: embed_workflow_effective_max_retries(step),
                 retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
                 child_plan: Box::new(child_plan),
@@ -400,12 +411,7 @@ fn step_run_plan_inner(
                 step_id: step_id.to_string(),
                 delay_id: delay.id,
                 durable: delay.durable,
-                breakpoint: graph.durable
-                    && step
-                        .body
-                        .get("breakpoint")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -425,12 +431,7 @@ fn step_run_plan_inner(
 
             Ok(DirectRunPlan::WaitForSignal {
                 step_id: step_id.to_string(),
-                breakpoint: graph.durable
-                    && step
-                        .body
-                        .get("breakpoint")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                breakpoint: step_breakpoint_enabled(graph, step),
                 on_wait_plan: on_wait_plan.map(Box::new),
                 next_plan: Box::new(next_plan),
             })
@@ -441,7 +442,9 @@ fn step_run_plan_inner(
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
             Ok(DirectRunPlan::Log {
+                step_id: step_id.to_string(),
                 log_id,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
             })
         }
@@ -475,6 +478,7 @@ fn step_run_plan_inner(
         "Error" => Ok(DirectRunPlan::Error {
             step_id: step_id.to_string(),
             error_id: error_id(graph, step_id)?,
+            breakpoint: step_breakpoint_enabled(graph, step),
         }),
         "Conditional" => {
             let condition_id = graph
@@ -503,6 +507,7 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::Conditional {
                 step_id: step_id.to_string(),
                 condition_id,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 true_plan: Box::new(true_plan),
                 false_plan: Box::new(false_plan),
             })

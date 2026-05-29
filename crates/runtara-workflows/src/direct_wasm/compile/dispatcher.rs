@@ -102,6 +102,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::Filter {
             step_id,
             filter_id,
+            breakpoint,
             next_plan,
         } => {
             emit_step_context_plan(
@@ -113,6 +114,7 @@ pub(super) fn emit_run_plan_mapping(
                 step_id,
                 indices.stdlib_filter,
                 *filter_id,
+                *breakpoint,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -132,6 +134,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::SwitchValue {
             step_id,
             switch_id,
+            breakpoint,
             next_plan,
         } => {
             emit_step_context_plan(
@@ -143,6 +146,7 @@ pub(super) fn emit_run_plan_mapping(
                 step_id,
                 indices.stdlib_value_switch,
                 *switch_id,
+                *breakpoint,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -162,6 +166,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::SwitchRoute {
             step_id,
             switch_id,
+            breakpoint,
             branches,
             default_plan,
         } => {
@@ -173,6 +178,7 @@ pub(super) fn emit_run_plan_mapping(
                 variables,
                 step_id,
                 *switch_id,
+                *breakpoint,
                 branches,
                 default_plan,
                 data_ptr_local,
@@ -220,6 +226,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::GroupBy {
             step_id,
             group_id,
+            breakpoint,
             next_plan,
         } => {
             emit_step_context_plan(
@@ -231,6 +238,7 @@ pub(super) fn emit_run_plan_mapping(
                 step_id,
                 indices.stdlib_group_by,
                 *group_id,
+                *breakpoint,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -418,14 +426,21 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
             );
         }
-        DirectRunPlan::Log { log_id, next_plan } => {
+        DirectRunPlan::Log {
+            step_id,
+            log_id,
+            breakpoint,
+            next_plan,
+        } => {
             emit_log_plan(
                 body,
                 indices,
                 static_data,
                 track_events,
                 variables,
+                step_id,
                 *log_id,
+                *breakpoint,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
@@ -485,7 +500,11 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
             );
         }
-        DirectRunPlan::Error { step_id, error_id } => {
+        DirectRunPlan::Error {
+            step_id,
+            error_id,
+            breakpoint,
+        } => {
             emit_error_plan(
                 body,
                 indices,
@@ -493,6 +512,7 @@ pub(super) fn emit_run_plan_mapping(
                 track_events,
                 step_id,
                 *error_id,
+                *breakpoint,
                 source_ptr_local,
                 source_len_local,
                 output_ptr_local,
@@ -504,9 +524,23 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::Conditional {
             step_id,
             condition_id,
+            breakpoint,
             true_plan,
             false_plan,
         } => {
+            emit_step_breakpoint(
+                body,
+                indices,
+                static_data,
+                *breakpoint,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+            );
             emit_step_debug_event(
                 body,
                 indices,

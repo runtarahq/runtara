@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Structural tests for the direct workflow compiler.
 
+use std::collections::HashMap;
 use std::fs;
 use std::process::Stdio;
 
@@ -103,6 +104,29 @@ fn fixture(name: &str) -> ExecutionGraph {
         other => panic!("unknown fixture {other}"),
     };
     serde_json::from_str(json).expect("fixture should parse")
+}
+
+fn enable_step_breakpoint(graph: &mut ExecutionGraph, step_id: &str) {
+    match graph
+        .steps
+        .get_mut(step_id)
+        .unwrap_or_else(|| panic!("missing fixture step '{step_id}'"))
+    {
+        runtara_dsl::Step::Finish(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Agent(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Conditional(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Split(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Switch(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::EmbedWorkflow(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::While(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Log(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Error(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Filter(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::GroupBy(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::Delay(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::WaitForSignal(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::AiAgent(step) => step.breakpoint = Some(true),
+    }
 }
 
 fn non_durable_agent_graph() -> ExecutionGraph {
@@ -543,6 +567,140 @@ fn imported_wit_function<'a>(
             _ => None,
         })
         .expect("imported WIT function")
+}
+
+fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<u32>) {
+    let mut imports = HashMap::new();
+    let mut next_function_index = 0;
+    let mut run_calls = Vec::new();
+    let mut code_body_index = 0;
+
+    for payload in Parser::new(0).parse_all(core) {
+        match payload.expect("core wasm payload") {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        imports.insert(
+                            format!("{}::{}", import.module, import.name),
+                            next_function_index,
+                        );
+                        next_function_index += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if code_body_index == 0 {
+                    for operator in body.get_operators_reader().expect("operators") {
+                        if let Operator::Call { function_index } = operator.expect("operator") {
+                            run_calls.push(function_index);
+                        }
+                    }
+                }
+                code_body_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    (imports, run_calls)
+}
+
+fn direct_core_import(imports: &HashMap<String, u32>, module: &str, name: &str) -> u32 {
+    *imports
+        .get(&format!("{module}::{name}"))
+        .unwrap_or_else(|| panic!("missing import {module}::{name}"))
+}
+
+fn direct_core_call_position(run_calls: &[u32], import_index: u32) -> usize {
+    run_calls
+        .iter()
+        .position(|call| *call == import_index)
+        .unwrap_or_else(|| panic!("missing call to import index {import_index}: {run_calls:?}"))
+}
+
+fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
+    match run_plan {
+        DirectRunPlan::Finish { breakpoint, .. }
+        | DirectRunPlan::Filter { breakpoint, .. }
+        | DirectRunPlan::SwitchValue { breakpoint, .. }
+        | DirectRunPlan::SwitchRoute { breakpoint, .. }
+        | DirectRunPlan::GroupBy { breakpoint, .. }
+        | DirectRunPlan::EmbedWorkflow { breakpoint, .. }
+        | DirectRunPlan::Delay { breakpoint, .. }
+        | DirectRunPlan::WaitForSignal { breakpoint, .. }
+        | DirectRunPlan::Log { breakpoint, .. }
+        | DirectRunPlan::Error { breakpoint, .. }
+        | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
+        DirectRunPlan::Split { .. }
+        | DirectRunPlan::While { .. }
+        | DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::Agent { .. } => None,
+    }
+}
+
+fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str) {
+    let (imports, run_calls) = direct_core_imports_and_run_calls(core);
+    let debug_mode_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "debug-mode-enabled",
+        ),
+    );
+    let breakpoint_key_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "breakpoint-key",
+        ),
+    );
+    let checkpoint_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "checkpoint",
+        ),
+    );
+    let breakpoint_event_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "breakpoint-event",
+        ),
+    );
+    let custom_event_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "custom-event",
+        ),
+    );
+    let breakpoint_pause_position = direct_core_call_position(
+        &run_calls,
+        direct_core_import(
+            &imports,
+            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "breakpoint-pause",
+        ),
+    );
+    let target_position =
+        direct_core_call_position(&run_calls, direct_core_import(&imports, module, name));
+
+    assert!(
+        debug_mode_position < breakpoint_key_position
+            && breakpoint_key_position < checkpoint_position
+            && checkpoint_position < breakpoint_event_position
+            && breakpoint_event_position < custom_event_position
+            && custom_event_position < breakpoint_pause_position
+            && breakpoint_pause_position < target_position,
+        "breakpoint pause path should run before {module}::{name}: {run_calls:?}"
+    );
 }
 
 #[test]
@@ -2904,6 +3062,104 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
         saw_mapping_id,
         "Finish mapping id should be passed to stdlib"
     );
+}
+
+#[test]
+fn direct_core_run_lowers_conditional_breakpoint_before_condition_eval() {
+    let mut graph = fixture("conditional");
+    graph.durable = Some(true);
+    enable_step_breakpoint(&mut graph, "check");
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    assert_eq!(
+        direct_run_plan_breakpoint(&core_config.run_plan),
+        Some(true),
+        "durable Conditional breakpoint should lower"
+    );
+
+    let (resolve, world) = build_direct_component_resolve().expect("resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Conditional breakpoint core module validates");
+
+    assert_direct_breakpoint_before_import(
+        &core,
+        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "eval-condition",
+    );
+}
+
+#[test]
+fn direct_core_run_lowers_step_context_breakpoints_before_step_helpers() {
+    for (fixture_name, step_id, helper_name) in [
+        ("filter", "filter", "filter"),
+        ("switch_value", "switch", "value-switch"),
+        ("switch_routing", "switch", "process-switch"),
+        ("group_by", "group", "group-by"),
+    ] {
+        let mut graph = fixture(fixture_name);
+        graph.durable = Some(true);
+        enable_step_breakpoint(&mut graph, step_id);
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        assert_eq!(
+            direct_run_plan_breakpoint(&core_config.run_plan),
+            Some(true),
+            "durable {fixture_name} breakpoint should lower"
+        );
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .unwrap_or_else(|_| panic!("{fixture_name} breakpoint core module validates"));
+
+        assert_direct_breakpoint_before_import(
+            &core,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            helper_name,
+        );
+    }
+}
+
+#[test]
+fn direct_core_run_lowers_log_and_error_breakpoints_before_side_effects() {
+    for (fixture_name, step_id, helper_name) in [
+        ("log", "simple_log", "log-event"),
+        ("error", "fail", "error-event"),
+    ] {
+        let mut graph = fixture(fixture_name);
+        graph.durable = Some(true);
+        enable_step_breakpoint(&mut graph, step_id);
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        assert_eq!(
+            direct_run_plan_breakpoint(&core_config.run_plan),
+            Some(true),
+            "durable {fixture_name} breakpoint should lower"
+        );
+
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .unwrap_or_else(|_| panic!("{fixture_name} breakpoint core module validates"));
+
+        assert_direct_breakpoint_before_import(
+            &core,
+            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            helper_name,
+        );
+    }
 }
 
 #[test]
@@ -7205,6 +7461,7 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
     let DirectRunPlan::Log {
         log_id: first_log_id,
         next_plan,
+        ..
     } = &core_config.run_plan
     else {
         panic!("expected first Log run plan");
@@ -7212,6 +7469,7 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
     let DirectRunPlan::Log {
         log_id: second_log_id,
         next_plan,
+        ..
     } = next_plan.as_ref()
     else {
         panic!("expected second Log run plan");
