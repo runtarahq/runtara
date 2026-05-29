@@ -125,6 +125,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   try `compile_workflow_direct` with the configured component directory and
   fall back to the existing Rust/codegen component compiler on unsupported
   graphs, missing direct components, or direct infrastructure errors.
+- Direct compile gate outcomes now emit OpenTelemetry metrics
+  (`runtara.compilation.direct.total` and
+  `runtara.compilation.direct.duration`) labeled by outcome and fallback
+  reason, so rollout dashboards can distinguish success, unsupported fallback,
+  missing component configuration, and direct infrastructure errors.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1994,8 +1999,9 @@ Current status:
   fallback to the existing compiler. It uses
   `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` when set, otherwise the shared
   `RUNTARA_AGENT_COMPONENTS_DIR` bundle.
-- Tenant/workflow allowlists, operator-visible fallback diagnostics, and
-  direct-vs-fallback metrics remain pending.
+- Direct compile outcome/duration metrics are emitted with outcome/reason
+  labels. Tenant/workflow allowlists and richer operator-visible fallback
+  diagnostics remain pending.
 
 ### Phase 15: Default Direct Mode
 

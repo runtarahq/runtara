@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -11,6 +12,7 @@ use crate::api::repositories::workflows::{
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
 use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
+use opentelemetry::KeyValue;
 use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
@@ -110,6 +112,7 @@ fn compile_workflow_with_direct_fallback(
 ) -> std::io::Result<NativeCompilationResult> {
     if settings.enabled {
         if let Some(components_dir) = settings.components_dir {
+            let direct_start = Instant::now();
             let options = DirectWorkflowCompileOptions {
                 output_dir: direct_output_dir(&input.tenant_id),
                 components_dir,
@@ -117,6 +120,7 @@ fn compile_workflow_with_direct_fallback(
             };
             match compile_workflow_direct(input.clone(), options) {
                 Ok(result) => {
+                    record_direct_compilation_outcome("success", "none", direct_start.elapsed());
                     info!(
                         workflow_id = %input.workflow_id,
                         version = input.version,
@@ -126,6 +130,8 @@ fn compile_workflow_with_direct_fallback(
                     return Ok(result);
                 }
                 Err(err) => {
+                    let reason = direct_compile_fallback_reason(&err);
+                    record_direct_compilation_outcome("fallback", reason, direct_start.elapsed());
                     warn!(
                         workflow_id = %input.workflow_id,
                         version = input.version,
@@ -135,6 +141,7 @@ fn compile_workflow_with_direct_fallback(
                 }
             }
         } else {
+            record_direct_compilation_outcome("fallback", "missing-components", Duration::ZERO);
             warn!(
                 workflow_id = %input.workflow_id,
                 version = input.version,
@@ -144,6 +151,31 @@ fn compile_workflow_with_direct_fallback(
     }
 
     compile_workflow(input)
+}
+
+fn direct_compile_fallback_reason(err: &std::io::Error) -> &'static str {
+    if err.kind() == std::io::ErrorKind::Unsupported {
+        "unsupported"
+    } else {
+        "direct-error"
+    }
+}
+
+fn record_direct_compilation_outcome(
+    outcome: &'static str,
+    reason: &'static str,
+    duration: Duration,
+) {
+    if let Some(metrics) = crate::observability::metrics() {
+        let attrs = [
+            KeyValue::new("outcome", outcome),
+            KeyValue::new("reason", reason),
+        ];
+        metrics.direct_compilations_total.add(1, &attrs);
+        metrics
+            .direct_compilation_duration
+            .record(duration.as_secs_f64(), &attrs);
+    }
 }
 
 fn direct_output_dir(tenant_id: &str) -> PathBuf {
@@ -1008,6 +1040,15 @@ mod tests {
             settings.components_dir.as_deref(),
             Some(std::path::Path::new("/opt/runtara/agents"))
         );
+    }
+
+    #[test]
+    fn direct_compile_fallback_reason_classifies_unsupported() {
+        let unsupported = std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported");
+        let other = std::io::Error::other("wac failed");
+
+        assert_eq!(direct_compile_fallback_reason(&unsupported), "unsupported");
+        assert_eq!(direct_compile_fallback_reason(&other), "direct-error");
     }
 
     // =========================================================================

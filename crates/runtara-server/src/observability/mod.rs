@@ -149,6 +149,8 @@ pub struct Metrics {
     pub compilations_active: UpDownCounter<i64>,
     pub compilation_duration: Histogram<f64>,
     pub compilation_queue_size: UpDownCounter<i64>,
+    pub direct_compilations_total: Counter<u64>,
+    pub direct_compilation_duration: Histogram<f64>,
 
     // Trigger worker metrics
     pub trigger_events_total: Counter<u64>,
@@ -211,6 +213,17 @@ impl Metrics {
         let compilation_queue_size = meter
             .i64_up_down_counter("runtara.compilation.queue.size")
             .with_description("Number of pending compilations in queue")
+            .build();
+
+        let direct_compilations_total = meter
+            .u64_counter("runtara.compilation.direct.total")
+            .with_description("Direct workflow compile attempts by outcome")
+            .build();
+
+        let direct_compilation_duration = meter
+            .f64_histogram("runtara.compilation.direct.duration")
+            .with_description("Direct workflow compile attempt duration in seconds")
+            .with_unit("s")
             .build();
 
         // Trigger worker metrics
@@ -285,6 +298,8 @@ impl Metrics {
             compilations_active,
             compilation_duration,
             compilation_queue_size,
+            direct_compilations_total,
+            direct_compilation_duration,
             trigger_events_total,
             trigger_events_failed,
             trigger_processing_duration,
