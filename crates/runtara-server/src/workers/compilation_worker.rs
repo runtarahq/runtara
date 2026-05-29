@@ -12,7 +12,9 @@ use tracing::{error, info, instrument, warn};
 
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::repositories::workflows::workflow_definition_checksum;
-use crate::api::services::compilation::CompilationService;
+use crate::api::services::compilation::{
+    CompilationService, direct_compilation_settings_from_config,
+};
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
@@ -110,7 +112,8 @@ pub async fn run(
         repository.clone(),
         config.connection_service_url.clone(),
         runtime_client,
-    );
+    )
+    .with_direct_compilation(direct_compilation_settings_from_config());
     if let Some(catalog) = agent_catalog {
         compilation_service = compilation_service.with_agent_catalog(catalog);
     }

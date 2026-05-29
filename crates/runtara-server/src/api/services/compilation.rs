@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -14,7 +15,10 @@ use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::compile::ProgressCallback;
-use runtara_workflows::{ChildWorkflowInput, CompilationInput, compile_workflow};
+use runtara_workflows::{
+    ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
+    compile_workflow, compile_workflow_direct,
+};
 
 /// Global semaphore limiting concurrent compilations across all code paths.
 /// Prevents OOM when multiple compilations are triggered simultaneously.
@@ -64,6 +68,99 @@ fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
 }
 
+/// Disabled-by-default direct WASM compilation settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectCompilationSettings {
+    /// Whether the service should try direct compilation before Rust/codegen.
+    pub enabled: bool,
+    /// Directory containing prebuilt shared workflow and agent components.
+    pub components_dir: Option<PathBuf>,
+}
+
+impl DirectCompilationSettings {
+    /// Return settings that keep the existing Rust/codegen component pipeline.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            components_dir: None,
+        }
+    }
+
+    /// Return settings that try direct compilation with fallback.
+    pub fn enabled(components_dir: Option<PathBuf>) -> Self {
+        Self {
+            enabled: true,
+            components_dir,
+        }
+    }
+}
+
+/// Build direct compilation settings from the process configuration.
+pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
+    DirectCompilationSettings {
+        enabled: crate::config::direct_wasm_compile_enabled(),
+        components_dir: crate::config::direct_wasm_components_dir(),
+    }
+}
+
+fn compile_workflow_with_direct_fallback(
+    input: CompilationInput,
+    source_checksum: String,
+    settings: DirectCompilationSettings,
+) -> std::io::Result<NativeCompilationResult> {
+    if settings.enabled {
+        if let Some(components_dir) = settings.components_dir {
+            let options = DirectWorkflowCompileOptions {
+                output_dir: direct_output_dir(&input.tenant_id),
+                components_dir,
+                source_checksum: Some(source_checksum),
+            };
+            match compile_workflow_direct(input.clone(), options) {
+                Ok(result) => {
+                    info!(
+                        workflow_id = %input.workflow_id,
+                        version = input.version,
+                        binary_size = result.binary_size,
+                        "Direct WASM workflow compilation succeeded"
+                    );
+                    return Ok(result);
+                }
+                Err(err) => {
+                    warn!(
+                        workflow_id = %input.workflow_id,
+                        version = input.version,
+                        error = %err,
+                        "Direct WASM workflow compilation failed; falling back to Rust/codegen compiler"
+                    );
+                }
+            }
+        } else {
+            warn!(
+                workflow_id = %input.workflow_id,
+                version = input.version,
+                "Direct WASM workflow compilation enabled but no component directory is configured; falling back to Rust/codegen compiler"
+            );
+        }
+    }
+
+    compile_workflow(input)
+}
+
+fn direct_output_dir(tenant_id: &str) -> PathBuf {
+    data_dir().join("workflow-builds-direct").join(tenant_id)
+}
+
+fn data_dir() -> PathBuf {
+    let raw = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+    if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&raw))
+            .unwrap_or(raw)
+    }
+}
+
 /// Service for workflow compilation operations
 pub struct CompilationService {
     repository: Arc<WorkflowRepository>,
@@ -88,6 +185,8 @@ pub struct CompilationService {
     /// `ai-tools::text-completion`) see a populated value rather than the
     /// empty stub the workflow runner cannot fill in from inside the WASM.
     connections_facade: Option<Arc<runtara_connections::ConnectionsFacade>>,
+    /// Optional direct WASM compiler gate. Disabled by default.
+    direct_compilation: DirectCompilationSettings,
 }
 
 impl CompilationService {
@@ -103,6 +202,7 @@ impl CompilationService {
             agent_catalog: None,
             redis_manager: None,
             connections_facade: None,
+            direct_compilation: DirectCompilationSettings::disabled(),
         }
     }
 
@@ -135,6 +235,14 @@ impl CompilationService {
     /// state — the frontend will see `unknown` until the DB row lands.
     pub fn with_redis_manager(mut self, manager: ConnectionManager) -> Self {
         self.redis_manager = Some(manager);
+        self
+    }
+
+    /// Plug in direct WASM compilation settings. When enabled, the service
+    /// tries direct compilation and falls back to the existing compiler on
+    /// unsupported graphs or direct infrastructure errors.
+    pub fn with_direct_compilation(mut self, settings: DirectCompilationSettings) -> Self {
+        self.direct_compilation = settings;
         self
     }
 
@@ -388,7 +496,7 @@ impl CompilationService {
             }
         }
 
-        // 6. Compile to native binary
+        // 6. Compile to workflow.wasm
         // IMPORTANT: compile_workflow is a synchronous blocking function that runs cargo build.
         // We MUST use spawn_blocking to prevent blocking the tokio runtime, which would
         // starve all other async tasks (API handlers, database queries, etc.) during compilation.
@@ -402,19 +510,26 @@ impl CompilationService {
         })?;
         debug!(
             wait_ms = step_start.elapsed().as_millis(),
-            "compile: step 6 - semaphore acquired, compiling to native binary"
+            direct_wasm_enabled = self.direct_compilation.enabled,
+            "compile: step 6 - semaphore acquired, compiling workflow artifact"
         );
         let compile_start_time = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || compile_workflow(compilation_input))
-            .await
-            .map_err(|e| {
-                ServiceError::CompilationError(format!("Compilation task panicked: {}", e))
-            })?
-            .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
+        let direct_compilation = self.direct_compilation.clone();
+        let compile_source_checksum = source_checksum.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            compile_workflow_with_direct_fallback(
+                compilation_input,
+                compile_source_checksum,
+                direct_compilation,
+            )
+        })
+        .await
+        .map_err(|e| ServiceError::CompilationError(format!("Compilation task panicked: {}", e)))?
+        .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
         debug!(
             duration_ms = compile_start_time.elapsed().as_millis(),
             binary_size = result.binary_size,
-            "compile: step 6 completed - native binary compiled"
+            "compile: step 6 completed - workflow artifact compiled"
         );
 
         // spawn_blocking returned, so the build callbacks are done firing.
@@ -874,6 +989,25 @@ mod tests {
         let error: Box<dyn std::error::Error> =
             Box::new(ServiceError::CompilationError("test".to_string()));
         assert!(error.to_string().contains("Compilation error"));
+    }
+
+    #[test]
+    fn direct_compilation_settings_default_to_disabled() {
+        let settings = DirectCompilationSettings::disabled();
+
+        assert!(!settings.enabled);
+        assert!(settings.components_dir.is_none());
+    }
+
+    #[test]
+    fn direct_compilation_settings_keep_component_dir() {
+        let settings = DirectCompilationSettings::enabled(Some("/opt/runtara/agents".into()));
+
+        assert!(settings.enabled);
+        assert_eq!(
+            settings.components_dir.as_deref(),
+            Some(std::path::Path::new("/opt/runtara/agents"))
+        );
     }
 
     // =========================================================================

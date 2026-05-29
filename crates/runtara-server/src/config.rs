@@ -6,6 +6,8 @@ const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
 const RUNTARA_MCP_SESSION_STORE_ENV: &str = "RUNTARA_MCP_SESSION_STORE";
 const RUNTARA_MCP_SESSION_TTL_SECONDS_ENV: &str = "RUNTARA_MCP_SESSION_TTL_SECONDS";
+const RUNTARA_DIRECT_WASM_COMPILE_ENV: &str = "RUNTARA_DIRECT_WASM_COMPILE";
+const RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV: &str = "RUNTARA_DIRECT_WASM_COMPONENTS_DIR";
 const DEFAULT_MCP_SESSION_TTL_SECONDS: u64 = 86_400;
 
 /// Global application configuration.
@@ -51,6 +53,12 @@ pub struct Config {
     /// embedded wasmtime path instead of the legacy dispatcher image.
     /// See docs/wasm-components-migration-plan.md § 6.
     pub agent_components_dir: Option<std::path::PathBuf>,
+    /// Whether workflow compilation should try the direct WASM emitter before
+    /// falling back to the Rust/codegen component pipeline.
+    pub direct_wasm_compile: bool,
+    /// Directory containing prebuilt direct workflow stdlib/runtime components
+    /// plus agent components. Defaults to `agent_components_dir`.
+    pub direct_wasm_components_dir: Option<std::path::PathBuf>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -140,6 +148,13 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
+        let direct_wasm_compile = parse_bool_or(RUNTARA_DIRECT_WASM_COMPILE_ENV, false)?;
+        let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
+            std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
+                .ok()
+                .as_deref(),
+            agent_components_dir.as_deref(),
+        );
 
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
@@ -203,6 +218,8 @@ impl Config {
             object_model_url,
             agent_service_url,
             agent_components_dir,
+            direct_wasm_compile,
+            direct_wasm_components_dir,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -332,6 +349,17 @@ fn mcp_session_store_from_raw(raw: Option<&str>) -> Result<McpSessionStore, Conf
             "must be one of local/valkey",
         )),
     }
+}
+
+fn direct_wasm_components_dir_from_raw(
+    direct_components_dir: Option<&str>,
+    agent_components_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    direct_components_dir
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| agent_components_dir.map(std::path::Path::to_path_buf))
 }
 
 fn mcp_allowed_hosts_from_raw(raw: Option<&str>) -> Vec<String> {
@@ -467,6 +495,16 @@ pub fn object_model_bulk_request_limit() -> usize {
     )
 }
 
+/// Whether the server should try direct WASM workflow compilation.
+pub fn direct_wasm_compile_enabled() -> bool {
+    get().direct_wasm_compile
+}
+
+/// Directory containing components used by direct WASM static composition.
+pub fn direct_wasm_components_dir() -> Option<std::path::PathBuf> {
+    get().direct_wasm_components_dir.clone()
+}
+
 /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
 pub fn mcp_allowed_hosts() -> &'static [String] {
     &get().mcp_allowed_hosts
@@ -524,6 +562,30 @@ mod tests {
         }
         assert_eq!(parse_bool_or(name, true).ok(), Some(true));
         assert_eq!(parse_bool_or(name, false).ok(), Some(false));
+    }
+
+    #[test]
+    fn direct_wasm_components_dir_prefers_explicit_dir() {
+        let agent_dir = std::path::Path::new("/opt/runtara/agents");
+
+        assert_eq!(
+            direct_wasm_components_dir_from_raw(Some("/tmp/direct-components"), Some(agent_dir)),
+            Some(std::path::PathBuf::from("/tmp/direct-components"))
+        );
+    }
+
+    #[test]
+    fn direct_wasm_components_dir_falls_back_to_agent_dir() {
+        let agent_dir = std::path::Path::new("/opt/runtara/agents");
+
+        assert_eq!(
+            direct_wasm_components_dir_from_raw(Some("  "), Some(agent_dir)),
+            Some(agent_dir.to_path_buf())
+        );
+        assert_eq!(
+            direct_wasm_components_dir_from_raw(None, Some(agent_dir)),
+            Some(agent_dir.to_path_buf())
+        );
     }
 
     #[test]

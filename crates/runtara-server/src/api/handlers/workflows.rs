@@ -893,7 +893,10 @@ pub async fn compile_workflow_handler(
         connection_service_url,
         runtime_client,
     )
-    .with_connections_facade(connections);
+    .with_connections_facade(connections)
+    .with_direct_compilation(
+        crate::api::services::compilation::direct_compilation_settings_from_config(),
+    );
 
     match compilation_service
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
@@ -902,7 +905,7 @@ pub async fn compile_workflow_handler(
         Ok(result) => {
             let mut response = json!({
                 "success": true,
-                "message": "Workflow compiled to native binary successfully",
+                "message": "Workflow compiled successfully",
                 "workflowId": result.workflow_id,
                 "version": result.version.to_string(),
                 "buildDir": result.build_dir,

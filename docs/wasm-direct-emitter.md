@@ -120,6 +120,11 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   package-size reporting, progress callbacks, and source-checksum metadata,
   and maps unsupported direct graphs to `io::ErrorKind::Unsupported` before
   writing direct build output.
+- `runtara-server` now has a disabled-by-default direct compile gate. When
+  `RUNTARA_DIRECT_WASM_COMPILE=true`, queued and direct API compilation paths
+  try `compile_workflow_direct` with the configured component directory and
+  fall back to the existing Rust/codegen component compiler on unsupported
+  graphs, missing direct components, or direct infrastructure errors.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1945,7 +1950,8 @@ Current status:
   (`compile_workflow_direct`) that returns `NativeCompilationResult`, so the
   server can shadow or gate direct artifacts without depending on direct-only
   result types.
-- Server-side shadow compilation, persistence, and metrics remain pending.
+- Server-side routing now has a disabled-by-default try-with-fallback gate via
+  `RUNTARA_DIRECT_WASM_COMPILE`; shadow persistence and metrics remain pending.
 
 ### Phase 14: Controlled Production Enablement
 
@@ -1981,6 +1987,15 @@ Rollback:
 - Flip compile mode back to Rust globally.
 - Existing Rust compiler remains available.
 - Previously compiled Rust artifacts remain runnable.
+
+Current status:
+
+- The global gate exists as `RUNTARA_DIRECT_WASM_COMPILE` with automatic
+  fallback to the existing compiler. It uses
+  `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` when set, otherwise the shared
+  `RUNTARA_AGENT_COMPONENTS_DIR` bundle.
+- Tenant/workflow allowlists, operator-visible fallback diagnostics, and
+  direct-vs-fallback metrics remain pending.
 
 ### Phase 15: Default Direct Mode
 

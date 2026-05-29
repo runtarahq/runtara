@@ -142,6 +142,7 @@ pub struct ChildWorkflowInput {
 pub type ProgressCallback = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Input for compilation (all data pre-loaded, no DB access needed).
+#[derive(Clone)]
 pub struct CompilationInput {
     /// Tenant ID for multi-tenant isolation.
     pub tenant_id: String,
