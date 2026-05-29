@@ -4,6 +4,7 @@
 //! workflow components, `wac`, and `wasmtime`.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -13,9 +14,12 @@ use std::thread;
 use std::time::Duration;
 
 use base64::Engine;
-use runtara_workflows::ExecutionGraph;
 use runtara_workflows::direct_wasm::{
-    DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectCompilationInput, compile_direct_workflow_composed,
+    DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
+    compile_direct_workflow_composed,
+};
+use runtara_workflows::{
+    CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, compile_workflow_direct,
 };
 use serde_json::Value;
 
@@ -717,6 +721,59 @@ fn non_durable_graph_json(graph_json: &str) -> String {
     let mut graph: Value = serde_json::from_str(graph_json).expect("fixture parses as json");
     graph["durable"] = Value::Bool(false);
     serde_json::to_string(&graph).expect("graph serializes")
+}
+
+#[test]
+fn direct_compile_entry_returns_native_result_shape_when_components_available() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+    let compiled = compile_workflow_direct(
+        CompilationInput {
+            tenant_id: "direct-entry".to_string(),
+            workflow_id: "native-result-shape".to_string(),
+            version: 9,
+            execution_graph: graph,
+            track_events: false,
+            child_workflows: vec![],
+            connection_service_url: None,
+            agent_catalog: None,
+            progress_callback: None,
+        },
+        DirectWorkflowCompileOptions {
+            output_dir: temp.path().to_path_buf(),
+            components_dir,
+            source_checksum: Some("source-sha256".to_string()),
+        },
+    )
+    .expect("direct compile entry succeeds");
+
+    assert_eq!(
+        compiled.binary_path,
+        compiled.build_dir.join("workflow.wasm")
+    );
+    assert!(compiled.binary_path.exists(), "compiled wasm missing");
+    assert_eq!(
+        compiled.binary_size as u64,
+        fs::metadata(&compiled.binary_path)
+            .expect("compiled wasm metadata")
+            .len()
+    );
+    assert_eq!(compiled.binary_checksum.len(), 64);
+    assert!(compiled.package_size > 0);
+    assert!(!compiled.has_side_effects);
+    assert!(compiled.child_dependencies.is_empty());
+    assert_eq!(compiled.default_variables, serde_json::json!({}));
+
+    let metadata: DirectArtifactMetadata = serde_json::from_slice(
+        &fs::read(compiled.build_dir.join("artifact-metadata.json")).expect("artifact metadata"),
+    )
+    .expect("metadata parses");
+    assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
+    assert!(metadata.composed_wasm.is_some());
 }
 
 #[test]

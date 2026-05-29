@@ -119,8 +119,9 @@ pub mod workflow_features;
 // Re-export main types
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
-    ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
-    TEMPLATE_MAJOR_VERSION, compile_workflow, workflow_has_side_effects,
+    ChildDependency, ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions,
+    NativeCompilationResult, TEMPLATE_MAJOR_VERSION, compile_workflow, compile_workflow_direct,
+    workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
 pub use input_validation::{

@@ -113,6 +113,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   first direct compile entry that returns the final static
   `workflow.wasm` artifact shape while retaining `workflow-logic.wasm` for
   debugging and manifest validation.
+- `runtara_workflows::compile_workflow_direct` now exposes that composed
+  direct artifact through the existing `NativeCompilationResult` contract used
+  by server registration. The entry requires explicit output/component paths,
+  preserves default variables, child dependency metadata, side-effect flags,
+  package-size reporting, progress callbacks, and source-checksum metadata,
+  and maps unsupported direct graphs to `io::ErrorKind::Unsupported` before
+  writing direct build output.
 - `tests/direct_wasm_execute.rs` now provides gated direct execution smoke
   tests. With `RUNTARA_RUN_DIRECT_WASM_E2E=1`, it compiles and statically
   composes the simple `Finish` fixture plus flat and nested `Conditional`
@@ -1333,6 +1340,9 @@ Current status:
   checksums, agent component checksums, and selected component sidecar version
   fields. Present sidecars are checked against actual Wasm bytes before static
   composition.
+- `compile_workflow_direct` is now the first compile-crate boundary that
+  returns a composed direct artifact as `NativeCompilationResult`, with
+  explicit output/component paths for gated server rollout.
 - Gated direct execution tests now run composed artifacts through the current
   environment runner shape and verify the SDK completion payload.
 - Finish mapping parity fixtures now compare direct stdlib output against the
@@ -1928,6 +1938,14 @@ Checkpoint 13:
 Rollback:
 
 - Disable shadow direct compilation via env/config.
+
+Current status:
+
+- The compile crate now has a production-shaped direct entry
+  (`compile_workflow_direct`) that returns `NativeCompilationResult`, so the
+  server can shadow or gate direct artifacts without depending on direct-only
+  result types.
+- Server-side shadow compilation, persistence, and metrics remain pending.
 
 ### Phase 14: Controlled Production Enablement
 
