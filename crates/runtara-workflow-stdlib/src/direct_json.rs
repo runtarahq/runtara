@@ -707,10 +707,14 @@ impl DirectJsonManifest {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let inputs = if step.step_type == "EmbedWorkflow" {
-            source.get("data").cloned().unwrap_or(Value::Null)
-        } else {
-            Value::Null
+        let inputs = match step.step_type.as_str() {
+            "Finish" => self
+                .finish_mapping(step.id.as_str())
+                .map(|mapping| apply_input_mapping(&mapping.value, &source))
+                .transpose()?
+                .unwrap_or_else(|| Value::Object(Map::new())),
+            "EmbedWorkflow" => source.get("data").cloned().unwrap_or(Value::Null),
+            _ => Value::Null,
         };
 
         serde_json::to_vec(&serde_json::json!({
@@ -5572,6 +5576,51 @@ mod tests {
         assert_eq!(event["step_type"], json!("WaitForSignal"));
         assert_eq!(event["inputs"], Value::Null);
         assert_eq!(event["steps_context"]["before"]["outputs"], json!(1));
+    }
+
+    #[test]
+    fn finish_breakpoint_event_uses_raw_resolved_outputs() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Finish",
+            "finish",
+            Some("Done"),
+            json!({
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "finish",
+                    "stepType": "Finish",
+                    "purpose": "finish.inputMapping",
+                    "value": {
+                        "outputs.value": {
+                            "valueType": "reference",
+                            "value": "data.input"
+                        }
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"input":"mapped"}"#,
+            br#"{"_loop_indices":[3]}"#,
+            br#"{"before":{"outputs":true}}"#,
+        )
+        .expect("source");
+
+        let key = manifest
+            .breakpoint_key("finish", &source)
+            .expect("breakpoint key");
+        let event = manifest
+            .breakpoint_event("finish", &source)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(key, "breakpoint::finish::3");
+        assert_eq!(event["step_id"], json!("finish"));
+        assert_eq!(event["step_name"], json!("Done"));
+        assert_eq!(event["step_type"], json!("Finish"));
+        assert_eq!(event["inputs"], json!({ "outputs": { "value": "mapped" } }));
+        assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
     }
 
     #[test]

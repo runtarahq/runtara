@@ -13,6 +13,7 @@ pub(super) enum DirectRunPlan {
     Finish {
         step_id: String,
         mapping_id: u32,
+        breakpoint: bool,
     },
     Filter {
         step_id: String,
@@ -234,6 +235,12 @@ fn step_run_plan_inner(
         "Finish" => Ok(DirectRunPlan::Finish {
             step_id: step_id.to_string(),
             mapping_id: finish_mapping_id(graph, step_id)?,
+            breakpoint: graph.durable
+                && step
+                    .body
+                    .get("breakpoint")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;

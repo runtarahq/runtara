@@ -969,17 +969,7 @@ fn collect_step_support(
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
     match step {
-        Step::Finish(step) => {
-            if step.breakpoint.unwrap_or(false) {
-                unsupported.push(UnsupportedWorkflowFeature {
-                    step_id: Some(step.id.clone()),
-                    step_type: Some("Finish".to_string()),
-                    feature: "finish-breakpoint".to_string(),
-                    reason: "Finish breakpoints require a direct runtime checkpoint/pause ABI"
-                        .to_string(),
-                });
-            }
-        }
+        Step::Finish(_) => {}
         Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
         Step::Agent(step) => collect_agent_step_unsupported(graph, step, unsupported),
         Step::Conditional(_) if direct_control => {}
@@ -1551,8 +1541,9 @@ mod tests {
     }
 
     #[test]
-    fn finish_breakpoints_are_rejected_until_checkpoint_abi_is_lowered() {
+    fn finish_breakpoints_are_supported_with_direct_pause_lowering() {
         let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "durable": true,
             "steps": {
                 "finish": {
                     "stepType": "Finish",
@@ -1570,19 +1561,12 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        let feature = report
-            .unsupported
-            .iter()
-            .find(|feature| {
-                feature.step_id.as_deref() == Some("finish")
-                    && feature.feature == "finish-breakpoint"
-            })
-            .expect("finish breakpoint rejection");
+        assert!(report.supported, "{:?}", report.unsupported);
         assert!(
-            feature.reason.contains("checkpoint/pause ABI"),
-            "{:?}",
-            feature
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "finish-breakpoint")
         );
     }
 

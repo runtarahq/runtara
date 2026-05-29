@@ -43,9 +43,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. General step breakpoints remain outside the supported
-  direct-control subset, while durable `Delay`, durable `WaitForSignal`, and
-  static `EmbedWorkflow` call-site breakpoints now have direct pause/resume
-  lowering.
+  direct-control subset, while durable `Finish`, durable `Delay`, durable
+  `WaitForSignal`, and static `EmbedWorkflow` call-site breakpoints now have
+  direct pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
@@ -138,7 +138,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   received. Gated direct-vs-generated artifact coverage now pins the
   external-input request payload for response schema, action key, correlation,
   and context mapping parity. It also exposes generated-compatible breakpoint
-  key and event helpers used by durable direct breakpoint lowering.
+  key and event helpers used by durable direct breakpoint lowering, including
+  Finish breakpoint event inputs built from the raw resolved
+  `Finish.inputMapping` payload before final `outputs` unwrapping.
 - The direct core emitter now lowers the baseline `WaitForSignal` path with
   no `onWait`, plus durable `WaitForSignal` breakpoint pause/resume behavior,
   including timeout handling. It calls
@@ -323,9 +325,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   normalizing timestamp fields before comparison. It also captures and compares
   durable `/sleep` and `/checkpoint` requests, with durable Delay, fresh and
   cached durable Agent, checkpoint-returned `pause`/`cancel`/`shutdown`
-  lifecycle coverage for durable Agent, and fresh/cached plus
-  checkpoint-returned pause/resume durable Split fixtures included in the
-  strict A/B suite. Static `EmbedWorkflow` is now covered for fresh and cached
+  lifecycle coverage for durable Agent, fresh/cached plus checkpoint-returned
+  pause/resume durable Split fixtures, and durable Finish breakpoint first-hit
+  pause/resume included in the strict A/B suite. Static `EmbedWorkflow` is now
+  covered for fresh and cached
   durable finish-only child calls plus generated-compatible wrapping of child
   `Error` failures reached directly or through child `Conditional` control
   flow, parent `EmbedWorkflow.onError` handling for child failures, nested static
@@ -444,9 +447,9 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
   `Log` remains intentionally limited to its existing `workflow_log` events,
   matching the generated Rust path. Breakpoint pauses remain gated per step
-  family; durable `Delay`, durable `WaitForSignal`, and static `EmbedWorkflow`
-  call-site breakpoints now have persisted pause/resume lowering and host-level
-  parity coverage.
+  family; durable `Finish`, durable `Delay`, durable `WaitForSignal`, and
+  static `EmbedWorkflow` call-site breakpoints now have persisted pause/resume
+  lowering and host-level parity coverage.
 - Phase 6 routing scope is now explicit: direct mode supports deterministic
   single-successor normal flow, condition-priority routes with an explicit
   default, and routing Switches with a complete static route/default edge set.
@@ -568,6 +571,15 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   generated-compatible null inputs, acknowledges pause, and returns before
   duration resolution or sleep. Structural and gated A/B coverage exercise
   first-hit pause and resume from the breakpoint checkpoint.
+- Durable Finish breakpoints are now supported in the direct dispatcher after
+  `Finish.inputMapping` has been resolved and before `runtime.complete`.
+  Direct mode checks/saves `breakpoint::<step>`, emits `breakpoint_hit` with
+  generated-compatible mapped Finish inputs, acknowledges pause, and returns
+  before completion on first hit; resume from the existing breakpoint
+  checkpoint continues to the final completion payload without a second
+  breakpoint event. Structural coverage verifies call order, stdlib coverage
+  pins raw mapped-event payloads before final `outputs` unwrapping, and gated
+  A/B coverage compares pause/resume behavior against generated Rust.
 
 Current remaining action items:
 
@@ -582,7 +594,7 @@ Current remaining action items:
 - Implement While timeout, While breakpoint, and While `onError` routing
   semantics with structural and gated A/B coverage.
 - Decide and implement the remaining general step breakpoint policy for
-  Finish, Filter, Switch, GroupBy, Log, Error, and Agent. Durable Delay,
+  Filter, Switch, GroupBy, Log, Error, and Agent. Durable Finish, Delay,
   WaitForSignal, and static EmbedWorkflow call-site breakpoints are now done.
 - Close Agent hardening gaps: timeout/compensation/breakpoint policy,
   retry/failure differential tests, and long-running cancellation coverage.

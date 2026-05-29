@@ -2767,6 +2767,146 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
 }
 
 #[test]
+fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
+    let mut graph = fixture("simple");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::Finish(finish)) = graph.steps.get_mut("finish") else {
+        panic!("expected Finish fixture step");
+    };
+    finish.breakpoint = Some(true);
+
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let DirectRunPlan::Finish {
+        breakpoint,
+        mapping_id,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected Finish run plan");
+    };
+    assert!(*breakpoint, "durable Finish breakpoint should lower");
+
+    let (resolve, world) = build_direct_component_resolve().expect("resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("Finish breakpoint core module validates");
+
+    let mut next_function_index = 0;
+    let mut stdlib_apply_mapping_index = None;
+    let mut runtime_debug_mode_enabled_index = None;
+    let mut stdlib_breakpoint_key_index = None;
+    let mut runtime_checkpoint_index = None;
+    let mut stdlib_breakpoint_event_index = None;
+    let mut runtime_custom_event_index = None;
+    let mut runtime_breakpoint_pause_index = None;
+    let mut runtime_complete_index = None;
+    let mut saw_mapping_id = false;
+    let mut run_calls = Vec::new();
+    let mut code_body_index = 0;
+
+    for payload in Parser::new(0).parse_all(&core) {
+        match payload.expect("core wasm payload") {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        match (import.module, import.name) {
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                stdlib_apply_mapping_index = Some(next_function_index)
+                            }
+                            (
+                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "debug-mode-enabled",
+                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                                stdlib_breakpoint_key_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                                runtime_checkpoint_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                                stdlib_breakpoint_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                runtime_custom_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                                runtime_breakpoint_pause_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                                runtime_complete_index = Some(next_function_index)
+                            }
+                            _ => {}
+                        }
+                        next_function_index += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if code_body_index == 0 {
+                    for operator in body.get_operators_reader().expect("operators") {
+                        match operator.expect("operator") {
+                            Operator::Call { function_index } => run_calls.push(function_index),
+                            Operator::I32Const { value } if value == *mapping_id as i32 => {
+                                saw_mapping_id = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                code_body_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let stdlib_apply_mapping_index = stdlib_apply_mapping_index.expect("apply-mapping import");
+    let runtime_debug_mode_enabled_index =
+        runtime_debug_mode_enabled_index.expect("debug-mode-enabled import");
+    let stdlib_breakpoint_key_index = stdlib_breakpoint_key_index.expect("breakpoint-key import");
+    let runtime_checkpoint_index = runtime_checkpoint_index.expect("checkpoint import");
+    let stdlib_breakpoint_event_index =
+        stdlib_breakpoint_event_index.expect("breakpoint-event import");
+    let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
+    let runtime_breakpoint_pause_index =
+        runtime_breakpoint_pause_index.expect("breakpoint-pause import");
+    let runtime_complete_index = runtime_complete_index.expect("complete import");
+
+    let position = |index| {
+        run_calls
+            .iter()
+            .position(|call| *call == index)
+            .expect("expected Finish breakpoint call")
+    };
+    let apply_mapping_position = position(stdlib_apply_mapping_index);
+    let debug_mode_position = position(runtime_debug_mode_enabled_index);
+    let breakpoint_key_position = position(stdlib_breakpoint_key_index);
+    let checkpoint_position = position(runtime_checkpoint_index);
+    let breakpoint_event_position = position(stdlib_breakpoint_event_index);
+    let custom_event_position = position(runtime_custom_event_index);
+    let breakpoint_pause_position = position(runtime_breakpoint_pause_index);
+    let complete_position = position(runtime_complete_index);
+
+    assert!(
+        apply_mapping_position < debug_mode_position
+            && debug_mode_position < breakpoint_key_position
+            && breakpoint_key_position < checkpoint_position
+            && checkpoint_position < breakpoint_event_position
+            && breakpoint_event_position < custom_event_position
+            && custom_event_position < breakpoint_pause_position
+            && breakpoint_pause_position < complete_position,
+        "Finish breakpoint should pause after output mapping and before completion: {run_calls:?}"
+    );
+    assert!(
+        saw_mapping_id,
+        "Finish mapping id should be passed to stdlib"
+    );
+}
+
+#[test]
 fn direct_core_metadata_can_import_agent_capabilities() {
     let graph = fixture("simple");
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
