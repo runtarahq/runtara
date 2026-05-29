@@ -597,10 +597,7 @@ fn supports_embed_workflow_step_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
-    if step.breakpoint.unwrap_or(false)
-        || step.timeout.is_some()
-        || child_stack.iter().any(|visited| visited == &step.id)
-    {
+    if step.timeout.is_some() || child_stack.iter().any(|visited| visited == &step.id) {
         return false;
     }
 
@@ -1190,12 +1187,6 @@ fn collect_embed_workflow_step_unsupported(
         });
     };
 
-    if step.breakpoint.unwrap_or(false) {
-        push(
-            "embed-workflow-breakpoint",
-            "EmbedWorkflow breakpoints require direct child workflow checkpoint/pause propagation",
-        );
-    }
     if step.timeout.is_some() {
         push(
             "embed-workflow-timeout",
@@ -1683,6 +1674,30 @@ mod tests {
     }
 
     #[test]
+    fn embed_workflow_breakpoint_is_supported_by_child_aware_check() {
+        let mut graph = fixture("embed_workflow");
+        graph.durable = Some(true);
+        let Some(Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
+            panic!("expected EmbedWorkflow fixture step");
+        };
+        embed.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &graph,
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("simple"),
+            }],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
     fn embed_workflow_with_terminal_error_child_is_supported_by_child_aware_check() {
         let report = analyze_direct_wasm_support_with_child_workflows(
             &fixture("embed_workflow"),
@@ -1820,6 +1835,46 @@ mod tests {
                     version_requested: "latest".to_string(),
                     version_resolved: 3,
                     execution_graph: fixture("embed_workflow_nested_child"),
+                },
+                ChildWorkflowInput {
+                    step_id: "call_grandchild".to_string(),
+                    workflow_id: "grandchild_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 7,
+                    execution_graph: fixture("embed_workflow_nested_grandchild"),
+                },
+                ChildWorkflowInput {
+                    step_id: "call_greatgrandchild".to_string(),
+                    workflow_id: "great_grandchild_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 11,
+                    execution_graph: fixture("embed_workflow_nested_great_grandchild"),
+                },
+            ],
+        );
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn nested_embed_workflow_breakpoint_is_supported_by_child_aware_check() {
+        let mut nested_child = fixture("embed_workflow_nested_child");
+        nested_child.durable = Some(true);
+        let Some(Step::EmbedWorkflow(embed)) = nested_child.steps.get_mut("call_grandchild") else {
+            panic!("expected nested EmbedWorkflow fixture step");
+        };
+        embed.breakpoint = Some(true);
+
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &fixture("embed_workflow_nested_parent"),
+            &[
+                ChildWorkflowInput {
+                    step_id: "call_child".to_string(),
+                    workflow_id: "child_workflow".to_string(),
+                    version_requested: "latest".to_string(),
+                    version_resolved: 3,
+                    execution_graph: nested_child,
                 },
                 ChildWorkflowInput {
                     step_id: "call_grandchild".to_string(),

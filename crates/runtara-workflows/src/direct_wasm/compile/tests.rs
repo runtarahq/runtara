@@ -861,6 +861,191 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
 }
 
 #[test]
+fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("embed_workflow");
+    graph.durable = Some(true);
+    let Some(runtara_dsl::Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
+        panic!("expected EmbedWorkflow fixture step");
+    };
+    embed.breakpoint = Some(true);
+
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parent-breakpoint".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "child_workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 3,
+            execution_graph: fixture("simple"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct EmbedWorkflow breakpoint compile should succeed");
+
+    assert!(result.support_report.supported);
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::EmbedWorkflow {
+        breakpoint,
+        next_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected EmbedWorkflow run plan");
+    };
+    assert!(*breakpoint, "durable EmbedWorkflow breakpoint should lower");
+    assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
+
+    let (resolve, world) = build_direct_component_resolve().expect("resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new()
+        .validate_all(&core)
+        .expect("EmbedWorkflow breakpoint core module validates");
+
+    let mut next_function_index = 0;
+    let mut stdlib_apply_mapping_index = None;
+    let mut stdlib_build_source_index = None;
+    let mut runtime_debug_mode_enabled_index = None;
+    let mut stdlib_breakpoint_key_index = None;
+    let mut runtime_checkpoint_index = None;
+    let mut stdlib_breakpoint_event_index = None;
+    let mut runtime_custom_event_index = None;
+    let mut runtime_breakpoint_pause_index = None;
+    let mut stdlib_embed_workflow_cache_key_index = None;
+    let mut run_calls = Vec::new();
+    let mut code_body_index = 0;
+
+    for payload in Parser::new(0).parse_all(&core) {
+        match payload.expect("core wasm payload") {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        match (import.module, import.name) {
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                                stdlib_apply_mapping_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                                stdlib_build_source_index = Some(next_function_index)
+                            }
+                            (
+                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "debug-mode-enabled",
+                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                                stdlib_breakpoint_key_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                                runtime_checkpoint_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                                stdlib_breakpoint_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                                runtime_custom_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                                runtime_breakpoint_pause_index = Some(next_function_index)
+                            }
+                            (
+                                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                "embed-workflow-cache-key",
+                            ) => stdlib_embed_workflow_cache_key_index = Some(next_function_index),
+                            _ => {}
+                        }
+                        next_function_index += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if code_body_index == 0 {
+                    for operator in body.get_operators_reader().expect("operators") {
+                        if let Operator::Call { function_index } = operator.expect("operator") {
+                            run_calls.push(function_index);
+                        }
+                    }
+                }
+                code_body_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let stdlib_apply_mapping_index = stdlib_apply_mapping_index.expect("apply-mapping import");
+    let stdlib_build_source_index = stdlib_build_source_index.expect("build-source import");
+    let runtime_debug_mode_enabled_index =
+        runtime_debug_mode_enabled_index.expect("debug-mode-enabled import");
+    let stdlib_breakpoint_key_index = stdlib_breakpoint_key_index.expect("breakpoint-key import");
+    let runtime_checkpoint_index = runtime_checkpoint_index.expect("checkpoint import");
+    let stdlib_breakpoint_event_index =
+        stdlib_breakpoint_event_index.expect("breakpoint-event import");
+    let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
+    let runtime_breakpoint_pause_index =
+        runtime_breakpoint_pause_index.expect("breakpoint-pause import");
+    let stdlib_embed_workflow_cache_key_index =
+        stdlib_embed_workflow_cache_key_index.expect("embed-workflow-cache-key import");
+
+    let position = |index| {
+        run_calls
+            .iter()
+            .position(|call| *call == index)
+            .expect("expected EmbedWorkflow breakpoint call")
+    };
+    let position_after = |index, after| {
+        run_calls
+            .iter()
+            .enumerate()
+            .find_map(|(position, call)| (*call == index && position > after).then_some(position))
+            .expect("expected EmbedWorkflow breakpoint call after prior call")
+    };
+
+    let apply_mapping_position = position(stdlib_apply_mapping_index);
+    let breakpoint_source_position =
+        position_after(stdlib_build_source_index, apply_mapping_position);
+    let debug_mode_position =
+        position_after(runtime_debug_mode_enabled_index, breakpoint_source_position);
+    let breakpoint_key_position = position_after(stdlib_breakpoint_key_index, debug_mode_position);
+    let checkpoint_position = position_after(runtime_checkpoint_index, breakpoint_key_position);
+    let breakpoint_event_position =
+        position_after(stdlib_breakpoint_event_index, checkpoint_position);
+    let custom_event_position =
+        position_after(runtime_custom_event_index, breakpoint_event_position);
+    let breakpoint_pause_position =
+        position_after(runtime_breakpoint_pause_index, custom_event_position);
+    let embed_cache_key_position = position_after(
+        stdlib_embed_workflow_cache_key_index,
+        breakpoint_pause_position,
+    );
+
+    assert!(
+        apply_mapping_position < breakpoint_source_position
+            && breakpoint_source_position < debug_mode_position
+            && debug_mode_position < breakpoint_key_position
+            && breakpoint_key_position < checkpoint_position
+            && checkpoint_position < breakpoint_event_position
+            && breakpoint_event_position < custom_event_position
+            && custom_event_position < breakpoint_pause_position
+            && breakpoint_pause_position < embed_cache_key_position,
+        "EmbedWorkflow breakpoint should pause after child input mapping and before child execution: {run_calls:?}"
+    );
+}
+
+#[test]
 fn direct_compile_supports_static_embed_workflow_retry_overrides() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut graph = fixture("embed_workflow");

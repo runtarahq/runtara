@@ -43,18 +43,20 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   Supported normal/`next` edges can now either be a single unconditioned edge or
   a priority-ordered conditional edge set with exactly one unconditioned default
   fallback. General step breakpoints remain outside the supported
-  direct-control subset, while durable `WaitForSignal` breakpoints now have
-  direct pause/resume lowering.
+  direct-control subset, while durable `WaitForSignal` and static
+  `EmbedWorkflow` call-site breakpoints now have direct pause/resume lowering.
   `Finish.inputMapping` forms remain broadly supported because mapping semantics
   are delegated to the shared stdlib.
 - The direct core emitter now has the first static `EmbedWorkflow` lowering
   slice. `compile_direct_workflow` uses a child-aware support gate and accepts
   `EmbedWorkflow` only when the call site has one preloaded static child graph,
-  no breakpoint/timeout behavior, and the child graph is limited to
+  no timeout behavior, and the child graph is limited to
   direct-control `Finish`/`Conditional`/`Error` steps plus nested static
   `EmbedWorkflow` calls. The lowerer maps parent input
   through the manifest `EmbedWorkflow.inputMapping`, builds isolated child
   variables/source with generated-compatible scope and cache-prefix values,
+  pauses durable breakpoints after resolved child input mapping and before
+  child execution/debug-start emission,
   runs the child run-plan inline through generated-compatible retry/backoff
   handling, wraps the child output as the parent `EmbedWorkflow` step result,
   writes/replays the durable final-result
@@ -440,9 +442,10 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `step_debug_start`/`step_debug_end` custom events for `Finish`,
   `Conditional`, `Filter`, `Switch`, `GroupBy`, and terminal `Error` steps.
   `Log` remains intentionally limited to its existing `workflow_log` events,
-  matching the generated Rust path. Breakpoint pauses remain rejected until
-  persisted step-breakpoint state and resume semantics are lowered and covered
-  by host-level parity tests.
+  matching the generated Rust path. Breakpoint pauses remain gated per step
+  family; durable `WaitForSignal` and static `EmbedWorkflow` call-site
+  breakpoints now have persisted pause/resume lowering and host-level parity
+  coverage.
 - Phase 6 routing scope is now explicit: direct mode supports deterministic
   single-successor normal flow, condition-priority routes with an explicit
   default, and routing Switches with a complete static route/default edge set.
@@ -914,8 +917,9 @@ Emitter module boundaries should stay readable as support broadens:
 - `compile/embed_workflow.rs` owns static EmbedWorkflow lowering, including
   parent-to-child input mapping, child variable/source construction, inline
   child run-plan dispatch, per-attempt frame preservation for deeply nested
-  child execution, generated-compatible parent step-result wrapping, durable
-  final-result checkpoint replay/save, parent source restoration, and
+  child execution, durable call-site breakpoint pause/resume after resolved
+  child input mapping, generated-compatible parent step-result wrapping,
+  durable final-result checkpoint replay/save, parent source restoration, and
   continuation into the next run plan.
 - `compile/delay.rs` owns Delay step lowering for durable and non-durable
   waits while delegating retptr/result mechanics to `compile/abi.rs`.
@@ -2287,11 +2291,17 @@ Current status:
   input-schema validation, child output wrapping, and parent step-result
   insertion.
 - Direct run-plan construction and Wasm lowering now support the first static
-  `EmbedWorkflow` subset: one preloaded child graph per call site, no
-  breakpoint/timeout behavior, child graphs made of
+  `EmbedWorkflow` subset: one preloaded child graph per call site, no timeout
+  behavior, child graphs made of
   direct-control `Finish`/`Conditional` steps, terminal `Error` steps, or
   nested static `EmbedWorkflow` calls including child-local `onError` handlers,
   and durable final-result checkpoint replay/save at the parent call site.
+  Durable call-site breakpoints are supported for root and nested static
+  `EmbedWorkflow` steps: direct lowering maps child inputs first, builds the
+  breakpoint source from those resolved child inputs plus the current variables
+  and steps context, checks/saves the generated-compatible
+  `breakpoint::<step>` checkpoint, emits `breakpoint_hit`, acknowledges pause,
+  and returns before child execution or EmbedWorkflow debug-start emission.
   `maxRetries` defaults to `3`, `retryDelay` defaults to `1000`, explicit
   overrides are accepted by support gating, and the retry loop records attempts
   after the generated-compatible sleep step before rerunning the child plan.
@@ -2313,13 +2323,16 @@ Current status:
   failures, child retry exhaustion with retry-attempt capture, parent `onError`
   after retry exhaustion, child-local `onError` handling for a nested
   `EmbedWorkflow` child failure, nested parent retry through a failing
-  grandchild, deep child workflow isolation/cache-key parity, and deeply nested
-  child failure wrapping across multiple embedded call-site layers. Normal
+  grandchild, durable `EmbedWorkflow` breakpoint pause/resume with resolved
+  child-input event payloads, deep child workflow isolation/cache-key parity,
+  and deeply nested child failure wrapping across multiple embedded call-site
+  layers. Normal
   nested Split/While loop execution now has reentrant scratch frame lowering and
   strict A/B coverage; `Split(dontStopOnFailed)` with nested loops remains gated
   until its terminal/failure aggregation paths have preserved target frames.
-  Remaining Phase 10 work is unsupported breakpoint/timeout semantics for
-  embedded child call sites.
+  Remaining Phase 10 work is unsupported timeout semantics for embedded child
+  call sites; generated Rust currently parses `EmbedWorkflow.timeout` but does
+  not appear to enforce it in `codegen/ast/steps/embed_workflow.rs`.
 
 ### Phase 11: WaitForSignal
 

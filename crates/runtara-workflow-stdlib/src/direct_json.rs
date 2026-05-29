@@ -707,12 +707,17 @@ impl DirectJsonManifest {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let inputs = if step.step_type == "EmbedWorkflow" {
+            source.get("data").cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
 
         serde_json::to_vec(&serde_json::json!({
             "step_id": step.id.clone(),
             "step_name": step.name.clone(),
             "step_type": step.step_type.clone(),
-            "inputs": Value::Null,
+            "inputs": inputs,
             "steps_context": Value::Object(steps_context),
         }))
         .map_err(|err| format!("failed to serialize breakpoint event payload: {err}"))
@@ -5567,6 +5572,41 @@ mod tests {
         assert_eq!(event["step_type"], json!("WaitForSignal"));
         assert_eq!(event["inputs"], Value::Null);
         assert_eq!(event["steps_context"]["before"]["outputs"], json!(1));
+    }
+
+    #[test]
+    fn embed_workflow_breakpoint_event_uses_resolved_child_inputs() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "EmbedWorkflow",
+            "call_child",
+            Some("Call child"),
+            json!({}),
+        ))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"childInput":"mapped","count":2}"#,
+            br#"{"_loop_indices":[4],"tenant":"t1"}"#,
+            br#"{"before":{"outputs":true}}"#,
+        )
+        .expect("source");
+
+        let key = manifest
+            .breakpoint_key("call_child", &source)
+            .expect("breakpoint key");
+        let event = manifest
+            .breakpoint_event("call_child", &source)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(key, "breakpoint::call_child::4");
+        assert_eq!(event["step_id"], json!("call_child"));
+        assert_eq!(event["step_name"], json!("Call child"));
+        assert_eq!(event["step_type"], json!("EmbedWorkflow"));
+        assert_eq!(
+            event["inputs"],
+            json!({ "childInput": "mapped", "count": 2 })
+        );
+        assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
     }
 
     #[test]

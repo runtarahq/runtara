@@ -10,7 +10,7 @@ use super::abi::{
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::emit_step_debug_event;
+use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_retry::{
     emit_embed_retry_before_attempt, emit_embed_retry_condition, emit_embed_retry_error_info,
@@ -357,6 +357,7 @@ pub(super) fn emit_embed_workflow_plan(
     step_id: &str,
     input_mapping_id: u32,
     durable: bool,
+    breakpoint: bool,
     max_retries: u32,
     retry_delay_ms: u64,
     child_plan: &DirectRunPlan,
@@ -380,19 +381,6 @@ pub(super) fn emit_embed_workflow_plan(
         .step_id(step_id)
         .expect("run plan step ids are present in static data");
 
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        true,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
-
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -407,6 +395,47 @@ pub(super) fn emit_embed_workflow_plan(
         DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
         DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
         failure_target,
+    );
+
+    if breakpoint {
+        emit_build_source(
+            body,
+            indices,
+            variables,
+            DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
+            DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+            steps_ptr_local,
+            steps_len_local,
+            output_ptr_local,
+            output_len_local,
+            failure_target,
+        );
+        emit_step_breakpoint(
+            body,
+            indices,
+            static_data,
+            true,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+        );
+    }
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
     );
 
     if durable {

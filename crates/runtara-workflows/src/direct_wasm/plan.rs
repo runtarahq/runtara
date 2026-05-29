@@ -57,6 +57,7 @@ pub(super) enum DirectRunPlan {
         step_id: String,
         input_mapping_id: u32,
         durable: bool,
+        breakpoint: bool,
         max_retries: u32,
         retry_delay_ms: u64,
         child_plan: Box<DirectRunPlan>,
@@ -369,6 +370,12 @@ fn step_run_plan_inner(
                         .get("durable")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(true),
+                breakpoint: graph.durable
+                    && step
+                        .body
+                        .get("breakpoint")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                 max_retries: embed_workflow_effective_max_retries(step),
                 retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
                 child_plan: Box::new(child_plan),
