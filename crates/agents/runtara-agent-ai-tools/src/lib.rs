@@ -651,6 +651,13 @@ pub struct ChatCompletionInput {
     pub _connection: Option<RawConnection>,
 
     #[field(
+        display_name = "Provider",
+        description = "LLM provider integration id (e.g. \"openai\" or \"bedrock\"); selects the provider explicitly rather than inferring it from the connection"
+    )]
+    #[serde(default)]
+    pub provider: String,
+
+    #[field(
         display_name = "System Prompt",
         description = "System instructions / preamble for the model"
     )]
@@ -753,8 +760,19 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
     ))
     .map_err(|e| AgentError::permanent("AI_CHAT_BAD_TOOLS", format!("invalid tools: {e}")))?;
 
+    // The provider comes from the AiAgent config (mirroring the generated loop,
+    // which passes `config.provider` as the integration id) rather than from the
+    // connection's integration id — the direct emitter passes an empty
+    // integration id in the connection-info and relies on the proxy to resolve
+    // credentials from the connection id. Fall back to the connection's
+    // integration id when the caller did not specify a provider.
+    let integration_id = if input.provider.is_empty() {
+        connection.integration_id.clone()
+    } else {
+        input.provider.clone()
+    };
     let req = runtara_ai::CompletionInvokeRequest {
-        integration_id: connection.integration_id.clone(),
+        integration_id,
         conn_params: connection.parameters.clone(),
         connection_id: connection.connection_id.clone(),
         model_id: input.model.clone(),

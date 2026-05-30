@@ -957,6 +957,13 @@ fn step_manifest(
                     "userPrompt".to_string(),
                     canonical_json(&config.user_prompt)?,
                 );
+                mapping.insert(
+                    "provider".to_string(),
+                    serde_json::json!({
+                        "valueType": "immediate",
+                        "value": config.provider.as_str(),
+                    }),
+                );
                 if let Some(model) = &config.model {
                     mapping.insert(
                         "model".to_string(),
