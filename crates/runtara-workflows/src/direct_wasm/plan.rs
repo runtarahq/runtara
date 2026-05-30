@@ -172,6 +172,18 @@ pub(super) enum DirectAiToolPlan {
         /// The composed child workflow run plan (built from the preloaded graph).
         child_plan: Box<DirectRunPlan>,
     },
+    /// Suspend the loop on a durable human-in-the-loop signal: emit an
+    /// external-input request, durably poll until the signal arrives, and feed the
+    /// payload back as the tool result. Mirrors the generated
+    /// `emit_wait_for_signal_tool_arm`.
+    Wait {
+        /// The WaitForSignal step id that owns the signal config (event payload,
+        /// poll interval). Reached via the tool edge, not the normal flow.
+        step_id: String,
+        /// The advertised tool name (edge label), folded into the per-call signal
+        /// id `…/{ai_step}.tool.{label}.{call}`.
+        label: String,
+    },
 }
 
 /// Conversation-memory provider for an AiAgent loop: the memory agent's
@@ -690,6 +702,19 @@ fn step_run_plan_inner(
                         tools.push(DirectAiToolPlan::Embed {
                             step_id: edge.to_step.clone(),
                             child_plan: Box::new(child_plan),
+                        });
+                        continue;
+                    }
+                    // A WaitForSignal tool target suspends the loop on a durable
+                    // human-in-the-loop signal and feeds the payload back.
+                    if graph
+                        .steps
+                        .iter()
+                        .any(|s| s.id == edge.to_step && s.step_type == "WaitForSignal")
+                    {
+                        tools.push(DirectAiToolPlan::Wait {
+                            step_id: edge.to_step.clone(),
+                            label: name.clone(),
                         });
                         continue;
                     }

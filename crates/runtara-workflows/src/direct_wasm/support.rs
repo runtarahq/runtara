@@ -761,6 +761,10 @@ fn supports_ai_agent_step_baseline(
                 Some(Step::EmbedWorkflow(embed)) => {
                     supports_embed_workflow_step_baseline(embed, child_workflows, &mut Vec::new())
                 }
+                // A WaitForSignal tool is lowered as a durable poll inside the
+                // loop; an `onWait` subgraph is the only WaitForSignal feature the
+                // tool arm does not yet run, so reject those (fall back).
+                Some(Step::WaitForSignal(wait)) => wait.on_wait.is_none(),
                 _ => false,
             })
 }

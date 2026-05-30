@@ -293,6 +293,12 @@ const DIRECT_AI_CONV_LEN_LOCAL: u32 = 103;
 const DIRECT_EMBED_SAVED_DATA_PTR_LOCAL: u32 = 104;
 const DIRECT_EMBED_SAVED_DATA_LEN_LOCAL: u32 = 105;
 
+/// Monotonic per-tool-call counter for the AiAgent loop, incremented once per
+/// dispatched tool call across all turns. WaitForSignal-as-tool folds it into the
+/// per-call signal id so repeated calls to the same wait tool get distinct,
+/// resume-stable ids (mirrors the generated `__tool_call_counter`). i32 local.
+const DIRECT_AI_TOOL_CALL_COUNTER_LOCAL: u32 = 106;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

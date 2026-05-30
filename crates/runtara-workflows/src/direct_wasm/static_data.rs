@@ -308,6 +308,18 @@ fn collect_static_step_ids(
             collect_static_step_ids(&nested.graph, offset, step_ids)?;
         }
     }
+    // Intern edge labels too (string-interning map). An AiAgent tool edge's label
+    // is the advertised tool name; WaitForSignal-as-tool builds its per-call
+    // signal id `…/{ai_step}.tool.{label}.{call}` and so needs the label segment.
+    for edge in &graph.edges {
+        if let Some(label) = &edge.label
+            && !step_ids.contains_key(label)
+        {
+            let segment = DirectDataSegment::new(*offset, label.as_bytes());
+            *offset = align_i32(checked_offset_add(*offset, label.len())?, 16);
+            step_ids.insert(label.clone(), segment);
+        }
+    }
     Ok(())
 }
 

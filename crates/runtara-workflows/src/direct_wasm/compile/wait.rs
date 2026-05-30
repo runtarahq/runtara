@@ -24,6 +24,133 @@ use super::{
     emit_runtime_fail_return,
 };
 
+/// Lower a WaitForSignal target used as an AiAgent tool: emit the external-input
+/// request, durably poll for the human signal, and leave the wrapped payload in
+/// the tool-result locals. Mirrors the generated `emit_wait_for_signal_tool_arm`
+/// — invoked from the AiAgent loop's tool dispatch (no next-plan continuation).
+/// `ai_step_id` is the AiAgent step (the signal path component), `wait_step_id`
+/// the WaitForSignal config owner, `label` the advertised tool name, and
+/// `tool_call_counter_local` the monotonic per-call counter for the signal id.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_ai_wait_tool_arm(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    ai_step_id: &str,
+    wait_step_id: &str,
+    label: &str,
+    tool_call_counter_local: u32,
+    tool_result_ptr_local: u32,
+    tool_result_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    let ai_step_segment = static_data
+        .step_id(ai_step_id)
+        .expect("AiAgent step id is present in static data");
+    let wait_step_segment = static_data
+        .step_id(wait_step_id)
+        .expect("WaitForSignal tool step id is present in static data");
+    let label_segment = static_data
+        .step_id(label)
+        .expect("AiAgent tool label is interned in static data");
+
+    // instance_id = runtime.instance-id()
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_instance_id));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    // signal_id = ai-wait-tool-signal-id(ai_step, instance, label, counter, source)
+    push_segment_args(body, ai_step_segment);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_segment_args(body, label_segment);
+    body.instruction(&Instruction::LocalGet(tool_call_counter_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_wait_tool_signal_id));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
+
+    // event = wait-event(wait_step, signal_id, source); runtime.custom-event(...)
+    push_segment_args(body, wait_step_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_event));
+    return_if_retptr_error(body);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+    push_segment_args(body, &static_data.external_input_requested_kind);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    return_if_retptr_error(body);
+
+    // poll_interval = wait-poll-interval-ms(wait_step)
+    push_segment_args(body, wait_step_segment);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
+    return_if_retptr_error(body);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
+
+    // Durable poll loop: exit when the signal arrives.
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_check_signals));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Return);
+    body.instruction(&Instruction::End);
+
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_poll_custom_signal));
+    return_if_retptr_error(body);
+    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::BrIf(1));
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
+    return_if_retptr_error(body);
+
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+
+    // The received payload is the retptr Option's Some value.
+    load_retptr_option_list(body, output_ptr_local, output_len_local);
+
+    // tool_result = ai-wait-tool-result(payload)
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_wait_tool_result));
+    return_if_retptr_error(body);
+    load_retptr_list(body, tool_result_ptr_local, tool_result_len_local);
+}
+
 pub(super) fn emit_wait_on_wait_error_and_fail(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

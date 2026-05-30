@@ -70,6 +70,7 @@ const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.jso
 const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json");
 const AI_AGENT_EMBED_TOOL: &str = include_str!("fixtures/ai_agent_embed_tool.json");
 const EMBED_TOOL_CHILD: &str = include_str!("fixtures/embed_tool_child.json");
+const AI_AGENT_WAIT_TOOL: &str = include_str!("fixtures/ai_agent_wait_tool.json");
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
@@ -5695,6 +5696,70 @@ fn direct_wasm_matches_components_ai_agent_embed_workflow_tool() {
     assert_eq!(
         direct_out.get("answer"),
         Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+}
+
+/// An AiAgent whose tool is a WaitForSignal target. The mock LLM calls the
+/// `get_approval` tool; both artifacts emit the external-input request, durably
+/// poll until the injected human signal arrives, feed the wrapped payload back
+/// into the conversation, and answer. Direct must match the generated loop.
+#[test]
+fn direct_wasm_matches_components_ai_agent_wait_for_signal_tool() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("ai-agent-wait-tool", AI_AGENT_WAIT_TOOL);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-wait-tool", AI_AGENT_WAIT_TOOL);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"need approval","case_id":"case-7","summary":"Please approve"}"#;
+    let signal_payload = br#"{"approved":true}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact_with_custom_signal(
+        &components_artifact,
+        "ab-components-ai-agent-wait-tool",
+        &components_input,
+        signal_payload,
+    );
+    let direct = execute_artifact_with_custom_signal(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-wait-tool",
+        workflow_input,
+        signal_payload,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+        direct.stderr, direct.error_json, direct.output_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "wait-tool AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+    // Direct must emit the external-input request event for the human-in-the-loop.
+    let direct_events = normalized_events(&direct.events);
+    assert!(
+        direct_events
+            .iter()
+            .any(|(subtype, _)| subtype == "external_input_requested"),
+        "direct wait-tool run should emit an external_input_requested event"
     );
 }
 

@@ -77,6 +77,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_wait_event: Option<u32>,
     stdlib_wait_debug_start: Option<u32>,
     stdlib_wait_output: Option<u32>,
+    stdlib_ai_wait_tool_signal_id: Option<u32>,
+    stdlib_ai_wait_tool_result: Option<u32>,
     stdlib_embed_workflow_cache_key: Option<u32>,
     stdlib_embed_workflow_variables: Option<u32>,
     stdlib_embed_workflow_result: Option<u32>,
@@ -308,6 +310,14 @@ impl DirectCoreImportIndices {
                 "stdlib.wait-debug-start",
             )?,
             stdlib_wait_output: require_import(self.stdlib_wait_output, "stdlib.wait-output")?,
+            stdlib_ai_wait_tool_signal_id: require_import(
+                self.stdlib_ai_wait_tool_signal_id,
+                "stdlib.ai-wait-tool-signal-id",
+            )?,
+            stdlib_ai_wait_tool_result: require_import(
+                self.stdlib_ai_wait_tool_result,
+                "stdlib.ai-wait-tool-result",
+            )?,
             stdlib_embed_workflow_cache_key: require_import(
                 self.stdlib_embed_workflow_cache_key,
                 "stdlib.embed-workflow-cache-key",
@@ -513,6 +523,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_wait_event: u32,
     pub(super) stdlib_wait_debug_start: u32,
     pub(super) stdlib_wait_output: u32,
+    pub(super) stdlib_ai_wait_tool_signal_id: u32,
+    pub(super) stdlib_ai_wait_tool_result: u32,
     pub(super) stdlib_embed_workflow_cache_key: u32,
     pub(super) stdlib_embed_workflow_variables: u32,
     pub(super) stdlib_embed_workflow_result: u32,
@@ -756,6 +768,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-output") {
         import_indices.stdlib_wait_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-signal-id") {
+        import_indices.stdlib_ai_wait_tool_signal_id = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-result") {
+        import_indices.stdlib_ai_wait_tool_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "embed-workflow-cache-key") {
         import_indices.stdlib_embed_workflow_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "embed-workflow-variables") {

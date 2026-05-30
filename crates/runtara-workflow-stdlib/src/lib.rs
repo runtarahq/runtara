@@ -659,6 +659,38 @@ mod component {
             })
         }
 
+        fn ai_wait_tool_signal_id(
+            step_id: String,
+            instance_id: String,
+            label: String,
+            call_counter: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_wait_tool_signal_id(
+                    &step_id,
+                    &instance_id,
+                    &label,
+                    call_counter,
+                    &source,
+                )
+            })
+        }
+
+        fn ai_wait_tool_result(signal_payload: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_wait_tool_result(&signal_payload)
+            })
+        }
+
         fn embed_workflow_cache_key(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

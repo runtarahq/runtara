@@ -23,16 +23,18 @@ use super::agent_invoke::emit_agent_invoke;
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
+use super::wait::emit_ai_wait_tool_arm;
 use super::{
     DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_CONV_LEN_LOCAL,
     DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_ITER_LOCAL, DIRECT_AI_PENDING_LEN_LOCAL,
     DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL, DIRECT_AI_STATE_PTR_LOCAL,
-    DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL,
-    DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
-    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-    DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_PTR_LOCAL,
-    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectRunPlan, DirectVariables,
+    DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+    DIRECT_AI_TOOL_CALL_COUNTER_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL,
+    DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL, DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+    DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL,
+    DIRECT_AI_TURN_OUT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
+    DirectVariables,
 };
 use crate::direct_wasm::plan::{DirectAiMemoryPlan, DirectAiToolPlan};
 
@@ -167,6 +169,10 @@ pub(super) fn emit_ai_agent_loop_plan(
     );
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_AI_ITER_LOCAL));
+    // Monotonic per-tool-call counter (across turns), folded into a
+    // WaitForSignal-tool's signal id so repeated calls get distinct ids.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
 
     body.instruction(&Instruction::Block(BlockType::Empty)); // $outer
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $turn
@@ -371,6 +377,26 @@ pub(super) fn emit_ai_agent_loop_plan(
                     workflow_error_kind,
                 );
             }
+            DirectAiToolPlan::Wait {
+                step_id: wait_step_id,
+                label,
+            } => {
+                emit_ai_wait_tool_arm(
+                    body,
+                    indices,
+                    static_data,
+                    step_id,
+                    wait_step_id,
+                    label,
+                    DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
+                    DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+                    DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                );
+            }
         }
         body.instruction(&Instruction::End);
     }
@@ -391,6 +417,13 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_PENDING_PTR_LOCAL,
         DIRECT_AI_PENDING_LEN_LOCAL,
     );
+
+    // Bump the monotonic per-tool-call counter after dispatching this call (the
+    // WaitForSignal-tool arm above read it for this call's signal id).
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
 
     body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_IDX_LOCAL));
     body.instruction(&Instruction::I32Const(1));

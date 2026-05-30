@@ -812,6 +812,48 @@ impl DirectJsonManifest {
         ))
     }
 
+    /// Build the per-call signal id for a WaitForSignal step used as an AiAgent
+    /// tool, matching the generated tool arm's
+    /// `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`.
+    pub fn ai_wait_tool_signal_id(
+        &self,
+        step_id: &str,
+        instance_id: &str,
+        label: &str,
+        call_counter: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        // `step_id` here is the AiAgent step id (the path component, matching the
+        // generated tool arm), not a WaitForSignal step — so it is NOT validated
+        // against the wait-step registry.
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-wait-tool-signal-id source: {err}"))?;
+        let workflow_id = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_workflow_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("root");
+        let indices_suffix = wait_loop_indices_suffix(&source);
+        Ok(format!(
+            "{instance_id}/{workflow_id}/{step_id}.tool.{label}.{call_counter}{indices_suffix}"
+        ))
+    }
+
+    /// Wrap a received WaitForSignal-tool signal payload as the tool result the
+    /// model sees: `{ "status": "received", "human_response": <payload> }`,
+    /// matching the generated tool arm.
+    pub fn ai_wait_tool_result(&self, signal_payload: &[u8]) -> Result<Vec<u8>, String> {
+        let payload: Value = serde_json::from_slice(signal_payload)
+            .map_err(|err| format!("failed to parse ai-wait-tool-result payload: {err}"))?;
+        let wrapped = serde_json::json!({
+            "status": "received",
+            "human_response": payload,
+        });
+        serde_json::to_vec(&wrapped)
+            .map_err(|err| format!("failed to serialize ai-wait-tool-result: {err}"))
+    }
+
     /// Resolve an optional WaitForSignal timeout mapping to milliseconds.
     pub fn wait_timeout_ms(&self, step_id: &str, source: &[u8]) -> Result<Option<u64>, String> {
         let source: Value = serde_json::from_slice(source)

@@ -82,6 +82,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "embed_tool_child" => {
             include_str!("../../../tests/fixtures/embed_tool_child.json")
         }
+        "ai_agent_wait_tool" => {
+            include_str!("../../../tests/fixtures/ai_agent_wait_tool.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2280,6 +2283,58 @@ fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
                 if step_id == "tool_weather"
         ),
         "the tool should be an EmbedWorkflow tool, got {:?}",
+        tools[0]
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-wait-tool".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_wait_tool"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct wait-tool AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent wait-tool artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    assert_eq!(tools.len(), 1, "expected the single wait tool");
+    assert!(
+        matches!(
+            &tools[0],
+            crate::direct_wasm::plan::DirectAiToolPlan::Wait { step_id, label }
+                if step_id == "ask_human" && label == "get_approval"
+        ),
+        "the tool should be a WaitForSignal tool, got {:?}",
         tools[0]
     );
 }

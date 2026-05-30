@@ -264,6 +264,24 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Build the per-call signal id for a WaitForSignal step used as an AiAgent
+    // tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
+    // the generated `emit_wait_for_signal_tool_arm`.
+    ai-wait-tool-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    // Wrap a received WaitForSignal-tool signal payload as the tool result the
+    // model sees: `{ "status": "received", "human_response": <payload> }`,
+    // matching the generated tool arm.
+    ai-wait-tool-result: func(
+        signal-payload: list<u8>,
+    ) -> result<list<u8>, string>;
+
     embed-workflow-cache-key: func(
         step-id: string,
         source: list<u8>,

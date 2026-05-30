@@ -1,0 +1,78 @@
+{
+  "name": "AiAgent WaitForSignal Tool",
+  "description": "Direct-emitter fixture: an AiAgent whose tool is a WaitForSignal target. The LLM calls get_approval, the loop suspends on a durable human signal, and the payload is fed back so the agent can answer.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Agent",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": {
+          "valueType": "immediate",
+          "value": "Ask the human for approval, then answer."
+        },
+        "userPrompt": {
+          "valueType": "reference",
+          "value": "data.q"
+        },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "maxIterations": 5
+      }
+    },
+    "ask_human": {
+      "stepType": "WaitForSignal",
+      "id": "ask_human",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "responseSchema": {
+        "approved": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "action": {
+        "key": "approval_decision",
+        "correlation": {
+          "case_id": {
+            "valueType": "reference",
+            "value": "data.case_id"
+          }
+        },
+        "context": {
+          "summary": {
+            "valueType": "reference",
+            "value": "data.summary"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": {
+          "valueType": "reference",
+          "value": "steps.ai.outputs.response"
+        }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    {
+      "fromStep": "ai",
+      "toStep": "ask_human",
+      "label": "get_approval"
+    },
+    {
+      "fromStep": "ai",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

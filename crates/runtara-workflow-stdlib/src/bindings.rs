@@ -3255,6 +3255,163 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_wait_tool_signal_id_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: i32,
+                    arg7: *mut u8,
+                    arg8: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg5;
+                    let bytes2 = _rt::Vec::from_raw_parts(arg4.cast(), len2, len2);
+                    let len3 = arg8;
+                    let result4 = T::ai_wait_tool_signal_id(
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        _rt::string_lift(bytes2),
+                        arg6 as u32,
+                        _rt::Vec::from_raw_parts(arg7.cast(), len3, len3),
+                    );
+                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result4 {
+                        Ok(e) => {
+                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec6 = (e.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec7 = (e.into_bytes()).into_boxed_slice();
+                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                            let len7 = vec7.len();
+                            ::core::mem::forget(vec7);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len7;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr7.cast_mut();
+                        }
+                    };
+                    ptr5
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_wait_tool_signal_id<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                        _ => {
+                            let l3 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l4 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l3, l4, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_wait_tool_result_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_wait_tool_result(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_wait_tool_result<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_embed_workflow_cache_key_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -6144,6 +6301,22 @@ pub mod exports {
                         signal_payload: _rt::Vec<u8>,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Build the per-call signal id for a WaitForSignal step used as an AiAgent
+                    /// tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
+                    /// the generated `emit_wait_for_signal_tool_arm`.
+                    fn ai_wait_tool_signal_id(
+                        step_id: _rt::String,
+                        instance_id: _rt::String,
+                        label: _rt::String,
+                        call_counter: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<_rt::String, _rt::String>;
+                    /// Wrap a received WaitForSignal-tool signal payload as the tool result the
+                    /// model sees: `{ "status": "received", "human_response": <payload> }`,
+                    /// matching the generated tool arm.
+                    fn ai_wait_tool_result(
+                        signal_payload: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn embed_workflow_cache_key(
                         step_id: _rt::String,
                         source: _rt::Vec<u8>,
@@ -6791,6 +6964,28 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_wait_output(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_wait_output::<$ty >
                         (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-wait-tool-signal-id")]
+                        unsafe extern "C" fn export_ai_wait_tool_signal_id(arg0 : * mut
+                        u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8,
+                        arg5 : usize, arg6 : i32, arg7 : * mut u8, arg8 : usize,) -> *
+                        mut u8 { unsafe { $($path_to_types)*::
+                        _export_ai_wait_tool_signal_id_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5, arg6, arg7, arg8) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-wait-tool-signal-id")]
+                        unsafe extern "C" fn _post_return_ai_wait_tool_signal_id(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_wait_tool_signal_id::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-wait-tool-result")] unsafe
+                        extern "C" fn export_ai_wait_tool_result(arg0 : * mut u8, arg1 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_ai_wait_tool_result_cabi::<$ty > (arg0, arg1) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-wait-tool-result")]
+                        unsafe extern "C" fn _post_return_ai_wait_tool_result(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_wait_tool_result::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#embed-workflow-cache-key")]
                         unsafe extern "C" fn export_embed_workflow_cache_key(arg0 : * mut
                         u8, arg1 : usize, arg2 : * mut u8, arg3 : usize,) -> * mut u8 {
@@ -7353,12 +7548,12 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4243] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x8d\x20\x01A\x02\x01\
-A\x02\x01B\xa4\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\
-\x04\0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\
-\0\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05\
-steps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4371] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x8d!\x01A\x02\x01A\x02\
+\x01B\xa8\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+\0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
+\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
+teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
 \x05\x04\0\x0dapply-mapping\x01\x07\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06\
 source\0\0\x08\x04\0\x0eeval-condition\x01\x09\x01j\x01s\x01s\x01@\x02\x09switch\
 -idy\x06source\0\0\x0a\x04\0\x0eprocess-switch\x01\x0b\x01@\x02\x09switch-idy\x06\
@@ -7399,45 +7594,47 @@ ait-on-wait-error\x01/\x01@\x01\x07step-ids\0$\x04\0\x15wait-poll-interval-ms\x0
 0\x01@\x03\x07step-ids\x09signal-ids\x06source\0\0\x05\x04\0\x0await-event\x011\x01\
 @\x04\x07step-ids\x09signal-ids\x0atimeout-ms*\x06source\0\0\x05\x04\0\x10wait-d\
 ebug-start\x012\x01@\x04\x07step-ids\x09signal-ids\x0esignal-payload\0\x06source\
-\0\0\x05\x04\0\x0bwait-output\x013\x04\0\x18embed-workflow-cache-key\x01(\x01@\x03\
-\x07step-ids\x06source\0\x0bchild-input\0\0\x05\x04\0\x18embed-workflow-variable\
-s\x014\x01@\x03\x07step-ids\x06source\0\x0cchild-output\0\0\x05\x04\0\x15embed-w\
-orkflow-result\x015\x01@\x03\x07step-ids\x06source\0\x0bstep-result\0\0\x05\x04\0\
-!embed-workflow-output-from-result\x016\x01@\x02\x07step-ids\x0bchild-error\0\0\x05\
-\x04\0\x14embed-workflow-error\x017\x01@\x02\x0dcheckpoint-ids\x0eattempt-number\
-y\0\x05\x04\0\x0fretry-sleep-key\x018\x01@\x05\x0eattempt-numbery\x0etotal-attem\
-ptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-after-ms*\0$\x04\0\x0eretry-del\
-ay-ms\x019\x01@\x01\x05error\0\0\x08\x04\0\x18workflow-error-retryable\x01:\x04\0\
-\x1bworkflow-error-rate-limited\x01:\x01@\x01\x05error\0\0+\x04\0\x1dworkflow-er\
-ror-retry-after-ms\x01;\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\
-\x0cagent-output\x01<\x04\0\x0fai-agent-output\x01<\x01@\x03\x04base\0\x08turn-o\
-ut\0\x07pending\0\0\x05\x04\0\x12ai-turn-next-input\x01=\x01@\x01\x08turn-out\0\0\
-\x08\x04\0\x13ai-turn-is-complete\x01>\x01@\x01\x08turn-out\0\0\x0e\x04\0\x12ai-\
-turn-tool-count\x01?\x01@\x02\x08turn-out\0\x05indexy\0\x05\x04\0\x11ai-turn-too\
-l-args\x01@\x01@\x02\x08turn-out\0\x05indexy\0\x0e\x04\0\x12ai-turn-tool-index\x01\
-A\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\x04\0\x12\
-ai-turn-add-result\x01B\x01@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x05\x04\
-\0\x0eai-turn-output\x01C\x01@\x01\x0bload-output\0\0\x05\x04\0\x17ai-memory-ini\
-tial-state\x01D\x01@\x02\x0cconversation\0\x0bfinal-state\0\0\x05\x04\0\x14ai-me\
-mory-save-input\x01E\x01@\x02\x05state\0\x0cmax-messagesy\0\x05\x04\0\x19ai-memo\
-ry-compact-sliding\x01F\x01@\x03\x04base\0\x05state\0\x0cmax-messagesy\0\x05\x04\
-\0\x12ai-summarize-input\x01G\x01@\x01\x10summarize-result\0\0\x05\x04\0\x13ai-s\
-ummarize-output\x01H\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-valid\
-ate-input\x01I\x04\0\x16agent-connection-input\x01I\x01@\x02\x08agent-idy\x06sou\
-rce\0\0\x05\x04\0\x0fagent-cache-key\x01J\x04\0\x15agent-retry-sleep-key\x018\x04\
-\0\x14agent-retry-delay-ms\x019\x01ks\x01@\x07\x04codes\x07messages\x08categorys\
-\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xcb\0\0\x05\x04\0\
-\x10agent-error-info\x01L\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08cat\
-egorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xcb\0\0\xcd\
-\0\x04\0\x16agent-retry-error-info\x01N\x01@\x08\x08agent-idy\x04codes\x07messag\
-es\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xcb\
-\0\0\x05\x04\0\x0bagent-error\x01O\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\
-\0\x15agent-error-from-info\x01P\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11\
-agent-debug-error\x01Q\x04\0\x10step-debug-start\x01(\x04\0\x0estep-debug-end\x01\
-(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/\
-workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09produ\
-cers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\
-0.41.0";
+\0\0\x05\x04\0\x0bwait-output\x013\x01@\x05\x07step-ids\x0binstance-ids\x05label\
+s\x0ccall-countery\x06source\0\0\x0a\x04\0\x16ai-wait-tool-signal-id\x014\x01@\x01\
+\x0esignal-payload\0\0\x05\x04\0\x13ai-wait-tool-result\x015\x04\0\x18embed-work\
+flow-cache-key\x01(\x01@\x03\x07step-ids\x06source\0\x0bchild-input\0\0\x05\x04\0\
+\x18embed-workflow-variables\x016\x01@\x03\x07step-ids\x06source\0\x0cchild-outp\
+ut\0\0\x05\x04\0\x15embed-workflow-result\x017\x01@\x03\x07step-ids\x06source\0\x0b\
+step-result\0\0\x05\x04\0!embed-workflow-output-from-result\x018\x01@\x02\x07ste\
+p-ids\x0bchild-error\0\0\x05\x04\0\x14embed-workflow-error\x019\x01@\x02\x0dchec\
+kpoint-ids\x0eattempt-numbery\0\x05\x04\0\x0fretry-sleep-key\x01:\x01@\x05\x0eat\
+tempt-numbery\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-aft\
+er-ms*\0$\x04\0\x0eretry-delay-ms\x01;\x01@\x01\x05error\0\0\x08\x04\0\x18workfl\
+ow-error-retryable\x01<\x04\0\x1bworkflow-error-rate-limited\x01<\x01@\x01\x05er\
+ror\0\0+\x04\0\x1dworkflow-error-retry-after-ms\x01=\x01@\x03\x08agent-idy\x06so\
+urce\0\x06output\0\0\x05\x04\0\x0cagent-output\x01>\x04\0\x0fai-agent-output\x01\
+>\x01@\x03\x04base\0\x08turn-out\0\x07pending\0\0\x05\x04\0\x12ai-turn-next-inpu\
+t\x01?\x01@\x01\x08turn-out\0\0\x08\x04\0\x13ai-turn-is-complete\x01@\x01@\x01\x08\
+turn-out\0\0\x0e\x04\0\x12ai-turn-tool-count\x01A\x01@\x02\x08turn-out\0\x05inde\
+xy\0\x05\x04\0\x11ai-turn-tool-args\x01B\x01@\x02\x08turn-out\0\x05indexy\0\x0e\x04\
+\0\x12ai-turn-tool-index\x01C\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0bt\
+ool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\x01@\x03\x08agent-idy\x06sou\
+rce\0\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01E\x01@\x01\x0bload-output\0\
+\0\x05\x04\0\x17ai-memory-initial-state\x01F\x01@\x02\x0cconversation\0\x0bfinal\
+-state\0\0\x05\x04\0\x14ai-memory-save-input\x01G\x01@\x02\x05state\0\x0cmax-mes\
+sagesy\0\x05\x04\0\x19ai-memory-compact-sliding\x01H\x01@\x03\x04base\0\x05state\
+\0\x0cmax-messagesy\0\x05\x04\0\x12ai-summarize-input\x01I\x01@\x01\x10summarize\
+-result\0\0\x05\x04\0\x13ai-summarize-output\x01J\x01@\x02\x08agent-idy\x05input\
+\0\0\x05\x04\0\x14agent-validate-input\x01K\x04\0\x16agent-connection-input\x01K\
+\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01L\x04\0\x15\
+agent-retry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\x04\
+codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0a\
+attributes\xcd\0\0\x05\x04\0\x10agent-error-info\x01N\x01j\x01\x02\x01s\x01@\x07\
+\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
+ms*\x0aattributes\xcd\0\0\xcf\0\x04\0\x16agent-retry-error-info\x01P\x01@\x08\x08\
+agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eret\
+ry-after-ms*\x0aattributes\xcd\0\0\x05\x04\0\x0bagent-error\x01Q\x01@\x02\x08age\
+nt-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01R\x01@\x02\x08age\
+nt-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01S\x04\0\x10step-debug-star\
+t\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\
+\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fwo\
+rkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
+0.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
