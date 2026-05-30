@@ -11,7 +11,9 @@ use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
 use sha2::{Digest, Sha256};
 
 use crate::compile::TEMPLATE_MAJOR_VERSION;
-use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
+use crate::workflow_features::{
+    WorkflowFeature, WorkflowFeatureSummary, analyze_workflow_features,
+};
 
 /// Current direct workflow manifest schema version.
 pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 2;
@@ -485,7 +487,18 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     child_workflows: &[DirectManifestChildWorkflowInput<'_>],
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
-    let feature_summary = analyze_workflow_features(graph);
+    let mut feature_summary = analyze_workflow_features(graph);
+    // An AiAgent step lowers as an invoke of the `ai-tools` `chat-completion`
+    // capability, so the workflow must import the ai-tools agent component even
+    // though the AiAgent step carries no agent_id of its own. This is
+    // direct-emitter-specific (the generated path links provider logic inline),
+    // so it is added here rather than in the shared feature analyzer.
+    if feature_summary.features.contains(&WorkflowFeature::AiAgent)
+        && !feature_summary.agent_ids.iter().any(|id| id == "ai-tools")
+    {
+        feature_summary.agent_ids.push("ai-tools".to_string());
+        feature_summary.agent_ids.sort();
+    }
     let root_durable = graph.durable.unwrap_or(true);
     let mut state = DirectManifestBuildState::default();
     let root_graph = graph_manifest(graph, root_durable, &mut state, agent_catalog)?;
@@ -930,6 +943,73 @@ fn step_manifest(
                 timeout: step.timeout,
             });
         }
+        Step::AiAgent(step) => {
+            // Single-shot AiAgent: lower as an invoke of the `ai-tools`
+            // `chat-completion` capability with a synthesized input mapping that
+            // builds the completion request from the AiAgent config.
+            let mut mapping = serde_json::Map::new();
+            if let Some(config) = step.config.as_ref() {
+                mapping.insert(
+                    "systemPrompt".to_string(),
+                    canonical_json(&config.system_prompt)?,
+                );
+                mapping.insert(
+                    "userPrompt".to_string(),
+                    canonical_json(&config.user_prompt)?,
+                );
+                if let Some(model) = &config.model {
+                    mapping.insert(
+                        "model".to_string(),
+                        serde_json::json!({ "valueType": "immediate", "value": model }),
+                    );
+                }
+                if let Some(temperature) = config.temperature {
+                    mapping.insert(
+                        "temperature".to_string(),
+                        serde_json::json!({ "valueType": "immediate", "value": temperature }),
+                    );
+                }
+                if let Some(max_tokens) = config.max_tokens {
+                    mapping.insert(
+                        "maxTokens".to_string(),
+                        serde_json::json!({ "valueType": "immediate", "value": max_tokens }),
+                    );
+                }
+            }
+            let input_mapping_id = state.allocate_mapping_id();
+            collections.mappings.push(DirectMappingManifest {
+                id: input_mapping_id,
+                step_id: step.id.clone(),
+                step_type: "AiAgent".to_string(),
+                purpose: "agent.inputMapping".to_string(),
+                value: serde_json::Value::Object(mapping),
+            });
+            collections.agents.push(DirectAgentManifest {
+                id: state.allocate_agent_id(),
+                step_id: step.id.clone(),
+                name: step.name.clone(),
+                step_type: "AiAgent".to_string(),
+                purpose: "agent.config".to_string(),
+                agent_id: "ai-tools".to_string(),
+                capability_id: "chat-completion".to_string(),
+                connection_id: step.connection_id.clone(),
+                durable: inherited_durable && step.durable.unwrap_or(true),
+                rate_limited: agent_capability_rate_limited(
+                    agent_catalog,
+                    "ai-tools",
+                    "chat-completion",
+                ),
+                input_mapping_id,
+                required_inputs: required_agent_inputs(
+                    agent_catalog,
+                    "ai-tools",
+                    "chat-completion",
+                ),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            });
+        }
         Step::WaitForSignal(step) => {
             if let Some(on_wait) = &step.on_wait {
                 nested_graphs.push(DirectNestedGraphManifest {
@@ -943,7 +1023,6 @@ fn step_manifest(
                 });
             }
         }
-        _ => {}
     }
 
     Ok(DirectStepManifest {

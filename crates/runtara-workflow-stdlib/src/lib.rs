@@ -772,6 +772,20 @@ mod component {
             })
         }
 
+        fn ai_agent_output(
+            agent_id: u32,
+            source: Vec<u8>,
+            output: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_agent_output(agent_id, &source, &output)
+            })
+        }
+
         fn agent_validate_input(agent_id: u32, input: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

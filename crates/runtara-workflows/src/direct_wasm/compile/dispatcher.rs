@@ -529,6 +529,56 @@ pub(super) fn emit_run_plan_mapping(
                 workflow_error_kind,
                 failure_target,
                 handled_target,
+                indices.stdlib_agent_output,
+            );
+        }
+        DirectRunPlan::AiAgent {
+            step_id,
+            agent_id,
+            agent_component_id,
+            input_mapping_id,
+            durable_checkpoint,
+            breakpoint,
+            next_plan,
+            error_plan,
+        } => {
+            // Single-shot AiAgent reuses the Agent invoke/checkpoint path (it is
+            // an invoke of `ai_tools`/`chat-completion`); only the output
+            // transform differs (`ai-agent-output` builds the
+            // `{response, iterations, toolCalls}` envelope). No retry/rate-limit
+            // in this slice.
+            emit_agent_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                step_id,
+                *agent_id,
+                agent_component_id,
+                *input_mapping_id,
+                *durable_checkpoint,
+                *breakpoint,
+                0,
+                0,
+                0,
+                next_plan,
+                error_plan.as_ref(),
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+                indices.stdlib_ai_agent_output,
             );
         }
         DirectRunPlan::Error {

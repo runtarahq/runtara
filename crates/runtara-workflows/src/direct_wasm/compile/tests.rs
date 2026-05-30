@@ -49,6 +49,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "while_nested_split" => include_str!("../../../tests/fixtures/while_nested_split.json"),
         "while_on_error" => include_str!("../../../tests/fixtures/while_on_error.json"),
         "while_timeout" => include_str!("../../../tests/fixtures/while_timeout.json"),
+        "ai_agent_single_shot" => {
+            include_str!("../../../tests/fixtures/ai_agent_single_shot.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -425,6 +428,12 @@ fn collect_run_plan_ids(
             next_plan,
             error_plan,
             ..
+        }
+        | DirectRunPlan::AiAgent {
+            input_mapping_id,
+            next_plan,
+            error_plan,
+            ..
         } => {
             mapping_ids.push(*input_mapping_id);
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
@@ -653,6 +662,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
+        | DirectRunPlan::AiAgent { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::EdgeRoute { .. } => None,
@@ -1986,6 +1996,72 @@ fn direct_compile_supports_split_on_error_graph() {
     let error_plan = error_plan.as_ref().expect("Split onError plan");
     assert!(error_plan.branches.is_empty());
     assert!(error_plan.default_plan.is_some());
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_single_shot_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-single-shot".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_single_shot"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct single-shot AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+    assert_eq!(result.support_report.unsupported, vec![]);
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+
+    // The AiAgent step lowers as an invoke of the ai-tools chat-completion
+    // capability, so the workflow imports the ai-tools agent component.
+    assert!(
+        manifest
+            .feature_summary
+            .agent_ids
+            .iter()
+            .any(|id| id == "ai-tools"),
+        "expected ai-tools in agent_ids: {:?}",
+        manifest.feature_summary.agent_ids
+    );
+
+    // The AiAgent step is recorded as an ai-tools/chat-completion agent entry.
+    let ai_agent = manifest
+        .graph
+        .agents
+        .iter()
+        .find(|agent| agent.step_id == "ai")
+        .expect("ai-agent manifest entry");
+    assert_eq!(ai_agent.agent_id, "ai-tools");
+    assert_eq!(ai_agent.capability_id, "chat-completion");
+    assert_eq!(ai_agent.step_type, "AiAgent");
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    assert!(
+        matches!(core_config.run_plan, DirectRunPlan::AiAgent { .. }),
+        "expected AiAgent run plan, got {:?}",
+        core_config.run_plan
+    );
 }
 
 #[test]

@@ -109,6 +109,19 @@ pub(super) enum DirectRunPlan {
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
+    /// Single-shot AiAgent: lowered as an invoke of the `ai_tools`
+    /// `chat-completion` capability, with the output transformed into the
+    /// `{response, iterations, toolCalls}` envelope via `ai-agent-output`.
+    AiAgent {
+        step_id: String,
+        agent_id: u32,
+        agent_component_id: String,
+        input_mapping_id: u32,
+        durable_checkpoint: bool,
+        breakpoint: bool,
+        next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
+    },
     Error {
         step_id: String,
         error_id: u32,
@@ -222,14 +235,13 @@ pub(super) fn direct_run_plan(
 
     match entry.step_type.as_str() {
         "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay"
-        | "EmbedWorkflow" | "WaitForSignal" | "Log" | "Agent" | "Error" | "Conditional" => {
-            step_run_plan(
-                &manifest.graph,
-                &manifest.child_workflows,
-                &manifest.graph.entry_point,
-                &mut Vec::new(),
-            )
-        }
+        | "EmbedWorkflow" | "WaitForSignal" | "Log" | "Agent" | "AiAgent" | "Error"
+        | "Conditional" => step_run_plan(
+            &manifest.graph,
+            &manifest.child_workflows,
+            &manifest.graph.entry_point,
+            &mut Vec::new(),
+        ),
         other => Err(DirectCompileError::Component(format!(
             "direct run plan does not support entry step type '{other}'"
         ))),
@@ -524,6 +536,31 @@ fn step_run_plan_inner(
                 max_retries,
                 retry_delay_ms,
                 rate_limit_budget_ms,
+                next_plan: Box::new(next_plan),
+                error_plan,
+            })
+        }
+        "AiAgent" => {
+            // The manifest stores the AiAgent step as an agent entry targeting
+            // `ai_tools`/`chat-completion`, with a synthesized input mapping
+            // that builds the completion request from the AiAgent config.
+            let agent = agent_config(graph, step_id)?;
+            let durable_checkpoint = agent.durable;
+            let next_plan =
+                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, child_workflows, step_id, stack)?
+            } else {
+                None
+            };
+
+            Ok(DirectRunPlan::AiAgent {
+                step_id: step_id.to_string(),
+                agent_id: agent.id,
+                agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
+                input_mapping_id: agent.input_mapping_id,
+                durable_checkpoint,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
                 error_plan,
             })
@@ -1134,13 +1171,15 @@ fn agent_config<'a>(
     graph: &'a DirectGraphManifest,
     step_id: &str,
 ) -> Result<&'a DirectAgentManifest, DirectCompileError> {
+    // Both Agent and AiAgent steps are recorded as agent entries (an AiAgent
+    // lowers to an `ai-tools`/`chat-completion` invoke), so accept either.
     if !graph
         .steps
         .iter()
-        .any(|step| step.id == step_id && step.step_type == "Agent")
+        .any(|step| step.id == step_id && matches!(step.step_type.as_str(), "Agent" | "AiAgent"))
     {
         return Err(DirectCompileError::Component(format!(
-            "direct step '{step_id}' is not an Agent step"
+            "direct step '{step_id}' is not an Agent or AiAgent step"
         )));
     }
 

@@ -1103,6 +1103,45 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize Agent steps context: {err}"))
     }
 
+    /// Build an Ai Agent step output context from a `chat-completion` capability
+    /// result `{choice, usage}`. Extracts the final assistant text from the
+    /// choice (single-shot: one iteration, no tool calls) and wraps it in the
+    /// generated-code-compatible `{response, iterations, toolCalls}` envelope.
+    /// Mirrors the generated `__step_output_envelope` payload for AiAgent.
+    pub fn ai_agent_output(
+        &self,
+        agent_id: u32,
+        source: &[u8],
+        output: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-agent-output source: {err}"))?;
+        let output: Value = serde_json::from_slice(output)
+            .map_err(|err| format!("failed to parse AiAgent output: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+
+        let final_text = extract_ai_final_text(output.get("choice").unwrap_or(&Value::Null));
+        let outputs = serde_json::json!({
+            "response": final_text,
+            "iterations": 1,
+            "toolCalls": [],
+        });
+
+        let steps = insert_step_output(
+            &source,
+            &agent.step_id,
+            agent.name.as_deref(),
+            "AiAgent",
+            outputs,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize AiAgent steps context: {err}"))
+    }
+
     /// Validate resolved Agent inputs and return a generated-code-compatible
     /// validation error string when required fields are missing/null.
     pub fn agent_validate_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
@@ -3073,6 +3112,28 @@ fn default_step_name(step_type: &str) -> &str {
     } else {
         "Unnamed"
     }
+}
+
+/// Extract the final assistant text from a serialized `chat-completion` choice.
+///
+/// The choice is `runtara_ai::OneOrMany<AssistantContent>`, which serializes as
+/// a JSON array of untagged `AssistantContent`: a `Text` is `{"text": "..."}`
+/// and a `ToolCall` is `{"id": ..., "function": ...}`. This returns the first
+/// element carrying a `text` string — matching how the generated Ai Agent loop
+/// sets `__final_response` from `AssistantContent::Text`. Tool-call content is
+/// ignored (single-shot); returns an empty string when no text is present.
+///
+/// Parsed by hand rather than via `runtara_ai` types: the direct-component
+/// stdlib build intentionally does not link `runtara-ai`.
+fn extract_ai_final_text(choice: &Value) -> String {
+    if let Some(items) = choice.as_array() {
+        for item in items {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                return text.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn insert_step_output(
@@ -6360,6 +6421,30 @@ mod tests {
             steps["agent"]["outputs"],
             json!({ "value": "out", "ok": true })
         );
+    }
+
+    #[test]
+    fn ai_agent_output_builds_single_shot_envelope() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.value" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        // A chat-completion result: choice = serialized OneOrMany<AssistantContent>
+        // (a JSON array; an untagged Text content is `{"text": ...}`).
+        let output = json!({ "choice": [{ "text": "Hello!" }] });
+        let output_bytes = serde_json::to_vec(&output).unwrap();
+
+        let steps = manifest
+            .ai_agent_output(0, &source, &output_bytes)
+            .expect("AiAgent steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(steps["agent"]["stepType"], json!("AiAgent"));
+        assert_eq!(steps["agent"]["outputs"]["response"], json!("Hello!"));
+        assert_eq!(steps["agent"]["outputs"]["iterations"], json!(1));
+        assert_eq!(steps["agent"]["outputs"]["toolCalls"], json!([]));
     }
 
     #[test]

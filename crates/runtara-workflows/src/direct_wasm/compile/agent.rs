@@ -62,6 +62,12 @@ pub(super) fn emit_agent_plan(
     workflow_error_kind: &DirectDataSegment,
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
+    // stdlib function index used to build the step output context from the
+    // capability result: `agent-output` for a normal Agent step, or
+    // `ai-agent-output` for an AiAgent step (which transforms the
+    // `chat-completion` choice into the `{response, iterations, toolCalls}`
+    // envelope). Both share the rest of the invoke/checkpoint/retry path.
+    output_fn: u32,
 ) {
     emit_apply_mapping(
         body,
@@ -304,7 +310,7 @@ pub(super) fn emit_agent_plan(
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_output));
+    body.instruction(&Instruction::Call(output_fn));
     emit_retptr_error_or_return(
         body,
         indices,

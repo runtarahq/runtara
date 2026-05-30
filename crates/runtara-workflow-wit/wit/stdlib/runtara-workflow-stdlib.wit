@@ -323,6 +323,16 @@ interface json {
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Build an Ai Agent step output context from a `chat-completion` capability
+    // result. Extracts the final assistant text from the choice and wraps it in
+    // the generated-code-compatible `{response, iterations, toolCalls}` envelope
+    // under the AiAgent step's id. Single-shot (one iteration, no tool calls).
+    ai-agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-validate-input: func(
         agent-id: u32,
         input: list<u8>,

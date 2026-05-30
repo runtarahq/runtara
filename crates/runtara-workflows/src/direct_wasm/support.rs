@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runtara_dsl::{
-    AgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep,
-    WhileStep,
+    AgentStep, AiAgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step,
+    WaitForSignalStep, WhileStep,
 };
 
 use crate::compile::ChildWorkflowInput;
@@ -583,6 +583,27 @@ fn supports_direct_control_step_inner(
                         child_stack,
                     ))
         }
+        Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step) => {
+            supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && (!include_on_error
+                || supports_on_error_flow_step(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                ))
+        }
         _ => false,
     }
 }
@@ -597,6 +618,30 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
     // timeout enforcement is impossible in the synchronous component model (a
     // running `capabilities.invoke` cannot be preempted) and is out of scope.
     true
+}
+
+/// Slice 0 supports single-shot AiAgent only. The full orchestration loop
+/// (tool calls, conversation memory, structured output, compaction, MCP) is
+/// added in later slices; until then, those shapes fall back to the generated
+/// Rust compiler. Accepted: an AiAgent with a config, no `memory`, no
+/// `outputSchema`, and no tool/memory/MCP edges (which would require the loop).
+fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -> bool {
+    let Some(config) = step.config.as_ref() else {
+        return false;
+    };
+    if config.memory.is_some() || config.output_schema.is_some() {
+        return false;
+    }
+    // A labelled outgoing edge (other than `next`/`onError`) is a tool, memory,
+    // or MCP edge — i.e. the tool loop, which Slice 0 does not lower.
+    let has_tool_edges = graph.execution_plan.iter().any(|edge| {
+        edge.from_step == step.id
+            && edge
+                .label
+                .as_deref()
+                .is_some_and(|label| label != "onError" && label != "next")
+    });
+    !has_tool_edges
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
@@ -1093,10 +1138,12 @@ fn collect_step_support(
             child_workflows,
             unsupported,
         ),
+        Step::AiAgent(ai_step) if supports_ai_agent_step_baseline(graph, ai_step) => {}
         Step::AiAgent(_) => unsupported_step(
             step,
             "ai-agent",
-            "AiAgent steps require LLM/tool-loop runtime support",
+            "AiAgent direct lowering currently supports single-shot completions only \
+             (no tool, memory, structured-output, or MCP edges)",
             unsupported,
         ),
     }

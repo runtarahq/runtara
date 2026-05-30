@@ -4006,6 +4006,7 @@ name = "runtara-agent-ai-tools"
 version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
+ "runtara-ai",
  "runtara-dsl",
  "runtara-http",
  "serde",
