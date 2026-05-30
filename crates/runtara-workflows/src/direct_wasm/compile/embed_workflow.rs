@@ -233,6 +233,106 @@ fn emit_embed_workflow_child_attempt(
     );
 }
 
+/// Lower an EmbedWorkflow target used as an AiAgent tool: run the composed child
+/// workflow with the LLM-provided tool arguments as its input data and leave the
+/// child's final output (or a wrapped error) in the tool-result locals. Mirrors
+/// the generated `emit_embed_workflow_tool_arm` (child run → result, else error)
+/// and is invoked from the AiAgent loop's tool dispatch, NOT the normal run plan,
+/// so there is no retry/durable wrapper or next-plan continuation — a single
+/// attempt whose outcome is fed back to the model as the tool result.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_embed_workflow_tool_arm(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    embed_step_id: &str,
+    child_plan: &DirectRunPlan,
+    tool_args_ptr_local: u32,
+    tool_args_len_local: u32,
+    tool_result_ptr_local: u32,
+    tool_result_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+) {
+    let step_id_segment = static_data
+        .step_id(embed_step_id)
+        .expect("embed tool step ids are present in static data");
+
+    // The LLM tool arguments ARE the child workflow's input data (no input
+    // mapping, matching the generated tool arm's `__child_data = __tool_args`).
+    body.instruction(&Instruction::LocalGet(tool_args_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(tool_args_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_DATA_LEN_LOCAL));
+
+    // The AiAgent step's source is the parent source for the child's variable
+    // scope (cache-key prefix, scope id, workflow id).
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+
+    // child_variables = embed-workflow-variables(parent_source, child_data)
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_DATA_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_variables));
+    return_if_retptr_error(body);
+    load_retptr_list(
+        body,
+        DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+        DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    );
+
+    // Run a single child attempt; the child's output lands in the tool-result
+    // locals and the shared child-error flag records failure. A child failure is
+    // captured (not propagated) so the model can see it as the tool result.
+    let child_variables = DirectVariables::Locals {
+        ptr_local: DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+        len_local: DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    };
+    emit_embed_workflow_child_attempt(
+        body,
+        indices,
+        static_data,
+        track_events,
+        child_variables,
+        child_plan,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        tool_result_ptr_local,
+        tool_result_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+    );
+
+    // On failure, wrap the child error as the tool result.
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_wrapped_child_error(
+        body,
+        indices,
+        step_id_segment,
+        tool_result_ptr_local,
+        tool_result_len_local,
+    );
+    body.instruction(&Instruction::End);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_embed_workflow_child_with_retry(
     body: &mut WasmFunction,

@@ -21,6 +21,7 @@ use super::agent_error::{
 };
 use super::agent_invoke::emit_agent_invoke;
 use super::dispatcher::emit_run_plan_mapping;
+use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
     DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_CONV_LEN_LOCAL,
@@ -307,39 +308,70 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
     );
 
-    // Dispatch by tool index: `if match == i { invoke tools[i] }`.
+    // Dispatch by tool index: `if match == i { run tools[i] }`.
     for (tool_index, tool) in tools.iter().enumerate() {
-        let tool_invoke = indices
-            .agent_invokes
-            .get(&tool.agent_component_id)
-            .expect("AiAgent tool has a matching component import");
-        let tool_capability = static_data
-            .agent_capability_id(tool.agent_id)
-            .expect("AiAgent tool has a static capability id");
-
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_MATCH_LOCAL));
         body.instruction(&Instruction::I32Const(tool_index as i32));
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
-        emit_agent_invoke(
-            body,
-            tool_invoke,
-            tool_capability,
-            static_data,
-            tool.agent_id,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-        );
-        // A tool failure is fed back to the LLM as the tool result (the error
-        // envelope) and the loop continues, rather than failing the workflow —
-        // matching the generated loop's `{"error": …}` tool result.
-        emit_agent_invoke_capture_error_or_result(
-            body,
-            indices,
-            tool.agent_id,
-            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
-            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
-        );
+        match tool {
+            DirectAiToolPlan::Agent {
+                agent_id,
+                agent_component_id,
+            } => {
+                let tool_invoke = indices
+                    .agent_invokes
+                    .get(agent_component_id)
+                    .expect("AiAgent tool has a matching component import");
+                let tool_capability = static_data
+                    .agent_capability_id(*agent_id)
+                    .expect("AiAgent tool has a static capability id");
+                emit_agent_invoke(
+                    body,
+                    tool_invoke,
+                    tool_capability,
+                    static_data,
+                    *agent_id,
+                    DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+                    DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                );
+                // A tool failure is fed back to the LLM as the tool result (the
+                // error envelope) and the loop continues, rather than failing the
+                // workflow — matching the generated loop's `{"error": …}` result.
+                emit_agent_invoke_capture_error_or_result(
+                    body,
+                    indices,
+                    *agent_id,
+                    DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+                    DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+                );
+            }
+            DirectAiToolPlan::Embed {
+                step_id,
+                child_plan,
+            } => {
+                emit_embed_workflow_tool_arm(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    step_id,
+                    child_plan,
+                    DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+                    DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                    DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+                    DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                );
+            }
+        }
         body.instruction(&Instruction::End);
     }
 

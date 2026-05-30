@@ -2529,7 +2529,13 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
     // The run plan's tool list mirrors the advertised order: search then invoke.
     assert_eq!(tools.len(), 2, "expected the two MCP meta-tools");
     assert!(
-        tools.iter().all(|tool| tool.agent_component_id == "mcp"),
+        tools.iter().all(|tool| matches!(
+            tool,
+            crate::direct_wasm::plan::DirectAiToolPlan::Agent {
+                agent_component_id,
+                ..
+            } if agent_component_id == "mcp"
+        )),
         "MCP tools dispatch to the mcp component"
     );
 }

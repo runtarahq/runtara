@@ -152,13 +152,26 @@ pub(super) enum DirectRunPlan {
     },
 }
 
-/// A tool the AiAgent loop can dispatch: the manifest agent id and component id
-/// of the target Agent step, invoked with the LLM-provided arguments. Dispatched
-/// by the capability-resolved tool index (the tool's position in this list).
+/// A tool the AiAgent loop can dispatch, by the capability-resolved tool index
+/// (the tool's position in this list). Either an Agent-capability invoke or a
+/// composed child workflow run (EmbedWorkflow tool).
 #[derive(Debug, Clone)]
-pub(super) struct DirectAiToolPlan {
-    pub(super) agent_id: u32,
-    pub(super) agent_component_id: String,
+pub(super) enum DirectAiToolPlan {
+    /// Invoke the target Agent step's capability with the LLM-provided arguments.
+    Agent {
+        agent_id: u32,
+        agent_component_id: String,
+    },
+    /// Run a composed child workflow with the LLM-provided arguments as its input
+    /// data and feed the child's final output back as the tool result. Mirrors the
+    /// generated `emit_embed_workflow_tool_arm` (child run → result, else error).
+    Embed {
+        /// The EmbedWorkflow step id that owns the preloaded child graph; used to
+        /// build the child variables/scope and debug events.
+        step_id: String,
+        /// The composed child workflow run plan (built from the preloaded graph).
+        child_plan: Box<DirectRunPlan>,
+    },
 }
 
 /// Conversation-memory provider for an AiAgent loop: the memory agent's
@@ -653,15 +666,34 @@ fn step_run_plan_inner(
                 .unwrap_or_default();
             let mut tools = Vec::with_capacity(tool_names.len());
             for name in &tool_names {
-                // Advertised tool order is Agent tools then MCP meta-tools. An
-                // Agent tool's name is its edge label; an MCP tool's name is
-                // `<toolset>_search`/`_invoke`, resolved to its `agent.tool.mcp`
-                // provider entry (named after the synthetic tool).
-                let tool_agent = if let Some(edge) = tool_edges
+                // Advertised tool order is Agent/Embed tools then MCP meta-tools.
+                // An Agent or EmbedWorkflow tool's name is its edge label; an MCP
+                // tool's name is `<toolset>_search`/`_invoke`, resolved to its
+                // `agent.tool.mcp` provider entry (named after the synthetic tool).
+                let tool_edge = tool_edges
                     .iter()
-                    .find(|edge| edge.label.as_deref() == Some(name.as_str()))
-                {
-                    graph
+                    .find(|edge| edge.label.as_deref() == Some(name.as_str()));
+                if let Some(edge) = tool_edge {
+                    // An EmbedWorkflow tool target has a preloaded child graph;
+                    // run it as the tool, feeding its output back to the model.
+                    if child_workflows
+                        .iter()
+                        .any(|child| child.step_id == edge.to_step)
+                    {
+                        let child = child_workflow_graph(child_workflows, &edge.to_step)?;
+                        let child_plan = step_run_plan(
+                            &child.graph,
+                            child_workflows,
+                            &child.graph.entry_point,
+                            &mut Vec::new(),
+                        )?;
+                        tools.push(DirectAiToolPlan::Embed {
+                            step_id: edge.to_step.clone(),
+                            child_plan: Box::new(child_plan),
+                        });
+                        continue;
+                    }
+                    let tool_agent = graph
                         .agents
                         .iter()
                         .find(|candidate| {
@@ -672,9 +704,13 @@ fn step_run_plan_inner(
                                 "AiAgent tool target '{}' has no agent config",
                                 edge.to_step
                             ))
-                        })?
+                        })?;
+                    tools.push(DirectAiToolPlan::Agent {
+                        agent_id: tool_agent.id,
+                        agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                    });
                 } else {
-                    graph
+                    let tool_agent = graph
                         .agents
                         .iter()
                         .find(|candidate| {
@@ -686,12 +722,12 @@ fn step_run_plan_inner(
                             DirectCompileError::Component(format!(
                                 "AiAgent tool '{name}' has no execution-plan edge or MCP provider"
                             ))
-                        })?
-                };
-                tools.push(DirectAiToolPlan {
-                    agent_id: tool_agent.id,
-                    agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
-                });
+                        })?;
+                    tools.push(DirectAiToolPlan::Agent {
+                        agent_id: tool_agent.id,
+                        agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                    });
+                }
             }
             let max_iterations = graph
                 .steps
