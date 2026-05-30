@@ -751,32 +751,42 @@ Current remaining action items:
   inner-attempt block stays open through the durable output (the lookup `End` +
   `split-output-from-result` are deferred past the retry blocks) and the
   no-failure branch breaks out of the retry-outer block.
+- **Nested EmbedWorkflow child-local `onError` is FIXED** (all 14 embed A/B
+  parity tests pass). A nested EmbedWorkflow whose child workflow handles its own
+  embed failure via a local `onError` edge previously diverged from the generated
+  compiler. Three coordinated emission bugs, all in `compile/embed_workflow.rs`:
+  1. **Durable target depth.** The durable checkpoint-lookup `if/else` wraps the
+     child execution through the result computation, but the failure/handled `br`
+     targets in that span were not offset for it, so a handled `onError` route
+     landed one level too shallow, fell through into the normal `next_plan`, and
+     replaced the handler output. Fix: shadow `failure_target`/`handled_target`
+     `+1` across the durable span (restored after the lookup `End`).
+  2. **Stale child-error flag.** The shared `DIRECT_EMBED_CHILD_ERROR_FLAG`
+     (local 45) set by the inner embed leaked to the outer embed, which read it as
+     its own child failing. Fix: clear it before the `onError` route — a handled
+     inner failure then breaks to the handled-target with the flag clear, while a
+     genuine failure re-sets it via `child_error_and_continue` or fails outright.
+  3. **Clobbered data context.** A nested embed's input mapping overwrites the
+     shared child-data local that IS its own data context, so the `onError`
+     handler (and following steps) resolved `data.*` to null. Fix: save the entry
+     data context into `DIRECT_EMBED_SAVED_DATA_*` (framed across the child run)
+     and restore it after. (Tracing technique: `wasm-tools print` of the dumped
+     `workflow-logic.wasm` to read the actual `br` depths and flag/data locals.)
 - **Known pre-existing issues** (gated behind `RUNTARA_RUN_DIRECT_WASM_E2E=1`,
-  so they don't block the default suite):
-  - `embed_workflow_child_local_on_error` and
-    `nested_embed_workflow_retry_parent_frame_isolation` — a nested EmbedWorkflow
-    whose child step has a local `onError` handler: when the grandchild fails,
-    the generated artifact applies the child's onError (`handled: true`,
-    completes), but the direct artifact lets the failure escape the child and
-    fails the parent. The run plan is correct (the child is built with
-    `include_on_error`, so its EmbedWorkflow step carries an `error_plan`), so the
-    bug is in the **emission**. Traced to the WASM: the shared
-    `DIRECT_EMBED_CHILD_ERROR_FLAG` local (local 45 in the dump) is set by the
-    inner embed (`call_grandchild`) on the grandchild failure; its onError route
-    then **breaks to the handled-target** (`br` out) rather than falling through,
-    and the flag is left set across the inner embed's frame, so the outer embed
-    (`call_child`) sees it and fails with `call 85` (runtime fail) instead of
-    treating the child as recovered. A naive flag-clear *after* the route is dead
-    code (the route already branched away) and clearing *before* it doesn't help
-    (the route's frame restore re-touches the flag local). The fix needs the flag
-    cleared on the handled-target landing — or a per-nesting-level flag local —
-    and careful verification against `cached_embed_workflow_checkpoint_replay`.
-  - `dont_stop_nested_split_failure_aggregation` — **not a direct-vs-generated
+  so they don't block the default suite) — none are direct-emitter lowering bugs:
+  - `dont_stop_nested_split_failure_aggregation` and
+    `dont_stop_deep_nested_failure_aggregation` — **not a direct-vs-generated
     divergence**: `assert_success_parity` passes (direct's completion payload
-    equals the generated artifact's), so the direct emitter is at parity. The
-    test's stricter explicit assertion `output["outputs"] == []` fails because
-    *both* artifacts emit `null` for the empty success list — a shared
-    behavioral/expectation question outside the direct emitter's scope.
+    equals the generated artifact's), so the direct emitter is at parity. Both
+    artifacts emit the workflow output as an empty array `[]`; the tests' stricter
+    explicit assertions assume a `{outputs, stats, data}` object shape that
+    *neither* compiler produces, so `output["outputs"]` indexes `[]` by a string
+    key and reads `null`. A shared behavioral/expectation question outside the
+    direct emitter's scope.
+  - `finish_breakpoint_pause_resume` and `direct_control_breakpoint_pause_resume`
+    — the failure is on the **generated/components** side
+    (`compile_workflow` → `cargo component build` exits 101), which the direct
+    emitter cannot affect; reproduces identically on the parent commit.
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
