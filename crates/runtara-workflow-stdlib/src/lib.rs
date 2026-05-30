@@ -838,6 +838,17 @@ mod component {
             })
         }
 
+        fn ai_memory_initial_state(load_output: Vec<u8>) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_memory_initial_state(&load_output)
+        }
+
+        fn ai_memory_save_input(
+            conversation: Vec<u8>,
+            final_state: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_memory_save_input(&conversation, &final_state)
+        }
+
         fn agent_validate_input(agent_id: u32, input: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

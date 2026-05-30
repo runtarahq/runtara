@@ -96,6 +96,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_tool_index: Option<u32>,
     stdlib_ai_turn_add_result: Option<u32>,
     stdlib_ai_turn_output: Option<u32>,
+    stdlib_ai_memory_initial_state: Option<u32>,
+    stdlib_ai_memory_save_input: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
@@ -376,6 +378,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_turn_output,
                 "stdlib.ai-turn-output",
             )?,
+            stdlib_ai_memory_initial_state: require_import(
+                self.stdlib_ai_memory_initial_state,
+                "stdlib.ai-memory-initial-state",
+            )?,
+            stdlib_ai_memory_save_input: require_import(
+                self.stdlib_ai_memory_save_input,
+                "stdlib.ai-memory-save-input",
+            )?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
                 "stdlib.agent-validate-input",
@@ -507,6 +517,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_tool_index: u32,
     pub(super) stdlib_ai_turn_add_result: u32,
     pub(super) stdlib_ai_turn_output: u32,
+    pub(super) stdlib_ai_memory_initial_state: u32,
+    pub(super) stdlib_ai_memory_save_input: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_cache_key: u32,
@@ -774,6 +786,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_add_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-output") {
         import_indices.stdlib_ai_turn_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-memory-initial-state") {
+        import_indices.stdlib_ai_memory_initial_state = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-memory-save-input") {
+        import_indices.stdlib_ai_memory_save_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {

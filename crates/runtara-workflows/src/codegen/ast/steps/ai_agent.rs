@@ -886,8 +886,8 @@ pub fn emit(
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
-                    None::<&str>,
                     Some(__mem_load_debug_outputs),
+                    None::<&str>,
                     Some(__mem_load_duration_ms),
                 );
             }
@@ -1229,8 +1229,8 @@ pub fn emit(
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
-                    None::<&str>,
                     Some(__mem_save_debug_outputs),
+                    None::<&str>,
                     Some(__mem_save_duration_ms),
                 );
             }

@@ -362,6 +362,15 @@ interface json {
         source: list<u8>,
         turn-out: list<u8>,
     ) -> result<list<u8>, string>;
+    // Build the initial loop state from a load-memory result (loaded
+    // conversation becomes the starting chat history).
+    ai-memory-initial-state: func(load-output: list<u8>) -> result<list<u8>, string>;
+    // Build the save-memory input `{conversation_id, messages}` from the final
+    // loop state and the resolved conversation object.
+    ai-memory-save-input: func(
+        conversation: list<u8>,
+        final-state: list<u8>,
+    ) -> result<list<u8>, string>;
 
     agent-validate-input: func(
         agent-id: u32,

@@ -998,10 +998,16 @@ fn step_manifest(
                 }
             }
             // Tool edges (labelled, excluding next/onError/memory/mcp.*) turn this
-            // into a tool-loop AiAgent driven by the `chat-turn` capability;
-            // otherwise it is a single-shot `chat-completion`.
+            // into a tool-loop AiAgent driven by the `chat-turn` capability.
+            // Conversation memory also forces the loop path (it manages chat
+            // history). Otherwise it is a single-shot `chat-completion`.
+            let has_memory = step
+                .config
+                .as_ref()
+                .and_then(|config| config.memory.as_ref())
+                .is_some();
             let tool_edges = ai_agent_tool_edges(graph, &step.id);
-            let capability_id = if tool_edges.is_empty() {
+            let capability_id = if tool_edges.is_empty() && !has_memory {
                 "chat-completion"
             } else {
                 let tool_defs = tool_edges
@@ -1057,6 +1063,52 @@ fn step_manifest(
                 retry_delay: None,
                 timeout: None,
             });
+            // Conversation memory: record the provider agent's load-memory and
+            // save-memory entries plus a conversation-id mapping. The loop loads
+            // history before the turns and saves the final history after.
+            if let (true, Some((mem_agent, mem_conn))) =
+                (has_memory, ai_agent_memory_provider(graph, &step.id))
+            {
+                let memory = step.config.as_ref().and_then(|c| c.memory.as_ref());
+                let mut conversation = serde_json::Map::new();
+                if let Some(memory) = memory {
+                    conversation.insert(
+                        "conversation_id".to_string(),
+                        canonical_json(&memory.conversation_id)?,
+                    );
+                }
+                let conversation_mapping_id = state.allocate_mapping_id();
+                collections.mappings.push(DirectMappingManifest {
+                    id: conversation_mapping_id,
+                    step_id: step.id.clone(),
+                    step_type: "AiAgent".to_string(),
+                    purpose: "memory.conversation".to_string(),
+                    value: serde_json::Value::Object(conversation),
+                });
+                let mem_agent = canonicalize_direct_agent_id(&mem_agent);
+                for (purpose, capability) in [
+                    ("memory.load", "load-memory"),
+                    ("memory.save", "save-memory"),
+                ] {
+                    collections.agents.push(DirectAgentManifest {
+                        id: state.allocate_agent_id(),
+                        step_id: step.id.clone(),
+                        name: None,
+                        step_type: "AiAgent".to_string(),
+                        purpose: purpose.to_string(),
+                        agent_id: mem_agent.clone(),
+                        capability_id: capability.to_string(),
+                        connection_id: mem_conn.clone(),
+                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        rate_limited: false,
+                        input_mapping_id: conversation_mapping_id,
+                        required_inputs: Vec::new(),
+                        max_retries: None,
+                        retry_delay: None,
+                        timeout: None,
+                    });
+                }
+            }
         }
         Step::WaitForSignal(step) => {
             if let Some(on_wait) = &step.on_wait {
@@ -1147,6 +1199,22 @@ fn canonical_json<T: serde::Serialize>(
 
 fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
+}
+
+/// The AiAgent's memory provider: the agent id and connection id of the Agent
+/// step on the `memory`-labelled edge, if any.
+fn ai_agent_memory_provider(
+    graph: &ExecutionGraph,
+    step_id: &str,
+) -> Option<(String, Option<String>)> {
+    let edge = graph
+        .execution_plan
+        .iter()
+        .find(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("memory"))?;
+    match graph.steps.get(&edge.to_step) {
+        Some(Step::Agent(agent)) => Some((agent.agent_id.clone(), agent.connection_id.clone())),
+        _ => None,
+    }
 }
 
 /// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled

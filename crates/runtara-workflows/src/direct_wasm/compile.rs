@@ -279,6 +279,10 @@ const DIRECT_AI_TOOL_RESULT_LEN_LOCAL: u32 = 99;
 const DIRECT_AI_ITER_LOCAL: u32 = 100;
 /// The capability-resolved tool index for the current tool call (dispatch key).
 const DIRECT_AI_TOOL_MATCH_LOCAL: u32 = 101;
+/// The resolved conversation object (`{conversation_id}`) for memory load/save,
+/// computed once before the loop and reused for the save after it.
+const DIRECT_AI_CONV_PTR_LOCAL: u32 = 102;
+const DIRECT_AI_CONV_LEN_LOCAL: u32 = 103;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

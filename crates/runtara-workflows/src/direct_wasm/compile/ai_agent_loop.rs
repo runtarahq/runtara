@@ -21,17 +21,17 @@ use super::agent_invoke::emit_agent_invoke;
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::{
-    DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_ITER_LOCAL,
-    DIRECT_AI_PENDING_LEN_LOCAL, DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL,
-    DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-    DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL,
-    DIRECT_AI_TOOL_RESULT_LEN_LOCAL, DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
-    DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL,
-    DIRECT_AI_TURN_OUT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
-    DirectVariables,
+    DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_CONV_LEN_LOCAL,
+    DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_ITER_LOCAL, DIRECT_AI_PENDING_LEN_LOCAL,
+    DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL, DIRECT_AI_STATE_PTR_LOCAL,
+    DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL,
+    DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_PTR_LOCAL,
+    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectRunPlan, DirectVariables,
 };
-use crate::direct_wasm::plan::DirectAiToolPlan;
+use crate::direct_wasm::plan::{DirectAiMemoryPlan, DirectAiToolPlan};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_ai_agent_loop_plan(
@@ -46,6 +46,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     input_mapping_id: u32,
     max_iterations: u32,
     tools: &[DirectAiToolPlan],
+    memory: Option<&DirectAiMemoryPlan>,
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -79,14 +80,82 @@ pub(super) fn emit_ai_agent_loop_plan(
         None,
     );
 
-    // Initial loop state: an empty object (chat-turn defaults chatHistory/[]/0),
-    // empty pending results, zero turns.
-    set_segment(
-        body,
-        &static_data.agent_empty_parameters,
-        DIRECT_AI_STATE_PTR_LOCAL,
-        DIRECT_AI_STATE_LEN_LOCAL,
-    );
+    // Conversation memory: resolve the conversation id once, then load prior
+    // history into the initial loop state. Without memory the initial state is
+    // an empty object (chat-turn defaults chatHistory/[]/0).
+    if let Some(memory) = memory {
+        // conversation = apply(conversation_mapping, source)
+        emit_apply_mapping(
+            body,
+            indices,
+            memory.conversation_mapping_id,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            None,
+        );
+        // load_output = invoke load-memory(conversation)
+        let load_invoke = indices
+            .agent_invokes
+            .get(&memory.agent_component_id)
+            .expect("AiAgent memory provider has a matching component import");
+        let load_capability = static_data
+            .agent_capability_id(memory.load_agent_id)
+            .expect("AiAgent memory load has a static capability id");
+        emit_agent_invoke(
+            body,
+            load_invoke,
+            load_capability,
+            static_data,
+            memory.load_agent_id,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+        );
+        emit_agent_invoke_error_branch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            memory.load_agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            None,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            None,
+            None,
+        );
+        load_agent_retptr_list(
+            body,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        );
+        // state = ai-memory-initial-state(load_output)
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_memory_initial_state));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+    } else {
+        set_segment(
+            body,
+            &static_data.agent_empty_parameters,
+            DIRECT_AI_STATE_PTR_LOCAL,
+            DIRECT_AI_STATE_LEN_LOCAL,
+        );
+    }
     set_segment(
         body,
         &static_data.split_empty_results,
@@ -319,6 +388,69 @@ pub(super) fn emit_ai_agent_loop_plan(
     body.instruction(&Instruction::Br(0)); // continue $turn
     body.instruction(&Instruction::End); // $turn
     body.instruction(&Instruction::End); // $outer
+
+    // Conversation memory: save the final conversation history.
+    if let Some(memory) = memory {
+        // save_input = ai-memory-save-input(conversation, final_state)
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_LEN_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_memory_save_input));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        load_retptr_list(
+            body,
+            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        );
+        // invoke save-memory(save_input); the result is unused.
+        let save_invoke = indices
+            .agent_invokes
+            .get(&memory.agent_component_id)
+            .expect("AiAgent memory provider has a matching component import");
+        let save_capability = static_data
+            .agent_capability_id(memory.save_agent_id)
+            .expect("AiAgent memory save has a static capability id");
+        emit_agent_invoke(
+            body,
+            save_invoke,
+            save_capability,
+            static_data,
+            memory.save_agent_id,
+            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        );
+        emit_agent_invoke_error_branch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            memory.save_agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            None,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            None,
+            None,
+        );
+        load_agent_retptr_list(
+            body,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
+    }
 
     // Build the AiAgent step output from the final (complete or at-bound) turn.
     body.instruction(&Instruction::I32Const(agent_id as i32));

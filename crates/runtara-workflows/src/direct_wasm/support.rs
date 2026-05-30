@@ -642,18 +642,29 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
     let Some(config) = step.config.as_ref() else {
         return false;
     };
-    if config.memory.is_some() {
-        return false;
-    }
-    // Memory / MCP edges require later slices.
-    let has_memory_or_mcp = graph.execution_plan.iter().any(|edge| {
+    // MCP edges (synthetic tools) require a later slice.
+    let has_mcp = graph.execution_plan.iter().any(|edge| {
         edge.from_step == step.id
             && edge
                 .label
                 .as_deref()
-                .is_some_and(|label| label == "memory" || label.starts_with("mcp."))
+                .is_some_and(|label| label.starts_with("mcp."))
     });
-    if has_memory_or_mcp {
+    if has_mcp {
+        return false;
+    }
+    // Conversation memory: the `memory`-labelled edge must target an Agent step
+    // (the provider), and the config must declare memory iff the edge exists.
+    let memory_edge = graph
+        .execution_plan
+        .iter()
+        .find(|edge| edge.from_step == step.id && edge.label.as_deref() == Some("memory"));
+    if config.memory.is_some() != memory_edge.is_some() {
+        return false;
+    }
+    if let Some(edge) = memory_edge
+        && !matches!(graph.steps.get(&edge.to_step), Some(Step::Agent(_)))
+    {
         return false;
     }
 

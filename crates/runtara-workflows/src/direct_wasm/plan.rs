@@ -134,6 +134,8 @@ pub(super) enum DirectRunPlan {
         /// Tools in the same order as the advertised `tools` (so the capability's
         /// resolved tool index selects the right entry). Dispatched by index.
         tools: Vec<DirectAiToolPlan>,
+        /// Conversation memory: load history before the loop, save it after.
+        memory: Option<DirectAiMemoryPlan>,
         next_plan: Box<DirectRunPlan>,
     },
     Error {
@@ -157,6 +159,17 @@ pub(super) enum DirectRunPlan {
 pub(super) struct DirectAiToolPlan {
     pub(super) agent_id: u32,
     pub(super) agent_component_id: String,
+}
+
+/// Conversation-memory provider for an AiAgent loop: the memory agent's
+/// load/save manifest agent ids, its component id, and the conversation-id
+/// mapping used to build the load/save inputs.
+#[derive(Debug, Clone)]
+pub(super) struct DirectAiMemoryPlan {
+    pub(super) load_agent_id: u32,
+    pub(super) save_agent_id: u32,
+    pub(super) agent_component_id: String,
+    pub(super) conversation_mapping_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -565,9 +578,8 @@ fn step_run_plan_inner(
         }
         "AiAgent" => {
             // The manifest stores the AiAgent step as an agent entry targeting
-            // `ai_tools`/`chat-completion` (single shot) or `chat-turn` (tool
-            // loop), with a synthesized input mapping. Tool edges (labelled,
-            // other than next/onError/memory/mcp.*) select the tool loop.
+            // `ai_tools`/`chat-completion` (single shot, no memory) or
+            // `chat-turn` (tool loop and/or memory). The capability id decides.
             let agent = agent_config(graph, step_id)?;
             let tool_edges = graph
                 .edges
@@ -583,7 +595,7 @@ fn step_run_plan_inner(
                 })
                 .collect::<Vec<_>>();
 
-            if tool_edges.is_empty() {
+            if agent.capability_id == "chat-completion" {
                 let next_plan =
                     normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
                 let error_plan = if include_on_error {
@@ -660,6 +672,30 @@ fn step_run_plan_inner(
                 .map(|value| value as u32)
                 .filter(|value| *value > 0)
                 .unwrap_or(10);
+            // Conversation memory, when present, is recorded as load/save agent
+            // entries plus a conversation-id mapping.
+            let memory = match (
+                graph
+                    .agents
+                    .iter()
+                    .find(|a| a.step_id == step_id && a.purpose == "memory.load"),
+                graph
+                    .agents
+                    .iter()
+                    .find(|a| a.step_id == step_id && a.purpose == "memory.save"),
+                graph
+                    .mappings
+                    .iter()
+                    .find(|m| m.step_id == step_id && m.purpose == "memory.conversation"),
+            ) {
+                (Some(load), Some(save), Some(conv)) => Some(DirectAiMemoryPlan {
+                    load_agent_id: load.id,
+                    save_agent_id: save.id,
+                    agent_component_id: canonicalize_direct_agent_id(&load.agent_id),
+                    conversation_mapping_id: conv.id,
+                }),
+                _ => None,
+            };
             let next_plan =
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
 
@@ -670,6 +706,7 @@ fn step_run_plan_inner(
                 input_mapping_id: agent.input_mapping_id,
                 max_iterations,
                 tools,
+                memory,
                 next_plan: Box::new(next_plan),
             })
         }

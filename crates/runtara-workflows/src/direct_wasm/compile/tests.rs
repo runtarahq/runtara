@@ -61,6 +61,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_multi_tool" => {
             include_str!("../../../tests/fixtures/ai_agent_multi_tool.json")
         }
+        "ai_agent_memory" => {
+            include_str!("../../../tests/fixtures/ai_agent_memory.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2236,6 +2239,78 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
         );
     };
     assert_eq!(tools.len(), 2, "expected two dispatchable tools");
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_memory_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-memory".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_memory"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct memory AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent memory artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    // Memory forces the chat-turn capability and records load/save provider
+    // entries targeting the object-model agent.
+    let ai_agent = manifest
+        .graph
+        .agents
+        .iter()
+        .find(|agent| agent.step_id == "ai" && agent.purpose == "agent.config")
+        .expect("ai-agent config");
+    assert_eq!(ai_agent.capability_id, "chat-turn");
+    assert!(manifest.graph.agents.iter().any(|agent| {
+        agent.purpose == "memory.load"
+            && agent.capability_id == "load-memory"
+            && agent.agent_id == "object-model"
+    }));
+    assert!(
+        manifest
+            .graph
+            .agents
+            .iter()
+            .any(|agent| agent.purpose == "memory.save" && agent.capability_id == "save-memory")
+    );
+    assert!(
+        manifest
+            .feature_summary
+            .agent_ids
+            .iter()
+            .any(|id| id == "object-model")
+    );
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { memory, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    assert!(memory.is_some(), "expected a memory plan");
 }
 
 #[test]

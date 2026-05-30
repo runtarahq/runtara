@@ -1274,6 +1274,45 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-turn pending: {err}"))
     }
 
+    /// Build the initial loop state from a `load-memory` result: the loaded
+    /// conversation becomes the starting `chat_history`.
+    pub fn ai_memory_initial_state(load_output: &[u8]) -> Result<Vec<u8>, String> {
+        let load: Value = serde_json::from_slice(load_output)
+            .map_err(|err| format!("failed to parse load-memory output: {err}"))?;
+        let messages = load
+            .get("messages")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let state = serde_json::json!({
+            "chat_history": messages,
+            "iterations": 0,
+            "tool_call_log": [],
+        });
+        serde_json::to_vec(&state)
+            .map_err(|err| format!("failed to serialize ai-memory state: {err}"))
+    }
+
+    /// Build the `save-memory` input from the final loop state and the resolved
+    /// conversation: `{conversation_id, messages}`.
+    pub fn ai_memory_save_input(
+        conversation: &[u8],
+        final_state: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let conversation: Value = serde_json::from_slice(conversation)
+            .map_err(|err| format!("failed to parse ai-memory conversation: {err}"))?;
+        let state: Value = serde_json::from_slice(final_state)
+            .map_err(|err| format!("failed to parse ai-memory state: {err}"))?;
+        let input = serde_json::json!({
+            "conversation_id": conversation.get("conversation_id").cloned().unwrap_or(Value::Null),
+            "messages": state
+                .get("chat_history")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        });
+        serde_json::to_vec(&input)
+            .map_err(|err| format!("failed to serialize ai-memory save input: {err}"))
+    }
+
     /// Build the AiAgent step output context from a completed turn: the
     /// `{response, iterations, toolCalls}` envelope inserted under the step id.
     pub fn ai_turn_output(
@@ -6677,6 +6716,34 @@ mod tests {
         assert_eq!(
             steps["agent"]["outputs"]["toolCalls"],
             json!([{"tool_name":"echo"}])
+        );
+    }
+
+    #[test]
+    fn ai_memory_helpers_round_trip_history() {
+        // load-memory output → initial loop state seeds chat_history.
+        let load = json!({ "success": true, "messages": [{"text":"prior"}], "message_count": 1 });
+        let state =
+            DirectJsonManifest::ai_memory_initial_state(&serde_json::to_vec(&load).unwrap())
+                .expect("initial state");
+        let state_value: Value = serde_json::from_slice(&state).unwrap();
+        assert_eq!(state_value["chat_history"], json!([{"text":"prior"}]));
+        assert_eq!(state_value["iterations"], json!(0));
+
+        // final state + conversation → save-memory input.
+        let conversation = json!({ "conversation_id": "c-1" });
+        let final_state =
+            json!({ "chat_history": [{"text":"prior"},{"text":"new"}], "iterations": 2 });
+        let save = DirectJsonManifest::ai_memory_save_input(
+            &serde_json::to_vec(&conversation).unwrap(),
+            &serde_json::to_vec(&final_state).unwrap(),
+        )
+        .expect("save input");
+        let save_value: Value = serde_json::from_slice(&save).unwrap();
+        assert_eq!(save_value["conversation_id"], json!("c-1"));
+        assert_eq!(
+            save_value["messages"],
+            json!([{"text":"prior"},{"text":"new"}])
         );
     }
 
