@@ -1150,6 +1150,150 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize AiAgent steps context: {err}"))
     }
 
+    // ===== Ai Agent tool-loop helpers (drive the `chat-turn` capability) =====
+
+    /// Build the next `chat-turn` capability input by merging the constant base
+    /// config (system/user prompts, provider, model, tools, ...) with the loop
+    /// state carried in the previous turn output (`chatHistory`, `iterations`,
+    /// `toolCallLog`) and the pending tool results from this round's dispatch.
+    /// For the first turn pass an empty turn output and empty pending list.
+    pub fn ai_turn_next_input(
+        base: &[u8],
+        turn_out: &[u8],
+        pending: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let base: Value = serde_json::from_slice(base)
+            .map_err(|err| format!("failed to parse ai-turn base: {err}"))?;
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let pending: Value = serde_json::from_slice(pending)
+            .map_err(|err| format!("failed to parse ai-turn pending: {err}"))?;
+        let mut input = base.as_object().cloned().unwrap_or_default();
+        input.insert(
+            "chat_history".to_string(),
+            turn_out
+                .get("chat_history")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        );
+        input.insert(
+            "iterations".to_string(),
+            turn_out
+                .get("iterations")
+                .cloned()
+                .unwrap_or(Value::from(0)),
+        );
+        input.insert(
+            "tool_call_log".to_string(),
+            turn_out
+                .get("tool_call_log")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        );
+        input.insert("pending_tool_results".to_string(), pending);
+        serde_json::to_vec(&Value::Object(input))
+            .map_err(|err| format!("failed to serialize ai-turn input: {err}"))
+    }
+
+    /// True when the turn output's `action` is `complete`.
+    pub fn ai_turn_is_complete(turn_out: &[u8]) -> Result<bool, String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        Ok(turn_out.get("action").and_then(Value::as_str) == Some("complete"))
+    }
+
+    /// Number of tool calls the turn requested.
+    pub fn ai_turn_tool_count(turn_out: &[u8]) -> Result<u32, String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        Ok(turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| calls.len() as u32)
+            .unwrap_or(0))
+    }
+
+    /// The arguments object for the `index`-th tool call, serialized as the tool
+    /// agent's input payload.
+    pub fn ai_turn_tool_args(turn_out: &[u8], index: u32) -> Result<Vec<u8>, String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let args = turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .and_then(|calls| calls.get(index as usize))
+            .and_then(|call| call.get("arguments"))
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        serde_json::to_vec(&args)
+            .map_err(|err| format!("failed to serialize ai-turn tool args: {err}"))
+    }
+
+    /// Append a dispatched tool result (paired with the `index`-th tool call's
+    /// id) to the pending-results list for the next turn.
+    pub fn ai_turn_add_result(
+        pending: &[u8],
+        turn_out: &[u8],
+        index: u32,
+        result: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let mut pending: Vec<Value> = serde_json::from_slice(pending)
+            .map_err(|err| format!("failed to parse ai-turn pending: {err}"))?;
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let tool_call_id = turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .and_then(|calls| calls.get(index as usize))
+            .and_then(|call| call.get("tool_call_id"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let content: Value = serde_json::from_slice(result)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(result).into_owned()));
+        pending.push(serde_json::json!({
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }));
+        serde_json::to_vec(&Value::Array(pending))
+            .map_err(|err| format!("failed to serialize ai-turn pending: {err}"))
+    }
+
+    /// Build the AiAgent step output context from a completed turn: the
+    /// `{response, iterations, toolCalls}` envelope inserted under the step id.
+    pub fn ai_turn_output(
+        &self,
+        agent_id: u32,
+        source: &[u8],
+        turn_out: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-turn source: {err}"))?;
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let outputs = serde_json::json!({
+            "response": turn_out.get("response").cloned().unwrap_or(Value::Null),
+            "iterations": turn_out.get("iterations").cloned().unwrap_or(Value::from(0)),
+            "toolCalls": turn_out
+                .get("tool_call_log")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        });
+        let steps = insert_step_output(
+            &source,
+            &agent.step_id,
+            agent.name.as_deref(),
+            "AiAgent",
+            outputs,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize AiAgent steps context: {err}"))
+    }
+
     /// Validate resolved Agent inputs and return a generated-code-compatible
     /// validation error string when required fields are missing/null.
     pub fn agent_validate_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
@@ -6453,6 +6597,71 @@ mod tests {
         assert_eq!(steps["agent"]["outputs"]["response"], json!("Hello!"));
         assert_eq!(steps["agent"]["outputs"]["iterations"], json!(1));
         assert_eq!(steps["agent"]["outputs"]["toolCalls"], json!([]));
+    }
+
+    #[test]
+    fn ai_turn_loop_helpers_drive_a_tool_round() {
+        // First turn: empty state + empty pending.
+        let base = br#"{"system_prompt":"sys","user_prompt":"hi","provider":"openai","tools":[]}"#;
+        let empty_turn = br#"{"chat_history":[],"iterations":0,"tool_call_log":[]}"#;
+        let empty_pending = b"[]";
+        let input =
+            DirectJsonManifest::ai_turn_next_input(base, empty_turn, empty_pending).expect("input");
+        let input: Value = serde_json::from_slice(&input).unwrap();
+        assert_eq!(input["system_prompt"], json!("sys"));
+        assert_eq!(input["iterations"], json!(0));
+        assert_eq!(input["pending_tool_results"], json!([]));
+
+        // A turn output requesting one tool call.
+        let turn_out = serde_json::to_vec(&json!({
+            "action": "tools",
+            "chat_history": [{"text":"hi"}],
+            "iterations": 1,
+            "tool_call_log": [{"tool_name":"echo","arguments":{"v":1}}],
+            "tool_calls": [{"tool_call_id":"call-1","name":"echo","arguments":{"v":1}}]
+        }))
+        .unwrap();
+        assert!(!DirectJsonManifest::ai_turn_is_complete(&turn_out).unwrap());
+        assert_eq!(
+            DirectJsonManifest::ai_turn_tool_count(&turn_out).unwrap(),
+            1
+        );
+        let args = DirectJsonManifest::ai_turn_tool_args(&turn_out, 0).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&args).unwrap(),
+            json!({"v":1})
+        );
+
+        // Dispatch result → pending for the next turn.
+        let pending =
+            DirectJsonManifest::ai_turn_add_result(b"[]", &turn_out, 0, br#"{"ok":true}"#).unwrap();
+        let pending: Value = serde_json::from_slice(&pending).unwrap();
+        assert_eq!(
+            pending,
+            json!([{"tool_call_id":"call-1","content":{"ok":true}}])
+        );
+
+        // A completed turn → output envelope.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let done = serde_json::to_vec(&json!({
+            "action": "complete",
+            "chat_history": [],
+            "iterations": 2,
+            "tool_call_log": [{"tool_name":"echo"}],
+            "response": "done"
+        }))
+        .unwrap();
+        assert!(DirectJsonManifest::ai_turn_is_complete(&done).unwrap());
+        let steps = manifest.ai_turn_output(0, &source, &done).expect("output");
+        let steps: Value = serde_json::from_slice(&steps).unwrap();
+        assert_eq!(steps["agent"]["stepType"], json!("AiAgent"));
+        assert_eq!(steps["agent"]["outputs"]["response"], json!("done"));
+        assert_eq!(steps["agent"]["outputs"]["iterations"], json!(2));
+        assert_eq!(
+            steps["agent"]["outputs"]["toolCalls"],
+            json!([{"tool_name":"echo"}])
+        );
     }
 
     #[test]

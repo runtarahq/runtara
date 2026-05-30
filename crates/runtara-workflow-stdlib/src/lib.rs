@@ -786,6 +786,54 @@ mod component {
             })
         }
 
+        fn ai_turn_next_input(
+            base: Vec<u8>,
+            turn_out: Vec<u8>,
+            pending: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_next_input(&base, &turn_out, &pending)
+        }
+
+        fn ai_turn_is_complete(turn_out: Vec<u8>) -> Result<bool, String> {
+            direct_json::DirectJsonManifest::ai_turn_is_complete(&turn_out)
+        }
+
+        fn ai_turn_tool_count(turn_out: Vec<u8>) -> Result<u32, String> {
+            direct_json::DirectJsonManifest::ai_turn_tool_count(&turn_out)
+        }
+
+        fn ai_turn_tool_args(turn_out: Vec<u8>, index: u32) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_tool_args(&turn_out, index)
+        }
+
+        fn ai_turn_add_result(
+            pending: Vec<u8>,
+            turn_out: Vec<u8>,
+            index: u32,
+            tool_result: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_add_result(
+                &pending,
+                &turn_out,
+                index,
+                &tool_result,
+            )
+        }
+
+        fn ai_turn_output(
+            agent_id: u32,
+            source: Vec<u8>,
+            turn_out: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_turn_output(agent_id, &source, &turn_out)
+            })
+        }
+
         fn agent_validate_input(agent_id: u32, input: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

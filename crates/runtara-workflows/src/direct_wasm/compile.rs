@@ -12,6 +12,7 @@ mod agent_error;
 mod agent_invoke;
 mod agent_io;
 mod agent_retry;
+mod ai_agent_loop;
 mod artifact_metadata;
 mod checkpoint;
 mod core_imports;
@@ -252,6 +253,30 @@ const DIRECT_SPLIT_DEADLINE_MS_LOCAL: u32 = 81;
 /// rather than the per-item iteration context. i32 locals.
 const DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL: u32 = 82;
 const DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL: u32 = 83;
+
+/// AiAgent tool-loop scratch locals (all i32). The loop drives the `chat-turn`
+/// capability: `BASE` is the constant turn config (from the input mapping),
+/// `STATE` is the prior turn output carried forward, `PENDING` is this round's
+/// dispatched tool results, `TURN_INPUT`/`TURN_OUT` are the current turn's
+/// I/O, and the `TOOL_*` locals drive the inner tool-dispatch loop.
+const DIRECT_AI_BASE_PTR_LOCAL: u32 = 84;
+const DIRECT_AI_BASE_LEN_LOCAL: u32 = 85;
+const DIRECT_AI_STATE_PTR_LOCAL: u32 = 86;
+const DIRECT_AI_STATE_LEN_LOCAL: u32 = 87;
+const DIRECT_AI_PENDING_PTR_LOCAL: u32 = 88;
+const DIRECT_AI_PENDING_LEN_LOCAL: u32 = 89;
+const DIRECT_AI_TURN_OUT_PTR_LOCAL: u32 = 90;
+const DIRECT_AI_TURN_OUT_LEN_LOCAL: u32 = 91;
+const DIRECT_AI_TURN_INPUT_PTR_LOCAL: u32 = 92;
+const DIRECT_AI_TURN_INPUT_LEN_LOCAL: u32 = 93;
+const DIRECT_AI_TOOL_COUNT_LOCAL: u32 = 94;
+const DIRECT_AI_TOOL_IDX_LOCAL: u32 = 95;
+const DIRECT_AI_TOOL_ARGS_PTR_LOCAL: u32 = 96;
+const DIRECT_AI_TOOL_ARGS_LEN_LOCAL: u32 = 97;
+const DIRECT_AI_TOOL_RESULT_PTR_LOCAL: u32 = 98;
+const DIRECT_AI_TOOL_RESULT_LEN_LOCAL: u32 = 99;
+/// Turn counter, a hard safety bound on the AiAgent tool loop.
+const DIRECT_AI_ITER_LOCAL: u32 = 100;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

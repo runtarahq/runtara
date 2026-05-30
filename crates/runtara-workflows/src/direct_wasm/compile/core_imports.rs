@@ -89,6 +89,12 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_workflow_error_retry_after_ms: Option<u32>,
     stdlib_agent_output: Option<u32>,
     stdlib_ai_agent_output: Option<u32>,
+    stdlib_ai_turn_next_input: Option<u32>,
+    stdlib_ai_turn_is_complete: Option<u32>,
+    stdlib_ai_turn_tool_count: Option<u32>,
+    stdlib_ai_turn_tool_args: Option<u32>,
+    stdlib_ai_turn_add_result: Option<u32>,
+    stdlib_ai_turn_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
@@ -341,6 +347,30 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_agent_output,
                 "stdlib.ai-agent-output",
             )?,
+            stdlib_ai_turn_next_input: require_import(
+                self.stdlib_ai_turn_next_input,
+                "stdlib.ai-turn-next-input",
+            )?,
+            stdlib_ai_turn_is_complete: require_import(
+                self.stdlib_ai_turn_is_complete,
+                "stdlib.ai-turn-is-complete",
+            )?,
+            stdlib_ai_turn_tool_count: require_import(
+                self.stdlib_ai_turn_tool_count,
+                "stdlib.ai-turn-tool-count",
+            )?,
+            stdlib_ai_turn_tool_args: require_import(
+                self.stdlib_ai_turn_tool_args,
+                "stdlib.ai-turn-tool-args",
+            )?,
+            stdlib_ai_turn_add_result: require_import(
+                self.stdlib_ai_turn_add_result,
+                "stdlib.ai-turn-add-result",
+            )?,
+            stdlib_ai_turn_output: require_import(
+                self.stdlib_ai_turn_output,
+                "stdlib.ai-turn-output",
+            )?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
                 "stdlib.agent-validate-input",
@@ -465,6 +495,12 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_workflow_error_retry_after_ms: u32,
     pub(super) stdlib_agent_output: u32,
     pub(super) stdlib_ai_agent_output: u32,
+    pub(super) stdlib_ai_turn_next_input: u32,
+    pub(super) stdlib_ai_turn_is_complete: u32,
+    pub(super) stdlib_ai_turn_tool_count: u32,
+    pub(super) stdlib_ai_turn_tool_args: u32,
+    pub(super) stdlib_ai_turn_add_result: u32,
+    pub(super) stdlib_ai_turn_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_cache_key: u32,
@@ -718,6 +754,18 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-agent-output") {
         import_indices.stdlib_ai_agent_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-next-input") {
+        import_indices.stdlib_ai_turn_next_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-is-complete") {
+        import_indices.stdlib_ai_turn_is_complete = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-tool-count") {
+        import_indices.stdlib_ai_turn_tool_count = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-tool-args") {
+        import_indices.stdlib_ai_turn_tool_args = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-add-result") {
+        import_indices.stdlib_ai_turn_add_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-output") {
+        import_indices.stdlib_ai_turn_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {

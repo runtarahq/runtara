@@ -122,6 +122,18 @@ pub(super) enum DirectRunPlan {
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
+    /// AiAgent with a tool loop: drive the `ai_tools` `chat-turn` capability,
+    /// dispatching the returned tool calls back through the tool agent until the
+    /// turn reports `complete`.
+    AiAgentLoop {
+        step_id: String,
+        agent_id: u32,
+        agent_component_id: String,
+        input_mapping_id: u32,
+        max_iterations: u32,
+        tool: DirectAiToolPlan,
+        next_plan: Box<DirectRunPlan>,
+    },
     Error {
         step_id: String,
         error_id: u32,
@@ -134,6 +146,15 @@ pub(super) enum DirectRunPlan {
         true_plan: Box<DirectRunPlan>,
         false_plan: Box<DirectRunPlan>,
     },
+}
+
+/// A tool the AiAgent loop can dispatch: the manifest agent id and component id
+/// of the target Agent step, invoked with the LLM-provided arguments. (Slice 1
+/// supports a single tool, so the tool name is not needed for dispatch.)
+#[derive(Debug, Clone)]
+pub(super) struct DirectAiToolPlan {
+    pub(super) agent_id: u32,
+    pub(super) agent_component_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -542,27 +563,82 @@ fn step_run_plan_inner(
         }
         "AiAgent" => {
             // The manifest stores the AiAgent step as an agent entry targeting
-            // `ai_tools`/`chat-completion`, with a synthesized input mapping
-            // that builds the completion request from the AiAgent config.
+            // `ai_tools`/`chat-completion` (single shot) or `chat-turn` (tool
+            // loop), with a synthesized input mapping. Tool edges (labelled,
+            // other than next/onError/memory/mcp.*) select the tool loop.
             let agent = agent_config(graph, step_id)?;
-            let durable_checkpoint = agent.durable;
+            let tool_edges = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from_step == step_id)
+                .filter(|edge| {
+                    edge.label.as_deref().is_some_and(|label| {
+                        label != "next"
+                            && label != "onError"
+                            && label != "memory"
+                            && !label.starts_with("mcp.")
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            if tool_edges.is_empty() {
+                let next_plan =
+                    normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+                let error_plan = if include_on_error {
+                    on_error_plan(graph, child_workflows, step_id, stack)?
+                } else {
+                    None
+                };
+                return Ok(DirectRunPlan::AiAgent {
+                    step_id: step_id.to_string(),
+                    agent_id: agent.id,
+                    agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
+                    input_mapping_id: agent.input_mapping_id,
+                    durable_checkpoint: agent.durable,
+                    breakpoint: step_breakpoint_enabled(graph, step),
+                    next_plan: Box::new(next_plan),
+                    error_plan,
+                });
+            }
+
+            // Slice 1: exactly one tool.
+            let edge = tool_edges[0];
+            let tool_agent = graph
+                .agents
+                .iter()
+                .find(|candidate| {
+                    candidate.step_id == edge.to_step && candidate.purpose == "agent.config"
+                })
+                .ok_or_else(|| {
+                    DirectCompileError::Component(format!(
+                        "AiAgent tool target '{}' has no agent config",
+                        edge.to_step
+                    ))
+                })?;
+            let max_iterations = graph
+                .steps
+                .iter()
+                .find(|candidate| candidate.id == step_id)
+                .and_then(|manifest_step| manifest_step.body.get("config"))
+                .and_then(|config| config.get("maxIterations"))
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32)
+                .filter(|value| *value > 0)
+                .unwrap_or(10);
             let next_plan =
                 normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
-            let error_plan = if include_on_error {
-                on_error_plan(graph, child_workflows, step_id, stack)?
-            } else {
-                None
-            };
 
-            Ok(DirectRunPlan::AiAgent {
+            Ok(DirectRunPlan::AiAgentLoop {
                 step_id: step_id.to_string(),
                 agent_id: agent.id,
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
-                durable_checkpoint,
-                breakpoint: step_breakpoint_enabled(graph, step),
+                max_iterations,
+                tool: DirectAiToolPlan {
+                    agent_id: tool_agent.id,
+                    agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                },
                 next_plan: Box::new(next_plan),
-                error_plan,
             })
         }
         "Error" => Ok(DirectRunPlan::Error {

@@ -584,6 +584,20 @@ fn supports_direct_control_step_inner(
                     ))
         }
         Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step) => {
+            // The AiAgent loop consumes its tool edges directly (it dispatches
+            // the tool agents itself), so mark them used and their targets
+            // reachable for the graph-wide routing check.
+            for (index, edge) in graph.execution_plan.iter().enumerate() {
+                if edge.from_step == step_id
+                    && edge
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label != "next" && label != "onError")
+                {
+                    used_edges.insert(index);
+                    reachable.insert(edge.to_step.clone());
+                }
+            }
             supports_normal_flow_step(
                 graph,
                 child_workflows,
@@ -620,11 +634,10 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
     true
 }
 
-/// Supports single-shot AiAgent, optionally with structured output. The tool
-/// loop, conversation memory, compaction, and MCP are added in later slices;
-/// until then those shapes fall back to the generated Rust compiler. Accepted:
-/// an AiAgent with a config, no `memory`, and no tool/memory/MCP edges (which
-/// would require the loop). `outputSchema` is supported.
+/// Supports single-shot AiAgent (optionally structured output) and a tool loop
+/// with exactly one Agent-capability tool. Conversation memory, compaction, MCP
+/// synthetic tools, multi-tool loops, and tool-loops-with-onError fall back to
+/// the generated Rust compiler.
 fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -> bool {
     let Some(config) = step.config.as_ref() else {
         return false;
@@ -632,16 +645,50 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
     if config.memory.is_some() {
         return false;
     }
-    // A labelled outgoing edge (other than `next`/`onError`) is a tool, memory,
-    // or MCP edge — i.e. the tool loop, which Slice 0 does not lower.
-    let has_tool_edges = graph.execution_plan.iter().any(|edge| {
+    // Memory / MCP edges require later slices.
+    let has_memory_or_mcp = graph.execution_plan.iter().any(|edge| {
         edge.from_step == step.id
             && edge
                 .label
                 .as_deref()
-                .is_some_and(|label| label != "onError" && label != "next")
+                .is_some_and(|label| label == "memory" || label.starts_with("mcp."))
     });
-    !has_tool_edges
+    if has_memory_or_mcp {
+        return false;
+    }
+
+    let tool_targets = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step.id)
+        .filter(|edge| {
+            edge.label.as_deref().is_some_and(|label| {
+                label != "next"
+                    && label != "onError"
+                    && label != "memory"
+                    && !label.starts_with("mcp.")
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match tool_targets.len() {
+        // Single-shot (chat-completion), with or without structured output.
+        0 => true,
+        // Tool loop (chat-turn): exactly one Agent-capability tool, and no
+        // onError on the step (the loop does not yet route onError).
+        1 => {
+            let has_on_error = graph
+                .execution_plan
+                .iter()
+                .any(|edge| edge.from_step == step.id && edge.label.as_deref() == Some("onError"));
+            !has_on_error
+                && matches!(
+                    graph.steps.get(&tool_targets[0].to_step),
+                    Some(Step::Agent(_))
+                )
+        }
+        _ => false,
+    }
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {

@@ -333,6 +333,34 @@ interface json {
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Ai Agent tool-loop helpers driving the `chat-turn` capability.
+    // Build the next chat-turn input from the constant base config, the prior
+    // turn output (loop state), and this round's pending tool results.
+    ai-turn-next-input: func(
+        base: list<u8>,
+        turn-out: list<u8>,
+        pending: list<u8>,
+    ) -> result<list<u8>, string>;
+    // True when the turn's action is `complete`.
+    ai-turn-is-complete: func(turn-out: list<u8>) -> result<bool, string>;
+    // Number of tool calls the turn requested.
+    ai-turn-tool-count: func(turn-out: list<u8>) -> result<u32, string>;
+    // The index-th tool call's arguments, as the tool agent input payload.
+    ai-turn-tool-args: func(turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
+    // Append the index-th tool call's dispatched result to the pending list.
+    ai-turn-add-result: func(
+        pending: list<u8>,
+        turn-out: list<u8>,
+        index: u32,
+        tool-result: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Build the AiAgent step output context from a completed turn.
+    ai-turn-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        turn-out: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-validate-input: func(
         agent-id: u32,
         input: list<u8>,

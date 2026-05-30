@@ -67,6 +67,7 @@ const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
 const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json");
 const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
 const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.json");
+const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -940,7 +941,51 @@ fn route(
     // `RUNTARA_HTTP_PROXY_URL` points at this server. We return a canned OpenAI
     // chat-completion response so AiAgent runs are deterministic and identical
     // across the generated and direct artifacts (both call through this mock).
+    //
+    // Turn-aware for the tool loop: when the request advertises tools and the
+    // conversation is still short (first turn), return a tool call; otherwise
+    // (no tools, or a later turn that already has the tool result) return text.
     if method == "POST" && path == "/proxy" {
+        let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let llm_request = envelope.get("body").cloned().unwrap_or(Value::Null);
+        let message_count = llm_request
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let tools = llm_request
+            .get("tools")
+            .and_then(Value::as_array)
+            .filter(|tools| !tools.is_empty());
+        let wants_tool_call = tools.is_some() && message_count <= 2;
+
+        let (message, finish_reason) = if let (true, Some(tools)) = (wants_tool_call, tools) {
+            let tool_name = tools
+                .first()
+                .and_then(|tool| tool.get("function").and_then(|f| f.get("name")))
+                .or_else(|| tools.first().and_then(|tool| tool.get("name")))
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
+            (
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": { "name": tool_name, "arguments": "{\"value\":\"from-tool\"}" }
+                    }]
+                }),
+                "tool_calls",
+            )
+        } else {
+            (
+                serde_json::json!({ "role": "assistant", "content": MOCK_AI_RESPONSE }),
+                "stop",
+            )
+        };
+
         return (
             200,
             serde_json::json!({
@@ -951,8 +996,8 @@ fn route(
                     "model": "gpt-4o",
                     "choices": [{
                         "index": 0,
-                        "message": { "role": "assistant", "content": MOCK_AI_RESPONSE },
-                        "finish_reason": "stop"
+                        "message": message,
+                        "finish_reason": finish_reason
                     }],
                     "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
                 }
@@ -4895,6 +4940,60 @@ fn direct_wasm_matches_components_ai_agent_structured_output() {
     assert_eq!(
         direct_out.get("result"),
         Some(&serde_json::json!({ "sentiment": "positive", "confidence": 0.9 }))
+    );
+}
+
+/// AiAgent tool loop. The mock returns a tool call on the first turn (the
+/// request advertises a tool and the history is short), the direct loop
+/// dispatches the `utils`/`return-input` tool back through the workflow, then
+/// the mock returns text → complete. Both artifacts run the loop and produce
+/// the identical final answer.
+#[test]
+fn direct_wasm_matches_components_ai_agent_tool_loop() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("ai-agent-tool-loop", AI_AGENT_TOOL_LOOP);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-tool-loop", AI_AGENT_TOOL_LOOP);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"echo this"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-tool-loop",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-tool-loop",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+        direct.stderr, direct.error_json, direct.output_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "tool-loop AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
     );
 }
 

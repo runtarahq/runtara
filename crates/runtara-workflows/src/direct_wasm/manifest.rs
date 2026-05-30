@@ -648,7 +648,7 @@ fn graph_manifest(
     let mut collections = DirectGraphManifestCollections::default();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, durable, state, &mut collections, agent_catalog))
+        .map(|step| step_manifest(step, graph, durable, state, &mut collections, agent_catalog))
         .collect::<Result<Vec<_>, _>>()?;
 
     collections
@@ -734,6 +734,7 @@ struct DirectGraphManifestCollections {
 
 fn step_manifest(
     step: &Step,
+    graph: &ExecutionGraph,
     inherited_durable: bool,
     state: &mut DirectManifestBuildState,
     collections: &mut DirectGraphManifestCollections,
@@ -996,6 +997,37 @@ fn step_manifest(
                     );
                 }
             }
+            // Tool edges (labelled, excluding next/onError/memory/mcp.*) turn this
+            // into a tool-loop AiAgent driven by the `chat-turn` capability;
+            // otherwise it is a single-shot `chat-completion`.
+            let tool_edges = ai_agent_tool_edges(graph, &step.id);
+            let capability_id = if tool_edges.is_empty() {
+                "chat-completion"
+            } else {
+                let tool_defs = tool_edges
+                    .iter()
+                    .map(|(label, target)| {
+                        serde_json::json!({
+                            "name": label,
+                            "description": graph
+                                .steps
+                                .get(target)
+                                .and_then(step_name)
+                                .unwrap_or(label.as_str()),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": true
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                mapping.insert(
+                    "tools".to_string(),
+                    serde_json::json!({ "valueType": "immediate", "value": tool_defs }),
+                );
+                "chat-turn"
+            };
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -1011,20 +1043,16 @@ fn step_manifest(
                 step_type: "AiAgent".to_string(),
                 purpose: "agent.config".to_string(),
                 agent_id: "ai-tools".to_string(),
-                capability_id: "chat-completion".to_string(),
+                capability_id: capability_id.to_string(),
                 connection_id: step.connection_id.clone(),
                 durable: inherited_durable && step.durable.unwrap_or(true),
                 rate_limited: agent_capability_rate_limited(
                     agent_catalog,
                     "ai-tools",
-                    "chat-completion",
+                    capability_id,
                 ),
                 input_mapping_id,
-                required_inputs: required_agent_inputs(
-                    agent_catalog,
-                    "ai-tools",
-                    "chat-completion",
-                ),
+                required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
@@ -1119,6 +1147,27 @@ fn canonical_json<T: serde::Serialize>(
 
 fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
+}
+
+/// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled
+/// outgoing edges other than `next`/`onError`/`memory`/`mcp.*`.
+fn ai_agent_tool_edges(graph: &ExecutionGraph, step_id: &str) -> Vec<(String, String)> {
+    graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id)
+        .filter_map(|edge| {
+            let label = edge.label.as_deref()?;
+            if label == "next"
+                || label == "onError"
+                || label == "memory"
+                || label.starts_with("mcp.")
+            {
+                return None;
+            }
+            Some((label.to_string(), edge.to_step.clone()))
+        })
+        .collect()
 }
 
 fn agent_capability_rate_limited(
