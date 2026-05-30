@@ -762,9 +762,10 @@ fn supports_ai_agent_step_baseline(
                     supports_embed_workflow_step_baseline(embed, child_workflows, &mut Vec::new())
                 }
                 // A WaitForSignal tool is lowered as a durable poll inside the
-                // loop; an `onWait` subgraph is the only WaitForSignal feature the
-                // tool arm does not yet run, so reject those (fall back).
-                Some(Step::WaitForSignal(wait)) => wait.on_wait.is_none(),
+                // loop. The generated tool arm ignores `onWait` entirely (it never
+                // runs the subgraph for a tool), so direct does too — accepting
+                // such targets keeps parity without falling back.
+                Some(Step::WaitForSignal(_)) => true,
                 _ => false,
             })
 }

@@ -85,6 +85,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_wait_tool" => {
             include_str!("../../../tests/fixtures/ai_agent_wait_tool.json")
         }
+        "ai_agent_wait_tool_on_wait" => {
+            include_str!("../../../tests/fixtures/ai_agent_wait_tool_on_wait.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2336,6 +2339,34 @@ fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
         ),
         "the tool should be a WaitForSignal tool, got {:?}",
         tools[0]
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
+    // A WaitForSignal tool whose target carries an onWait subgraph must still
+    // compile directly (the generated tool arm ignores onWait), not fall back.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-wait-tool-on-wait".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_wait_tool_on_wait"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct wait-tool-with-onWait AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent wait-tool-with-onWait artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "wait tool with onWait must lower directly (no fallback): {:?}",
+        result.support_report.unsupported
     );
 }
 
