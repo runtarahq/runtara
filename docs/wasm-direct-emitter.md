@@ -752,8 +752,11 @@ Current remaining action items:
     `{"results": null}` and *succeeds*. Diagnosed: the item's error event fires
     but the retry never triggers (no durable sleep, the post-loop checkpoint
     runs) — the item-level failure does not reach the retry-after-attempt
-    handler, so the loop exits as if no item failed. The retry-target block
-    depths read as correct on static inspection; root-causing needs
+    handler, so the loop exits as if no item failed. The run plan is correct
+    (`Split { durable: true, max_retries: 2, dont_stop_on_failed: false,
+    nested_plan: Error }`), so the bug is in the WASM **emission** of the
+    item-failure → retry routing, not in plan construction. The retry-target
+    block depths read as correct on static inspection; root-causing needs
     instruction-level wasmtime tracing. Likely affects any retry-enabled Split
     where an item exhausts, not just `Error`-step items.
   - `embed_workflow_child_local_on_error` — an EmbedWorkflow child with a local
