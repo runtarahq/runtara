@@ -30,10 +30,15 @@ import {
 
 interface ObjectSchemaDtosTableProps {
   connectionId?: string | null;
+  /** True while the connection selection is still resolving — shows the
+   *  loading skeleton instead of flashing "no connection selected" before
+   *  the default connection is picked. */
+  connectionsLoading?: boolean;
 }
 
 export function ObjectSchemaDtosTable({
   connectionId,
+  connectionsLoading = false,
 }: ObjectSchemaDtosTableProps) {
   const navigate = useNavigate();
   const [deleteTarget, setDeleteTarget] = useState<Schema | null>(null);
@@ -86,7 +91,7 @@ export function ObjectSchemaDtosTable({
     ? deleteTarget?.id
     : null;
 
-  if (isLoading) {
+  if (isLoading || connectionsLoading) {
     return (
       <div className="rounded-lg border divide-y">
         {[...Array(4)].map((_, i) => (

@@ -10,8 +10,11 @@ import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useO
 export function ObjectSchemas() {
   const navigate = useNavigate();
   usePageTitle('Object Types');
-  const { selectedConnectionId, connectionQuery } =
-    useObjectModelConnectionSelection();
+  const {
+    selectedConnectionId,
+    connectionQuery,
+    isLoading: connectionsLoading,
+  } = useObjectModelConnectionSelection();
   const { isError } = useObjectSchemaDtos(selectedConnectionId);
 
   return (
@@ -30,7 +33,10 @@ export function ObjectSchemas() {
       toolbar={<ObjectModelConnectionSelector />}
     >
       <TileList>
-        <ObjectSchemaDtosTable connectionId={selectedConnectionId} />
+        <ObjectSchemaDtosTable
+          connectionId={selectedConnectionId}
+          connectionsLoading={connectionsLoading}
+        />
       </TileList>
     </TilesPage>
   );
