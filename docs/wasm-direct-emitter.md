@@ -743,6 +743,22 @@ Current remaining action items:
   (fan-out to two terminal/branching sinks) still fall back. The only remaining
   deferral is crash/resume differential test hardening (coverage, not a feature
   gap). See `docs/wasm-direct-emitter-phase12-plan.md` for the AiAgent slice plan.
+- **Known pre-existing parity bugs** (predate the AiAgent/fan-out work — confirmed
+  failing at commit `c2c1a8e7`; gated behind `RUNTARA_RUN_DIRECT_WASM_E2E=1` so
+  they don't block the default suite):
+  - `split_retry_exhausted` — a **durable Split with `maxRetries>0` whose item
+    fully fails** (the fixture's subgraph is a bare `Error` step): the generated
+    artifact fails with the item error, but the direct artifact completes with
+    `{"results": null}` and *succeeds*. Diagnosed: the item's error event fires
+    but the retry never triggers (no durable sleep, the post-loop checkpoint
+    runs) — the item-level failure does not reach the retry-after-attempt
+    handler, so the loop exits as if no item failed. The retry-target block
+    depths read as correct on static inspection; root-causing needs
+    instruction-level wasmtime tracing. Likely affects any retry-enabled Split
+    where an item exhausts, not just `Error`-step items.
+  - `embed_workflow_child_local_on_error` — an EmbedWorkflow child with a local
+    onError handler: the direct artifact unexpectedly succeeds where the failure
+    should propagate. Same family (error propagation through nested scopes).
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
