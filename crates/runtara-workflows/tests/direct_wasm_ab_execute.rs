@@ -66,8 +66,11 @@ const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
 const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
 const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json");
 const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
-/// Canned assistant text returned by the mock LLM proxy in `route`.
-const MOCK_AI_RESPONSE: &str = "Mocked single-shot answer.";
+const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.json");
+/// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
+/// JSON so the same mock drives both the plain single-shot test (response is the
+/// JSON string) and the structured-output test (response is the parsed object).
+const MOCK_AI_RESPONSE: &str = "{\"sentiment\":\"positive\",\"confidence\":0.9}";
 const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
     include_str!("fixtures/split_dont_stop_nested_split_error.json");
 const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
@@ -4836,6 +4839,62 @@ fn direct_wasm_matches_components_ai_agent_single_shot() {
     assert_eq!(
         direct_out.get("answer"),
         Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+}
+
+/// Structured-output AiAgent (config has an `outputSchema`). The mock returns
+/// JSON content; both artifacts parse it, so the AiAgent `response` is the
+/// parsed object (not a string) and the completion payloads match.
+#[test]
+fn direct_wasm_matches_components_ai_agent_structured_output() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("ai-agent-structured", AI_AGENT_STRUCTURED);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-structured", AI_AGENT_STRUCTURED);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"text":"I love this!"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-structured",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-structured",
+        workflow_input,
+    );
+
+    // Completion-payload parity (checkpoint traffic differs by design, see the
+    // single-shot test).
+    assert!(
+        components.status_success,
+        "components run failed:\n{}",
+        components.stderr
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\n{}",
+        direct.stderr
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "structured AiAgent completion payload mismatch"
+    );
+    // `response` is the parsed JSON object, mapped to `result` by finish.
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("result"),
+        Some(&serde_json::json!({ "sentiment": "positive", "confidence": 0.9 }))
     );
 }
 

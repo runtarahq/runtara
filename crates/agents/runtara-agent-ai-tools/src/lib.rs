@@ -729,6 +729,13 @@ pub struct ChatCompletionOutput {
     )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
+
+    #[field(
+        display_name = "Structured Output",
+        description = "Parsed JSON response when an output schema was requested and the model returned valid JSON"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
 }
 
 #[capability(
@@ -802,7 +809,29 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
         .as_ref()
         .and_then(|u| serde_json::to_value(u).ok());
 
-    Ok(ChatCompletionOutput { choice, usage })
+    // When an output schema was requested, parse the final assistant text as
+    // JSON — mirroring the generated loop's `serde_json::from_str(&text)` with a
+    // string fallback. We surface it as `structured_output` so `ai-agent-output`
+    // can use it as the response value.
+    let structured_output = if input.output_schema.is_some() {
+        let final_text = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        serde_json::from_str::<Value>(&final_text).ok()
+    } else {
+        None
+    };
+
+    Ok(ChatCompletionOutput {
+        choice,
+        usage,
+        structured_output,
+    })
 }
 
 // ============================================================================

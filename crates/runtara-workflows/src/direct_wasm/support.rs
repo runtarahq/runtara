@@ -620,16 +620,16 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
     true
 }
 
-/// Slice 0 supports single-shot AiAgent only. The full orchestration loop
-/// (tool calls, conversation memory, structured output, compaction, MCP) is
-/// added in later slices; until then, those shapes fall back to the generated
-/// Rust compiler. Accepted: an AiAgent with a config, no `memory`, no
-/// `outputSchema`, and no tool/memory/MCP edges (which would require the loop).
+/// Supports single-shot AiAgent, optionally with structured output. The tool
+/// loop, conversation memory, compaction, and MCP are added in later slices;
+/// until then those shapes fall back to the generated Rust compiler. Accepted:
+/// an AiAgent with a config, no `memory`, and no tool/memory/MCP edges (which
+/// would require the loop). `outputSchema` is supported.
 fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -> bool {
     let Some(config) = step.config.as_ref() else {
         return false;
     };
-    if config.memory.is_some() || config.output_schema.is_some() {
+    if config.memory.is_some() {
         return false;
     }
     // A labelled outgoing edge (other than `next`/`onError`) is a tool, memory,

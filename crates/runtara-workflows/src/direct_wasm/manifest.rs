@@ -947,14 +947,16 @@ fn step_manifest(
             // Single-shot AiAgent: lower as an invoke of the `ai-tools`
             // `chat-completion` capability with a synthesized input mapping that
             // builds the completion request from the AiAgent config.
+            // Keys are snake_case to match the `chat-completion` capability
+            // input fields (ChatCompletionInput deserializes snake_case).
             let mut mapping = serde_json::Map::new();
             if let Some(config) = step.config.as_ref() {
                 mapping.insert(
-                    "systemPrompt".to_string(),
+                    "system_prompt".to_string(),
                     canonical_json(&config.system_prompt)?,
                 );
                 mapping.insert(
-                    "userPrompt".to_string(),
+                    "user_prompt".to_string(),
                     canonical_json(&config.user_prompt)?,
                 );
                 mapping.insert(
@@ -964,6 +966,17 @@ fn step_manifest(
                         "value": config.provider.as_str(),
                     }),
                 );
+                if let Some(output_schema) = &config.output_schema {
+                    // Convert the DSL flat-map schema to JSON Schema, matching the
+                    // generated loop, so the provider's structured-output params
+                    // line up.
+                    let json_schema =
+                        runtara_dsl::schema_convert::dsl_schema_to_json_schema(output_schema);
+                    mapping.insert(
+                        "output_schema".to_string(),
+                        serde_json::json!({ "valueType": "immediate", "value": json_schema }),
+                    );
+                }
                 if let Some(model) = &config.model {
                     mapping.insert(
                         "model".to_string(),
@@ -978,7 +991,7 @@ fn step_manifest(
                 }
                 if let Some(max_tokens) = config.max_tokens {
                     mapping.insert(
-                        "maxTokens".to_string(),
+                        "max_tokens".to_string(),
                         serde_json::json!({ "valueType": "immediate", "value": max_tokens }),
                     );
                 }

@@ -1123,9 +1123,17 @@ impl DirectJsonManifest {
             .get(&agent_id)
             .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
 
-        let final_text = extract_ai_final_text(output.get("choice").unwrap_or(&Value::Null));
+        // With a structured output schema the capability parses the response as
+        // JSON and returns it under `structured_output`; use it as the response.
+        // Otherwise the response is the final assistant text (a JSON string).
+        let response = match output.get("structured_output") {
+            Some(value) if !value.is_null() => value.clone(),
+            _ => Value::String(extract_ai_final_text(
+                output.get("choice").unwrap_or(&Value::Null),
+            )),
+        };
         let outputs = serde_json::json!({
-            "response": final_text,
+            "response": response,
             "iterations": 1,
             "toolCalls": [],
         });
@@ -6445,6 +6453,33 @@ mod tests {
         assert_eq!(steps["agent"]["outputs"]["response"], json!("Hello!"));
         assert_eq!(steps["agent"]["outputs"]["iterations"], json!(1));
         assert_eq!(steps["agent"]["outputs"]["toolCalls"], json!([]));
+    }
+
+    #[test]
+    fn ai_agent_output_uses_structured_output_when_present() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.value" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        // With a structured output schema the capability returns the parsed JSON
+        // under `structured_output`; the response becomes that object, not text.
+        let output = json!({
+            "choice": [{ "text": "{\"sentiment\":\"positive\"}" }],
+            "structured_output": { "sentiment": "positive" }
+        });
+        let output_bytes = serde_json::to_vec(&output).unwrap();
+
+        let steps = manifest
+            .ai_agent_output(0, &source, &output_bytes)
+            .expect("AiAgent steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(
+            steps["agent"]["outputs"]["response"],
+            json!({ "sentiment": "positive" })
+        );
     }
 
     #[test]

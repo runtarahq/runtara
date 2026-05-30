@@ -52,6 +52,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_single_shot" => {
             include_str!("../../../tests/fixtures/ai_agent_single_shot.json")
         }
+        "ai_agent_structured" => {
+            include_str!("../../../tests/fixtures/ai_agent_structured.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2061,6 +2064,55 @@ fn direct_compile_supports_ai_agent_single_shot_graph() {
         matches!(core_config.run_plan, DirectRunPlan::AiAgent { .. }),
         "expected AiAgent run plan, got {:?}",
         core_config.run_plan
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_structured_output_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-structured".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_structured"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct structured-output AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    // The synthesized chat-completion input mapping carries the converted
+    // JSON-schema under `outputSchema`.
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let ai_agent = manifest
+        .graph
+        .agents
+        .iter()
+        .find(|agent| agent.step_id == "ai")
+        .expect("ai-agent manifest entry");
+    let mapping = manifest
+        .graph
+        .mappings
+        .iter()
+        .find(|mapping| mapping.id == ai_agent.input_mapping_id)
+        .expect("input mapping");
+    assert!(
+        mapping.value.get("output_schema").is_some(),
+        "expected output_schema in mapping: {:?}",
+        mapping.value
     );
 }
 

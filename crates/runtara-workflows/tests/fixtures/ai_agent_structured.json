@@ -1,0 +1,37 @@
+{
+  "name": "AiAgent Structured Output",
+  "description": "Direct-emitter fixture: a single-shot AiAgent with an output schema (structured output, no tools/memory/MCP).",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Classify",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": { "valueType": "immediate", "value": "Classify the sentiment." },
+        "userPrompt": { "valueType": "reference", "value": "data.text" },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "outputSchema": {
+          "sentiment": { "type": "string", "required": true },
+          "confidence": { "type": "number", "required": false }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    { "fromStep": "ai", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
