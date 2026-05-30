@@ -68,6 +68,8 @@ const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json"
 const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
 const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.json");
 const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json");
+const AI_AGENT_EMBED_TOOL: &str = include_str!("fixtures/ai_agent_embed_tool.json");
+const EMBED_TOOL_CHILD: &str = include_str!("fixtures/embed_tool_child.json");
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
@@ -5619,6 +5621,75 @@ fn direct_wasm_matches_components_ai_agent_tool_loop() {
     assert_eq!(
         components.output_json, direct.output_json,
         "tool-loop AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+}
+
+/// An AiAgent whose tool is an EmbedWorkflow target. The mock LLM calls the
+/// `get_weather` tool; both artifacts run the composed child workflow with the
+/// tool arguments as input data, feed its output back into the conversation, and
+/// the mock returns text → complete. Direct must match the generated loop.
+#[test]
+fn direct_wasm_matches_components_ai_agent_embed_workflow_tool() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = vec![ChildWorkflowInput {
+        step_id: "tool_weather".to_string(),
+        workflow_id: "weather-workflow".to_string(),
+        version_requested: "latest".to_string(),
+        version_resolved: 1,
+        execution_graph: graph_from_fixture(EMBED_TOOL_CHILD),
+    }];
+
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "ai-agent-embed-tool",
+        AI_AGENT_EMBED_TOOL,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "ai-agent-embed-tool",
+        AI_AGENT_EMBED_TOOL,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"weather please"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-embed-tool",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-embed-tool",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+        direct.stderr, direct.error_json, direct.output_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "embed-tool AiAgent completion payload mismatch"
     );
     let direct_out = direct.output_json.as_ref().expect("direct completion");
     assert_eq!(

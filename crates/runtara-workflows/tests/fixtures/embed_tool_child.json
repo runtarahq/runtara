@@ -10,9 +10,9 @@
           "valueType": "immediate",
           "value": "sunny"
         },
-        "city": {
+        "echo": {
           "valueType": "reference",
-          "value": "data.city"
+          "value": "data.value"
         }
       }
     }
