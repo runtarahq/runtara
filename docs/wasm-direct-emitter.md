@@ -753,10 +753,18 @@ Current remaining action items:
   no-failure branch breaks out of the retry-outer block.
 - **Known pre-existing issues** (gated behind `RUNTARA_RUN_DIRECT_WASM_E2E=1`,
   so they don't block the default suite):
-  - `embed_workflow_child_local_on_error` — an EmbedWorkflow child with a local
-    onError handler: the direct artifact unexpectedly succeeds where the failure
-    should propagate. Error propagation through nested scopes; needs the same
-    instruction-level tracing approach used for the Split-retry fix.
+  - `embed_workflow_child_local_on_error` and
+    `nested_embed_workflow_retry_parent_frame_isolation` — a nested EmbedWorkflow
+    whose child step has a local `onError` handler: when the grandchild fails,
+    the generated artifact applies the child's onError (`handled: true`,
+    completes), but the direct artifact lets the failure escape the child and
+    fails the parent. The run plan is correct (the child is built with
+    `include_on_error`, so its EmbedWorkflow step carries an `error_plan`), so the
+    bug is in the **emission** — the child's `onError` route does not recover the
+    nested embed (an early flag-clear attempt was wrong: it regressed
+    `cached_embed_workflow_checkpoint_replay` and did not fix the target). Needs
+    the wasm-tools-print tracing used for the Split-retry fix, in
+    `embed_workflow.rs`'s error routing / shared `DIRECT_EMBED_CHILD_ERROR_FLAG`.
   - `dont_stop_nested_split_failure_aggregation` — **not a direct-vs-generated
     divergence**: `assert_success_parity` passes (direct's completion payload
     equals the generated artifact's), so the direct emitter is at parity. The
