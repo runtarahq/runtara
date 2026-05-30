@@ -1,6 +1,28 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool complete; embed/wait tools + durability pending.**
+Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool + 5b EmbedWorkflow-tool complete; 5b WaitForSignal-tool + durability pending.**
+
+### Slice 5b (EmbedWorkflow tool) — DONE and e2e-verified
+
+An AiAgent tool edge whose target is an EmbedWorkflow step with a preloaded child
+graph runs the composed child once with the LLM tool arguments as its input data
+(no input mapping, matching the generated `emit_embed_workflow_tool_arm`), feeding
+the child's output back as the tool result. `DirectAiToolPlan` is now an enum
+(`Agent { invoke } | Embed { child_plan }`); `emit_embed_workflow_tool_arm`
+(embed_workflow.rs) reuses `emit_embed_workflow_child_attempt` (CHILD_DATA = tool
+args → child variables → child run → output captured to the tool-result locals,
+error wrapped on the child-error flag). The manifest already advertises such edges
+and composes the child, so only the plan, loop dispatch, and support gate changed.
+Verified by `direct_compile_supports_ai_agent_embed_workflow_tool_graph` (compile
++ WASM validation + Embed in plan) and the gated A/B test
+`direct_wasm_matches_components_ai_agent_embed_workflow_tool` (runtime parity: the
+mock LLM calls `get_weather`, both artifacts run the child and answer identically).
+
+WaitForSignal-as-tool remains: it needs a tool-suffixed signal id
+(`<instance>/<wf>/<step>.tool.<label>.<call#>`) built in a new stdlib helper
+(WASM has no string ops), a per-tool-call counter, the `external_input_requested`
+custom event, and the durable poll loop wired into the tool dispatch — a distinct
+effort that also rebuilds the stdlib component. It still falls back to generated.
 
 ### Slice 5a (MCP synthetic tools) — DONE and e2e-verified
 
