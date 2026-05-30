@@ -76,6 +76,12 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_tool_error" => {
             include_str!("../../../tests/fixtures/ai_agent_tool_error.json")
         }
+        "ai_agent_embed_tool" => {
+            include_str!("../../../tests/fixtures/ai_agent_embed_tool.json")
+        }
+        "embed_tool_child" => {
+            include_str!("../../../tests/fixtures/embed_tool_child.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2208,6 +2214,73 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
         matches!(core_config.run_plan, DirectRunPlan::AiAgentLoop { .. }),
         "expected AiAgentLoop run plan, got {:?}",
         core_config.run_plan
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-embed-tool".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_embed_tool"),
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "tool_weather".to_string(),
+            workflow_id: "weather-workflow".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: fixture("embed_tool_child"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct embed-tool AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent embed-tool artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    // The embed tool's child workflow is composed into the artifact.
+    assert!(
+        manifest
+            .child_workflows
+            .iter()
+            .any(|child| child.step_id == "tool_weather"),
+        "embed tool child workflow should be preloaded"
+    );
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    assert_eq!(tools.len(), 1, "expected the single embed tool");
+    assert!(
+        matches!(
+            &tools[0],
+            crate::direct_wasm::plan::DirectAiToolPlan::Embed { step_id, .. }
+                if step_id == "tool_weather"
+        ),
+        "the tool should be an EmbedWorkflow tool, got {:?}",
+        tools[0]
     );
 }
 

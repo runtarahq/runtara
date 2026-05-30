@@ -628,7 +628,7 @@ fn supports_direct_control_step_inner(
                         child_stack,
                     ))
         }
-        Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step) => {
+        Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step, child_workflows) => {
             // The AiAgent loop consumes its tool edges directly (it dispatches
             // the tool agents itself), so mark them used and their targets
             // reachable for the graph-wide routing check.
@@ -683,7 +683,11 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
 /// with exactly one Agent-capability tool. Conversation memory, compaction, MCP
 /// synthetic tools, multi-tool loops, and tool-loops-with-onError fall back to
 /// the generated Rust compiler.
-fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -> bool {
+fn supports_ai_agent_step_baseline(
+    graph: &ExecutionGraph,
+    step: &AiAgentStep,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+) -> bool {
     let Some(config) = step.config.as_ref() else {
         return false;
     };
@@ -740,9 +744,11 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
         // structured output.
         return true;
     }
-    // Tool loop (chat-turn): every Agent tool must target an Agent step, MCP
-    // tools were validated above, and the step must have no onError (the loop
-    // does not yet route onError).
+    // Tool loop (chat-turn): every tool must target an Agent step or an
+    // EmbedWorkflow step whose child graph is preloaded and itself directly
+    // lowerable (run as a tool — its output is fed back to the model); MCP tools
+    // were validated above; and the step must have no onError (the loop does not
+    // yet route onError).
     let has_on_error = graph
         .execution_plan
         .iter()
@@ -750,7 +756,13 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
     !has_on_error
         && tool_targets
             .iter()
-            .all(|edge| matches!(graph.steps.get(&edge.to_step), Some(Step::Agent(_))))
+            .all(|edge| match graph.steps.get(&edge.to_step) {
+                Some(Step::Agent(_)) => true,
+                Some(Step::EmbedWorkflow(embed)) => {
+                    supports_embed_workflow_step_baseline(embed, child_workflows, &mut Vec::new())
+                }
+                _ => false,
+            })
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
@@ -1256,7 +1268,8 @@ fn collect_step_support(
             child_workflows,
             unsupported,
         ),
-        Step::AiAgent(ai_step) if supports_ai_agent_step_baseline(graph, ai_step) => {}
+        Step::AiAgent(ai_step)
+            if supports_ai_agent_step_baseline(graph, ai_step, child_workflows) => {}
         Step::AiAgent(_) => unsupported_step(
             step,
             "ai-agent",
