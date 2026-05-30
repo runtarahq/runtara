@@ -294,6 +294,15 @@ fn supports_direct_control_graph_inner(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
+    // The plan linearizes the unconditional normal-flow backbone topologically
+    // (so fan-out — a step with multiple unconditional successors — and the
+    // joins it forms run sequentially, each step once). That only works when no
+    // branching step sits mid-order; otherwise the topological chain would
+    // orphan the steps after it.
+    if !backbone_topologically_linearizable(graph) {
+        return false;
+    }
+
     let mut reachable = BTreeSet::new();
     let mut used_edges = BTreeSet::new();
     let mut stack = Vec::new();
@@ -310,6 +319,34 @@ fn supports_direct_control_graph_inner(
     }
 
     reachable.len() == graph.steps.len() && used_edges.len() == graph.execution_plan.len()
+}
+
+/// Whether the graph's unconditional normal-flow backbone forms a single
+/// topological chain the direct plan can linearize: every step before the last
+/// in `build_execution_order` must be a non-branching step that continues to its
+/// topological successor. A branching step (Conditional / routing Switch /
+/// conditioned normal-flow edges) mid-order would break the chain. Branching
+/// steps are sinks of the backbone (their successors are emitted by branch
+/// sub-plans), so a supported graph has at most one, and it is last.
+fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
+    use crate::codegen::ast::steps::{
+        branching, build_execution_order, has_conditioned_normal_flow_edges,
+    };
+    let order = build_execution_order(graph);
+    if order.len() <= 1 {
+        return true;
+    }
+    // Every step before the last must continue to its topological successor: not
+    // a terminal (Finish/Error) and not a branching step. Two terminal sinks
+    // (e.g. fan-out to two Finish steps) cannot linearize — the second would be
+    // unreachable after the first returns.
+    order[..order.len() - 1].iter().all(|step_id| {
+        graph.steps.get(step_id).is_some_and(|step| {
+            !matches!(step, Step::Finish(_) | Step::Error(_))
+                && !branching::is_branching_step(step)
+                && !has_conditioned_normal_flow_edges(step_id, graph)
+        })
+    })
 }
 
 fn supports_direct_control_step(
@@ -346,6 +383,14 @@ fn supports_direct_control_step_inner(
 ) -> bool {
     if stack.iter().any(|visited| visited == step_id) {
         return false;
+    }
+    // A join reached by more than one fan-out path is analyzed once. The first
+    // (depth-first) visit fully validates its subtree and marks its edges used;
+    // later arrivals short-circuit (avoiding exponential re-analysis of nested
+    // diamonds). If the first visit had found it unsupported, the whole analysis
+    // already failed, so returning true here cannot mask a rejection.
+    if reachable.contains(step_id) {
+        return true;
     }
     let Some(step) = graph.steps.get(step_id) else {
         return false;
@@ -826,21 +871,30 @@ fn supports_normal_flow_step(
         .collect::<Vec<_>>();
 
     if conditional_edges.is_empty() {
-        let [(edge_index, edge)] = default_edges.as_slice() else {
+        if default_edges.is_empty() {
             return false;
-        };
-        used_edges.insert(*edge_index);
+        }
+        // Unconditional fan-out: every successor runs (the plan linearizes them
+        // topologically). Mark all fan-out edges used and validate each target;
+        // a shared join is analyzed once (see the dedup in
+        // `supports_direct_control_step_inner`).
         stack.push(step_id.to_string());
-        let supported = supports_direct_control_step_inner(
-            graph,
-            child_workflows,
-            &edge.to_step,
-            reachable,
-            used_edges,
-            stack,
-            child_stack,
-            include_on_error,
-        );
+        let mut supported = true;
+        for (edge_index, edge) in &default_edges {
+            used_edges.insert(*edge_index);
+            if !supports_direct_control_step_inner(
+                graph,
+                child_workflows,
+                &edge.to_step,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) {
+                supported = false;
+            }
+        }
         stack.pop();
         return supported;
     }

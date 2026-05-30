@@ -811,6 +811,129 @@ fn step_run_plan_inner(
     }
 }
 
+/// Whether a step routes its normal-flow successors through generated condition
+/// code (Conditional, routing Switch, or any conditioned normal-flow edge)
+/// rather than continuing unconditionally. Mirrors the generated
+/// `branching::is_branching_step` + `has_conditioned_normal_flow_edges` so the
+/// direct topological order stops at the same steps.
+fn direct_is_branching_step(graph: &DirectGraphManifest, step: &DirectStepManifest) -> bool {
+    match step.step_type.as_str() {
+        "Conditional" => true,
+        "Switch" => switch_is_routing(graph, &step.id).unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn direct_has_conditioned_normal_flow_edges(graph: &DirectGraphManifest, step_id: &str) -> bool {
+    graph.edges.iter().any(|edge| {
+        edge.from_step == step_id
+            && is_normal_label(edge.label.as_deref())
+            && edge.condition_id.is_some()
+    })
+}
+
+/// Topological order of the unconditional normal-flow backbone, reachable from
+/// the entry point (Kahn's algorithm, FIFO — identical to the generated
+/// `build_execution_order`). Traversal stops at branching steps, whose
+/// successors are emitted by the branch sub-plans instead. The order linearizes
+/// fan-out (a step with multiple unconditional successors) and the joins it
+/// creates so each step is emitted exactly once, in dependency order — the same
+/// sequential execution the generated path produces.
+pub(super) fn direct_execution_order(graph: &DirectGraphManifest) -> Vec<String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let mut reachable = HashSet::new();
+    let mut discovery_order = Vec::new();
+    let mut discovery_queue = VecDeque::new();
+
+    reachable.insert(graph.entry_point.clone());
+    discovery_order.push(graph.entry_point.clone());
+    discovery_queue.push_back(graph.entry_point.clone());
+
+    while let Some(step_id) = discovery_queue.pop_front() {
+        let Some(step) = graph.steps.iter().find(|candidate| candidate.id == step_id) else {
+            continue;
+        };
+        if direct_is_branching_step(graph, step)
+            || direct_has_conditioned_normal_flow_edges(graph, &step_id)
+        {
+            continue;
+        }
+        for edge in &graph.edges {
+            if edge.from_step == step_id
+                && is_normal_label(edge.label.as_deref())
+                && reachable.insert(edge.to_step.clone())
+            {
+                discovery_order.push(edge.to_step.clone());
+                discovery_queue.push_back(edge.to_step.clone());
+            }
+        }
+    }
+
+    let mut indegree: HashMap<String, usize> = discovery_order
+        .iter()
+        .map(|step_id| (step_id.clone(), 0))
+        .collect();
+    for edge in &graph.edges {
+        if is_normal_label(edge.label.as_deref())
+            && reachable.contains(&edge.from_step)
+            && reachable.contains(&edge.to_step)
+        {
+            *indegree.entry(edge.to_step.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut order = Vec::new();
+    let mut ready = VecDeque::new();
+    let mut queued = HashSet::new();
+    if reachable.contains(&graph.entry_point) {
+        ready.push_back(graph.entry_point.clone());
+        queued.insert(graph.entry_point.clone());
+    }
+    while let Some(step_id) = ready.pop_front() {
+        order.push(step_id.clone());
+        let Some(step) = graph.steps.iter().find(|candidate| candidate.id == step_id) else {
+            continue;
+        };
+        if direct_is_branching_step(graph, step)
+            || direct_has_conditioned_normal_flow_edges(graph, &step_id)
+        {
+            continue;
+        }
+        for edge in &graph.edges {
+            if edge.from_step != step_id
+                || !is_normal_label(edge.label.as_deref())
+                || !reachable.contains(&edge.to_step)
+            {
+                continue;
+            }
+            if let Some(count) = indegree.get_mut(&edge.to_step) {
+                *count = count.saturating_sub(1);
+                if *count == 0 && queued.insert(edge.to_step.clone()) {
+                    ready.push_back(edge.to_step.clone());
+                }
+            }
+        }
+    }
+    // Deterministic fallback for any steps left out (validation rejects normal
+    // -flow cycles, but keep the order total).
+    for step_id in discovery_order {
+        if !queued.contains(&step_id) {
+            order.push(step_id);
+        }
+    }
+    order
+}
+
+/// The next step to run after `from_step` on the topological backbone, if
+/// `from_step` is a backbone step (the step immediately after it in
+/// `direct_execution_order`).
+fn topo_successor(graph: &DirectGraphManifest, from_step: &str) -> Option<String> {
+    let order = direct_execution_order(graph);
+    let position = order.iter().position(|step| step == from_step)?;
+    order.get(position + 1).cloned()
+}
+
 fn normal_flow_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -819,11 +942,6 @@ fn normal_flow_plan(
     include_on_error: bool,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     let edges = normal_flow_edges(graph, from_step);
-    if edges.is_empty() {
-        return Err(DirectCompileError::Component(format!(
-            "missing normal branch for direct step '{from_step}'"
-        )));
-    }
 
     let mut conditional_edges = edges
         .iter()
@@ -837,21 +955,37 @@ fn normal_flow_plan(
         .collect::<Vec<_>>();
 
     if conditional_edges.is_empty() {
-        let [edge] = default_edges.as_slice() else {
-            return Err(DirectCompileError::Component(format!(
-                "direct step '{from_step}' has unsupported parallel normal branches"
-            )));
+        // Backbone steps continue to their topological successor, which
+        // linearizes fan-out (multiple unconditional successors) and joins so
+        // each downstream step is emitted exactly once. Off-backbone steps
+        // (conditional-branch sub-steps) fall back to following their single
+        // unconditional edge.
+        let next_step = if let Some(next) = topo_successor(graph, from_step) {
+            next
+        } else {
+            if edges.is_empty() {
+                return Err(DirectCompileError::Component(format!(
+                    "missing normal branch for direct step '{from_step}'"
+                )));
+            }
+            let [edge] = default_edges.as_slice() else {
+                return Err(DirectCompileError::Component(format!(
+                    "direct step '{from_step}' has unsupported parallel normal branches"
+                )));
+            };
+            edge.to_step.clone()
         };
         stack.push(from_step.to_string());
-        let next_plan = step_run_plan_inner(
-            graph,
-            child_workflows,
-            &edge.to_step,
-            stack,
-            include_on_error,
-        )?;
+        let next_plan =
+            step_run_plan_inner(graph, child_workflows, &next_step, stack, include_on_error)?;
         stack.pop();
         return Ok(next_plan);
+    }
+
+    if edges.is_empty() {
+        return Err(DirectCompileError::Component(format!(
+            "missing normal branch for direct step '{from_step}'"
+        )));
     }
 
     let [default_edge] = default_edges.as_slice() else {

@@ -139,6 +139,7 @@ fn fixture(name: &str) -> ExecutionGraph {
                 "../../../tests/fixtures/embed_workflow_nested_error_great_grandchild.json"
             )
         }
+        "fanout_diamond" => include_str!("../../../tests/fixtures/fanout_diamond.json"),
         "transform" => include_str!("../../../tests/fixtures/transform_workflow.json"),
         other => panic!("unknown fixture {other}"),
     };
@@ -2559,6 +2560,68 @@ fn direct_compile_supports_ai_agent_tool_error_graph() {
         result.support_report.supported,
         "{:?}",
         result.support_report.unsupported
+    );
+}
+
+#[test]
+fn direct_compile_supports_fanout_diamond_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "fanout-diamond".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("fanout_diamond"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct fan-out diamond compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct fan-out diamond artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    // The diamond linearizes topologically into a single chain that runs each
+    // step once: start -> left -> right -> join. The plan is a linear chain of
+    // Agent plans terminating in the join Finish.
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+
+    let mut plan = &core_config.run_plan;
+    let mut chain = Vec::new();
+    loop {
+        match plan {
+            DirectRunPlan::Agent {
+                step_id, next_plan, ..
+            } => {
+                chain.push(step_id.clone());
+                plan = next_plan;
+            }
+            DirectRunPlan::Finish { step_id, .. } => {
+                chain.push(step_id.clone());
+                break;
+            }
+            other => panic!("unexpected plan node in fan-out chain: {other:?}"),
+        }
+    }
+    assert_eq!(
+        chain,
+        vec!["start", "left", "right", "join"],
+        "fan-out diamond should linearize to start -> left -> right -> join"
     );
 }
 

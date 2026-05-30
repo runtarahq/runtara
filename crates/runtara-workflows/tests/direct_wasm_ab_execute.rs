@@ -74,6 +74,7 @@ const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_
 const AI_AGENT_MEMORY_SUMMARIZE: &str = include_str!("fixtures/ai_agent_memory_summarize.json");
 const AI_AGENT_MCP: &str = include_str!("fixtures/ai_agent_mcp.json");
 const AI_AGENT_TOOL_ERROR: &str = include_str!("fixtures/ai_agent_tool_error.json");
+const FANOUT_DIAMOND: &str = include_str!("fixtures/fanout_diamond.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -5378,6 +5379,68 @@ fn direct_wasm_matches_components_ai_agent_mcp() {
     assert_eq!(
         direct_out.get("answer"),
         Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+}
+
+/// A step fans out to two unconditional successors that rejoin at a single
+/// Finish. The direct emitter linearizes the diamond topologically (start, left,
+/// right, join) so each step runs once and the join sees BOTH branches' outputs
+/// — at output parity with the generated path's topological execution.
+#[test]
+fn direct_wasm_matches_components_fanout_diamond() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("fanout-diamond", FANOUT_DIAMOND);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "fanout-diamond", FANOUT_DIAMOND);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"hello"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-fanout-diamond",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-fanout-diamond",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}",
+        direct.stderr, direct.error_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "fan-out diamond completion payload mismatch"
+    );
+    // The join saw all three outputs: both fan-out branches plus the start.
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("fromStart"),
+        Some(&serde_json::json!("hello"))
+    );
+    assert_eq!(
+        direct_out.get("fromLeft"),
+        Some(&serde_json::json!("left-value"))
+    );
+    assert_eq!(
+        direct_out.get("fromRight"),
+        Some(&serde_json::json!("right-value"))
     );
 }
 
