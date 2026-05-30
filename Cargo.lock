@@ -4001,7 +4001,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ai-tools"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-azure-blob-storage"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4026,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bedrock"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4038,7 +4038,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bundle-emit"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "anyhow",
  "runtara-agent-ai-tools",
@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-compression"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4084,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-crypto"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "hmac 0.12.1",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-csv"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "csv",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-datetime"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4129,7 +4129,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-encoding"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-http"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4156,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4168,7 +4168,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mailgun"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mcp"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-object-model"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4227,7 +4227,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-s3-storage"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4240,7 +4240,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sftp"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4252,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sharepoint"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4265,7 +4265,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shopify"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4277,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4290,7 +4290,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4302,7 +4302,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-text"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "minijinja",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-transform"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-utils"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
@@ -4343,11 +4343,11 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-wit"
-version = "7.2.5"
+version = "7.2.6"
 
 [[package]]
 name = "runtara-agent-xlsx"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xml"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "roxmltree",
@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "calamine",
@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-ai"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-http",
  "serde",
@@ -4421,7 +4421,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-component-host"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "anyhow",
  "http",
@@ -4439,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4471,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -4507,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4538,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "serde",
@@ -4550,7 +4550,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-management-sdk"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "chrono",
@@ -4565,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "chrono",
  "pgvector",
@@ -4581,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-report-dsl"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "chrono",
  "insta",
@@ -4599,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "async-trait",
  "base64",
@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4630,7 +4630,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-text-parser"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "chrono",
  "regex",
@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "minijinja",
  "runtara-ai",
@@ -4722,7 +4722,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-validation-wasm"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "runtara-dsl",
  "runtara-workflows",
@@ -4733,7 +4733,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "7.2.5"
+version = "7.2.6"
 dependencies = [
  "base64",
  "minijinja",
