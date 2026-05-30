@@ -99,6 +99,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_memory_initial_state: Option<u32>,
     stdlib_ai_memory_save_input: Option<u32>,
     stdlib_ai_memory_compact_sliding: Option<u32>,
+    stdlib_ai_summarize_input: Option<u32>,
+    stdlib_ai_summarize_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
@@ -391,6 +393,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_memory_compact_sliding,
                 "stdlib.ai-memory-compact-sliding",
             )?,
+            stdlib_ai_summarize_input: require_import(
+                self.stdlib_ai_summarize_input,
+                "stdlib.ai-summarize-input",
+            )?,
+            stdlib_ai_summarize_output: require_import(
+                self.stdlib_ai_summarize_output,
+                "stdlib.ai-summarize-output",
+            )?,
             stdlib_agent_validate_input: require_import(
                 self.stdlib_agent_validate_input,
                 "stdlib.agent-validate-input",
@@ -525,6 +535,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_memory_initial_state: u32,
     pub(super) stdlib_ai_memory_save_input: u32,
     pub(super) stdlib_ai_memory_compact_sliding: u32,
+    pub(super) stdlib_ai_summarize_input: u32,
+    pub(super) stdlib_ai_summarize_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_cache_key: u32,
@@ -798,6 +810,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_memory_save_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-memory-compact-sliding") {
         import_indices.stdlib_ai_memory_compact_sliding = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-summarize-input") {
+        import_indices.stdlib_ai_summarize_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-summarize-output") {
+        import_indices.stdlib_ai_summarize_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {

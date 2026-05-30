@@ -1335,6 +1335,47 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-memory state: {err}"))
     }
 
+    /// Build the `summarize-memory` capability input from the base chat-turn
+    /// config (for the LLM provider/model), the final loop state, and the
+    /// compaction threshold: `{provider, model, max_messages, state}`. The
+    /// capability decides internally whether the conversation is over the
+    /// threshold (mirroring the generated Summarize branch's guard).
+    pub fn ai_summarize_input(
+        base: &[u8],
+        state: &[u8],
+        max_messages: u32,
+    ) -> Result<Vec<u8>, String> {
+        let base: Value = serde_json::from_slice(base)
+            .map_err(|err| format!("failed to parse ai-summarize base: {err}"))?;
+        let state: Value = serde_json::from_slice(state)
+            .map_err(|err| format!("failed to parse ai-summarize state: {err}"))?;
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "provider".to_string(),
+            base.get("provider").cloned().unwrap_or(Value::Null),
+        );
+        if let Some(model) = base.get("model").filter(|model| !model.is_null()) {
+            input.insert("model".to_string(), model.clone());
+        }
+        input.insert("max_messages".to_string(), Value::from(max_messages));
+        input.insert("state".to_string(), state);
+        serde_json::to_vec(&Value::Object(input))
+            .map_err(|err| format!("failed to serialize ai-summarize input: {err}"))
+    }
+
+    /// Extract the compacted loop state from a `summarize-memory` result
+    /// (`{state}`). Carries the conversation forward into the memory save.
+    pub fn ai_summarize_output(result: &[u8]) -> Result<Vec<u8>, String> {
+        let result: Value = serde_json::from_slice(result)
+            .map_err(|err| format!("failed to parse summarize-memory output: {err}"))?;
+        let state = result
+            .get("state")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        serde_json::to_vec(&state)
+            .map_err(|err| format!("failed to serialize ai-summarize state: {err}"))
+    }
+
     /// Build the AiAgent step output context from a completed turn: the
     /// `{response, iterations, toolCalls}` envelope inserted under the step id.
     pub fn ai_turn_output(
@@ -6790,6 +6831,36 @@ mod tests {
                 .expect("compact");
         let kept_value: Value = serde_json::from_slice(&kept).unwrap();
         assert_eq!(kept_value["chat_history"], state["chat_history"]);
+    }
+
+    #[test]
+    fn ai_summarize_input_carries_provider_and_state() {
+        let base = json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "system_prompt": "be helpful",
+            "chat_history": [],
+        });
+        let state = json!({ "chat_history": [{"i":0},{"i":1},{"i":2}], "iterations": 3 });
+        let input = DirectJsonManifest::ai_summarize_input(
+            &serde_json::to_vec(&base).unwrap(),
+            &serde_json::to_vec(&state).unwrap(),
+            2,
+        )
+        .expect("summarize input");
+        let value: Value = serde_json::from_slice(&input).unwrap();
+        assert_eq!(value["provider"], json!("openai"));
+        assert_eq!(value["model"], json!("gpt-4o"));
+        assert_eq!(value["max_messages"], json!(2));
+        assert_eq!(value["state"]["iterations"], json!(3));
+
+        // The capability returns `{state}`; ai_summarize_output unwraps it.
+        let result = json!({ "state": { "chat_history": [{"summary":true}] } });
+        let unwrapped =
+            DirectJsonManifest::ai_summarize_output(&serde_json::to_vec(&result).unwrap())
+                .expect("summarize output");
+        let unwrapped_value: Value = serde_json::from_slice(&unwrapped).unwrap();
+        assert_eq!(unwrapped_value["chat_history"], json!([{"summary":true}]));
     }
 
     #[test]

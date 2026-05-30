@@ -71,6 +71,7 @@ const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json"
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
+const AI_AGENT_MEMORY_SUMMARIZE: &str = include_str!("fixtures/ai_agent_memory_summarize.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -5142,6 +5143,87 @@ fn direct_wasm_matches_components_ai_agent_memory_compaction() {
             .map(|first| first["type"] == serde_json::json!("tool_result"))
             .unwrap_or(false),
         "the oldest kept message should be the tool result, got {:?}",
+        direct_saved[0]
+    );
+}
+
+/// AiAgent with memory + a tool + Summarize-strategy compaction (maxMessages 2).
+/// The tool loop produces four messages; Summarize compaction replaces the
+/// oldest two with one LLM-generated `[Previous conversation summary]: …` user
+/// message (the summarization runs through the `ai-tools` summarize-memory
+/// capability → the same mock LLM proxy). The direct run persists exactly three
+/// messages: the summary followed by the two most recent.
+#[test]
+fn direct_wasm_matches_components_ai_agent_memory_summarize() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("ai-agent-memory-summarize", AI_AGENT_MEMORY_SUMMARIZE);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "ai-agent-memory-summarize",
+        AI_AGENT_MEMORY_SUMMARIZE,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"hi","session":"s-summarize"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-memory-summarize",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-memory-summarize",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}",
+        direct.stderr, direct.error_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "memory-summarize AiAgent completion payload mismatch"
+    );
+
+    // Observable summarize compaction: of the four-message conversation, the
+    // oldest two are replaced by a single summary message, leaving three saved.
+    let direct_saved = direct
+        .memory_saves
+        .last()
+        .expect("direct save-memory captured");
+    assert_eq!(
+        direct_saved.len(),
+        3,
+        "summarize should leave 1 summary + 2 recent messages, got {}: {:?}",
+        direct_saved.len(),
+        direct_saved
+    );
+    // The first message is the inserted summary (a `user` message whose text
+    // begins with the summary marker).
+    assert_eq!(direct_saved[0]["role"], serde_json::json!("user"));
+    let summary_text = direct_saved[0]["content"]
+        .as_array()
+        .and_then(|content| content.first())
+        .and_then(|first| first["text"].as_str())
+        .unwrap_or_default();
+    assert!(
+        summary_text.starts_with("[Previous conversation summary]:"),
+        "the first kept message should be the summary, got {:?}",
         direct_saved[0]
     );
 }

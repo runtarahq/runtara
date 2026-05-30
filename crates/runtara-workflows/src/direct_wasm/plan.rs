@@ -170,11 +170,22 @@ pub(super) struct DirectAiMemoryPlan {
     pub(super) save_agent_id: u32,
     pub(super) agent_component_id: String,
     pub(super) conversation_mapping_id: u32,
-    /// Sliding-window compaction threshold: the most-recent `max_messages`
-    /// messages are kept before the conversation is saved (generated default
-    /// 50; runs whenever memory is configured). Summarize strategy is not yet
-    /// lowered (gated to the generated path).
+    /// Compaction threshold: at most `max_messages` messages are kept before the
+    /// conversation is saved (generated default 50; runs whenever memory is
+    /// configured).
     pub(super) max_messages: u32,
+    /// Summarize-strategy compaction provider. `None` → sliding window (drop the
+    /// oldest); `Some` → invoke the `ai-tools` `summarize-memory` capability,
+    /// which LLM-summarizes the oldest messages into a single message.
+    pub(super) summarize: Option<DirectAiSummarizePlan>,
+}
+
+/// Summarize-strategy compaction provider for an AiAgent loop: the `ai-tools`
+/// `summarize-memory` capability's manifest agent id and component id.
+#[derive(Debug, Clone)]
+pub(super) struct DirectAiSummarizePlan {
+    pub(super) agent_id: u32,
+    pub(super) agent_component_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -706,13 +717,26 @@ fn step_run_plan_inner(
                     .iter()
                     .find(|m| m.step_id == step_id && m.purpose == "memory.conversation"),
             ) {
-                (Some(load), Some(save), Some(conv)) => Some(DirectAiMemoryPlan {
-                    load_agent_id: load.id,
-                    save_agent_id: save.id,
-                    agent_component_id: canonicalize_direct_agent_id(&load.agent_id),
-                    conversation_mapping_id: conv.id,
-                    max_messages,
-                }),
+                (Some(load), Some(save), Some(conv)) => {
+                    // Summarize strategy is recorded as a `memory.summarize`
+                    // provider agent (the `ai-tools` summarize-memory capability).
+                    let summarize = graph
+                        .agents
+                        .iter()
+                        .find(|a| a.step_id == step_id && a.purpose == "memory.summarize")
+                        .map(|agent| DirectAiSummarizePlan {
+                            agent_id: agent.id,
+                            agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
+                        });
+                    Some(DirectAiMemoryPlan {
+                        load_agent_id: load.id,
+                        save_agent_id: save.id,
+                        agent_component_id: canonicalize_direct_agent_id(&load.agent_id),
+                        conversation_mapping_id: conv.id,
+                        max_messages,
+                        summarize,
+                    })
+                }
                 _ => None,
             };
             let next_plan =

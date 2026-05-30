@@ -391,16 +391,89 @@ pub(super) fn emit_ai_agent_loop_plan(
 
     // Conversation memory: save the final conversation history.
     if let Some(memory) = memory {
-        // Sliding-window compaction before save: state = ai-memory-compact-
-        // sliding(state, max_messages). Generated always compacts before saving
-        // when memory is configured (default window 50).
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
-        body.instruction(&Instruction::I32Const(memory.max_messages as i32));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_memory_compact_sliding));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+        // Compaction before save. Generated always compacts when memory is
+        // configured (default window 50).
+        if let Some(summarize) = memory.summarize.as_ref() {
+            // Summarize strategy: state = summarize-memory(ai-summarize-input(
+            // base, state, max_messages)). The capability LLM-summarizes the
+            // oldest messages (or no-ops below the threshold) and returns the
+            // compacted state.
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_LEN_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+            body.instruction(&Instruction::I32Const(memory.max_messages as i32));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_ai_summarize_input));
+            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+            load_retptr_list(
+                body,
+                DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+                DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            );
+            let summarize_invoke = indices
+                .agent_invokes
+                .get(&summarize.agent_component_id)
+                .expect("AiAgent summarize provider has a matching component import");
+            let summarize_capability = static_data
+                .agent_capability_id(summarize.agent_id)
+                .expect("AiAgent summarize has a static capability id");
+            emit_agent_invoke(
+                body,
+                summarize_invoke,
+                summarize_capability,
+                static_data,
+                summarize.agent_id,
+                DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+                DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            );
+            emit_agent_invoke_error_branch(
+                body,
+                indices,
+                static_data,
+                track_events,
+                summarize.agent_id,
+                step_id,
+                output_ptr_local,
+                output_len_local,
+                source_ptr_local,
+                source_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                None,
+                route_ptr_local,
+                route_len_local,
+                variables,
+                data_ptr_local,
+                data_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                None,
+                None,
+            );
+            load_agent_retptr_list(
+                body,
+                DIRECT_AI_TURN_OUT_PTR_LOCAL,
+                DIRECT_AI_TURN_OUT_LEN_LOCAL,
+            );
+            // state = ai-summarize-output(summarize_out)
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_ai_summarize_output));
+            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+            load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+        } else {
+            // Sliding-window (default): state = ai-memory-compact-sliding(state,
+            // max_messages).
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+            body.instruction(&Instruction::I32Const(memory.max_messages as i32));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_ai_memory_compact_sliding));
+            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+            load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+        }
 
         // save_input = ai-memory-save-input(conversation, final_state)
         body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_PTR_LOCAL));

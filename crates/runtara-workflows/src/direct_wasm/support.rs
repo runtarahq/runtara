@@ -667,17 +667,8 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
     {
         return false;
     }
-    // Compaction: sliding-window (the default) is lowered; the Summarize
-    // strategy needs a conditional LLM call and is not yet lowered.
-    if config
-        .memory
-        .as_ref()
-        .and_then(|memory| memory.compaction.as_ref())
-        .and_then(|compaction| compaction.strategy.as_ref())
-        .is_some_and(|strategy| matches!(strategy, runtara_dsl::CompactionStrategy::Summarize))
-    {
-        return false;
-    }
+    // Compaction: both sliding-window (the default) and Summarize are lowered.
+    // Summarize runs the `ai-tools` summarize-memory capability before the save.
 
     let tool_targets = graph
         .execution_plan

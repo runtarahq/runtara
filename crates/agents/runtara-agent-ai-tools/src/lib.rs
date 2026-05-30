@@ -1106,6 +1106,145 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
 }
 
 // ============================================================================
+// Capability: Summarize Memory (compaction primitive)
+// ============================================================================
+//
+// Summarize-strategy compaction for AiAgent conversation memory. Given the loop
+// state (`chat_history` + bookkeeping) and a `max_messages` threshold, it
+// summarizes the oldest excess messages via one LLM call and replaces them with
+// a single `[Previous conversation summary]: …` user message — mirroring the
+// generated path. The conditional ("only when over the threshold") lives here in
+// Rust so the direct-WASM loop just invokes it unconditionally before saving.
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Summarize Memory Input")]
+pub struct SummarizeMemoryInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Provider", description = "LLM provider integration id")]
+    #[serde(default)]
+    pub provider: String,
+    #[field(display_name = "Model", description = "Model identifier")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[field(
+        display_name = "Max Messages",
+        description = "Compaction threshold; messages beyond this are summarized"
+    )]
+    #[serde(default)]
+    pub max_messages: u32,
+    #[field(
+        display_name = "State",
+        description = "AiAgent loop state ({chat_history, iterations, tool_call_log})"
+    )]
+    #[serde(default)]
+    pub state: Value,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Summarize Memory Output")]
+pub struct SummarizeMemoryOutput {
+    #[field(
+        display_name = "State",
+        description = "The loop state with the conversation compacted (unchanged below the threshold)"
+    )]
+    pub state: Value,
+}
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Summarize Memory",
+    description = "Summarize-strategy memory compaction: replace the oldest messages beyond max_messages with a single LLM-generated summary. Used by the direct emitter's AiAgent memory path.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm,internal",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOutput, AgentError> {
+    use runtara_ai::message::Message;
+
+    let connection = require_connection(input._connection.as_ref())?;
+
+    let mut state = input.state.clone();
+    let history = state
+        .get("chat_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let max = input.max_messages as usize;
+    // Below the threshold: nothing to compact (and no LLM call), exactly as the
+    // generated path skips the summarization branch.
+    if history.len() <= max {
+        return Ok(SummarizeMemoryOutput { state });
+    }
+
+    let excess = history.len() - max;
+    let old_json = serde_json::to_string(&history[..excess]).unwrap_or_default();
+    let summary_prompt = format!(
+        "Summarize the following conversation history concisely, preserving key \
+         facts, decisions, and context:\n{old_json}"
+    );
+
+    let integration_id = if input.provider.is_empty() {
+        connection.integration_id.clone()
+    } else {
+        input.provider.clone()
+    };
+    let req = runtara_ai::CompletionInvokeRequest {
+        integration_id,
+        conn_params: connection.parameters.clone(),
+        connection_id: connection.connection_id.clone(),
+        model_id: input.model.clone(),
+        system_prompt: "You are a conversation summarizer. Produce a concise \
+                        summary preserving key facts."
+            .to_string(),
+        user_prompt: summary_prompt,
+        chat_history: Vec::new(),
+        tools: Vec::new(),
+        temperature: 0.3,
+        max_tokens: None,
+        output_schema_json: None,
+    };
+
+    // A summarization failure degrades like the generated path: keep the most
+    // recent messages (sliding window) without an inserted summary.
+    let summary_text = match runtara_ai::run_completion(req) {
+        Ok(response) => response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "[Summary unavailable]".to_string()),
+        Err(_) => "[Summary unavailable]".to_string(),
+    };
+
+    // Drop the summarized messages and prepend the summary as a user message,
+    // serialized in the same rig Message form chat-turn uses for chat_history.
+    let summary_message = serde_json::to_value(Message::user(format!(
+        "[Previous conversation summary]: {summary_text}"
+    )))
+    .unwrap_or(Value::Null);
+    let mut compacted: Vec<Value> = Vec::with_capacity(max + 1);
+    compacted.push(summary_message);
+    compacted.extend_from_slice(&history[excess..]);
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("chat_history".to_string(), Value::Array(compacted));
+    }
+
+    Ok(SummarizeMemoryOutput { state })
+}
+
+// ============================================================================
 // Capability 2: Image Generation
 // ============================================================================
 
@@ -2211,6 +2350,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         &__CAPABILITY_META_TEXT_COMPLETION,
         &__CAPABILITY_META_CHAT_COMPLETION,
         &__CAPABILITY_META_CHAT_TURN,
+        &__CAPABILITY_META_SUMMARIZE_MEMORY,
         &__CAPABILITY_META_IMAGE_GENERATION,
         &__CAPABILITY_META_VISION_TO_TEXT,
         &__CAPABILITY_META_VISION_TO_IMAGE,
@@ -2223,6 +2363,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ),
         ("ChatCompletionInput", &__INPUT_META_ChatCompletionInput),
         ("ChatTurnInput", &__INPUT_META_ChatTurnInput),
+        ("SummarizeMemoryInput", &__INPUT_META_SummarizeMemoryInput),
         ("ImageGenerationInput", &__INPUT_META_ImageGenerationInput),
         ("VisionToTextInput", &__INPUT_META_VisionToTextInput),
         ("VisionToImageInput", &__INPUT_META_VisionToImageInput),
@@ -2237,6 +2378,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ),
         ("ChatCompletionOutput", &__OUTPUT_META_ChatCompletionOutput),
         ("ChatTurnOutput", &__OUTPUT_META_ChatTurnOutput),
+        (
+            "SummarizeMemoryOutput",
+            &__OUTPUT_META_SummarizeMemoryOutput,
+        ),
         (
             "ImageGenerationOutput",
             &__OUTPUT_META_ImageGenerationOutput,
@@ -2319,6 +2464,7 @@ impl Guest for Component {
             "text-completion" => __executor_text_completion(value),
             "chat-completion" => __executor_chat_completion(value),
             "chat-turn" => __executor_chat_turn(value),
+            "summarize-memory" => __executor_summarize_memory(value),
             "image-generation" => __executor_image_generation(value),
             "vision-to-text" => __executor_vision_to_text(value),
             "vision-to-image" => __executor_vision_to_image(value),

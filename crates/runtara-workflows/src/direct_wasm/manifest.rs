@@ -1108,6 +1108,40 @@ fn step_manifest(
                         timeout: None,
                     });
                 }
+                // Summarize-strategy compaction runs the `ai-tools`
+                // summarize-memory capability before the save (the LLM
+                // summarizes the oldest messages). The default sliding window
+                // needs no provider. The summarize LLM call reuses the AiAgent's
+                // own connection (provider/model are passed in the input).
+                let use_summarize = memory
+                    .and_then(|memory| memory.compaction.as_ref())
+                    .and_then(|compaction| compaction.strategy.as_ref())
+                    .is_some_and(|strategy| {
+                        matches!(strategy, runtara_dsl::CompactionStrategy::Summarize)
+                    });
+                if use_summarize {
+                    collections.agents.push(DirectAgentManifest {
+                        id: state.allocate_agent_id(),
+                        step_id: step.id.clone(),
+                        name: None,
+                        step_type: "AiAgent".to_string(),
+                        purpose: "memory.summarize".to_string(),
+                        agent_id: "ai-tools".to_string(),
+                        capability_id: "summarize-memory".to_string(),
+                        connection_id: step.connection_id.clone(),
+                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        rate_limited: agent_capability_rate_limited(
+                            agent_catalog,
+                            "ai-tools",
+                            "summarize-memory",
+                        ),
+                        input_mapping_id: conversation_mapping_id,
+                        required_inputs: Vec::new(),
+                        max_retries: None,
+                        retry_delay: None,
+                        timeout: None,
+                    });
+                }
             }
         }
         Step::WaitForSignal(step) => {

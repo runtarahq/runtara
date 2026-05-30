@@ -377,6 +377,15 @@ interface json {
         state: list<u8>,
         max-messages: u32,
     ) -> result<list<u8>, string>;
+    // Build the summarize-memory capability input `{provider, model,
+    // max_messages, state}` from the base chat-turn config and the loop state.
+    ai-summarize-input: func(
+        base: list<u8>,
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
+    // Unwrap the loop state from a summarize-memory result (`{state}`).
+    ai-summarize-output: func(summarize-result: list<u8>) -> result<list<u8>, string>;
 
     agent-validate-input: func(
         agent-id: u32,
