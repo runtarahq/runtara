@@ -1,16 +1,21 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0 + 2 complete; Slice 1 foundation landed; Slices 1(loop), 3–6 pending.**
+Status: **Slices 0, 1, 2 complete; Slices 3–6 pending.**
 
-### Slice 1 (tool loop) — concrete design
+### Slice 1 (tool loop) — DONE and e2e-verified
 
-Foundation done (`ai-agent-turn` capability, committed): one loop turn in Rust —
-appends the prior turn's tool results, runs the LLM, records user/assistant
-messages, returns `complete` (with the final response) or `tools` (with the
-tool calls to dispatch). All conversation-state management lives in the
-capability, so the core-WASM loop is comparatively thin.
+An AiAgent with a single Agent-capability tool now lowers to a validated WASM
+component that runs the full tool loop at output parity with generated Rust
+(gated A/B test `direct_wasm_matches_components_ai_agent_tool_loop`). The
+`ai-agent-turn` capability does one turn in Rust; `compile/ai_agent_loop.rs`
+emits the outer turn loop + inner tool-dispatch loop driven by the `ai-turn-*`
+stdlib helpers, dispatching the tool agent with the LLM-provided args and
+threading loop state between turns. Remaining tool-loop work folded into later
+slices: **multiple tools** (name-matched dispatch — Slice 5), MCP/embed/wait
+tools (Slice 5), tool-loop onError routing, and durability/checkpoint per turn
+(Slice 6).
 
-Remaining (the core-WASM loop driving it):
+Original design (now implemented), kept for reference:
 - **plan/manifest**: a `DirectRunPlan::AiAgentLoop` carrying the base
   chat-turn input mapping + a **tool table** — for each tool edge (label →
   target Agent step), `{name, agent_component_id, capability_id,

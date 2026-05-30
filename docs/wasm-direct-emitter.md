@@ -2772,20 +2772,20 @@ Current status:
 Goal: support AI agent workflows without linking provider logic into every
 workflow.
 
-Progress (Slice 0 — single-shot AiAgent): done. The `ai-tools` component gained
-a `chat-completion` capability backed by the shared
-`runtara_ai::run_completion` (the exact logic the generated `__ai_llm_durable`
-runs inline), so the LLM call now lives behind the agent `invoke` ABI instead of
-linked into workflow.wasm. The direct emitter lowers a single-shot AiAgent (no
-tools, memory, structured output, or MCP) as an invoke of that capability with a
-synthesized input mapping from the AiAgent config, and a new stdlib
-`ai-agent-output` builds the generated-compatible `{response, iterations,
-toolCalls}` envelope from the returned choice. A gated A/B test drives both
-artifacts through an in-test mock LLM proxy and asserts completion-payload
-parity (checkpoint traffic differs by design — see the phase-12 plan doc). The
-support gate still rejects tool/memory/structured-output/MCP AiAgents (they fall
-back to the generated compiler) until Slices 1–6. See
-`docs/wasm-direct-emitter-phase12-plan.md`.
+Progress: Slices 0 (single-shot), 1 (tool loop), and 2 (structured output) are
+done and e2e-verified. The `ai-tools` component gained `chat-completion` (one
+LLM call) and `chat-turn` (one loop turn) capabilities, both backed by the
+shared `runtara_ai::run_completion`, so provider logic lives behind the agent
+`invoke` ABI instead of linked into workflow.wasm. The direct emitter lowers:
+single-shot and structured-output AiAgents as a `chat-completion` invoke with an
+`ai-agent-output`/structured envelope; and tool-loop AiAgents (one
+Agent-capability tool) as a core-WASM loop (`compile/ai_agent_loop.rs`) driving
+`chat-turn` and dispatching the tool agent, via the `ai-turn-*` stdlib helpers.
+Gated A/B tests drive both artifacts through an in-test mock LLM proxy and
+assert completion-payload parity (checkpoint traffic differs by design — see the
+phase-12 plan doc). Still gated to the generated compiler (Slices 3–6):
+conversation memory, compaction, MCP synthetic tools, multi-tool loops, and
+AiAgent durability/crash-resume. See `docs/wasm-direct-emitter-phase12-plan.md`.
 
 Implementation steps:
 
