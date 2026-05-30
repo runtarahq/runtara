@@ -1,6 +1,24 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool + 5b EmbedWorkflow-tool complete; 5b WaitForSignal-tool + durability pending.**
+Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool + 5b (EmbedWorkflow + WaitForSignal tools) complete — AiAgent tool loops no longer fall back; only durability hardening pending.**
+
+### Slice 5b (WaitForSignal tool) — DONE and e2e-verified
+
+A WaitForSignal AiAgent tool now lowers directly: the loop emits the external
+-input request and durably polls (check-signals / poll-custom-signal / heartbeat
+/ blocking-sleep) until the human signal arrives, then feeds the wrapped payload
+(`{status:"received", human_response}`) back as the tool result — matching the
+generated `emit_wait_for_signal_tool_arm`. Two stdlib functions back it because
+WASM has no string ops: `ai-wait-tool-signal-id` builds the per-call id
+`{instance}/{wf}/{ai_step}.tool.{label}.{call}{indices}`, `ai-wait-tool-result`
+wraps the payload. `DirectAiToolPlan::Wait { step_id, label }`;
+`emit_ai_wait_tool_arm` (wait.rs) reuses the existing wait poll helpers; a
+monotonic per-tool-call counter local yields resume-stable ids; static_data
+interns tool-edge labels as segments. The generated tool arm ignores `onWait`
+(zero `on_wait` references), so direct accepts wait tools with or without an
+onWait subgraph rather than falling back. Verified by structural tests and the
+gated A/B `direct_wasm_matches_components_ai_agent_wait_for_signal_tool` (drives
+the loop with an injected human signal).
 
 ### Slice 5b (EmbedWorkflow tool) — DONE and e2e-verified
 
