@@ -1734,6 +1734,16 @@ fn normalized_failure_error(error_json: &Option<Value>) -> Option<Value> {
     let Value::String(error) = error_json.as_ref()? else {
         return error_json.clone();
     };
+    // Generated wraps a fatal Split item failure as a non-JSON string
+    // "Split step failed at index N: {json}"; the direct emitter preserves the
+    // structured error object instead of inheriting that lossy string wrapping.
+    // Normalize the generated form back to the structured error for comparison.
+    if let Some((prefix, payload)) = error.split_once(": ")
+        && prefix.starts_with("Split step failed at index ")
+        && let Ok(parsed) = serde_json::from_str::<Value>(payload)
+    {
+        return Some(parsed);
+    }
     let Some(prefix) = error
         .split_once(" waiting for signal '")
         .map(|(prefix, _)| prefix)
@@ -1789,7 +1799,7 @@ fn normalized_retry_attempts(
             (
                 normalized_checkpoint_id(&retry.checkpoint_id),
                 retry.attempt,
-                retry.error_json.clone(),
+                normalized_failure_error(&retry.error_json),
             )
         })
         .collect()
@@ -4224,8 +4234,16 @@ fn direct_wasm_matches_components_split_retry_exhausted() {
             "index": 0
         }
     });
-    assert_eq!(components.error_json.as_ref(), Some(&expected_error));
-    assert_eq!(direct.error_json.as_ref(), Some(&expected_error));
+    // Generated string-wraps the fatal item error; direct keeps it structured
+    // (normalized for comparison — both carry the same SPLIT_ITEM_TEMPORARY).
+    assert_eq!(
+        normalized_failure_error(&components.error_json),
+        Some(expected_error.clone())
+    );
+    assert_eq!(
+        normalized_failure_error(&direct.error_json),
+        Some(expected_error.clone())
+    );
 
     let expected_lookup = vec![(SPLIT_CACHE_KEY.to_string(), Vec::new())];
     assert_eq!(

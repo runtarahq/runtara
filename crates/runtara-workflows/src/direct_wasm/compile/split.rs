@@ -695,17 +695,23 @@ pub(super) fn emit_split_plan(
             output_ptr_local,
             output_len_local,
         );
-        body.instruction(&Instruction::End);
-
-        body.instruction(&Instruction::I32Const(split_id as i32));
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_split_output_from_result));
-        return_if_retptr_error(body);
-        load_retptr_list(body, steps_ptr_local, steps_len_local);
+        // Close the checkpoint-lookup `if`/`else` and build the step output from
+        // the (cached or computed) result. Under retry this is deferred until
+        // after the retry blocks (the inner-attempt block must stay open so
+        // `retry-after-attempt` sits inside the retry loop); see the
+        // `retry_enabled && durable` tail below.
+        if !retry_enabled {
+            body.instruction(&Instruction::End);
+            emit_split_durable_output_from_result(
+                body,
+                indices,
+                split_id,
+                output_ptr_local,
+                output_len_local,
+                steps_ptr_local,
+                steps_len_local,
+            );
+        }
     } else {
         body.instruction(&Instruction::I32Const(split_id as i32));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
@@ -725,6 +731,9 @@ pub(super) fn emit_split_plan(
     }
 
     if retry_enabled {
+        // Close the inner-attempt block, run retry-after-attempt INSIDE the retry
+        // loop (so a retryable failure re-iterates the loop), then close the
+        // loop and the retry-outer block.
         body.instruction(&Instruction::End);
         emit_split_retry_after_attempt(
             body,
@@ -736,6 +745,21 @@ pub(super) fn emit_split_plan(
         );
         body.instruction(&Instruction::End);
         body.instruction(&Instruction::End);
+        if durable {
+            // Close the deferred checkpoint-lookup `if`/`else` (opened before the
+            // retry) and build the step output from the cached-or-computed
+            // result once the retry settled.
+            body.instruction(&Instruction::End);
+            emit_split_durable_output_from_result(
+                body,
+                indices,
+                split_id,
+                output_ptr_local,
+                output_len_local,
+                steps_ptr_local,
+                steps_len_local,
+            );
+        }
     }
 
     if has_error_plan {
@@ -854,6 +878,29 @@ pub(super) fn emit_split_retry_error_and_continue(
     body.instruction(&Instruction::Br(branch_depth));
 }
 
+/// Build the durable Split's step output from the checkpointed-or-computed
+/// result (`split-output-from-result`), after the checkpoint-lookup `if`/`else`
+/// has closed so it covers both the cached and the freshly-computed branches.
+fn emit_split_durable_output_from_result(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    split_id: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+) {
+    body.instruction(&Instruction::I32Const(split_id as i32));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_split_output_from_result));
+    return_if_retptr_error(body);
+    load_retptr_list(body, steps_ptr_local, steps_len_local);
+}
+
 fn emit_split_retry_after_attempt(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -887,7 +934,10 @@ fn emit_split_retry_after_attempt(
         );
     }
     body.instruction(&Instruction::Else);
-    body.instruction(&Instruction::Br(1));
+    // No item failed this attempt: exit the retry by breaking past the retry
+    // loop to the retry-outer block (the flag `if` is depth 0, the retry loop
+    // depth 1, the retry-outer block depth 2).
+    body.instruction(&Instruction::Br(2));
     body.instruction(&Instruction::End);
 }
 
