@@ -1,12 +1,30 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2, 3 (memory) + multi-tool complete; compaction/MCP/durability pending.**
+Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction) + multi-tool complete; MCP/durability pending.**
 
 Multi-tool dispatch (commit 82321f16) is done: the `chat-turn` capability
 resolves each tool call's name to a `tool_index`, and the loop dispatches by
-index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: compaction
-(Slice 4), MCP/embed/wait tools (Slice 5), tool-loop onError routing +
-per-turn durability/crash-resume (Slice 6).
+index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: MCP/embed/wait
+tools (Slice 5), tool-loop onError routing + per-turn durability/crash-resume
+(Slice 6).
+
+### Slice 4 (memory compaction) — DONE and e2e-verified
+
+Both compaction strategies lower at parity (gated A/B tests
+`direct_wasm_matches_components_ai_agent_memory_compaction` and
+`…_memory_summarize`). The generated path always compacts the conversation
+before the memory save when memory is configured (default window 50), so the
+Slice 3 memory lowering silently diverged for long conversations; this closes
+that gap. **SlidingWindow** (default): the stdlib `ai-memory-compact-sliding`
+drops the oldest messages so at most `max_messages` remain, invoked on the
+final loop state before `ai-memory-save-input`. **Summarize**: the new
+`ai-tools` `summarize-memory` capability LLM-summarizes the oldest excess into
+a single `[Previous conversation summary]: …` message (the conditional + the
+one LLM call live in the capability, so the direct loop stays branch-light);
+`ai-summarize-input`/`ai-summarize-output` stdlib helpers build the call and
+unwrap the compacted state. The A/B tests capture the object-model save payload
+and assert the direct run persists the expected compacted conversation
+(compaction is invisible in the completion payload).
 
 ### Slice 3 (conversation memory) — DONE and e2e-verified
 
@@ -343,7 +361,7 @@ these must be reproduced exactly for crash/resume parity.
    (+ multi-tool name-matched dispatch.)
 3. ✅ **Slice 2 — structured output** (`output_schema`).
 4. ✅ **Slice 3 — memory** load/save (object_model edge).
-5. **Slice 4 — compaction** (SlidingWindow, then Summarize).
+5. ✅ **Slice 4 — compaction** (SlidingWindow + Summarize).
 6. **Slice 5 — MCP synthetic tools** + EmbedWorkflow/WaitForSignal tools.
 7. **Slice 6 — durability hardening**: breakpoint pause/resume, crash/resume
    differential tests across LLM/tool checkpoints; retry parity.
