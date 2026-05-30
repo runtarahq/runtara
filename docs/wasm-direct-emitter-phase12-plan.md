@@ -1,6 +1,12 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2 complete; Slices 3–6 pending.**
+Status: **Slices 0, 1, 2 + multi-tool complete; memory/compaction/MCP/durability pending.**
+
+Multi-tool dispatch (commit 82321f16) is done: the `chat-turn` capability
+resolves each tool call's name to a `tool_index`, and the loop dispatches by
+index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: conversation
+memory (Slice 3), compaction (Slice 4), MCP/embed/wait tools (Slice 5),
+tool-loop onError routing + per-turn durability/crash-resume (Slice 6).
 
 ### Slice 1 (tool loop) — DONE and e2e-verified
 
