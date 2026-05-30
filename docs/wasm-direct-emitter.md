@@ -743,25 +743,26 @@ Current remaining action items:
   (fan-out to two terminal/branching sinks) still fall back. The only remaining
   deferral is crash/resume differential test hardening (coverage, not a feature
   gap). See `docs/wasm-direct-emitter-phase12-plan.md` for the AiAgent slice plan.
-- **Known pre-existing parity bugs** (predate the AiAgent/fan-out work — confirmed
-  failing at commit `c2c1a8e7`; gated behind `RUNTARA_RUN_DIRECT_WASM_E2E=1` so
-  they don't block the default suite):
-  - `split_retry_exhausted` — a **durable Split with `maxRetries>0` whose item
-    fully fails** (the fixture's subgraph is a bare `Error` step): the generated
-    artifact fails with the item error, but the direct artifact completes with
-    `{"results": null}` and *succeeds*. Diagnosed: the item's error event fires
-    but the retry never triggers (no durable sleep, the post-loop checkpoint
-    runs) — the item-level failure does not reach the retry-after-attempt
-    handler, so the loop exits as if no item failed. The run plan is correct
-    (`Split { durable: true, max_retries: 2, dont_stop_on_failed: false,
-    nested_plan: Error }`), so the bug is in the WASM **emission** of the
-    item-failure → retry routing, not in plan construction. The retry-target
-    block depths read as correct on static inspection; root-causing needs
-    instruction-level wasmtime tracing. Likely affects any retry-enabled Split
-    where an item exhausts, not just `Error`-step items.
+- **Durable Split retry** (FIXED, commit `0a2a40f6`): a durable Split with
+  `maxRetries>0` whose item failed used to complete with stale `null` output and
+  succeed instead of retrying then failing. The durable checkpoint-lookup `End`
+  prematurely closed the inner-attempt block, leaving `retry-after-attempt`
+  outside the retry loop so a retryable failure could not re-iterate. Now the
+  inner-attempt block stays open through the durable output (the lookup `End` +
+  `split-output-from-result` are deferred past the retry blocks) and the
+  no-failure branch breaks out of the retry-outer block.
+- **Known pre-existing issues** (gated behind `RUNTARA_RUN_DIRECT_WASM_E2E=1`,
+  so they don't block the default suite):
   - `embed_workflow_child_local_on_error` — an EmbedWorkflow child with a local
     onError handler: the direct artifact unexpectedly succeeds where the failure
-    should propagate. Same family (error propagation through nested scopes).
+    should propagate. Error propagation through nested scopes; needs the same
+    instruction-level tracing approach used for the Split-retry fix.
+  - `dont_stop_nested_split_failure_aggregation` — **not a direct-vs-generated
+    divergence**: `assert_success_parity` passes (direct's completion payload
+    equals the generated artifact's), so the direct emitter is at parity. The
+    test's stricter explicit assertion `output["outputs"] == []` fails because
+    *both* artifacts emit `null` for the empty success list — a shared
+    behavioral/expectation question outside the direct emitter's scope.
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
