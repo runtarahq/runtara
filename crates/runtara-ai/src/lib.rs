@@ -13,6 +13,7 @@
 pub mod completion;
 pub mod message;
 pub mod one_or_many;
+pub mod orchestration;
 pub mod provider;
 pub mod providers;
 pub mod types;
@@ -21,3 +22,4 @@ pub mod types;
 pub use completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};
 pub use message::{AssistantContent, Message, UserContent};
 pub use one_or_many::OneOrMany;
+pub use orchestration::{CompletionInvokeRequest, run_completion};

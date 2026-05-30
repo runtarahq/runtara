@@ -632,6 +632,162 @@ fn text_completion_bedrock_structured(
 }
 
 // ============================================================================
+// Capability: Chat Completion (Ai Agent loop primitive)
+// ============================================================================
+//
+// One LLM chat completion turn, the building block of the Ai Agent orchestration
+// loop. Unlike `text-completion` (which builds provider JSON directly and
+// returns plain text), this capability uses `runtara_ai::run_completion` — the
+// exact logic the generated `__ai_llm_durable` runs inline — and returns the
+// raw assistant `choice` (which may contain tool calls). This lets the
+// direct-WASM emitter run the Ai Agent loop without linking `runtara-ai` into
+// every workflow.wasm, while staying byte-identical with the generated path.
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Chat Completion Input")]
+pub struct ChatCompletionInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "System Prompt",
+        description = "System instructions / preamble for the model"
+    )]
+    #[serde(default)]
+    pub system_prompt: String,
+
+    #[field(
+        display_name = "User Prompt",
+        description = "The user message for this turn (empty after the first iteration)"
+    )]
+    #[serde(default)]
+    pub user_prompt: String,
+
+    #[field(
+        display_name = "Model",
+        description = "Model identifier (auto-selected by provider when absent)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Temperature",
+        description = "Sampling temperature (default 0.7)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    #[field(
+        display_name = "Max Tokens",
+        description = "Maximum tokens to generate"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+
+    #[field(
+        display_name = "Chat History",
+        description = "Prior conversation messages (rig Message JSON)"
+    )]
+    #[serde(default)]
+    pub chat_history: Vec<Value>,
+
+    #[field(
+        display_name = "Tools",
+        description = "Tool definitions advertised to the model"
+    )]
+    #[serde(default)]
+    pub tools: Vec<Value>,
+
+    #[field(
+        display_name = "Output Schema",
+        description = "Optional JSON Schema for structured output"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Chat Completion Output")]
+pub struct ChatCompletionOutput {
+    #[field(
+        display_name = "Choice",
+        description = "The assistant response content (serialized OneOrMany<AssistantContent>); may contain tool calls"
+    )]
+    pub choice: Value,
+
+    #[field(
+        display_name = "Usage",
+        description = "Token usage statistics, when reported"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+}
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Chat Completion",
+    description = "Run one LLM chat-completion turn and return the raw assistant choice (with tool calls). Primitive used by the Ai Agent loop.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm,internal",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
+
+    let chat_history = serde_json::from_value::<Vec<runtara_ai::Message>>(Value::Array(
+        input.chat_history.clone(),
+    ))
+    .map_err(|e| {
+        AgentError::permanent("AI_CHAT_BAD_HISTORY", format!("invalid chatHistory: {e}"))
+    })?;
+    let tools = serde_json::from_value::<Vec<runtara_ai::types::ToolDefinition>>(Value::Array(
+        input.tools.clone(),
+    ))
+    .map_err(|e| AgentError::permanent("AI_CHAT_BAD_TOOLS", format!("invalid tools: {e}")))?;
+
+    let req = runtara_ai::CompletionInvokeRequest {
+        integration_id: connection.integration_id.clone(),
+        conn_params: connection.parameters.clone(),
+        connection_id: connection.connection_id.clone(),
+        model_id: input.model.clone(),
+        system_prompt: input.system_prompt.clone(),
+        user_prompt: input.user_prompt.clone(),
+        chat_history,
+        tools,
+        temperature: input.temperature.unwrap_or(0.7),
+        max_tokens: input.max_tokens.map(|v| v.max(0) as u64),
+        output_schema_json: input
+            .output_schema
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+    };
+
+    let response = runtara_ai::run_completion(req)
+        .map_err(|e| AgentError::transient("AI_CHAT_COMPLETION_FAILED", e))?;
+
+    let choice = serde_json::to_value(&response.choice).map_err(|e| {
+        AgentError::permanent(
+            "AI_CHAT_BAD_CHOICE",
+            format!("choice serialization failed: {e}"),
+        )
+    })?;
+    let usage = response
+        .usage
+        .as_ref()
+        .and_then(|u| serde_json::to_value(u).ok());
+
+    Ok(ChatCompletionOutput { choice, usage })
+}
+
+// ============================================================================
 // Capability 2: Image Generation
 // ============================================================================
 
@@ -1735,6 +1891,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
     let caps: &[&'static CapabilityMeta] = &[
         &__CAPABILITY_META_TEXT_COMPLETION,
+        &__CAPABILITY_META_CHAT_COMPLETION,
         &__CAPABILITY_META_IMAGE_GENERATION,
         &__CAPABILITY_META_VISION_TO_TEXT,
         &__CAPABILITY_META_VISION_TO_IMAGE,
@@ -1745,6 +1902,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "TextCompletionInput",
             &__INPUT_META_TextCompletionInput as &InputTypeMeta,
         ),
+        ("ChatCompletionInput", &__INPUT_META_ChatCompletionInput),
         ("ImageGenerationInput", &__INPUT_META_ImageGenerationInput),
         ("VisionToTextInput", &__INPUT_META_VisionToTextInput),
         ("VisionToImageInput", &__INPUT_META_VisionToImageInput),
@@ -1757,6 +1915,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "TextCompletionOutput",
             &__OUTPUT_META_TextCompletionOutput as &OutputTypeMeta,
         ),
+        ("ChatCompletionOutput", &__OUTPUT_META_ChatCompletionOutput),
         (
             "ImageGenerationOutput",
             &__OUTPUT_META_ImageGenerationOutput,
@@ -1837,6 +1996,7 @@ impl Guest for Component {
 
         let executor_result = match capability_id.as_str() {
             "text-completion" => __executor_text_completion(value),
+            "chat-completion" => __executor_chat_completion(value),
             "image-generation" => __executor_image_generation(value),
             "vision-to-text" => __executor_vision_to_text(value),
             "vision-to-image" => __executor_vision_to_image(value),
