@@ -719,6 +719,13 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 
 Current remaining action items:
 
+- `AiAgent` is now the **sole remaining unsupported step type** at the top
+  level. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
+  WaitForSignal, Conditional, Filter, Switch, GroupBy, Log, terminal Error,
+  Finish) is supported, including their durable/breakpoint/onError/retry
+  variants. The only other deferrals are parallel fan-out routing
+  (`execution-plan-routing`, a deliberately-not-a-target routing shape) and
+  crash/resume differential test hardening (coverage, not a feature gap).
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
