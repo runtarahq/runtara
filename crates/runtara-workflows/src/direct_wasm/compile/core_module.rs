@@ -418,6 +418,7 @@ fn direct_run_function(
         (2, ValType::I64),
         (2, ValType::I32),
         (20, ValType::I32),
+        (2, ValType::I32),
     ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);

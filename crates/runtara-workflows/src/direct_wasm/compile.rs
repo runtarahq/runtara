@@ -284,6 +284,15 @@ const DIRECT_AI_TOOL_MATCH_LOCAL: u32 = 101;
 const DIRECT_AI_CONV_PTR_LOCAL: u32 = 102;
 const DIRECT_AI_CONV_LEN_LOCAL: u32 = 103;
 
+/// The data-context pointer/length an `EmbedWorkflow` step was entered with,
+/// saved before the input mapping overwrites the shared child-data local and
+/// restored after the child runs. A nested embed's data context IS the child
+/// -data local, so without this save its own input mapping clobbers the data the
+/// step's onError handler (and following steps) reference via `data.*`. i32
+/// locals, saved/restored with the embed frame so nesting stays isolated.
+const DIRECT_EMBED_SAVED_DATA_PTR_LOCAL: u32 = 104;
+const DIRECT_EMBED_SAVED_DATA_LEN_LOCAL: u32 = 105;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

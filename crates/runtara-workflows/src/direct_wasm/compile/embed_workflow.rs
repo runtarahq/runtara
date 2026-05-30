@@ -22,7 +22,8 @@ use super::{
     DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL, DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
     DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL, DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
     DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL, DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
-    DIRECT_EMBED_RETRY_ATTEMPT_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
+    DIRECT_EMBED_RETRY_ATTEMPT_LOCAL, DIRECT_EMBED_SAVED_DATA_LEN_LOCAL,
+    DIRECT_EMBED_SAVED_DATA_PTR_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
     DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
     DirectHandledTarget, DirectRunPlan, DirectVariables,
@@ -56,6 +57,8 @@ fn push_embed_workflow_frame(
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(steps_ptr_local));
     body.instruction(&Instruction::LocalGet(steps_len_local));
     body.instruction(&Instruction::LocalGet(route_ptr_local));
@@ -73,6 +76,8 @@ fn pop_embed_workflow_frame(
     body.instruction(&Instruction::LocalSet(route_ptr_local));
     body.instruction(&Instruction::LocalSet(steps_len_local));
     body.instruction(&Instruction::LocalSet(steps_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
 }
@@ -383,6 +388,15 @@ pub(super) fn emit_embed_workflow_plan(
         .step_id(step_id)
         .expect("run plan step ids are present in static data");
 
+    // Save the data context this step was entered with before the input mapping
+    // below overwrites the shared child-data local. When this embed is nested,
+    // its data context IS that local, so the save is what lets the onError
+    // handler and following steps still resolve `data.*` after the child runs.
+    body.instruction(&Instruction::LocalGet(data_ptr_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(data_len_local));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
+
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -460,6 +474,24 @@ pub(super) fn emit_embed_workflow_plan(
         body.instruction(&Instruction::Else);
     }
 
+    // Inside the durable branch the checkpoint-lookup `if/else` opened above adds
+    // one block level, and it stays open until the lookup `End` emitted after the
+    // result computation below. Every failure/handled `br` emitted in that span
+    // must therefore target one level deeper than the ambient targets. Shadow the
+    // targets across the span; they are restored right after the durable `End`.
+    let outer_failure_target = failure_target;
+    let outer_handled_target = handled_target;
+    let failure_target = if durable {
+        failure_target.map(|target| target.nested(1))
+    } else {
+        failure_target
+    };
+    let handled_target = if durable {
+        handled_target.map(|target| target.nested(1))
+    } else {
+        handled_target
+    };
+
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
@@ -522,8 +554,25 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
     );
 
+    // Restore the entry data context: the child's input mapping (and any nested
+    // embed) clobbered the shared child-data local, but the onError handler and
+    // the next plan resolve `data.*` against THIS step's data context.
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(data_ptr_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(data_len_local));
+
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
+    // This embed level is now resolving its child's failure. Clear the shared
+    // child-error flag up front: on the HANDLED path the route dispatch computes
+    // the onError output and `br`s straight to the handled-target, so the flag
+    // stays 0 and an enclosing embed does not misread this (already handled)
+    // inner failure as its own child failing. On a propagating path the trailing
+    // child_error_and_continue re-sets the flag to 1 before breaking, and the
+    // no-onError path fails outright, so genuine failures are unaffected.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     emit_agent_error_route_or_fail(
         body,
         indices,
@@ -586,6 +635,11 @@ pub(super) fn emit_embed_workflow_plan(
         );
         body.instruction(&Instruction::End);
     }
+
+    // The durable checkpoint-lookup `if/else` is now closed; restore the ambient
+    // targets for the post-result emission (output_from_result, next_plan, ...).
+    let failure_target = outer_failure_target;
+    let handled_target = outer_handled_target;
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
