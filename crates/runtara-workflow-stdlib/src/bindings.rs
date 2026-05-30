@@ -4710,6 +4710,79 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_memory_compact_sliding_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_memory_compact_sliding(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                        arg2 as u32,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_memory_compact_sliding<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_validate_input_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -6032,6 +6105,12 @@ pub mod exports {
                         conversation: _rt::Vec<u8>,
                         final_state: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Sliding-window compaction: drop the oldest messages from the loop state's
+                    /// chat history so at most max-messages remain (no-op below the threshold).
+                    fn ai_memory_compact_sliding(
+                        state: _rt::Vec<u8>,
+                        max_messages: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_validate_input(
                         agent_id: u32,
                         input: _rt::Vec<u8>,
@@ -6778,6 +6857,16 @@ pub mod exports {
                         mut u8,) { unsafe { $($path_to_types)*::
                         __post_return_ai_memory_save_input::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-memory-compact-sliding")]
+                        unsafe extern "C" fn export_ai_memory_compact_sliding(arg0 : *
+                        mut u8, arg1 : usize, arg2 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_ai_memory_compact_sliding_cabi::<$ty
+                        > (arg0, arg1, arg2) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-memory-compact-sliding")]
+                        unsafe extern "C" fn _post_return_ai_memory_compact_sliding(arg0
+                        : * mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_memory_compact_sliding::<$ty > (arg0) } }
+                        #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-validate-input")]
                         unsafe extern "C" fn export_agent_validate_input(arg0 : i32, arg1
                         : * mut u8, arg2 : usize,) -> * mut u8 { unsafe {
@@ -7086,9 +7175,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4085] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xef\x1e\x01A\x02\x01\
-A\x02\x01B\x9e\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4141] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa7\x1f\x01A\x02\x01\
+A\x02\x01B\xa0\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\
 \x04\0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\
 \0\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05\
 steps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -7152,18 +7241,19 @@ A\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\x04\0\x12
 ai-turn-add-result\x01B\x01@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x05\x04\
 \0\x0eai-turn-output\x01C\x01@\x01\x0bload-output\0\0\x05\x04\0\x17ai-memory-ini\
 tial-state\x01D\x01@\x02\x0cconversation\0\x0bfinal-state\0\0\x05\x04\0\x14ai-me\
-mory-save-input\x01E\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-valid\
-ate-input\x01F\x04\0\x16agent-connection-input\x01F\x01@\x02\x08agent-idy\x06sou\
-rce\0\0\x05\x04\0\x0fagent-cache-key\x01G\x04\0\x15agent-retry-sleep-key\x018\x04\
-\0\x14agent-retry-delay-ms\x019\x01ks\x01@\x07\x04codes\x07messages\x08categorys\
-\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc8\0\0\x05\x04\0\
-\x10agent-error-info\x01I\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08cat\
-egorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc8\0\0\xca\
-\0\x04\0\x16agent-retry-error-info\x01K\x01@\x08\x08agent-idy\x04codes\x07messag\
-es\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc8\
-\0\0\x05\x04\0\x0bagent-error\x01L\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\
-\0\x15agent-error-from-info\x01M\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11\
-agent-debug-error\x01N\x04\0\x10step-debug-start\x01(\x04\0\x0estep-debug-end\x01\
+mory-save-input\x01E\x01@\x02\x05state\0\x0cmax-messagesy\0\x05\x04\0\x19ai-memo\
+ry-compact-sliding\x01F\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-va\
+lidate-input\x01G\x04\0\x16agent-connection-input\x01G\x01@\x02\x08agent-idy\x06\
+source\0\0\x05\x04\0\x0fagent-cache-key\x01H\x04\0\x15agent-retry-sleep-key\x018\
+\x04\0\x14agent-retry-delay-ms\x019\x01ks\x01@\x07\x04codes\x07messages\x08categ\
+orys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc9\0\0\x05\x04\
+\0\x10agent-error-info\x01J\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08c\
+ategorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc9\0\0\xcb\
+\0\x04\0\x16agent-retry-error-info\x01L\x01@\x08\x08agent-idy\x04codes\x07messag\
+es\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc9\
+\0\0\x05\x04\0\x0bagent-error\x01M\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\
+\0\x15agent-error-from-info\x01N\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11\
+agent-debug-error\x01O\x04\0\x10step-debug-start\x01(\x04\0\x0estep-debug-end\x01\
 (\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/\
 workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09produ\
 cers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\

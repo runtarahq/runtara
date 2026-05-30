@@ -64,6 +64,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_memory" => {
             include_str!("../../../tests/fixtures/ai_agent_memory.json")
         }
+        "ai_agent_memory_compaction" => {
+            include_str!("../../../tests/fixtures/ai_agent_memory_compaction.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2311,6 +2314,54 @@ fn direct_compile_supports_ai_agent_memory_graph() {
         );
     };
     assert!(memory.is_some(), "expected a memory plan");
+    // No explicit compaction config → the generated default sliding window (50).
+    assert_eq!(memory.as_ref().unwrap().max_messages, 50);
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_memory_compaction_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-memory-compaction".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_memory_compaction"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct memory-compaction AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent memory-compaction artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { memory, tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    // The explicit sliding-window threshold is carried into the plan, alongside
+    // the tool that drives the multi-message conversation.
+    assert_eq!(memory.as_ref().expect("memory plan").max_messages, 2);
+    assert_eq!(tools.len(), 1, "expected the single echo tool");
 }
 
 #[test]

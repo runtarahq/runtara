@@ -371,6 +371,12 @@ interface json {
         conversation: list<u8>,
         final-state: list<u8>,
     ) -> result<list<u8>, string>;
+    // Sliding-window compaction: drop the oldest messages from the loop state's
+    // chat history so at most max-messages remain (no-op below the threshold).
+    ai-memory-compact-sliding: func(
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
 
     agent-validate-input: func(
         agent-id: u32,

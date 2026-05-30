@@ -849,6 +849,10 @@ mod component {
             direct_json::DirectJsonManifest::ai_memory_save_input(&conversation, &final_state)
         }
 
+        fn ai_memory_compact_sliding(state: Vec<u8>, max_messages: u32) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_memory_compact_sliding(&state, max_messages)
+        }
+
         fn agent_validate_input(agent_id: u32, input: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

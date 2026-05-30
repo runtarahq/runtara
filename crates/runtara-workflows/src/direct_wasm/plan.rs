@@ -170,6 +170,11 @@ pub(super) struct DirectAiMemoryPlan {
     pub(super) save_agent_id: u32,
     pub(super) agent_component_id: String,
     pub(super) conversation_mapping_id: u32,
+    /// Sliding-window compaction threshold: the most-recent `max_messages`
+    /// messages are kept before the conversation is saved (generated default
+    /// 50; runs whenever memory is configured). Summarize strategy is not yet
+    /// lowered (gated to the generated path).
+    pub(super) max_messages: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -672,6 +677,19 @@ fn step_run_plan_inner(
                 .map(|value| value as u32)
                 .filter(|value| *value > 0)
                 .unwrap_or(10);
+            // Sliding-window compaction threshold (generated default 50).
+            let max_messages = graph
+                .steps
+                .iter()
+                .find(|candidate| candidate.id == step_id)
+                .and_then(|manifest_step| manifest_step.body.get("config"))
+                .and_then(|config| config.get("memory"))
+                .and_then(|memory| memory.get("compaction"))
+                .and_then(|compaction| compaction.get("maxMessages"))
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32)
+                .filter(|value| *value > 0)
+                .unwrap_or(50);
             // Conversation memory, when present, is recorded as load/save agent
             // entries plus a conversation-id mapping.
             let memory = match (
@@ -693,6 +711,7 @@ fn step_run_plan_inner(
                     save_agent_id: save.id,
                     agent_component_id: canonicalize_direct_agent_id(&load.agent_id),
                     conversation_mapping_id: conv.id,
+                    max_messages,
                 }),
                 _ => None,
             };

@@ -1313,6 +1313,28 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-memory save input: {err}"))
     }
 
+    /// Sliding-window compaction: if the loop state's `chat_history` exceeds
+    /// `max_messages`, drop the oldest `len - max_messages` messages so only the
+    /// most recent `max_messages` remain. Mirrors the generated SlidingWindow
+    /// path (`__chat_history.drain(0..excess)`), which runs before the memory
+    /// save whenever memory is configured (default max 50). Below the threshold
+    /// the state is returned unchanged.
+    pub fn ai_memory_compact_sliding(state: &[u8], max_messages: u32) -> Result<Vec<u8>, String> {
+        let mut state: Value = serde_json::from_slice(state)
+            .map_err(|err| format!("failed to parse ai-memory state: {err}"))?;
+        let max = max_messages as usize;
+        if let Some(history) = state
+            .get_mut("chat_history")
+            .and_then(|value| value.as_array_mut())
+            && history.len() > max
+        {
+            let excess = history.len() - max;
+            history.drain(0..excess);
+        }
+        serde_json::to_vec(&state)
+            .map_err(|err| format!("failed to serialize ai-memory state: {err}"))
+    }
+
     /// Build the AiAgent step output context from a completed turn: the
     /// `{response, iterations, toolCalls}` envelope inserted under the step id.
     pub fn ai_turn_output(
@@ -6745,6 +6767,29 @@ mod tests {
             save_value["messages"],
             json!([{"text":"prior"},{"text":"new"}])
         );
+    }
+
+    #[test]
+    fn ai_memory_compact_sliding_drops_oldest_over_threshold() {
+        let state = json!({
+            "chat_history": [{"i":0},{"i":1},{"i":2},{"i":3},{"i":4}],
+            "iterations": 5,
+        });
+        // Over threshold: keep only the most recent 2.
+        let compacted =
+            DirectJsonManifest::ai_memory_compact_sliding(&serde_json::to_vec(&state).unwrap(), 2)
+                .expect("compact");
+        let value: Value = serde_json::from_slice(&compacted).unwrap();
+        assert_eq!(value["chat_history"], json!([{"i":3},{"i":4}]));
+        // Untouched fields survive.
+        assert_eq!(value["iterations"], json!(5));
+
+        // At/under threshold: unchanged.
+        let kept =
+            DirectJsonManifest::ai_memory_compact_sliding(&serde_json::to_vec(&state).unwrap(), 5)
+                .expect("compact");
+        let kept_value: Value = serde_json::from_slice(&kept).unwrap();
+        assert_eq!(kept_value["chat_history"], state["chat_history"]);
     }
 
     #[test]

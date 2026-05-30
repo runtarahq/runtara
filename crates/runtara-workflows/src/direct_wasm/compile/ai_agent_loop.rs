@@ -391,6 +391,17 @@ pub(super) fn emit_ai_agent_loop_plan(
 
     // Conversation memory: save the final conversation history.
     if let Some(memory) = memory {
+        // Sliding-window compaction before save: state = ai-memory-compact-
+        // sliding(state, max_messages). Generated always compacts before saving
+        // when memory is configured (default window 50).
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+        body.instruction(&Instruction::I32Const(memory.max_messages as i32));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_memory_compact_sliding));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+
         // save_input = ai-memory-save-input(conversation, final_state)
         body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_LEN_LOCAL));
