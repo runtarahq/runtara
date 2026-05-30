@@ -724,12 +724,13 @@ Current remaining action items:
   LLM-provider logic is linked into workflow.wasm), **structured output**, the
   **multi-iteration tool loop** (single and multiple name-matched Agent-capability
   tools, via the `chat-turn` capability), and **conversation memory**
-  (`load-memory`/`save-memory` through the object_model provider), and **memory
-  compaction** (SlidingWindow + Summarize) — all at output parity with the
-  generated path (gated A/B tests). The remaining AiAgent surface — MCP synthetic
-  tools, embed/wait tools, and per-turn AiAgent durability/crash-resume — is
-  still gated (falls back to the generated compiler) and lands in Phase 12
-  Slices 5–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
+  (`load-memory`/`save-memory` through the object_model provider), **memory
+  compaction** (SlidingWindow + Summarize), and **MCP synthetic tools**
+  (`<toolset>_search`/`_invoke` → the `mcp` agent) — all at output parity with
+  the generated path (gated A/B tests). The remaining AiAgent surface —
+  EmbedWorkflow/WaitForSignal tools and per-turn AiAgent durability/crash-resume
+  + tool-loop onError routing — is still gated (falls back to the generated
+  compiler) and lands in Phase 12 Slices 5b–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
   WaitForSignal, Conditional, Filter, Switch, GroupBy, Log, terminal Error,
   Finish) is fully supported, including their durable/breakpoint/onError/retry
   variants. The only other deferrals are parallel fan-out routing
@@ -2776,8 +2777,9 @@ Goal: support AI agent workflows without linking provider logic into every
 workflow.
 
 Progress: Slices 0 (single-shot), 1 (tool loop, single + multiple tools),
-2 (structured output), 3 (conversation memory), and 4 (memory compaction —
-SlidingWindow + Summarize) are done and e2e-verified.
+2 (structured output), 3 (conversation memory), 4 (memory compaction —
+SlidingWindow + Summarize), and 5a (MCP synthetic tools) are done and
+e2e-verified.
 The `ai-tools` component gained `chat-completion` (one LLM call) and `chat-turn`
 (one loop turn) capabilities, both backed by the shared
 `runtara_ai::run_completion`, so provider logic lives behind the agent `invoke`
@@ -2789,15 +2791,18 @@ name-matched Agent-capability tools) as a core-WASM loop
 agent(s), via the `ai-turn-*` stdlib helpers; and conversation memory by
 invoking `load-memory` before the loop (seeding initial state via
 `ai-memory-initial-state`) and `save-memory` after (`ai-memory-save-input`),
-through the object_model provider; and memory compaction before the save —
+through the object_model provider; memory compaction before the save —
 SlidingWindow (`ai-memory-compact-sliding`) and Summarize (the `ai-tools`
-`summarize-memory` capability). Gated A/B tests drive both artifacts through
-an in-test mock LLM proxy (plus an object_model mock for memory) and assert
-completion-payload parity, and for compaction capture the object-model save
-payload to assert the persisted conversation (checkpoint traffic differs by
-design — see the phase-12 plan doc). Still gated to the generated compiler
-(Slices 5–6): MCP synthetic tools, embed/wait tools, and AiAgent
-durability/crash-resume. See `docs/wasm-direct-emitter-phase12-plan.md`.
+`summarize-memory` capability); and MCP synthetic tools (each `mcp.<toolset>`
+edge advertises `<toolset>_search`/`_invoke` dispatched to the `mcp` agent).
+Gated A/B tests drive both artifacts through an in-test mock LLM proxy (plus an
+object_model mock for memory and a JSON-RPC + connection-service mock for MCP)
+and assert completion-payload parity, and for compaction capture the
+object-model save payload to assert the persisted conversation (checkpoint
+traffic differs by design — see the phase-12 plan doc). Still gated to the
+generated compiler (Slices 5b–6): EmbedWorkflow/WaitForSignal tools, AiAgent
+durability/crash-resume, and tool-loop onError routing. See
+`docs/wasm-direct-emitter-phase12-plan.md`.
 
 Implementation steps:
 

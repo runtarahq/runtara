@@ -1,6 +1,21 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction) + multi-tool complete; MCP/durability pending.**
+Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool complete; embed/wait tools + durability pending.**
+
+### Slice 5a (MCP synthetic tools) — DONE and e2e-verified
+
+`mcp.<toolset>` edges lower at parity (gated A/B test
+`direct_wasm_matches_components_ai_agent_mcp`). Each toolset advertises two
+synthetic meta-tools (`<toolset>_search` → `mcp/mcp-tool-search`,
+`<toolset>_invoke` → `mcp/mcp-tool-invoke`); these fit the existing static
+tool-dispatch model (each is an agent invoke by tool index), so no new core-WASM
+control flow was needed. The manifest advertises the two tool defs after the
+Agent tools and adds two `agent.tool.mcp` provider entries per edge (named after
+the synthetic tools); the plan resolves each advertised tool name to its Agent
+edge or MCP provider, preserving order; a `chat-turn` `system_prompt_suffix`
+field carries the MCP usage guide (matching the generated `mcp_prompt_addition`).
+The A/B test drives `search → invoke → text` through a JSON-RPC MCP mock + a
+connection-service mock in the harness.
 
 Multi-tool dispatch (commit 82321f16) is done: the `chat-turn` capability
 resolves each tool call's name to a `tool_index`, and the loop dispatches by
@@ -362,8 +377,10 @@ these must be reproduced exactly for crash/resume parity.
 3. ✅ **Slice 2 — structured output** (`output_schema`).
 4. ✅ **Slice 3 — memory** load/save (object_model edge).
 5. ✅ **Slice 4 — compaction** (SlidingWindow + Summarize).
-6. **Slice 5 — MCP synthetic tools** + EmbedWorkflow/WaitForSignal tools.
-7. **Slice 6 — durability hardening**: breakpoint pause/resume, crash/resume
+6. **Slice 5** — ✅ **5a MCP synthetic tools**; ⏳ 5b EmbedWorkflow/WaitForSignal
+   tools.
+7. **Slice 6 — durability hardening**: tool-loop onError routing, breakpoint
+   pause/resume, crash/resume
    differential tests across LLM/tool checkpoints; retry parity.
 
 Each slice: ungate its subset in `support.rs`, add structural core-WASM test +
