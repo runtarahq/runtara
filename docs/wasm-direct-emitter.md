@@ -733,10 +733,16 @@ Current remaining action items:
   compiler) and lands in Phase 12 Slices 5b–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
   WaitForSignal, Conditional, Filter, Switch, GroupBy, Log, terminal Error,
   Finish) is fully supported, including their durable/breakpoint/onError/retry
-  variants. The only other deferrals are parallel fan-out routing
-  (`execution-plan-routing`, a deliberately-not-a-target routing shape) and
-  crash/resume differential test hardening (coverage, not a feature gap). See
-  `docs/wasm-direct-emitter-phase12-plan.md` for the AiAgent slice plan.
+  variants. Unconditional **fan-out** (a step with multiple normal-flow
+  successors) and the joins it forms are now supported: the plan linearizes the
+  normal-flow backbone in topological order (porting the generated
+  `build_execution_order`), so fan-out and fan-in run sequentially, each step
+  once, in dependency order — exactly the generated path's execution (no
+  parallel threads in WASM). For a linear graph the topological order equals the
+  edge chain, so existing graphs are unaffected. Shapes that cannot linearize
+  (fan-out to two terminal/branching sinks) still fall back. The only remaining
+  deferral is crash/resume differential test hardening (coverage, not a feature
+  gap). See `docs/wasm-direct-emitter-phase12-plan.md` for the AiAgent slice plan.
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
