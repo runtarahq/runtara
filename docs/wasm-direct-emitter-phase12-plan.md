@@ -19,9 +19,17 @@ connection-service mock in the harness.
 
 Multi-tool dispatch (commit 82321f16) is done: the `chat-turn` capability
 resolves each tool call's name to a `tool_index`, and the loop dispatches by
-index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: MCP/embed/wait
-tools (Slice 5), tool-loop onError routing + per-turn durability/crash-resume
-(Slice 6).
+index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: embed/wait tools
+(Slice 5b) and per-turn durability/crash-resume hardening (Slice 6).
+
+**onError is NOT an AiAgent feature** (corrected): the generated path's
+`emit_step_execution` `can_have_on_error` covers only `Agent`/`Split`/
+`EmbedWorkflow`/`While` — an AiAgent's LLM failure propagates fatally (an A/B
+test confirmed the generated run fails on a 503 rather than routing to onError).
+So the direct emitter must NOT route AiAgent failures to onError (it would
+diverge); the loop correctly fails on a fatal chat-turn error, matching
+generated. A failing *tool* is fed back to the model (Slice 6 / commit
+58d17a4b), which is the real generated behavior.
 
 ### Slice 4 (memory compaction) — DONE and e2e-verified
 
@@ -379,9 +387,10 @@ these must be reproduced exactly for crash/resume parity.
 5. ✅ **Slice 4 — compaction** (SlidingWindow + Summarize).
 6. **Slice 5** — ✅ **5a MCP synthetic tools**; ⏳ 5b EmbedWorkflow/WaitForSignal
    tools.
-7. **Slice 6 — durability hardening**: tool-loop onError routing, breakpoint
-   pause/resume, crash/resume
-   differential tests across LLM/tool checkpoints; retry parity.
+7. **Slice 6 — durability hardening**: breakpoint pause/resume, crash/resume
+   differential tests across LLM/tool checkpoints; retry parity. (NOT onError
+   routing — that is not an AiAgent feature in the generated path; tool errors
+   are fed back to the model, done in commit 58d17a4b.)
 
 Each slice: ungate its subset in `support.rs`, add structural core-WASM test +
 gated A/B execution test, fmt/clippy, doc update, commit. The support gate keeps
