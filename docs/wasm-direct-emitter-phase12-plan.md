@@ -1,6 +1,41 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0 + 2 complete; Slices 1, 3–6 pending.**
+Status: **Slices 0 + 2 complete; Slice 1 foundation landed; Slices 1(loop), 3–6 pending.**
+
+### Slice 1 (tool loop) — concrete design
+
+Foundation done (`ai-agent-turn` capability, committed): one loop turn in Rust —
+appends the prior turn's tool results, runs the LLM, records user/assistant
+messages, returns `complete` (with the final response) or `tools` (with the
+tool calls to dispatch). All conversation-state management lives in the
+capability, so the core-WASM loop is comparatively thin.
+
+Remaining (the core-WASM loop driving it):
+- **plan/manifest**: a `DirectRunPlan::AiAgentLoop` carrying the base
+  chat-turn input mapping + a **tool table** — for each tool edge (label →
+  target Agent step), `{name, agent_component_id, capability_id,
+  input_mapping_id?}`. Build it from the AiAgent's labelled edges (excluding
+  `next`/`onError`/`memory`/`mcp.*`).
+- **stdlib helpers** (~6, mirror the `while-*` family):
+  `ai-turn-input(base, state) -> turn_input` (merge mapping result + loop
+  state); `ai-turn-is-complete(turn_out) -> bool`; `ai-turn-tool-count`,
+  `ai-turn-tool-name(i)`, `ai-turn-tool-args(i) -> bytes`;
+  `ai-turn-next-state(turn_out, pending_results) -> state`;
+  `ai-turn-output(turn_out) -> step_output` (`{response, iterations, toolCalls}`).
+- **core-WASM** (`compile/ai_agent_loop.rs`): outer `block`/`loop` (reuse the
+  While Block+Loop + frame save/restore). Body: build turn input → invoke
+  `ai-tools`/`chat-turn` (reuse `emit_agent_invoke`) → if complete, emit output
+  + `Br outer`; else inner `block`/`loop` over the tool calls (reuse Split's
+  count+index iteration): per tool, match `name` against the tool table and
+  `emit_agent_invoke` the matching tool agent, collect the result into
+  `pending_results`; then `Br turn`.
+- **support**: accept AiAgent steps whose only labelled edges are
+  Agent-capability tool edges (gate MCP/embed/wait tools + memory to later
+  slices).
+- **test**: gated A/B with the mock LLM returning a tool call on turn 1 then
+  text on turn 2; use an in-WASM tool (e.g. `utils`/`return-input`) so no extra
+  proxy mock is needed. Assert completion-payload parity (checkpoint traffic
+  differs by design, as in Slice 0).
 
 Slice 2 (structured output) is done and e2e-verified: AiAgent steps with an
 `outputSchema` lower in direct mode; the `chat-completion` capability parses the
