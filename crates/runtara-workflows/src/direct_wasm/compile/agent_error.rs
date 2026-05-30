@@ -5,8 +5,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
 use super::abi::{
-    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
-    push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    load_agent_retptr_list, load_retptr_list, load_retptr_tag, push_retptr_arg,
+    push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
+    return_if_retptr_error,
 };
 use super::debug::emit_agent_debug_error;
 use super::dispatcher::emit_run_plan_mapping;
@@ -24,6 +25,29 @@ use super::{
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
+
+/// Capture an agent invoke's outcome into a result pointer/length pair: on
+/// success the raw result list; on error the error envelope JSON (`{code,
+/// message, category, …}`). Used by the AiAgent tool loop so a tool failure is
+/// fed back to the LLM as the tool result instead of failing the workflow —
+/// mirroring the generated loop, which returns `{"error": …}` to the model
+/// (direct surfaces the richer structured envelope rather than a bare string).
+pub(super) fn emit_agent_invoke_capture_error_or_result(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    agent_id: u32,
+    result_ptr_local: u32,
+    result_len_local: u32,
+) {
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // Error tag: build the error envelope JSON into the result locals.
+    emit_agent_error(body, indices, agent_id, result_ptr_local, result_len_local);
+    body.instruction(&Instruction::Else);
+    // Success: the agent result list.
+    load_agent_retptr_list(body, result_ptr_local, result_len_local);
+    body.instruction(&Instruction::End);
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_agent_invoke_error_branch(

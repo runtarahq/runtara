@@ -73,6 +73,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_mcp" => {
             include_str!("../../../tests/fixtures/ai_agent_mcp.json")
         }
+        "ai_agent_tool_error" => {
+            include_str!("../../../tests/fixtures/ai_agent_tool_error.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2527,6 +2530,35 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
     assert!(
         tools.iter().all(|tool| tool.agent_component_id == "mcp"),
         "MCP tools dispatch to the mcp component"
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_tool_error_graph() {
+    // A tool loop whose tool can fail at runtime compiles like any other tool
+    // loop; the tool failure is fed back to the LLM at execution time (covered
+    // by the A/B test), not rejected at compile time.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-tool-error".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_tool_error"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct tool-error AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent tool-error artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
     );
 }
 

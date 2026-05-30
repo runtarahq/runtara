@@ -16,7 +16,9 @@ use super::abi::{
     emit_retptr_error_or_return, load_agent_retptr_list, load_retptr_list, push_retptr_arg,
     push_retptr_i32_load, push_retptr_u8_load,
 };
-use super::agent_error::emit_agent_invoke_error_branch;
+use super::agent_error::{
+    emit_agent_invoke_capture_error_or_result, emit_agent_invoke_error_branch,
+};
 use super::agent_invoke::emit_agent_invoke;
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping, emit_build_source};
@@ -328,32 +330,13 @@ pub(super) fn emit_ai_agent_loop_plan(
             DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
             DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
         );
-        emit_agent_invoke_error_branch(
+        // A tool failure is fed back to the LLM as the tool result (the error
+        // envelope) and the loop continues, rather than failing the workflow —
+        // matching the generated loop's `{"error": …}` tool result.
+        emit_agent_invoke_capture_error_or_result(
             body,
             indices,
-            static_data,
-            track_events,
             tool.agent_id,
-            step_id,
-            output_ptr_local,
-            output_len_local,
-            source_ptr_local,
-            source_len_local,
-            steps_ptr_local,
-            steps_len_local,
-            None,
-            route_ptr_local,
-            route_len_local,
-            variables,
-            data_ptr_local,
-            data_len_local,
-            workflow_log_kind,
-            workflow_error_kind,
-            None,
-            None,
-        );
-        load_agent_retptr_list(
-            body,
             DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
             DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
         );

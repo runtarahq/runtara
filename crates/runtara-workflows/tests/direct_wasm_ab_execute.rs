@@ -73,6 +73,7 @@ const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
 const AI_AGENT_MEMORY_SUMMARIZE: &str = include_str!("fixtures/ai_agent_memory_summarize.json");
 const AI_AGENT_MCP: &str = include_str!("fixtures/ai_agent_mcp.json");
+const AI_AGENT_TOOL_ERROR: &str = include_str!("fixtures/ai_agent_tool_error.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -5372,6 +5373,64 @@ fn direct_wasm_matches_components_ai_agent_mcp() {
     assert_eq!(
         components.output_json, direct.output_json,
         "MCP AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
+}
+
+/// AiAgent whose tool (utils/calculate) fails because the LLM calls it without
+/// an `expression`. The tool error must be fed back to the model as the tool
+/// result so the loop continues to a text answer — not fail the workflow. Both
+/// artifacts complete at output parity (the direct path surfaces the structured
+/// error envelope as the tool result; the generated path a `{"error":…}` blob —
+/// invisible in the final completion payload).
+#[test]
+fn direct_wasm_matches_components_ai_agent_tool_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("ai-agent-tool-error", AI_AGENT_TOOL_ERROR);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-tool-error", AI_AGENT_TOOL_ERROR);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"not an expression"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-tool-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-tool-error",
+        workflow_input,
+    );
+
+    // The key assertion: a tool error does NOT fail the workflow — both runs
+    // recover and complete.
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run should recover from the tool error, not fail:\nstderr={}\nerror={:?}",
+        direct.stderr, direct.error_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "tool-error AiAgent completion payload mismatch"
     );
     let direct_out = direct.output_json.as_ref().expect("direct completion");
     assert_eq!(
