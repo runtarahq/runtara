@@ -565,6 +565,22 @@ fn embed_workflow_breakpoint_parent_json() -> String {
     serde_json::to_string(&graph).expect("fixture serializes")
 }
 
+/// `EMBED_WORKFLOW` with an (unenforced) `timeout` on the embed step, to prove
+/// the field is an inert no-op that does not change execution vs. the plain
+/// static-child case.
+fn embed_workflow_timeout_parent_json() -> String {
+    let mut graph: Value = serde_json::from_str(EMBED_WORKFLOW).expect("fixture parses");
+    graph["steps"]["call_child"]["timeout"] = serde_json::json!(5_000);
+    serde_json::to_string(&graph).expect("fixture serializes")
+}
+
+/// `AGENT_RETURN_INPUT` with an (unenforced) `timeout` on the agent step.
+fn agent_timeout_json() -> String {
+    let mut graph: Value = serde_json::from_str(AGENT_RETURN_INPUT).expect("fixture parses");
+    graph["steps"]["agent"]["timeout"] = serde_json::json!(5_000);
+    serde_json::to_string(&graph).expect("fixture serializes")
+}
+
 fn embed_workflow_child_workflows() -> Vec<ChildWorkflowInput> {
     embed_workflow_child_workflows_with_graph(EMBED_WORKFLOW_FINISH_CHILD)
 }
@@ -4632,6 +4648,95 @@ fn direct_wasm_matches_components_agent_compensation_noop() {
         output_str.contains("hello") && output_str.contains("world"),
         "agent output should carry the return-input payload: {output_str}"
     );
+}
+
+/// `AgentStep.timeout` is parsed but never enforced in the generated Rust path
+/// (codegen never reads it; a synchronous `capabilities.invoke` cannot be
+/// preempted). Generated accepts + ignores it, so direct ungates it as a no-op
+/// instead of rejecting the workflow. Full execution parity proves inertness.
+#[test]
+fn direct_wasm_matches_components_agent_timeout_noop() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let graph = agent_timeout_json();
+    let components_artifact = compile_components_artifact("agent-timeout", &graph);
+    let direct_artifact = compile_direct_artifact(&components_dir, "agent-timeout", &graph);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"value":{"hello":"world"}}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-agent-timeout",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-agent-timeout",
+        workflow_input,
+    );
+
+    assert_success_parity("agent-timeout", 0, &components, &direct);
+    let output_str =
+        serde_json::to_string(direct.output_json.as_ref().expect("direct completion")).unwrap();
+    assert!(
+        output_str.contains("hello") && output_str.contains("world"),
+        "agent output should carry the return-input payload: {output_str}"
+    );
+}
+
+/// `EmbedWorkflowStep.timeout` is likewise parsed but never enforced in the
+/// generated Rust path (no child-run deadline exists). Direct ungates it as a
+/// no-op; this asserts the embed call produces the identical output and
+/// checkpoint traffic as the timeout-free static-child case.
+#[test]
+fn direct_wasm_matches_components_embed_workflow_timeout_noop() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let graph = embed_workflow_timeout_parent_json();
+    let child_workflows = embed_workflow_child_workflows();
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-workflow-timeout",
+        &graph,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-workflow-timeout",
+        &graph,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"input":"fresh-child"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-workflow-timeout",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-workflow-timeout",
+        workflow_input,
+    );
+
+    assert_success_parity("embed-workflow-timeout", 0, &components, &direct);
+    let expected_output = serde_json::json!({ "result": { "result": "fresh-child" } });
+    assert_eq!(components.output_json.as_ref(), Some(&expected_output));
+    assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
 }
 
 #[test]

@@ -587,13 +587,16 @@ fn supports_direct_control_step_inner(
     }
 }
 
-fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    // `compensation` is intentionally not gated: it is a no-op end-to-end in the
-    // generated Rust path too (codegen never emits it, the SDK always records
-    // `compensation_step_id: None`, and the host `CompensationManager` is never
-    // triggered). Accepting + ignoring it matches generated behavior; rejecting
-    // it would make direct mode stricter than generated. See `collect_agent_step_unsupported`.
-    step.timeout.is_none()
+fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> bool {
+    // Neither `timeout` nor `compensation` is gated: both are no-ops end-to-end
+    // in the generated Rust path too. The generated Agent codegen never reads
+    // `AgentStep.timeout` (no deadline enforcement exists), and compensation is
+    // never emitted, never wired to the SDK (`compensation_step_id: None`), and
+    // never triggered by the host. Generated accepts + ignores both fields, so
+    // direct does too rather than rejecting workflows generated compiles. Real
+    // timeout enforcement is impossible in the synchronous component model (a
+    // running `capabilities.invoke` cannot be preempted) and is out of scope.
+    true
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
@@ -622,7 +625,11 @@ fn supports_embed_workflow_step_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
-    if step.timeout.is_some() || child_stack.iter().any(|visited| visited == &step.id) {
+    // `timeout` is not gated: the generated EmbedWorkflow codegen parses but
+    // never enforces it (no child-run deadline exists), so direct accepts and
+    // ignores it to match the generated accepted-graph set. See
+    // `collect_embed_workflow_step_unsupported`.
+    if child_stack.iter().any(|visited| visited == &step.id) {
         return false;
     }
 
@@ -1141,12 +1148,8 @@ fn collect_embed_workflow_step_unsupported(
         });
     };
 
-    if step.timeout.is_some() {
-        push(
-            "embed-workflow-timeout",
-            "EmbedWorkflow timeout requires direct child execution deadline enforcement",
-        );
-    }
+    // `timeout` is accepted as a no-op (the generated EmbedWorkflow codegen
+    // parses but never enforces it), so it is intentionally not pushed here.
     let Some(child) = child_workflows.get(&step.id) else {
         push(
             "embed-workflow-missing-child",
@@ -1175,29 +1178,15 @@ fn collect_embed_workflow_step_unsupported(
 
 fn collect_agent_step_unsupported(
     _graph: &ExecutionGraph,
-    step: &AgentStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    _step: &AgentStep,
+    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    let mut push = |feature: &str, reason: &str| {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("Agent".to_string()),
-            feature: feature.to_string(),
-            reason: reason.to_string(),
-        });
-    };
-
-    if step.timeout.is_some() {
-        push(
-            "agent-timeout",
-            "Agent direct lowering needs timeout enforcement",
-        );
-    }
-    // `compensation` is deliberately accepted as a no-op rather than gated: it is
-    // dead end-to-end in the generated Rust path (never emitted, never wired to
-    // the host saga manager). Direct mode ignores it to keep the accepted-graph
-    // set identical to generated. Real saga support is out of scope for the
-    // emitter and would require host/SDK wiring that does not exist for either path.
+    // No Agent fields are gated. `timeout` and `compensation` are both parsed
+    // but never honored in the generated Rust path, so direct accepts and
+    // ignores them to keep the accepted-graph set identical to generated.
+    // Timeout enforcement is impossible in the synchronous component model and
+    // real saga compensation is out of scope for the emitter; both would require
+    // host/SDK wiring that exists for neither compilation path.
 }
 
 fn collect_delay_step_unsupported(
@@ -2556,8 +2545,13 @@ mod tests {
         assert!(report.supported, "{:?}", report.unsupported);
     }
 
+    /// `AgentStep.timeout` is parsed but never enforced in the generated Rust
+    /// path (codegen never reads it; the synchronous component model cannot
+    /// preempt a running `capabilities.invoke`). Generated accepts + ignores it,
+    /// so direct accepts it as an inert no-op rather than rejecting workflows
+    /// generated compiles.
     #[test]
-    fn agent_timeout_remains_rejected() {
+    fn agent_timeout_is_accepted_as_noop() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -2566,12 +2560,14 @@ mod tests {
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(!report.supported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("transform")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "agent-timeout"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "agent-timeout"),
+            "timeout must not produce an unsupported feature"
+        );
     }
 
     /// Compensation is dead code end-to-end (codegen never emits it, the SDK

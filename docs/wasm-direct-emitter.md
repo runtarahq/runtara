@@ -506,8 +506,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   direct stdlib exposes `error-steps` to insert generated-code-compatible
   `steps.__error`/`steps.error` context, and direct core routes validation and
   capability failures through the handler branch before falling back to
-  `runtime.fail` when no condition matches. Agent timeout remains rejected;
-  Agent `compensation` is accepted as a no-op (see below).
+  `runtime.fail` when no condition matches. Agent `timeout` and `compensation`
+  are both accepted as no-ops (see below).
 - The first Phase 8 runtime lifecycle ABI slice is in place. The
   `runtara:workflow-runtime` WIT and runtime component now expose checkpoint
   lookup/write, retry-attempt recording, checkpointed durable sleep, and a
@@ -516,7 +516,8 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   `cancel`/`pause`/`shutdown` signals and suspends or cancels without reporting
   workflow completion. Direct Agent lowering now uses these checkpoint,
   retry-attempt, and lifecycle-signal pieces internally. Durable Agent public
-  support is enabled for workflows without Agent timeout or breakpoints;
+  support is enabled for workflows without Agent breakpoints (`timeout` is an
+  inert no-op);
   Delay support is now lowered for durable and non-durable normal
   flow, and durable Delay breakpoints now pause/resume before duration
   resolution and sleep. Delay crash/resume differential tests remain pending.
@@ -528,7 +529,7 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   It has an internal no-retry durable Agent checkpoint path that computes this
   key, reads an existing checkpoint before `capabilities.invoke`, and writes a
   checkpoint after successful output. Public support is enabled for the durable
-  Agent subset without Agent timeout.
+  Agent subset (`timeout` is accepted as an inert no-op).
 - The direct core now also has an internal durable Agent retry loop. It uses
   the generated Rust retry defaults (`maxRetries` override, otherwise 3 or 5
   for rate-limited capabilities), retries only typed WIT Agent errors with
@@ -543,22 +544,23 @@ Current implementation progress on `codex/wasm-direct-emitter`:
   recording retry attempts. Successful durable Agent checkpoint saves now route
   pending `cancel`/`pause`/`shutdown` signals through the runtime lifecycle
   handler and return before `runtime.complete` when the instance is stopped.
-  Public support is now enabled for durable Agent workflows that do not use
-  timeout. Timeout remains gated because the generated Rust
-  Agent path does not currently enforce `AgentStep.timeout`; broader
+  Public support is now enabled for durable Agent workflows; broader
   retry/failure and long-running cancellation differential coverage remains a
   Phase 8 hardening checkpoint.
-- Agent `compensation` (saga rollback) is accepted as a no-op rather than
-  gated. It is dead code end-to-end in the existing system: the generated Rust
-  codegen never emits it, the SDK always records `compensation_step_id: None`,
-  and the host `CompensationManager`/`trigger_compensation` machinery is never
-  instantiated or called. Generated Rust therefore accepts a workflow carrying a
-  `compensation` config and silently ignores the field. Direct mode matches that
-  behavior (accept + ignore) so it does not reject workflows the generated
-  compiler compiles; a gated A/B test asserts full execution parity for an Agent
-  step carrying a compensation config, proving the field is inert in both paths.
-  Real saga compensation is out of scope for the emitter: it would require new
-  host/SDK wiring that does not exist for either compilation path.
+- Agent `timeout` and `compensation` are both accepted as inert no-ops rather
+  than gated, because both are no-ops end-to-end in the generated Rust path and
+  rejecting them would make direct mode stricter than generated:
+  - `timeout`: the generated Agent codegen never reads `AgentStep.timeout`, so
+    no deadline is enforced. Real enforcement is impossible in the synchronous
+    component model (a running `capabilities.invoke` cannot be preempted), so
+    direct accepts and ignores the field exactly as generated does.
+  - `compensation` (saga rollback): dead code end-to-end — the generated codegen
+    never emits it, the SDK always records `compensation_step_id: None`, and the
+    host `CompensationManager`/`trigger_compensation` machinery is never
+    instantiated or called. Real saga compensation would require new host/SDK
+    wiring that exists for neither path, so it is out of scope for the emitter.
+  Gated A/B tests assert full execution parity for an Agent step carrying each
+  field, proving both are inert in both compilation paths.
 - The direct core now has structural and gated host-level replay coverage for
   durable Agent cached checkpoints: the emitted Wasm branch that receives an
   existing checkpoint payload skips both `capabilities.invoke` and
@@ -717,14 +719,12 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 
 Current remaining action items:
 
-- Keep `EmbedWorkflow.timeout` gated until the generated Rust path has defined
-  behavior or direct mode intentionally becomes the first implementation. The
-  current Rust `EmbedWorkflow` codegen appears to parse the field without
-  enforcing a deadline.
-- `Agent`/`EmbedWorkflow` timeout is not cleanly enforceable in the synchronous
-  direct model (a running `capabilities.invoke` / inline child run cannot be
-  preempted mid-call), so leaving it gated is defensible rather than a defect to
-  fix; revisit only if these gain an async/cancellable invoke path.
+- `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
+  that match the generated Rust path (which parses but never enforces either
+  field). Real enforcement is impossible in the synchronous direct model (a
+  running `capabilities.invoke` / inline child run cannot be preempted mid-call);
+  revisit only if these gain an async/cancellable invoke path. Gated A/B tests
+  pin the inert behavior.
 - Close Agent hardening gaps: retry/failure
   differential tests, and long-running cancellation coverage.
 - Start Phase 12 AiAgent support only after the shared Agent/runtime durability
@@ -808,15 +808,14 @@ Deep nesting invariants for future work:
 
 Recommended next implementation slices:
 
-1. `EmbedWorkflow`/`Agent` timeout is the last of the family. Unlike While/Split
-   it is not cleanly enforceable synchronously (a child run / `capabilities.invoke`
-   cannot be preempted mid-call), so leave it gated unless an async/cancellable
-   invoke path lands.
-2. Continue Agent hardening after loop durability is stable: timeout,
-   retry/failure differential tests, and long-running cancellation coverage.
-   (`compensation` is settled: accepted as a no-op matching generated Rust.)
-3. Leave `EmbedWorkflow.timeout` gated unless product decides direct mode should
-   define behavior before generated Rust does.
+1. `EmbedWorkflow`/`Agent` timeout is settled: accepted as inert no-ops matching
+   generated Rust (which parses but never enforces them). Unlike While/Split,
+   real enforcement is not cleanly possible synchronously (a child run /
+   `capabilities.invoke` cannot be preempted mid-call); revisit only if an
+   async/cancellable invoke path lands.
+2. Continue Agent hardening after loop durability is stable: retry/failure
+   differential tests and long-running cancellation coverage. (`timeout` and
+   `compensation` are settled: both accepted as no-ops matching generated Rust.)
 
 ## Final Goal
 
@@ -2167,7 +2166,8 @@ Current status:
   longer fall back to the shared `root::` namespace. Direct core has an
   internal `maxRetries = 0` durable Agent checkpoint lowering that uses
   `runtime.get-checkpoint` and `runtime.checkpoint`, and the support gate now
-  accepts durable Agent workflows that do not use timeout or breakpoints.
+  accepts durable Agent workflows that do not use breakpoints (`timeout` and
+  `compensation` are accepted as inert no-ops).
 - Durable Agent retry-loop lowering is now implemented internally for typed WIT
   Agent errors. The direct manifest records the Agent catalog `rateLimited`
   flag, the run plan derives the same default retry counts as generated Rust,
@@ -2195,7 +2195,7 @@ Current status:
   `runtime.handle-checkpoint-signal`; handled `cancel`, `pause`, and
   `shutdown` signals stop before `runtime.complete`, while `resume`/unknown
   signals continue. The public support gate accepts this durable Agent subset;
-  timeout remains rejected and compensation is accepted as a no-op, while
+  `timeout` and `compensation` are both accepted as inert no-ops, while
   durable Agent breakpoints now pause after input mapping and before
   validation/invoke. Gated A/B execution
   now proves checkpoint-returned `pause` suspends without completion/failure,
@@ -2625,9 +2625,13 @@ Current status:
   strict A/B coverage; `Split(dontStopOnFailed)` with nested loops now has a
   dedicated failure aggregation frame with generated-compatible nested failure
   parity.
-  Remaining Phase 10 work is unsupported timeout semantics for embedded child
-  call sites; generated Rust currently parses `EmbedWorkflow.timeout` but does
-  not appear to enforce it in `codegen/ast/steps/embed_workflow.rs`.
+  `EmbedWorkflow.timeout` is accepted as an inert no-op: generated Rust parses
+  `EmbedWorkflow.timeout` but never enforces it in
+  `codegen/ast/steps/embed_workflow.rs`, so direct accepts and ignores it to
+  match the generated accepted-graph set rather than rejecting it. A gated A/B
+  test (`direct_wasm_matches_components_embed_workflow_timeout_noop`) pins the
+  inert behavior. Real child-run deadline enforcement is out of scope (not
+  cleanly possible synchronously).
 
 ### Phase 11: WaitForSignal
 

@@ -217,15 +217,6 @@ fn durable_agent_retry_graph() -> ExecutionGraph {
     graph
 }
 
-fn agent_timeout_graph() -> ExecutionGraph {
-    let mut graph = fixture("transform");
-    let Some(runtara_dsl::Step::Agent(agent)) = graph.steps.get_mut("transform") else {
-        panic!("expected Agent step");
-    };
-    agent.timeout = Some(1_000);
-    graph
-}
-
 fn non_durable_agent_on_error_finish_graph() -> ExecutionGraph {
     serde_json::from_value(serde_json::json!({
         "durable": false,
@@ -8753,18 +8744,39 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
 
 #[test]
 fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
+    // A parallel fan-out (multiple unconditioned normal edges from one step) is
+    // a durably-deferred routing shape, so it is a stable choice for asserting
+    // unsupported-graph rejection that will not become supported as individual
+    // step features (timeouts, compensation, etc.) are lowered over time.
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "steps": {
+            "log": { "stepType": "Log", "id": "log", "message": "fanout" },
+            "finish_a": { "stepType": "Finish", "id": "finish_a" },
+            "finish_b": { "stepType": "Finish", "id": "finish_b" }
+        },
+        "entryPoint": "log",
+        "executionPlan": [
+            { "fromStep": "log", "toStep": "finish_a" },
+            { "fromStep": "log", "toStep": "finish_b" }
+        ],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("graph parses");
+
     let temp = tempfile::tempdir().expect("tempdir");
     let err = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "agent-timeout".to_string(),
+        workflow_id: "parallel-fanout".to_string(),
         version: 1,
         source_checksum: None,
-        execution_graph: agent_timeout_graph(),
+        execution_graph: graph,
         child_workflows: vec![],
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
     })
-    .expect_err("Agent timeout workflow is not supported yet");
+    .expect_err("parallel fan-out is not supported in direct mode");
 
     let DirectCompileError::Unsupported { report } = err else {
         panic!("expected unsupported error");
@@ -8774,8 +8786,7 @@ fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         report
             .unsupported
             .iter()
-            .any(|feature| feature.step_id.as_deref() == Some("transform")
-                && feature.feature == "agent-timeout")
+            .any(|feature| feature.feature == "execution-plan-routing")
     );
     assert!(
         fs::read_dir(temp.path())
