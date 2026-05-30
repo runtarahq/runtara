@@ -1,10 +1,73 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **proposal for review — no production code written yet.**
+Status: **approved; Slice 0 in progress.**
+
+Decisions (resolved with the maintainer):
+- The `chat-completion` capability is added to the **existing
+  `runtara-agent-ai-tools`** component (not a new component).
+- Build proceeds **Slice 0 end-to-end** (single-shot AiAgent at A/B parity).
+  If the shared deterministic mock-LLM proxy proves infeasible, fall back to
+  "direct behaves correctly" assertions (as done for Split onError) rather than
+  blocking.
 
 This plan is the concrete design for direct-WASM-emitter support of the
 `AiAgent` step, the sole remaining unsupported step type. It is written against
 the verified current state of the codebase (May 2026).
+
+## Slice 0 progress (live)
+
+Done:
+- **`runtara_ai::run_completion`** + `CompletionInvokeRequest` (new
+  `orchestration` module) — single source of truth for the loop's LLM call,
+  identical to the generated `__ai_llm_durable` body.
+- **`chat-completion` capability** on `runtara-agent-ai-tools` — calls
+  `run_completion`, returns the raw assistant `choice` (+ usage). Builds as a
+  `wasm32-wasip2` component with `runtara-ai` linked in. Agent count unchanged
+  (new capability on an existing component, so no staged-component-count or
+  compose-graph change). Committed.
+
+Mock-proxy feasibility (the A/B linchpin) — **confirmed feasible**:
+- The gated harness runs `wasmtime run --wasi http --wasi inherit-network` with
+  a local server reached via `RUNTARA_HTTP_URL`/`RUNTARA_SERVER_ADDR` (runtime
+  callbacks: load-input/complete/fail/events/checkpoints).
+- `runtara-http::call_agent` routes outbound provider calls through
+  `RUNTARA_HTTP_PROXY_URL` when set; the harness does NOT set it today.
+- Plan: set `RUNTARA_HTTP_PROXY_URL` to the test server and extend its handler
+  to recognize the proxy envelope and return a **canned chat-completion**
+  response (parseable by `runtara-ai`'s openai/bedrock client). Both generated
+  and direct paths hit the same mock → identical `choice` → A/B parity. Needs:
+  (a) the runtara-http proxy request/response envelope shape, (b) a minimal
+  OpenAI chat-completion response body.
+
+Remaining Slice 0 steps (direct-lowering half):
+1. **stdlib WIT + impl**: add `ai-agent-output(source, step-id, choice) ->
+   steps` (extract final assistant text from the choice; build the
+   `{response, iterations:1, toolCalls:[]}` envelope, wrapped as the step
+   output context — matches generated `__step_output_envelope` for the
+   single-shot case). Rebuild stdlib/runtime components
+   (`RUNTARA_ONLY_WORKFLOW_COMPONENTS=1 ./scripts/build-agent-components.sh`).
+2. **manifest.rs**: build a `DirectAgentManifest`-like entry for the AiAgent
+   step that targets `ai_tools`/`chat-completion`, plus an input mapping that
+   produces the chat-completion input (`{systemPrompt, userPrompt, model,
+   temperature, maxTokens}`) from the AiAgentConfig MappingValues.
+3. **plan.rs**: `DirectRunPlan::AiAgent { step_id, input_mapping_id,
+   durable_checkpoint, next_plan, error_plan, ... }` (single-shot subset).
+4. **static_data.rs**: AiAgent capability/connection string segments (reuse the
+   agent segment machinery, since the target is the `ai_tools` agent).
+5. **support.rs**: replace the `Step::AiAgent` hard rejection with
+   `supports_ai_agent_step_baseline` accepting only the single-shot subset (no
+   tools edges, no memory edge, no output schema, no compaction, default
+   iterations) and rejecting everything else (clean Rust fallback).
+6. **compile/ai_agent.rs** (new): `emit_ai_agent_plan` — apply input mapping →
+   (durable: checkpoint) invoke `ai_tools`/`chat-completion` (reuse
+   `emit_agent_invoke`) → `ai-agent-output` → build-source → next_plan; error
+   capture via `emit_agent_error_route_or_fail`.
+7. **dispatcher.rs / core_module.rs**: route `DirectRunPlan::AiAgent`; allocate
+   any AiAgent-specific locals.
+8. **Tests**: structural core-WASM test (compile a single-shot AiAgent fixture,
+   assert it validates + invokes chat-completion); gated A/B test against the
+   mock proxy (assert identical output, or "direct correct" if the shared mock
+   proves impractical).
 
 ## 1. Goal and scope
 
