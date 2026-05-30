@@ -4356,6 +4356,60 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_tool_index_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_turn_tool_index(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                        arg2 as u32,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<i32>() = _rt::as_i32(e);
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_tool_index<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_ai_turn_add_result_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -5803,6 +5857,11 @@ pub mod exports {
                         turn_out: _rt::Vec<u8>,
                         index: u32,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// The resolved tool index for the index-th tool call (u32::MAX = unknown).
+                    fn ai_turn_tool_index(
+                        turn_out: _rt::Vec<u8>,
+                        index: u32,
+                    ) -> Result<u32, _rt::String>;
                     /// Append the index-th tool call's dispatched result to the pending list.
                     fn ai_turn_add_result(
                         pending: _rt::Vec<u8>,
@@ -6510,6 +6569,16 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_ai_turn_tool_args::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-tool-index")] unsafe
+                        extern "C" fn export_ai_turn_tool_index(arg0 : * mut u8, arg1 :
+                        usize, arg2 : i32,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_ai_turn_tool_index_cabi::<$ty > (arg0, arg1, arg2) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-tool-index")]
+                        unsafe extern "C" fn _post_return_ai_turn_tool_index(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_tool_index::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#ai-turn-add-result")] unsafe
                         extern "C" fn export_ai_turn_add_result(arg0 : * mut u8, arg1 :
                         usize, arg2 : * mut u8, arg3 : usize, arg4 : i32, arg5 : * mut
@@ -6839,9 +6908,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3937] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xdb\x1d\x01A\x02\x01\
-A\x02\x01B\x98\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 3982] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x88\x1e\x01A\x02\x01\
+A\x02\x01B\x9a\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\
 \x04\0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\
 \0\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05\
 steps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -6900,24 +6969,25 @@ ror-retry-after-ms\x01;\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\
 ut\0\x07pending\0\0\x05\x04\0\x12ai-turn-next-input\x01=\x01@\x01\x08turn-out\0\0\
 \x08\x04\0\x13ai-turn-is-complete\x01>\x01@\x01\x08turn-out\0\0\x0e\x04\0\x12ai-\
 turn-tool-count\x01?\x01@\x02\x08turn-out\0\x05indexy\0\x05\x04\0\x11ai-turn-too\
-l-args\x01@\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\
-\x04\0\x12ai-turn-add-result\x01A\x01@\x03\x08agent-idy\x06source\0\x08turn-out\0\
-\0\x05\x04\0\x0eai-turn-output\x01B\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\
-\x14agent-validate-input\x01C\x04\0\x16agent-connection-input\x01C\x01@\x02\x08a\
-gent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01D\x04\0\x15agent-retry-sl\
-eep-key\x018\x04\0\x14agent-retry-delay-ms\x019\x01ks\x01@\x07\x04codes\x07messa\
-ges\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc5\
-\0\0\x05\x04\0\x10agent-error-info\x01F\x01j\x01\x02\x01s\x01@\x07\x04codes\x07m\
-essages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattribu\
-tes\xc5\0\0\xc7\0\x04\0\x16agent-retry-error-info\x01H\x01@\x08\x08agent-idy\x04\
-codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0a\
-attributes\xc5\0\0\x05\x04\0\x0bagent-error\x01I\x01@\x02\x08agent-idy\x0aerror-\
-info\0\0\x05\x04\0\x15agent-error-from-info\x01J\x01@\x02\x08agent-idy\x05error\0\
-\0\x05\x04\0\x11agent-debug-error\x01K\x04\0\x10step-debug-start\x01(\x04\0\x0es\
-tep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara\
-:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\
-\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-\
-bindgen-rust\x060.41.0";
+l-args\x01@\x01@\x02\x08turn-out\0\x05indexy\0\x0e\x04\0\x12ai-turn-tool-index\x01\
+A\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\x04\0\x12\
+ai-turn-add-result\x01B\x01@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x05\x04\
+\0\x0eai-turn-output\x01C\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-\
+validate-input\x01D\x04\0\x16agent-connection-input\x01D\x01@\x02\x08agent-idy\x06\
+source\0\0\x05\x04\0\x0fagent-cache-key\x01E\x04\0\x15agent-retry-sleep-key\x018\
+\x04\0\x14agent-retry-delay-ms\x019\x01ks\x01@\x07\x04codes\x07messages\x08categ\
+orys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc6\0\0\x05\x04\
+\0\x10agent-error-info\x01G\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08c\
+ategorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc6\0\0\xc8\
+\0\x04\0\x16agent-retry-error-info\x01I\x01@\x08\x08agent-idy\x04codes\x07messag\
+es\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xc6\
+\0\0\x05\x04\0\x0bagent-error\x01J\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\
+\0\x15agent-error-from-info\x01K\x01@\x02\x08agent-idy\x05error\0\0\x05\x04\0\x11\
+agent-debug-error\x01L\x04\0\x10step-debug-start\x01(\x04\0\x0estep-debug-end\x01\
+(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/\
+workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09produ\
+cers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x06\
+0.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

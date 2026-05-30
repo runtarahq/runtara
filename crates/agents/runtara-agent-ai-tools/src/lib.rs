@@ -974,6 +974,9 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         input.tools.clone(),
     ))
     .map_err(|e| AgentError::permanent("AI_TURN_BAD_TOOLS", format!("invalid tools: {e}")))?;
+    // Tool names captured before `tools` is moved into the completion request,
+    // so we can resolve each tool call's name to its index.
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
     // Append the previous turn's tool results to the conversation.
     for pending in &input.pending_tool_results {
@@ -1041,9 +1044,17 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         match content {
             AssistantContent::ToolCall(tc) => {
                 assistant_contents.push(AssistantContent::ToolCall(tc.clone()));
+                // Resolve the tool name to its index in the advertised tools so
+                // the direct loop can dispatch by index (out of range when the
+                // model names an unknown tool).
+                let tool_index = tool_names
+                    .iter()
+                    .position(|name| name == &tc.function.name)
+                    .unwrap_or(tool_names.len()) as u32;
                 tool_calls.push(serde_json::json!({
                     "tool_call_id": tc.id,
                     "name": tc.function.name,
+                    "tool_index": tool_index,
                     "arguments": tc.function.arguments,
                 }));
                 tool_call_log.push(serde_json::json!({

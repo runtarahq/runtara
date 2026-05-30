@@ -24,11 +24,12 @@ use super::{
     DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_ITER_LOCAL,
     DIRECT_AI_PENDING_LEN_LOCAL, DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL,
     DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-    DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
-    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-    DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_PTR_LOCAL,
-    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectRunPlan, DirectVariables,
+    DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL,
+    DIRECT_AI_TOOL_RESULT_LEN_LOCAL, DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+    DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL,
+    DIRECT_AI_TURN_OUT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
+    DirectVariables,
 };
 use crate::direct_wasm::plan::DirectAiToolPlan;
 
@@ -44,7 +45,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     agent_component_id: &str,
     input_mapping_id: u32,
     max_iterations: u32,
-    tool: &DirectAiToolPlan,
+    tools: &[DirectAiToolPlan],
     next_plan: &DirectRunPlan,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -66,14 +67,6 @@ pub(super) fn emit_ai_agent_loop_plan(
     let turn_capability = static_data
         .agent_capability_id(agent_id)
         .expect("AiAgent loop has a static chat-turn capability id");
-    let tool_invoke = indices
-        .agent_invokes
-        .get(&tool.agent_component_id)
-        .expect("AiAgent tool has a matching component import");
-    let tool_capability = static_data
-        .agent_capability_id(tool.agent_id)
-        .expect("AiAgent tool has a static capability id");
-
     // Build the constant base turn config from the input mapping.
     emit_apply_mapping(
         body,
@@ -224,45 +217,79 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
     );
 
-    // tool_result = invoke <tool>(args)
-    emit_agent_invoke(
+    // Resolve which tool this call selects.
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_IDX_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_tool_index));
+    emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+    push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_MATCH_LOCAL));
+
+    // Default the tool result to an empty list so an unknown tool index is a
+    // benign no-op (the model gets an empty result).
+    set_segment(
         body,
-        tool_invoke,
-        tool_capability,
-        static_data,
-        tool.agent_id,
-        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-    );
-    emit_agent_invoke_error_branch(
-        body,
-        indices,
-        static_data,
-        track_events,
-        tool.agent_id,
-        step_id,
-        output_ptr_local,
-        output_len_local,
-        source_ptr_local,
-        source_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        None,
-        route_ptr_local,
-        route_len_local,
-        variables,
-        data_ptr_local,
-        data_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        None,
-        None,
-    );
-    load_agent_retptr_list(
-        body,
+        &static_data.split_empty_results,
         DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
         DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
     );
+
+    // Dispatch by tool index: `if match == i { invoke tools[i] }`.
+    for (tool_index, tool) in tools.iter().enumerate() {
+        let tool_invoke = indices
+            .agent_invokes
+            .get(&tool.agent_component_id)
+            .expect("AiAgent tool has a matching component import");
+        let tool_capability = static_data
+            .agent_capability_id(tool.agent_id)
+            .expect("AiAgent tool has a static capability id");
+
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_MATCH_LOCAL));
+        body.instruction(&Instruction::I32Const(tool_index as i32));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_invoke(
+            body,
+            tool_invoke,
+            tool_capability,
+            static_data,
+            tool.agent_id,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+        );
+        emit_agent_invoke_error_branch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            tool.agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            None,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            None,
+            None,
+        );
+        load_agent_retptr_list(
+            body,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::End);
+    }
 
     // pending = ai-turn-add-result(pending, turn_out, idx, tool_result)
     body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));

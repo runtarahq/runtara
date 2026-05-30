@@ -1229,6 +1229,22 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-turn tool args: {err}"))
     }
 
+    /// The resolved tool index for the `index`-th tool call (its position in the
+    /// advertised tools). Returns `u32::MAX` when the model named an unknown
+    /// tool, which the loop dispatches as a no-op.
+    pub fn ai_turn_tool_index(turn_out: &[u8], index: u32) -> Result<u32, String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        Ok(turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .and_then(|calls| calls.get(index as usize))
+            .and_then(|call| call.get("tool_index"))
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(u32::MAX))
+    }
+
     /// Append a dispatched tool result (paired with the `index`-th tool call's
     /// id) to the pending-results list for the next turn.
     pub fn ai_turn_add_result(

@@ -671,24 +671,20 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
         })
         .collect::<Vec<_>>();
 
-    match tool_targets.len() {
+    if tool_targets.is_empty() {
         // Single-shot (chat-completion), with or without structured output.
-        0 => true,
-        // Tool loop (chat-turn): exactly one Agent-capability tool, and no
-        // onError on the step (the loop does not yet route onError).
-        1 => {
-            let has_on_error = graph
-                .execution_plan
-                .iter()
-                .any(|edge| edge.from_step == step.id && edge.label.as_deref() == Some("onError"));
-            !has_on_error
-                && matches!(
-                    graph.steps.get(&tool_targets[0].to_step),
-                    Some(Step::Agent(_))
-                )
-        }
-        _ => false,
+        return true;
     }
+    // Tool loop (chat-turn): every tool must target an Agent step, and the step
+    // must have no onError (the loop does not yet route onError).
+    let has_on_error = graph
+        .execution_plan
+        .iter()
+        .any(|edge| edge.from_step == step.id && edge.label.as_deref() == Some("onError"));
+    !has_on_error
+        && tool_targets
+            .iter()
+            .all(|edge| matches!(graph.steps.get(&edge.to_step), Some(Step::Agent(_))))
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {

@@ -131,7 +131,9 @@ pub(super) enum DirectRunPlan {
         agent_component_id: String,
         input_mapping_id: u32,
         max_iterations: u32,
-        tool: DirectAiToolPlan,
+        /// Tools in the same order as the advertised `tools` (so the capability's
+        /// resolved tool index selects the right entry). Dispatched by index.
+        tools: Vec<DirectAiToolPlan>,
         next_plan: Box<DirectRunPlan>,
     },
     Error {
@@ -149,8 +151,8 @@ pub(super) enum DirectRunPlan {
 }
 
 /// A tool the AiAgent loop can dispatch: the manifest agent id and component id
-/// of the target Agent step, invoked with the LLM-provided arguments. (Slice 1
-/// supports a single tool, so the tool name is not needed for dispatch.)
+/// of the target Agent step, invoked with the LLM-provided arguments. Dispatched
+/// by the capability-resolved tool index (the tool's position in this list).
 #[derive(Debug, Clone)]
 pub(super) struct DirectAiToolPlan {
     pub(super) agent_id: u32,
@@ -601,20 +603,53 @@ fn step_run_plan_inner(
                 });
             }
 
-            // Slice 1: exactly one tool.
-            let edge = tool_edges[0];
-            let tool_agent = graph
-                .agents
+            // Build the tool table in the same order as the advertised `tools`
+            // in the input mapping, so the capability's resolved tool index
+            // selects the matching entry.
+            let tool_names: Vec<String> = graph
+                .mappings
                 .iter()
-                .find(|candidate| {
-                    candidate.step_id == edge.to_step && candidate.purpose == "agent.config"
+                .find(|mapping| {
+                    mapping.step_id == step_id && mapping.purpose == "agent.inputMapping"
                 })
-                .ok_or_else(|| {
-                    DirectCompileError::Component(format!(
-                        "AiAgent tool target '{}' has no agent config",
-                        edge.to_step
-                    ))
-                })?;
+                .and_then(|mapping| mapping.value.get("tools"))
+                .and_then(|tools| tools.get("value"))
+                .and_then(|value| value.as_array())
+                .map(|defs| {
+                    defs.iter()
+                        .filter_map(|def| {
+                            def.get("name").and_then(|n| n.as_str()).map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut tools = Vec::with_capacity(tool_names.len());
+            for name in &tool_names {
+                let edge = tool_edges
+                    .iter()
+                    .find(|edge| edge.label.as_deref() == Some(name.as_str()))
+                    .ok_or_else(|| {
+                        DirectCompileError::Component(format!(
+                            "AiAgent tool '{name}' has no execution-plan edge"
+                        ))
+                    })?;
+                let tool_agent = graph
+                    .agents
+                    .iter()
+                    .find(|candidate| {
+                        candidate.step_id == edge.to_step && candidate.purpose == "agent.config"
+                    })
+                    .ok_or_else(|| {
+                        DirectCompileError::Component(format!(
+                            "AiAgent tool target '{}' has no agent config",
+                            edge.to_step
+                        ))
+                    })?;
+                tools.push(DirectAiToolPlan {
+                    agent_id: tool_agent.id,
+                    agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                });
+            }
             let max_iterations = graph
                 .steps
                 .iter()
@@ -634,10 +669,7 @@ fn step_run_plan_inner(
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
                 max_iterations,
-                tool: DirectAiToolPlan {
-                    agent_id: tool_agent.id,
-                    agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
-                },
+                tools,
                 next_plan: Box::new(next_plan),
             })
         }

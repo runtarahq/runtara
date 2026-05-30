@@ -68,6 +68,7 @@ const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json"
 const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
 const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.json");
 const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json");
+const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -960,10 +961,12 @@ fn route(
         let wants_tool_call = tools.is_some() && message_count <= 2;
 
         let (message, finish_reason) = if let (true, Some(tools)) = (wants_tool_call, tools) {
+            // Call the last advertised tool, exercising a non-zero tool index in
+            // the multi-tool case.
             let tool_name = tools
-                .first()
+                .last()
                 .and_then(|tool| tool.get("function").and_then(|f| f.get("name")))
-                .or_else(|| tools.first().and_then(|tool| tool.get("name")))
+                .or_else(|| tools.last().and_then(|tool| tool.get("name")))
                 .and_then(Value::as_str)
                 .unwrap_or("tool")
                 .to_string();
@@ -4940,6 +4943,59 @@ fn direct_wasm_matches_components_ai_agent_structured_output() {
     assert_eq!(
         direct_out.get("result"),
         Some(&serde_json::json!({ "sentiment": "positive", "confidence": 0.9 }))
+    );
+}
+
+/// AiAgent loop with two tools. The mock calls the last advertised tool, so the
+/// direct loop dispatches by a non-zero tool index. Both artifacts complete at
+/// output parity.
+#[test]
+fn direct_wasm_matches_components_ai_agent_multi_tool() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("ai-agent-multi-tool", AI_AGENT_MULTI_TOOL);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-multi-tool", AI_AGENT_MULTI_TOOL);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"do it"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-multi-tool",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-multi-tool",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}",
+        direct.stderr, direct.error_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "multi-tool AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
     );
 }
 

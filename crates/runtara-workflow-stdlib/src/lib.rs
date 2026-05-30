@@ -806,6 +806,10 @@ mod component {
             direct_json::DirectJsonManifest::ai_turn_tool_args(&turn_out, index)
         }
 
+        fn ai_turn_tool_index(turn_out: Vec<u8>, index: u32) -> Result<u32, String> {
+            direct_json::DirectJsonManifest::ai_turn_tool_index(&turn_out, index)
+        }
+
         fn ai_turn_add_result(
             pending: Vec<u8>,
             turn_out: Vec<u8>,

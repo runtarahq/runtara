@@ -347,6 +347,8 @@ interface json {
     ai-turn-tool-count: func(turn-out: list<u8>) -> result<u32, string>;
     // The index-th tool call's arguments, as the tool agent input payload.
     ai-turn-tool-args: func(turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
+    // The resolved tool index for the index-th tool call (u32::MAX = unknown).
+    ai-turn-tool-index: func(turn-out: list<u8>, index: u32) -> result<u32, string>;
     // Append the index-th tool call's dispatched result to the pending list.
     ai-turn-add-result: func(
         pending: list<u8>,

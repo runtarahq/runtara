@@ -58,6 +58,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_tool_loop" => {
             include_str!("../../../tests/fixtures/ai_agent_tool_loop.json")
         }
+        "ai_agent_multi_tool" => {
+            include_str!("../../../tests/fixtures/ai_agent_multi_tool.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2190,6 +2193,49 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
         "expected AiAgentLoop run plan, got {:?}",
         core_config.run_plan
     );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_multi_tool_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-multi-tool".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_multi_tool"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct multi-tool AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent multi-tool artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    assert_eq!(tools.len(), 2, "expected two dispatchable tools");
 }
 
 #[test]

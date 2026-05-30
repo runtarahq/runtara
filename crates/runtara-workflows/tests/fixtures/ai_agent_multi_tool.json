@@ -1,0 +1,56 @@
+{
+  "name": "AiAgent Multi Tool",
+  "description": "Direct-emitter fixture: an AiAgent with two Agent-capability tools. The LLM calls one tool by name, then returns text.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Agent",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": { "valueType": "immediate", "value": "Use a tool, then answer." },
+        "userPrompt": { "valueType": "reference", "value": "data.q" },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "maxIterations": 5
+      }
+    },
+    "echo": {
+      "stepType": "Agent",
+      "id": "echo",
+      "name": "Echo",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "inputMapping": {
+        "value": { "valueType": "reference", "value": "data.q" }
+      }
+    },
+    "roll": {
+      "stepType": "Agent",
+      "id": "roll",
+      "name": "Roll",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "inputMapping": {
+        "value": { "valueType": "immediate", "value": "rolled" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    { "fromStep": "ai", "toStep": "echo", "label": "echo" },
+    { "fromStep": "ai", "toStep": "roll", "label": "roll" },
+    { "fromStep": "ai", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

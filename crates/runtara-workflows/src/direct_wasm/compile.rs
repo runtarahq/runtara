@@ -277,6 +277,8 @@ const DIRECT_AI_TOOL_RESULT_PTR_LOCAL: u32 = 98;
 const DIRECT_AI_TOOL_RESULT_LEN_LOCAL: u32 = 99;
 /// Turn counter, a hard safety bound on the AiAgent tool loop.
 const DIRECT_AI_ITER_LOCAL: u32 = 100;
+/// The capability-resolved tool index for the current tool call (dispatch key).
+const DIRECT_AI_TOOL_MATCH_LOCAL: u32 = 101;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]

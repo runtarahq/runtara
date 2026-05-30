@@ -587,7 +587,7 @@ pub(super) fn emit_run_plan_mapping(
             agent_component_id,
             input_mapping_id,
             max_iterations,
-            tool,
+            tools,
             next_plan,
         } => {
             super::ai_agent_loop::emit_ai_agent_loop_plan(
@@ -601,7 +601,7 @@ pub(super) fn emit_run_plan_mapping(
                 agent_component_id,
                 *input_mapping_id,
                 *max_iterations,
-                tool,
+                tools,
                 next_plan,
                 data_ptr_local,
                 data_len_local,
