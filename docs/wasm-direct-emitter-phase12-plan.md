@@ -1,6 +1,16 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slice 0 complete; Slices 1–6 pending.**
+Status: **Slices 0 + 2 complete; Slices 1, 3–6 pending.**
+
+Slice 2 (structured output) is done and e2e-verified: AiAgent steps with an
+`outputSchema` lower in direct mode; the `chat-completion` capability parses the
+response as JSON (`structured_output`, string fallback) and `ai-agent-output`
+uses it as the response value. Gated A/B test
+`direct_wasm_matches_components_ai_agent_structured_output`. (Also fixed a latent
+bug: the synthesized chat-completion input mapping must use snake_case keys —
+`ChatCompletionInput` deserializes snake_case — or the prompts/schema silently
+drop, which the deterministic mock had masked.)
+
 
 Slice 0 (single-shot AiAgent) is done and e2e-verified: a single-shot AiAgent
 compiles to a validated WASM component and runs at output parity with the
