@@ -1,0 +1,22 @@
+[package]
+name = "runtara-agent-encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared character-encoding vocabulary, detection (chardetng) and decoding (encoding_rs) for runtara WASM agents"
+keywords = ["wasm", "agent", "encoding", "charset", "detection"]
+categories = ["text-processing", "wasm"]
+
+[dependencies]
+serde = { workspace = true }
+encoding_rs = { workspace = true }
+chardetng = { workspace = true }
+# Only for the `EnumVariants` trait, which lets the curated `Encoding` enum
+# surface as a Step Picker dropdown via the `#[capability_input]` macro. The
+# `default-features = false` drops the schemars/spec surface so this stays
+# wasm-safe and light.
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
+
+[dev-dependencies]
+serde_json = { workspace = true }

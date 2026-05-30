@@ -27,6 +27,7 @@ minijinja = "2.5"
 # the `.wasm` — the JSON is a build artifact, never hand-edited.
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+runtara-agent-encoding = { path = "../../runtara-agent-encoding" }
 strum = { version = "0.26", features = ["derive"] }
 
 [package.metadata.component]

@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `runtara-agent-encoding` crate: a single, WASM-safe character-encoding
+  vocabulary shared by the text, csv, and xml agents. It wraps `encoding_rs`
+  (the WHATWG label/alias table and decoder) and `chardetng` (statistical
+  detection), so a *detected* encoding name and a *requested* encoding name are
+  guaranteed to be the same set. Exposes an `Encoding` input type that accepts
+  any standard label (e.g. `UTF-8`, `windows-1252`, `Shift_JIS`, plus aliases
+  like `utf8`/`latin-1`/`iso-8859-1`/`cp1252`) or `Auto`, and advertises a
+  curated dropdown of common names to the Step Picker.
+- New `text` agent capability `detect-encoding`: detects the character encoding
+  of bytes via BOM sniffing then chardetng, returning the canonical encoding
+  name plus `confident` and `bom` flags. The returned name can be fed directly
+  into any encoding-sensitive capability (csv `from-csv`/`get-header`, xml
+  `from-xml`, text `from-base64`).
 - `runtara-environment` HTTP error responses now additively include
   structured fields (`category`, `severity`, `retry_hint`,
   `retry_after_ms`, `attributes`) when the underlying error carries them
@@ -44,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Encoding-sensitive agents (text, csv, xml) now share one encoding
+  vocabulary** via the new `runtara-agent-encoding` crate. Their `encoding`
+  inputs become a curated dropdown of standard names plus `Auto` (detect),
+  while still accepting any standard label or alias. Notable behavior changes:
+  - The `text` agent now decodes `ISO-8859-1` / `LATIN-1` as **windows-1252**
+    (WHATWG aliasing). This matches the `csv` agent's pre-existing behavior and
+    correctly handles bytes `0x80`–`0x9F`; the previous text-agent path mapped
+    them as raw code points.
+  - The `csv` agent no longer silently falls back to lossy UTF-8 when given an
+    unrecognized encoding label — unknown labels are now rejected at input
+    validation. It also strips a leading BOM (previously left in the first
+    field).
+  - The `xml` agent now supports non-UTF-8 encodings (previously UTF-8 only,
+    with a TODO) and BOM stripping.
+  - Decoding is lossy across all three (malformed bytes become U+FFFD) rather
+    than erroring; `Auto` enables automatic detection (BOM + chardetng).
 - **Retention defaults are now on and aligned at 3 days.** Previously
   `DbCleanupWorker` and `ImageCleanupWorker` were off-by-default and the
   `CleanupWorker` ran at a 24-hour retention. All four workers now default

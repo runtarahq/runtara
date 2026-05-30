@@ -25,6 +25,7 @@ roxmltree = "0.20"
 # artifact, never hand-edited.
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+runtara-agent-encoding = { path = "../../runtara-agent-encoding" }
 
 [package.metadata.component]
 package = "runtara:agent-xml"

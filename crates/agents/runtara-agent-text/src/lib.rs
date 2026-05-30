@@ -22,6 +22,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use minijinja::Environment;
 use regex::RegexBuilder;
+use runtara_agent_encoding::Encoding;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
@@ -106,10 +107,6 @@ fn default_space() -> String {
 
 fn default_wrap_width() -> usize {
     80
-}
-
-fn default_encoding() -> String {
-    "UTF-8".to_string()
 }
 
 // ============================================================================
@@ -413,12 +410,39 @@ pub struct FromBase64Input {
 
     #[field(
         display_name = "Encoding",
-        description = "Output encoding for text",
+        description = "Text encoding to decode with. 'Auto' detects from the bytes (BOM + chardetng). Accepts any standard encoding label.",
         example = "UTF-8",
-        default = "UTF-8"
+        default = "UTF-8",
+        enum_type = "Encoding"
     )]
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
+    #[serde(default)]
+    pub encoding: Encoding,
+}
+
+/// Input for character-encoding detection
+#[derive(Debug, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "Detect Encoding Input")]
+pub struct DetectEncodingInput {
+    #[field(
+        display_name = "Data",
+        description = "Base64 encoded string, FileData object, or byte array to sniff"
+    )]
+    pub data: Value,
+
+    #[field(
+        display_name = "TLD Hint",
+        description = "Optional country-code TLD (e.g. 'jp', 'ru') to bias detection toward a region"
+    )]
+    #[serde(default)]
+    pub tld_hint: Option<String>,
+
+    #[field(
+        display_name = "Allow UTF-8",
+        description = "Allow UTF-8 as a detection result",
+        default = "true"
+    )]
+    #[serde(default = "default_true")]
+    pub allow_utf8: bool,
 }
 
 /// Input for base64 encoding
@@ -916,6 +940,32 @@ impl FileData {
     }
 }
 
+/// Result of `detect-encoding`.
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Detected Encoding",
+    description = "Result of character-encoding detection"
+)]
+pub struct DetectEncodingOutput {
+    #[field(
+        display_name = "Encoding",
+        description = "Canonical encoding name (e.g. 'UTF-8', 'windows-1252', 'Shift_JIS'). Feed this straight into any encoding-sensitive capability."
+    )]
+    pub encoding: String,
+
+    #[field(
+        display_name = "Confident",
+        description = "True if a BOM was found or the bytes contain non-ASCII; false for pure-ASCII input where the label is arbitrary"
+    )]
+    pub confident: bool,
+
+    #[field(
+        display_name = "BOM",
+        description = "Whether a byte-order mark determined the encoding"
+    )]
+    pub bom: bool,
+}
+
 // ============================================================================
 // Capabilities — annotated for metadata; the `__executor_*` fns the macro
 // emits are what the wasm Guest impl dispatches to.
@@ -1253,13 +1303,38 @@ pub fn as_byte_array(input: ByteArrayInput) -> Result<Vec<u8>, String> {
     id = "from-base64",
     module = "text",
     display_name = "From Base64",
-    description = "Decode base64 content to a string",
-    errors(permanent("TEXT_UNSUPPORTED_ENCODING", "Unsupported text encoding"),)
+    description = "Decode base64 content to a string using the given encoding (or 'Auto' to detect it)"
 )]
 pub fn from_base64(input: FromBase64Input) -> Result<String, AgentError> {
     let file_data = FileData::from_value(&input.data)?;
     let bytes = file_data.decode()?;
-    decode_text_bytes(bytes, &input.encoding)
+    Ok(runtara_agent_encoding::decode(&bytes, input.encoding).text)
+}
+
+/// Detect the character encoding of bytes (BOM + statistical analysis)
+#[capability(
+    id = "detect-encoding",
+    module = "text",
+    display_name = "Detect Encoding",
+    description = "Detect the character encoding of bytes using BOM sniffing and statistical analysis (chardetng)",
+    errors(
+        permanent("FILE_INVALID_STRUCTURE", "Invalid file data structure"),
+        permanent("FILE_BASE64_DECODE_ERROR", "Failed to decode base64 file content"),
+    )
+)]
+pub fn detect_encoding(input: DetectEncodingInput) -> Result<DetectEncodingOutput, AgentError> {
+    let file_data = FileData::from_value(&input.data)?;
+    let bytes = file_data.decode()?;
+    let detection = runtara_agent_encoding::detect(
+        &bytes,
+        input.tld_hint.as_deref().map(str::as_bytes),
+        input.allow_utf8,
+    );
+    Ok(DetectEncodingOutput {
+        encoding: detection.encoding_name.to_string(),
+        confident: detection.confident,
+        bom: detection.bom,
+    })
 }
 
 /// Encode text or bytes into a FileData structure with base64 content
@@ -1742,39 +1817,6 @@ fn build_safe_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Rege
         })
 }
 
-fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, AgentError> {
-    let enc = encoding.to_uppercase();
-    let enc = enc.as_str();
-    if enc == "UTF-8" || enc == "UTF8" {
-        String::from_utf8(bytes).map_err(|e| {
-            AgentError::permanent(
-                "TEXT_UTF8_DECODE_ERROR",
-                format!("Decoded bytes are not valid UTF-8: {}", e),
-            )
-            .with_attr("decode_error", e.to_string())
-        })
-    } else if enc == "LATIN-1"
-        || enc == "LATIN1"
-        || enc == "ISO-8859-1"
-        || enc == "ISO88591"
-        || enc == "WINDOWS-1252"
-        || enc == "CP1252"
-    {
-        Ok(bytes.into_iter().map(|b| b as char).collect())
-    } else if enc == "AUTO" {
-        match String::from_utf8(bytes) {
-            Ok(s) => Ok(s),
-            Err(e) => Ok(e.into_bytes().into_iter().map(|b| b as char).collect()),
-        }
-    } else {
-        Err(AgentError::permanent(
-            "TEXT_UNSUPPORTED_ENCODING",
-            format!("Unsupported encoding: {}", enc),
-        )
-        .with_attr("encoding", enc.to_string()))
-    }
-}
-
 fn normalize_nfd(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1991,6 +2033,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         &__CAPABILITY_META_HASH_TEXT,
         &__CAPABILITY_META_AS_BYTE_ARRAY,
         &__CAPABILITY_META_FROM_BASE64,
+        &__CAPABILITY_META_DETECT_ENCODING,
         &__CAPABILITY_META_TO_BASE64,
         &__CAPABILITY_META_REGEX_REPLACE,
         &__CAPABILITY_META_REGEX_MATCH,
@@ -2019,6 +2062,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ("SubstringInput", &__INPUT_META_SubstringInput),
         ("ByteArrayInput", &__INPUT_META_ByteArrayInput),
         ("FromBase64Input", &__INPUT_META_FromBase64Input),
+        ("DetectEncodingInput", &__INPUT_META_DetectEncodingInput),
         ("ToBase64Input", &__INPUT_META_ToBase64Input),
         ("RegexReplaceInput", &__INPUT_META_RegexReplaceInput),
         ("RegexMatchInput", &__INPUT_META_RegexMatchInput),
@@ -2034,10 +2078,12 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     .into_iter()
     .collect();
 
-    let output_types: HashMap<&'static str, &'static OutputTypeMeta> =
-        [("FileData", &__OUTPUT_META_FileData as &OutputTypeMeta)]
-            .into_iter()
-            .collect();
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        ("FileData", &__OUTPUT_META_FileData as &OutputTypeMeta),
+        ("DetectEncodingOutput", &__OUTPUT_META_DetectEncodingOutput),
+    ]
+    .into_iter()
+    .collect();
 
     let capabilities = caps
         .iter()
@@ -2096,6 +2142,7 @@ impl Guest for Component {
             "hash-text" => __executor_hash_text(value),
             "as-byte-array" => __executor_as_byte_array(value),
             "from-base64" => __executor_from_base64(value),
+            "detect-encoding" => __executor_detect_encoding(value),
             "to-base64" => __executor_to_base64(value),
             "regex-replace" => __executor_regex_replace(value),
             "regex-match" => __executor_regex_match(value),
@@ -2653,11 +2700,37 @@ mod tests {
         let encoded = FileData::from_bytes("hello".as_bytes().to_vec(), None, None).content;
         let input = FromBase64Input {
             data: json!(encoded),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
         };
 
         let result = from_base64(input).unwrap();
         assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_from_base64_auto_detects_windows_1252() {
+        // 0xE9 = 'é' in windows-1252; invalid as UTF-8, so "Auto" must detect it.
+        let encoded = FileData::from_bytes(vec![b'c', b'a', b'f', 0xE9], None, None).content;
+        let input = FromBase64Input {
+            data: json!(encoded),
+            encoding: Encoding::Auto,
+        };
+        let result = from_base64(input).unwrap();
+        assert_eq!(result, "café");
+    }
+
+    #[test]
+    fn test_detect_encoding_reports_aligned_name() {
+        let encoded = FileData::from_bytes(vec![b'h', 0xE9, b'l', b'l', b'o'], None, None).content;
+        let input = DetectEncodingInput {
+            data: json!(encoded),
+            tld_hint: None,
+            allow_utf8: true,
+        };
+        let out = detect_encoding(input).unwrap();
+        // The reported name must parse straight back into an Encoding.
+        assert!(Encoding::from_label(&out.encoding).is_some());
+        assert!(out.confident);
     }
 
     #[test]

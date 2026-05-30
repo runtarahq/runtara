@@ -10,6 +10,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use runtara_agent_encoding::Encoding;
 use runtara_agent_macro::{CapabilityInput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -132,15 +133,16 @@ pub struct FromXmlInput {
     )]
     pub data: XmlDataInput,
 
-    /// Character encoding (default: "UTF-8")
+    /// Character encoding (default: "UTF-8"; "Auto" detects it)
     #[field(
         display_name = "Encoding",
-        description = "Character encoding of the XML data",
+        description = "Character encoding of the XML data. 'Auto' detects from the bytes (BOM + chardetng). Accepts any standard encoding label.",
         example = "UTF-8",
-        default = "UTF-8"
+        default = "UTF-8",
+        enum_type = "Encoding"
     )]
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
+    #[serde(default)]
+    pub encoding: Encoding,
 
     /// Whether to preserve text nodes (default: true)
     /// If false, only elements and attributes are included
@@ -175,10 +177,6 @@ pub struct FromXmlInput {
 }
 
 // Default value functions
-fn default_encoding() -> String {
-    "UTF-8".to_string()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -199,14 +197,13 @@ fn default_true() -> bool {
     description = "Parse XML bytes into a JSON structure",
     errors(
         permanent("XML_DECODE_ERROR", "Failed to decode base64 or file data"),
-        permanent("XML_ENCODING_ERROR", "Failed to decode with specified encoding"),
         permanent("XML_PARSE_ERROR", "Failed to parse XML document"),
     )
 )]
 pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
-    // Convert bytes to string using specified encoding
+    // Convert bytes to string using the specified encoding ("Auto" detects it)
     let data = input.data.to_bytes()?;
-    let xml_string = decode_bytes(&data, &input.encoding)?;
+    let xml_string = runtara_agent_encoding::decode(&data, input.encoding).text;
 
     // Parse the XML document
     let doc = roxmltree::Document::parse(&xml_string).map_err(|e| {
@@ -228,28 +225,6 @@ pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
 // -----------------------------------------------------------------------------
 // Helper Functions
 // -----------------------------------------------------------------------------
-
-/// Decodes bytes to string using specified encoding
-fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, AgentError> {
-    match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => String::from_utf8(data.to_vec()).map_err(|e| {
-            AgentError::permanent(
-                "XML_ENCODING_ERROR",
-                format!("Failed to decode UTF-8: {}", e),
-            )
-        }),
-        _ => {
-            // For other encodings, we'd need encoding_rs or similar
-            // For now, just try UTF-8
-            String::from_utf8(data.to_vec()).map_err(|e| {
-                AgentError::permanent(
-                    "XML_ENCODING_ERROR",
-                    format!("Encoding '{}' not supported, tried UTF-8: {}", encoding, e),
-                )
-            })
-        }
-    }
-}
 
 /// Converts an XML element to a JSON value (content only, no wrapper)
 fn element_to_json(node: &roxmltree::Node, input: &FromXmlInput) -> Value {
@@ -489,7 +464,7 @@ mod tests {
         let xml_data = b"<root><name>Alice</name></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -500,12 +475,31 @@ mod tests {
     }
 
     #[test]
+    fn test_from_xml_windows_1252() {
+        // <name>café</name> with 0xE9 ('é' in windows-1252), invalid as UTF-8.
+        // Previously the xml agent only supported UTF-8 and would fail here.
+        let mut xml_data = b"<root><name>caf".to_vec();
+        xml_data.push(0xE9);
+        xml_data.extend_from_slice(b"</name></root>");
+        let input = FromXmlInput {
+            data: XmlDataInput::Bytes(xml_data),
+            encoding: Encoding::from_label("windows-1252").unwrap(),
+            preserve_text: true,
+            include_attributes: true,
+            trim_text: true,
+        };
+
+        let result = from_xml(input).unwrap();
+        assert_eq!(result["root"]["name"], "café");
+    }
+
+    #[test]
     fn test_from_xml_base64_input() {
         let xml_data = b"<root><name>Alice</name></root>";
         let encoded = base64::engine::general_purpose::STANDARD.encode(xml_data);
         let input = FromXmlInput {
             data: XmlDataInput::Base64String(encoded),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -520,7 +514,7 @@ mod tests {
         let xml_data = b"<root><person id=\"1\" active=\"true\">Alice</person></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -537,7 +531,7 @@ mod tests {
         let xml_data = b"<root><person id=\"1\">Alice</person></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: false,
             trim_text: true,
@@ -553,7 +547,7 @@ mod tests {
         let xml_data = b"<root><user><name>Alice</name><age>30</age></user></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -569,7 +563,7 @@ mod tests {
         let xml_data = b"<root><item>First</item><item>Second</item><item>Third</item></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -593,7 +587,7 @@ mod tests {
         let xml_data = b"<root>\n  <name>  Alice  </name>\n</root>";
         let input_trim = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -604,7 +598,7 @@ mod tests {
 
         let input_no_trim = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: false,
@@ -633,7 +627,7 @@ mod tests {
 
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -658,7 +652,7 @@ mod tests {
         let xml_data = b"<root><empty/></root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -674,7 +668,7 @@ mod tests {
         let xml_data = b"<root><unclosed>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,
@@ -692,7 +686,7 @@ mod tests {
         let xml_data = b"<root>Text before <child>Child text</child> Text after</root>";
         let input = FromXmlInput {
             data: XmlDataInput::Bytes(xml_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,
             trim_text: true,

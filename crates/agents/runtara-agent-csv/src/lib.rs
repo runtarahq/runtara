@@ -9,6 +9,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use runtara_agent_encoding::Encoding;
 use runtara_agent_macro::{CapabilityInput, capability};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -82,15 +83,16 @@ pub struct FromCsvInput {
     )]
     pub data: CsvDataInput,
 
-    /// Character encoding (default: "UTF-8")
+    /// Character encoding (default: "UTF-8"; "Auto" detects it)
     #[field(
         display_name = "Encoding",
-        description = "Character encoding of the CSV data",
+        description = "Character encoding of the CSV data. 'Auto' detects from the bytes (BOM + chardetng). Accepts any standard encoding label.",
         example = "UTF-8",
-        default = "UTF-8"
+        default = "UTF-8",
+        enum_type = "Encoding"
     )]
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
+    #[serde(default)]
+    pub encoding: Encoding,
 
     /// Column delimiter (default: ',')
     #[field(
@@ -162,16 +164,18 @@ pub struct ToCsvInput {
     )]
     pub value: Value,
 
-    /// Character encoding (default: "UTF-8")
+    /// Character encoding (default: "UTF-8"). CSV output is always written as
+    /// UTF-8; this field is accepted for symmetry with parsing but ignored.
     #[field(
         display_name = "Encoding",
-        description = "Character encoding for the output CSV",
+        description = "Character encoding for the output CSV (currently always UTF-8)",
         example = "UTF-8",
-        default = "UTF-8"
+        default = "UTF-8",
+        enum_type = "Encoding"
     )]
-    #[serde(default = "default_encoding")]
+    #[serde(default)]
     #[allow(dead_code)]
-    pub encoding: String,
+    pub encoding: Encoding,
 
     /// Column delimiter (default: ',')
     #[field(
@@ -222,15 +226,16 @@ pub struct GetHeaderInput {
     )]
     pub data: CsvDataInput,
 
-    /// Character encoding (default: "UTF-8")
+    /// Character encoding (default: "UTF-8"; "Auto" detects it)
     #[field(
         display_name = "Encoding",
-        description = "Character encoding of the CSV data",
+        description = "Character encoding of the CSV data. 'Auto' detects from the bytes (BOM + chardetng). Accepts any standard encoding label.",
         example = "UTF-8",
-        default = "UTF-8"
+        default = "UTF-8",
+        enum_type = "Encoding"
     )]
-    #[serde(default = "default_encoding")]
-    pub encoding: String,
+    #[serde(default)]
+    pub encoding: Encoding,
 
     /// Column delimiter (default: ',')
     #[field(
@@ -282,10 +287,6 @@ pub struct GetHeaderInput {
 }
 
 // Default value functions
-fn default_encoding() -> String {
-    "UTF-8".to_string()
-}
-
 fn default_delimiter() -> char {
     ','
 }
@@ -315,9 +316,9 @@ fn default_true() -> bool {
     description = "Parse CSV bytes into a JSON array of objects or arrays"
 )]
 pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, String> {
-    // Convert bytes to string using specified encoding
+    // Convert bytes to string using the specified encoding ("Auto" detects it)
     let data = input.data.to_bytes()?;
-    let csv_string = decode_bytes(&data, &input.encoding)?;
+    let csv_string = runtara_agent_encoding::decode(&data, input.encoding).text;
 
     // Build CSV reader
     let mut reader_builder = csv::ReaderBuilder::new();
@@ -482,9 +483,9 @@ pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, String> {
     description = "Extract CSV headers with type inference from the first data row"
 )]
 pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, String> {
-    // Convert bytes to string using specified encoding
+    // Convert bytes to string using the specified encoding ("Auto" detects it)
     let data = input.data.to_bytes()?;
-    let csv_string = decode_bytes(&data, &input.encoding)?;
+    let csv_string = runtara_agent_encoding::decode(&data, input.encoding).text;
 
     // Build CSV reader
     let mut reader_builder = csv::ReaderBuilder::new();
@@ -572,29 +573,6 @@ pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, Stri
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-
-/// Decodes bytes to string using specified encoding
-fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, String> {
-    match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => String::from_utf8(data.to_vec())
-            .map_err(|e| err_json("CSV_ENCODING_ERROR", format!("Failed to decode UTF-8: {e}"))),
-        "LATIN-1" | "LATIN1" | "ISO-8859-1" | "ISO88591" | "WINDOWS-1252" | "CP1252" => {
-            // Use encoding_rs for Latin-1/Windows-1252 encoding
-            let (decoded, _, _had_errors) = encoding_rs::WINDOWS_1252.decode(data);
-            Ok(decoded.into_owned())
-        }
-        _ => {
-            // Try to use encoding_rs for other encodings
-            if let Some(enc) = encoding_rs::Encoding::for_label(encoding.as_bytes()) {
-                let (decoded, _, _) = enc.decode(data);
-                Ok(decoded.into_owned())
-            } else {
-                // Fall back to lossy UTF-8 conversion
-                Ok(String::from_utf8_lossy(data).into_owned())
-            }
-        }
-    }
-}
 
 /// Checks if a CSV record is empty
 fn is_empty_record(record: &csv::StringRecord) -> bool {
@@ -828,7 +806,7 @@ mod tests {
         let input = FromCsvInput {
             skip_empty_lines: true,
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -848,12 +826,54 @@ mod tests {
     }
 
     #[test]
+    fn test_from_csv_windows_1252() {
+        // Header "café" with 0xE9 ('é' in windows-1252), invalid as UTF-8.
+        let csv_data = vec![b'c', b'a', b'f', 0xE9, b'\n', b'x'];
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data),
+            encoding: Encoding::from_label("windows-1252").unwrap(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["café"], "x");
+    }
+
+    #[test]
+    fn test_from_csv_auto_strips_utf8_bom() {
+        // UTF-8 BOM + content. "Auto" must detect UTF-8 from the BOM and strip
+        // it, so the first header is clean "name" (not "\u{feff}name"). The old
+        // decoder did not strip BOMs — this is a behavior improvement.
+        let mut csv_data = vec![0xEF, 0xBB, 0xBF];
+        csv_data.extend_from_slice(b"name,age\nAlice,30");
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data: CsvDataInput::Bytes(csv_data),
+            encoding: Encoding::Auto,
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["name"], "Alice");
+        assert_eq!(result[0]["age"], "30");
+    }
+
+    #[test]
     fn test_from_csv_without_headers() {
         let csv_data = b"Alice,30\nBob,25";
         let input = FromCsvInput {
             skip_empty_lines: true,
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -878,7 +898,7 @@ mod tests {
         let input = FromCsvInput {
             skip_empty_lines: true,
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ';',
             quote_char: '"',
             escape_char: None,
@@ -897,7 +917,7 @@ mod tests {
         let input = FromCsvInput {
             skip_empty_lines: true,
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -916,7 +936,7 @@ mod tests {
         let input = FromCsvInput {
             skip_empty_lines: true,
             data: CsvDataInput::Base64String(encoded),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -938,7 +958,7 @@ mod tests {
 
         let input = ToCsvInput {
             value: data,
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -962,7 +982,7 @@ mod tests {
 
         let input = ToCsvInput {
             value: data,
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -983,7 +1003,7 @@ mod tests {
 
         let input = ToCsvInput {
             value: data,
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ';',
             quote_char: '"',
             escape_char: None,
@@ -1001,7 +1021,7 @@ mod tests {
         let csv_data = b"name,age,active\nAlice,30,true";
         let input = GetHeaderInput {
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
@@ -1021,7 +1041,7 @@ mod tests {
         let csv_data = b"Alice,30,true\nBob,25,false";
         let input = GetHeaderInput {
             data: CsvDataInput::Bytes(csv_data.to_vec()),
-            encoding: "UTF-8".to_string(),
+            encoding: Encoding::default(),
             delimiter: ',',
             quote_char: '"',
             escape_char: None,
