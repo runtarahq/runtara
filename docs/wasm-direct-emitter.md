@@ -719,13 +719,20 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 
 Current remaining action items:
 
-- `AiAgent` is now the **sole remaining unsupported step type** at the top
-  level. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
+- `AiAgent` is the last step type being lowered (Phase 12). **Single-shot**
+  AiAgent (no tools, memory, structured output, or MCP) is now supported: it
+  lowers as an invoke of the `ai-tools` `chat-completion` capability (so no
+  LLM-provider logic is linked into workflow.wasm) and runs at output parity
+  with the generated path (gated A/B test). The remaining AiAgent surface — the
+  tool loop, conversation memory, structured output, compaction, and MCP — is
+  still gated (falls back to the generated compiler) and lands in Phase 12
+  Slices 1–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
   WaitForSignal, Conditional, Filter, Switch, GroupBy, Log, terminal Error,
-  Finish) is supported, including their durable/breakpoint/onError/retry
+  Finish) is fully supported, including their durable/breakpoint/onError/retry
   variants. The only other deferrals are parallel fan-out routing
   (`execution-plan-routing`, a deliberately-not-a-target routing shape) and
-  crash/resume differential test hardening (coverage, not a feature gap).
+  crash/resume differential test hardening (coverage, not a feature gap). See
+  `docs/wasm-direct-emitter-phase12-plan.md` for the AiAgent slice plan.
 - `Agent`/`EmbedWorkflow` timeout is settled: both are accepted as inert no-ops
   that match the generated Rust path (which parses but never enforces either
   field). Real enforcement is impossible in the synchronous direct model (a
@@ -2764,6 +2771,21 @@ Current status:
 
 Goal: support AI agent workflows without linking provider logic into every
 workflow.
+
+Progress (Slice 0 — single-shot AiAgent): done. The `ai-tools` component gained
+a `chat-completion` capability backed by the shared
+`runtara_ai::run_completion` (the exact logic the generated `__ai_llm_durable`
+runs inline), so the LLM call now lives behind the agent `invoke` ABI instead of
+linked into workflow.wasm. The direct emitter lowers a single-shot AiAgent (no
+tools, memory, structured output, or MCP) as an invoke of that capability with a
+synthesized input mapping from the AiAgent config, and a new stdlib
+`ai-agent-output` builds the generated-compatible `{response, iterations,
+toolCalls}` envelope from the returned choice. A gated A/B test drives both
+artifacts through an in-test mock LLM proxy and asserts completion-payload
+parity (checkpoint traffic differs by design — see the phase-12 plan doc). The
+support gate still rejects tool/memory/structured-output/MCP AiAgents (they fall
+back to the generated compiler) until Slices 1–6. See
+`docs/wasm-direct-emitter-phase12-plan.md`.
 
 Implementation steps:
 

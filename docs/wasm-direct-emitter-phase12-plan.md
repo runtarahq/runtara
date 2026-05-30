@@ -1,6 +1,16 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **approved; Slice 0 in progress.**
+Status: **Slice 0 complete; Slices 1–6 pending.**
+
+Slice 0 (single-shot AiAgent) is done and e2e-verified: a single-shot AiAgent
+compiles to a validated WASM component and runs at output parity with the
+generated Rust path (gated A/B test
+`direct_wasm_matches_components_ai_agent_single_shot`). One intentional
+divergence: checkpoint traffic differs (generated uses a bespoke
+`agent::<step>/llm/<iter>` LLM checkpoint; direct reuses the standard Agent
+checkpoint `agent::ai-tools::chat-completion::<step>`), so the A/B test asserts
+completion-payload parity, not checkpoint parity. Both are internally consistent
+for crash/resume.
 
 Decisions (resolved with the maintainer):
 - The `chat-completion` capability is added to the **existing
