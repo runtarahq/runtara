@@ -760,11 +760,17 @@ Current remaining action items:
     completes), but the direct artifact lets the failure escape the child and
     fails the parent. The run plan is correct (the child is built with
     `include_on_error`, so its EmbedWorkflow step carries an `error_plan`), so the
-    bug is in the **emission** — the child's `onError` route does not recover the
-    nested embed (an early flag-clear attempt was wrong: it regressed
-    `cached_embed_workflow_checkpoint_replay` and did not fix the target). Needs
-    the wasm-tools-print tracing used for the Split-retry fix, in
-    `embed_workflow.rs`'s error routing / shared `DIRECT_EMBED_CHILD_ERROR_FLAG`.
+    bug is in the **emission**. Traced to the WASM: the shared
+    `DIRECT_EMBED_CHILD_ERROR_FLAG` local (local 45 in the dump) is set by the
+    inner embed (`call_grandchild`) on the grandchild failure; its onError route
+    then **breaks to the handled-target** (`br` out) rather than falling through,
+    and the flag is left set across the inner embed's frame, so the outer embed
+    (`call_child`) sees it and fails with `call 85` (runtime fail) instead of
+    treating the child as recovered. A naive flag-clear *after* the route is dead
+    code (the route already branched away) and clearing *before* it doesn't help
+    (the route's frame restore re-touches the flag local). The fix needs the flag
+    cleared on the handled-target landing — or a per-nesting-level flag local —
+    and careful verification against `cached_embed_workflow_checkpoint_replay`.
   - `dont_stop_nested_split_failure_aggregation` — **not a direct-vs-generated
     divergence**: `assert_success_parity` passes (direct's completion payload
     equals the generated artifact's), so the direct emitter is at parity. The
