@@ -1,12 +1,29 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2 + multi-tool complete; memory/compaction/MCP/durability pending.**
+Status: **Slices 0, 1, 2, 3 (memory) + multi-tool complete; compaction/MCP/durability pending.**
 
 Multi-tool dispatch (commit 82321f16) is done: the `chat-turn` capability
 resolves each tool call's name to a `tool_index`, and the loop dispatches by
-index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: conversation
-memory (Slice 3), compaction (Slice 4), MCP/embed/wait tools (Slice 5),
-tool-loop onError routing + per-turn durability/crash-resume (Slice 6).
+index over a `Vec<DirectAiToolPlan>`. Remaining AiAgent work: compaction
+(Slice 4), MCP/embed/wait tools (Slice 5), tool-loop onError routing +
+per-turn durability/crash-resume (Slice 6).
+
+### Slice 3 (conversation memory) — DONE and e2e-verified
+
+An AiAgent with `config.memory` and a `memory`-labelled edge to an Agent step
+now lowers at output parity (gated A/B test
+`direct_wasm_matches_components_ai_agent_memory`). The manifest routes the
+memory edge to the `object_model` provider (`load-memory` / `save-memory`),
+adds the conversation mapping and load/save provider agent entries; the plan
+carries a `DirectAiMemoryPlan`; `compile/ai_agent_loop.rs` resolves the
+conversation id once, invokes `load-memory` and seeds the initial loop state
+via `ai-memory-initial-state` before the turn loop, then `ai-memory-save-input`
++ `save-memory` after it. New stdlib helpers `ai-memory-initial-state` /
+`ai-memory-save-input`. Intentional divergence from a generated defect: the
+generated `codegen/ast/steps/ai_agent.rs` emitted the memory load/save end
+debug events with the `data`/`input_mapping_json` arguments swapped (failed to
+compile any memory AiAgent); fixed in the generated path so the A/B test can
+verify both. The direct path was authored correctly and never inherited it.
 
 ### Slice 1 (tool loop) — DONE and e2e-verified
 
@@ -316,15 +333,16 @@ these must be reproduced exactly for crash/resume parity.
 
 ## 8. Incremental slices (MVP-first; each slice is shippable + tested)
 
-1. **Slice 0 — component + MVP single-shot.** Add the `chat-completion`
+1. ✅ **Slice 0 — component + MVP single-shot.** Add the `chat-completion`
    capability and a deterministic mock provider. Direct-lower the *no-tool,
    no-memory, no-structured-output, single-iteration* AiAgent: build input →
    checkpointed invoke → extract final text → output envelope. Gate everything
    else. Prove end-to-end + A/B parity on one fixture.
-2. **Slice 1 — multi-iteration tool loop** (Agent-capability tools only).
+2. ✅ **Slice 1 — multi-iteration tool loop** (Agent-capability tools only).
    Iteration bound, tool dispatch + per-tool checkpoint, conversation append.
-3. **Slice 2 — structured output** (`output_schema`).
-4. **Slice 3 — memory** load/save + sanitization (object_model edge).
+   (+ multi-tool name-matched dispatch.)
+3. ✅ **Slice 2 — structured output** (`output_schema`).
+4. ✅ **Slice 3 — memory** load/save (object_model edge).
 5. **Slice 4 — compaction** (SlidingWindow, then Summarize).
 6. **Slice 5 — MCP synthetic tools** + EmbedWorkflow/WaitForSignal tools.
 7. **Slice 6 — durability hardening**: breakpoint pause/resume, crash/resume

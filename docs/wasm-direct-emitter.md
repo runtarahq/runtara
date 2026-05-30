@@ -719,14 +719,16 @@ Current implementation progress on `codex/wasm-direct-emitter`:
 
 Current remaining action items:
 
-- `AiAgent` is the last step type being lowered (Phase 12). **Single-shot**
-  AiAgent (no tools, memory, structured output, or MCP) is now supported: it
-  lowers as an invoke of the `ai-tools` `chat-completion` capability (so no
-  LLM-provider logic is linked into workflow.wasm) and runs at output parity
-  with the generated path (gated A/B test). The remaining AiAgent surface — the
-  tool loop, conversation memory, structured output, compaction, and MCP — is
-  still gated (falls back to the generated compiler) and lands in Phase 12
-  Slices 1–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
+- `AiAgent` is the last step type being lowered (Phase 12). Supported today:
+  **single-shot** (invoke of the `ai-tools` `chat-completion` capability, so no
+  LLM-provider logic is linked into workflow.wasm), **structured output**, the
+  **multi-iteration tool loop** (single and multiple name-matched Agent-capability
+  tools, via the `chat-turn` capability), and **conversation memory**
+  (`load-memory`/`save-memory` through the object_model provider) — all at output
+  parity with the generated path (gated A/B tests). The remaining AiAgent surface
+  — compaction, MCP synthetic tools, embed/wait tools, and per-turn AiAgent
+  durability/crash-resume — is still gated (falls back to the generated compiler)
+  and lands in Phase 12 Slices 4–6. Every other step type (Agent, Split, While, Delay, EmbedWorkflow,
   WaitForSignal, Conditional, Filter, Switch, GroupBy, Log, terminal Error,
   Finish) is fully supported, including their durable/breakpoint/onError/retry
   variants. The only other deferrals are parallel fan-out routing
@@ -2772,20 +2774,25 @@ Current status:
 Goal: support AI agent workflows without linking provider logic into every
 workflow.
 
-Progress: Slices 0 (single-shot), 1 (tool loop), and 2 (structured output) are
-done and e2e-verified. The `ai-tools` component gained `chat-completion` (one
-LLM call) and `chat-turn` (one loop turn) capabilities, both backed by the
-shared `runtara_ai::run_completion`, so provider logic lives behind the agent
-`invoke` ABI instead of linked into workflow.wasm. The direct emitter lowers:
-single-shot and structured-output AiAgents as a `chat-completion` invoke with an
-`ai-agent-output`/structured envelope; and tool-loop AiAgents (one
-Agent-capability tool) as a core-WASM loop (`compile/ai_agent_loop.rs`) driving
-`chat-turn` and dispatching the tool agent, via the `ai-turn-*` stdlib helpers.
-Gated A/B tests drive both artifacts through an in-test mock LLM proxy and
-assert completion-payload parity (checkpoint traffic differs by design — see the
-phase-12 plan doc). Still gated to the generated compiler (Slices 3–6):
-conversation memory, compaction, MCP synthetic tools, multi-tool loops, and
-AiAgent durability/crash-resume. See `docs/wasm-direct-emitter-phase12-plan.md`.
+Progress: Slices 0 (single-shot), 1 (tool loop, single + multiple tools),
+2 (structured output), and 3 (conversation memory) are done and e2e-verified.
+The `ai-tools` component gained `chat-completion` (one LLM call) and `chat-turn`
+(one loop turn) capabilities, both backed by the shared
+`runtara_ai::run_completion`, so provider logic lives behind the agent `invoke`
+ABI instead of linked into workflow.wasm. The direct emitter lowers: single-shot
+and structured-output AiAgents as a `chat-completion` invoke with an
+`ai-agent-output`/structured envelope; tool-loop AiAgents (one or more
+name-matched Agent-capability tools) as a core-WASM loop
+(`compile/ai_agent_loop.rs`) driving `chat-turn` and dispatching the tool
+agent(s), via the `ai-turn-*` stdlib helpers; and conversation memory by
+invoking `load-memory` before the loop (seeding initial state via
+`ai-memory-initial-state`) and `save-memory` after (`ai-memory-save-input`),
+through the object_model provider. Gated A/B tests drive both artifacts through
+an in-test mock LLM proxy (plus an object_model mock for memory) and assert
+completion-payload parity (checkpoint traffic differs by design — see the
+phase-12 plan doc). Still gated to the generated compiler (Slices 4–6):
+compaction, MCP synthetic tools, embed/wait tools, and AiAgent
+durability/crash-resume. See `docs/wasm-direct-emitter-phase12-plan.md`.
 
 Implementation steps:
 
