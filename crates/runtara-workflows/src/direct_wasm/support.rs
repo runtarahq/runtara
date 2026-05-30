@@ -642,15 +642,21 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
     let Some(config) = step.config.as_ref() else {
         return false;
     };
-    // MCP edges (synthetic tools) require a later slice.
-    let has_mcp = graph.execution_plan.iter().any(|edge| {
-        edge.from_step == step.id
-            && edge
-                .label
+    // MCP edges advertise synthetic search/invoke tools; each must target an
+    // Agent step with `agent_id == "mcp"` (the toolset suffix must be non-empty).
+    let mcp_targets = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step.id)
+        .filter(|edge| {
+            edge.label
                 .as_deref()
-                .is_some_and(|label| label.starts_with("mcp."))
-    });
-    if has_mcp {
+                .is_some_and(|label| label.starts_with("mcp.") && label.len() > 4)
+        })
+        .collect::<Vec<_>>();
+    if !mcp_targets.iter().all(|edge| {
+        matches!(graph.steps.get(&edge.to_step), Some(Step::Agent(agent)) if agent.agent_id == "mcp")
+    }) {
         return false;
     }
     // Conversation memory: the `memory`-labelled edge must target an Agent step
@@ -684,12 +690,14 @@ fn supports_ai_agent_step_baseline(graph: &ExecutionGraph, step: &AiAgentStep) -
         })
         .collect::<Vec<_>>();
 
-    if tool_targets.is_empty() {
-        // Single-shot (chat-completion), with or without structured output.
+    if tool_targets.is_empty() && mcp_targets.is_empty() {
+        // Single-shot (chat-completion) or a memory-only loop, with or without
+        // structured output.
         return true;
     }
-    // Tool loop (chat-turn): every tool must target an Agent step, and the step
-    // must have no onError (the loop does not yet route onError).
+    // Tool loop (chat-turn): every Agent tool must target an Agent step, MCP
+    // tools were validated above, and the step must have no onError (the loop
+    // does not yet route onError).
     let has_on_error = graph
         .execution_plan
         .iter()

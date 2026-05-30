@@ -879,6 +879,12 @@ pub struct ChatTurnInput {
     #[serde(default)]
     pub system_prompt: String,
     #[field(
+        display_name = "System Prompt Suffix",
+        description = "Text appended to the system prompt (e.g. the MCP toolset usage guide)"
+    )]
+    #[serde(default)]
+    pub system_prompt_suffix: String,
+    #[field(
         display_name = "User Prompt",
         description = "Original user prompt (sent on the first turn only)"
     )]
@@ -1013,7 +1019,13 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         conn_params: connection.parameters.clone(),
         connection_id: connection.connection_id.clone(),
         model_id: input.model.clone(),
-        system_prompt: input.system_prompt.clone(),
+        // The MCP toolset usage guide (if any) is appended to the system prompt,
+        // mirroring the generated loop's `system_prompt + mcp_prompt_addition`.
+        system_prompt: if input.system_prompt_suffix.is_empty() {
+            input.system_prompt.clone()
+        } else {
+            format!("{}{}", input.system_prompt, input.system_prompt_suffix)
+        },
         user_prompt: if is_first {
             input.user_prompt.clone()
         } else {

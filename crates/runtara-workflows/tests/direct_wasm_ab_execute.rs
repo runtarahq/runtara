@@ -72,6 +72,7 @@ const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.jso
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
 const AI_AGENT_MEMORY_SUMMARIZE: &str = include_str!("fixtures/ai_agent_memory_summarize.json");
+const AI_AGENT_MCP: &str = include_str!("fixtures/ai_agent_mcp.json");
 /// Canned assistant text returned by the mock LLM proxy in `route`. It is valid
 /// JSON so the same mock drives both the plain single-shot test (response is the
 /// JSON string) and the structured-output test (response is the parsed object).
@@ -956,27 +957,78 @@ fn route(
     if method == "POST" && path == "/proxy" {
         let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let llm_request = envelope.get("body").cloned().unwrap_or(Value::Null);
-        let message_count = llm_request
+
+        // MCP JSON-RPC envelope: the mcp agent posts `tools/list` / `tools/call`
+        // through the same proxy. Respond as a deterministic MCP server.
+        if let Some(rpc) = llm_request.get("method").and_then(Value::as_str) {
+            let rpc_body = match rpc {
+                "tools/list" => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": llm_request.get("id").cloned().unwrap_or(Value::from(1)),
+                    "result": {
+                        "tools": [{
+                            "name": "echo_tool",
+                            "description": "Echo back the provided value.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "value": { "type": "string" } },
+                                "required": ["value"]
+                            }
+                        }]
+                    }
+                }),
+                _ => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": llm_request.get("id").cloned().unwrap_or(Value::from(1)),
+                    "result": {
+                        "content": [{ "type": "text", "text": "echo: from-mcp" }],
+                        "isError": false
+                    }
+                }),
+            };
+            return (
+                200,
+                serde_json::json!({ "status": 200, "headers": {}, "body": rpc_body }),
+            );
+        }
+
+        let messages = llm_request
             .get("messages")
             .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0);
+            .cloned()
+            .unwrap_or_default();
+        let message_count = messages.len();
         let tools = llm_request
             .get("tools")
             .and_then(Value::as_array)
             .filter(|tools| !tools.is_empty());
-        let wants_tool_call = tools.is_some() && message_count <= 2;
 
-        let (message, finish_reason) = if let (true, Some(tools)) = (wants_tool_call, tools) {
-            // Call the last advertised tool, exercising a non-zero tool index in
-            // the multi-tool case.
-            let tool_name = tools
-                .last()
-                .and_then(|tool| tool.get("function").and_then(|f| f.get("name")))
-                .or_else(|| tools.last().and_then(|tool| tool.get("name")))
-                .and_then(Value::as_str)
-                .unwrap_or("tool")
-                .to_string();
+        // MCP meta-tools advertise a `<toolset>_search` / `<toolset>_invoke`
+        // pair. Drive the three-step flow search → invoke → text, selecting the
+        // step from how many assistant tool calls already happened.
+        let mcp_tool = |suffix: &str| -> Option<String> {
+            tools?.iter().find_map(|tool| {
+                let name = tool
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .or_else(|| tool.get("name"))
+                    .and_then(Value::as_str)?;
+                name.ends_with(suffix).then(|| name.to_string())
+            })
+        };
+        let mcp_search = mcp_tool("_search");
+        let mcp_invoke = mcp_tool("_invoke");
+        let prior_tool_calls = messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(Value::as_str) == Some("assistant")
+                    && m.get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| !calls.is_empty())
+            })
+            .count();
+
+        let tool_call = |name: String, arguments: &str| {
             (
                 serde_json::json!({
                     "role": "assistant",
@@ -984,17 +1036,47 @@ fn route(
                     "tool_calls": [{
                         "id": "call-1",
                         "type": "function",
-                        "function": { "name": tool_name, "arguments": "{\"value\":\"from-tool\"}" }
+                        "function": { "name": name, "arguments": arguments }
                     }]
                 }),
                 "tool_calls",
             )
-        } else {
-            (
-                serde_json::json!({ "role": "assistant", "content": MOCK_AI_RESPONSE }),
-                "stop",
-            )
         };
+
+        let (message, finish_reason) =
+            if let (Some(search), Some(invoke)) = (mcp_search.clone(), mcp_invoke.clone()) {
+                match prior_tool_calls {
+                    0 => tool_call(search, "{\"query\":\"echo\"}"),
+                    1 => tool_call(
+                        invoke,
+                        "{\"tool_name\":\"echo_tool\",\"args\":{\"value\":\"x\"}}",
+                    ),
+                    _ => (
+                        serde_json::json!({ "role": "assistant", "content": MOCK_AI_RESPONSE }),
+                        "stop",
+                    ),
+                }
+            } else if tools.is_some() && message_count <= 2 {
+                // Regular Agent tool loop: call the last advertised tool, exercising
+                // a non-zero tool index in the multi-tool case.
+                let tool_name = tools
+                    .and_then(|tools| tools.last())
+                    .and_then(|tool| tool.get("function").and_then(|f| f.get("name")))
+                    .or_else(|| {
+                        tools
+                            .and_then(|tools| tools.last())
+                            .and_then(|tool| tool.get("name"))
+                    })
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                tool_call(tool_name, "{\"value\":\"from-tool\"}")
+            } else {
+                (
+                    serde_json::json!({ "role": "assistant", "content": MOCK_AI_RESPONSE }),
+                    "stop",
+                )
+            };
 
         return (
             200,
@@ -1061,6 +1143,20 @@ fn route(
         }
         // /schemas create, etc.
         return (200, serde_json::json!({ "success": true }));
+    }
+
+    // Connection-service mock for the MCP agent. `resolve_connection_params`
+    // GETs `{CONNECTION_SERVICE_URL}/{tenant}/{connection_id}` when the invoke
+    // passed empty parameters; it expects `{parameters: {...}}`. The `url` only
+    // needs to be non-empty — the mcp client posts JSON-RPC through the proxy
+    // (handled above), not to this url directly.
+    if method == "GET" && path.starts_with("/connsvc/") {
+        return (
+            200,
+            serde_json::json!({
+                "parameters": { "url": "http://mcp-mock.local/rpc" }
+            }),
+        );
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -1514,6 +1610,10 @@ fn execute_artifact_with_options(
         .arg(format!(
             "RUNTARA_OBJECT_MODEL_URL=http://{addr}/api/internal/object-model"
         ))
+        // The mcp agent resolves empty connection parameters via the
+        // connection-service mock (`{base}/{tenant}/{connection_id}`).
+        .arg("--env")
+        .arg(format!("CONNECTION_SERVICE_URL=http://{addr}/connsvc"))
         .arg("--env")
         .arg("RUST_LOG=warn");
     if options.debug_mode {
@@ -5225,6 +5325,58 @@ fn direct_wasm_matches_components_ai_agent_memory_summarize() {
         summary_text.starts_with("[Previous conversation summary]:"),
         "the first kept message should be the summary, got {:?}",
         direct_saved[0]
+    );
+}
+
+/// AiAgent with an MCP toolset edge (`mcp.github`). The mock LLM drives the
+/// three-step flow `github_search` → `github_invoke` → text; both synthetic
+/// tools dispatch to the `mcp` agent (mcp-tool-search / mcp-tool-invoke) through
+/// the proxy's JSON-RPC mock. Both artifacts complete at output parity.
+#[test]
+fn direct_wasm_matches_components_ai_agent_mcp() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("ai-agent-mcp", AI_AGENT_MCP);
+    let direct_artifact = compile_direct_artifact(&components_dir, "ai-agent-mcp", AI_AGENT_MCP);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"find an echo tool"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-mcp",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-mcp",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}",
+        direct.stderr, direct.error_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "MCP AiAgent completion payload mismatch"
+    );
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
     );
 }
 

@@ -1007,10 +1007,12 @@ fn step_manifest(
                 .and_then(|config| config.memory.as_ref())
                 .is_some();
             let tool_edges = ai_agent_tool_edges(graph, &step.id);
-            let capability_id = if tool_edges.is_empty() && !has_memory {
+            let mcp_edges = ai_agent_mcp_edges(graph, &step.id);
+            let has_mcp = !mcp_edges.is_empty();
+            let capability_id = if tool_edges.is_empty() && !has_memory && !has_mcp {
                 "chat-completion"
             } else {
-                let tool_defs = tool_edges
+                let mut tool_defs = tool_edges
                     .iter()
                     .map(|(label, target)| {
                         serde_json::json!({
@@ -1028,10 +1030,29 @@ fn step_manifest(
                         })
                     })
                     .collect::<Vec<_>>();
+                // MCP toolsets each advertise two synthetic meta-tools, appended
+                // after the Agent tools (the LLM's tool_index resolves by this
+                // order, which the run plan's tool list mirrors exactly).
+                for (toolset, _target, _conn) in &mcp_edges {
+                    tool_defs.extend(ai_agent_mcp_tool_defs(toolset));
+                }
                 mapping.insert(
                     "tools".to_string(),
                     serde_json::json!({ "valueType": "immediate", "value": tool_defs }),
                 );
+                if has_mcp {
+                    let toolsets = mcp_edges
+                        .iter()
+                        .map(|(toolset, _, _)| toolset.clone())
+                        .collect::<Vec<_>>();
+                    mapping.insert(
+                        "system_prompt_suffix".to_string(),
+                        serde_json::json!({
+                            "valueType": "immediate",
+                            "value": ai_agent_mcp_prompt_addition(&toolsets),
+                        }),
+                    );
+                }
                 "chat-turn"
             };
             let input_mapping_id = state.allocate_mapping_id();
@@ -1136,6 +1157,38 @@ fn step_manifest(
                             "summarize-memory",
                         ),
                         input_mapping_id: conversation_mapping_id,
+                        required_inputs: Vec::new(),
+                        max_retries: None,
+                        retry_delay: None,
+                        timeout: None,
+                    });
+                }
+            }
+            // MCP toolsets: each `mcp.<toolset>` edge contributes two tool
+            // provider entries (the `mcp` agent's mcp-tool-search /
+            // mcp-tool-invoke capabilities), named after the synthetic tools so
+            // the run plan can resolve each advertised tool to its provider.
+            // Order matches `ai_agent_mcp_tool_defs`: search then invoke.
+            for (toolset, _target, connection_id) in &mcp_edges {
+                for (role, capability) in
+                    [("search", "mcp-tool-search"), ("invoke", "mcp-tool-invoke")]
+                {
+                    collections.agents.push(DirectAgentManifest {
+                        id: state.allocate_agent_id(),
+                        step_id: step.id.clone(),
+                        name: Some(format!("{toolset}_{role}")),
+                        step_type: "AiAgent".to_string(),
+                        purpose: "agent.tool.mcp".to_string(),
+                        agent_id: "mcp".to_string(),
+                        capability_id: capability.to_string(),
+                        connection_id: connection_id.clone(),
+                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        rate_limited: agent_capability_rate_limited(
+                            agent_catalog,
+                            "mcp",
+                            capability,
+                        ),
+                        input_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
@@ -1249,6 +1302,83 @@ fn ai_agent_memory_provider(
         Some(Step::Agent(agent)) => Some((agent.agent_id.clone(), agent.connection_id.clone())),
         _ => None,
     }
+}
+
+/// The AiAgent's MCP tool edges as `(toolset_id, target_step_id, connection_id)`.
+/// An `mcp.<toolset>` edge targets an Agent step with `agent_id == "mcp"`; each
+/// becomes two synthetic LLM tools (`<toolset>_search` / `<toolset>_invoke`).
+fn ai_agent_mcp_edges(
+    graph: &ExecutionGraph,
+    step_id: &str,
+) -> Vec<(String, String, Option<String>)> {
+    graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id)
+        .filter_map(|edge| {
+            let label = edge.label.as_deref()?;
+            let toolset = label.strip_prefix("mcp.").filter(|s| !s.is_empty())?;
+            let connection_id = match graph.steps.get(&edge.to_step) {
+                Some(Step::Agent(agent)) => agent.connection_id.clone(),
+                _ => return None,
+            };
+            Some((toolset.to_string(), edge.to_step.clone(), connection_id))
+        })
+        .collect()
+}
+
+/// The two synthetic tool definitions advertised to the LLM for one MCP toolset:
+/// `<toolset>_search` (discover tools) and `<toolset>_invoke` (call one).
+/// Mirrors the generated `mcp_tool_def_tokens`.
+fn ai_agent_mcp_tool_defs(toolset: &str) -> [serde_json::Value; 2] {
+    let search = serde_json::json!({
+        "name": format!("{toolset}_search"),
+        "description": format!(
+            "Search the `{toolset}` MCP toolset for tools matching a free-text query. \
+             Use this before `{toolset}_invoke` to discover tool names and argument shapes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Free-text description of what you need." },
+                "limit": { "type": "integer", "description": "Maximum number of tools to return (default 5, max 20)." }
+            },
+            "required": ["query"]
+        }
+    });
+    let invoke = serde_json::json!({
+        "name": format!("{toolset}_invoke"),
+        "description": format!(
+            "Invoke a specific tool from the `{toolset}` MCP toolset. The `tool_name` must be \
+             one returned by `{toolset}_search`; `args` must match its input schema."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_name": { "type": "string", "description": "Exact tool name from the search result." },
+                "args": { "type": "object", "description": "Tool arguments matching the tool's input schema." }
+            },
+            "required": ["tool_name", "args"]
+        }
+    });
+    [search, invoke]
+}
+
+/// The system-prompt suffix appended when an AiAgent has MCP edges, listing the
+/// toolsets and the search→invoke pattern. Mirrors the generated
+/// `mcp_prompt_addition`.
+fn ai_agent_mcp_prompt_addition(toolsets: &[String]) -> String {
+    let names = toolsets
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n\nExternal toolsets are available: {names}. To use one, first call \
+         `<toolset>_search` with a description of what you need to find available \
+         tools, then call `<toolset>_invoke` with the exact tool name and args \
+         from the search result. Do not guess tool names."
+    )
 }
 
 /// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled

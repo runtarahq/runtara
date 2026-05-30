@@ -653,26 +653,41 @@ fn step_run_plan_inner(
                 .unwrap_or_default();
             let mut tools = Vec::with_capacity(tool_names.len());
             for name in &tool_names {
-                let edge = tool_edges
+                // Advertised tool order is Agent tools then MCP meta-tools. An
+                // Agent tool's name is its edge label; an MCP tool's name is
+                // `<toolset>_search`/`_invoke`, resolved to its `agent.tool.mcp`
+                // provider entry (named after the synthetic tool).
+                let tool_agent = if let Some(edge) = tool_edges
                     .iter()
                     .find(|edge| edge.label.as_deref() == Some(name.as_str()))
-                    .ok_or_else(|| {
-                        DirectCompileError::Component(format!(
-                            "AiAgent tool '{name}' has no execution-plan edge"
-                        ))
-                    })?;
-                let tool_agent = graph
-                    .agents
-                    .iter()
-                    .find(|candidate| {
-                        candidate.step_id == edge.to_step && candidate.purpose == "agent.config"
-                    })
-                    .ok_or_else(|| {
-                        DirectCompileError::Component(format!(
-                            "AiAgent tool target '{}' has no agent config",
-                            edge.to_step
-                        ))
-                    })?;
+                {
+                    graph
+                        .agents
+                        .iter()
+                        .find(|candidate| {
+                            candidate.step_id == edge.to_step && candidate.purpose == "agent.config"
+                        })
+                        .ok_or_else(|| {
+                            DirectCompileError::Component(format!(
+                                "AiAgent tool target '{}' has no agent config",
+                                edge.to_step
+                            ))
+                        })?
+                } else {
+                    graph
+                        .agents
+                        .iter()
+                        .find(|candidate| {
+                            candidate.step_id == step_id
+                                && candidate.purpose == "agent.tool.mcp"
+                                && candidate.name.as_deref() == Some(name.as_str())
+                        })
+                        .ok_or_else(|| {
+                            DirectCompileError::Component(format!(
+                                "AiAgent tool '{name}' has no execution-plan edge or MCP provider"
+                            ))
+                        })?
+                };
                 tools.push(DirectAiToolPlan {
                     agent_id: tool_agent.id,
                     agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),

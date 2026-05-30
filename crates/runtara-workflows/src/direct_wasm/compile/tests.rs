@@ -70,6 +70,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_memory_summarize" => {
             include_str!("../../../tests/fixtures/ai_agent_memory_summarize.json")
         }
+        "ai_agent_mcp" => {
+            include_str!("../../../tests/fixtures/ai_agent_mcp.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2423,6 +2426,107 @@ fn direct_compile_supports_ai_agent_memory_summarize_graph() {
     assert!(
         memory.summarize.is_some(),
         "Summarize strategy should carry a summarize provider plan"
+    );
+}
+
+#[test]
+fn direct_compile_supports_ai_agent_mcp_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-mcp".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_mcp"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct MCP AiAgent compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct AiAgent MCP artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    // MCP forces the chat-turn capability and advertises two synthetic tools.
+    let ai_agent = manifest
+        .graph
+        .agents
+        .iter()
+        .find(|agent| agent.step_id == "ai" && agent.purpose == "agent.config")
+        .expect("ai-agent config");
+    assert_eq!(ai_agent.capability_id, "chat-turn");
+    let tool_mapping = manifest
+        .graph
+        .mappings
+        .iter()
+        .find(|mapping| mapping.step_id == "ai" && mapping.purpose == "agent.inputMapping")
+        .expect("ai-agent input mapping");
+    let tool_names: Vec<&str> = tool_mapping
+        .value
+        .get("tools")
+        .and_then(|tools| tools.get("value"))
+        .and_then(|value| value.as_array())
+        .map(|defs| {
+            defs.iter()
+                .filter_map(|def| def.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(tool_names, vec!["github_search", "github_invoke"]);
+    // A system-prompt suffix guides the LLM to the search→invoke pattern.
+    assert!(
+        tool_mapping
+            .value
+            .get("system_prompt_suffix")
+            .and_then(|suffix| suffix.get("value"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| text.contains("github")),
+        "expected an MCP system-prompt suffix"
+    );
+    // Two provider entries (mcp-tool-search / mcp-tool-invoke) on the mcp agent.
+    let mcp_providers: Vec<&str> = manifest
+        .graph
+        .agents
+        .iter()
+        .filter(|agent| agent.step_id == "ai" && agent.purpose == "agent.tool.mcp")
+        .map(|agent| agent.capability_id.as_str())
+        .collect();
+    assert_eq!(mcp_providers, vec!["mcp-tool-search", "mcp-tool-invoke"]);
+    assert!(
+        manifest
+            .feature_summary
+            .agent_ids
+            .iter()
+            .any(|id| id == "mcp")
+    );
+
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    // The run plan's tool list mirrors the advertised order: search then invoke.
+    assert_eq!(tools.len(), 2, "expected the two MCP meta-tools");
+    assert!(
+        tools.iter().all(|tool| tool.agent_component_id == "mcp"),
+        "MCP tools dispatch to the mcp component"
     );
 }
 
