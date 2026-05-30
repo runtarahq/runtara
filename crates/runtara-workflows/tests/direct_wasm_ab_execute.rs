@@ -65,6 +65,9 @@ const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json"
 const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
 const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
 const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json");
+const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
+/// Canned assistant text returned by the mock LLM proxy in `route`.
+const MOCK_AI_RESPONSE: &str = "Mocked single-shot answer.";
 const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
     include_str!("fixtures/split_dont_stop_nested_split_error.json");
 const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
@@ -929,6 +932,31 @@ fn route(
         return (200, serde_json::json!({"ok": true}));
     }
 
+    // Deterministic mock LLM proxy. `runtara-http::call_agent` posts the proxy
+    // envelope `{method, url, headers, body, connection_id, ...}` here when
+    // `RUNTARA_HTTP_PROXY_URL` points at this server. We return a canned OpenAI
+    // chat-completion response so AiAgent runs are deterministic and identical
+    // across the generated and direct artifacts (both call through this mock).
+    if method == "POST" && path == "/proxy" {
+        return (
+            200,
+            serde_json::json!({
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "id": "chatcmpl-mock",
+                    "model": "gpt-4o",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": MOCK_AI_RESPONSE },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+                }
+            }),
+        );
+    }
+
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
         let mut iter = rest.splitn(2, '/');
         let _instance_id = iter.next().unwrap_or("");
@@ -1371,6 +1399,10 @@ fn execute_artifact_with_options(
         .arg(format!("RUNTARA_INSTANCE_ID={instance_id}"))
         .arg("--env")
         .arg("RUNTARA_TENANT_ID=direct-wasm-ab")
+        // Route agent HTTP egress (e.g. the AiAgent chat-completion LLM call)
+        // through the in-test mock proxy served by `route`'s `/proxy` handler.
+        .arg("--env")
+        .arg(format!("RUNTARA_HTTP_PROXY_URL=http://{addr}/proxy"))
         .arg("--env")
         .arg("RUST_LOG=warn");
     if options.debug_mode {
@@ -4737,6 +4769,74 @@ fn direct_wasm_matches_components_embed_workflow_timeout_noop() {
     let expected_output = serde_json::json!({ "result": { "result": "fresh-child" } });
     assert_eq!(components.output_json.as_ref(), Some(&expected_output));
     assert_eq!(direct.output_json.as_ref(), Some(&expected_output));
+}
+
+/// Single-shot AiAgent end-to-end parity. The direct artifact lowers the
+/// AiAgent as an `ai-tools`/`chat-completion` invoke; the generated artifact
+/// links runtara-ai inline. Both issue the LLM call through the in-test mock
+/// proxy (`/proxy`), which returns a deterministic completion, so both produce
+/// the identical `{response, iterations, toolCalls}` envelope.
+#[test]
+fn direct_wasm_matches_components_ai_agent_single_shot() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("ai-agent-single-shot", AI_AGENT_SINGLE_SHOT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "ai-agent-single-shot",
+        AI_AGENT_SINGLE_SHOT,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"question":"What is 2+2?"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-single-shot",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-single-shot",
+        workflow_input,
+    );
+
+    // Completion-payload parity: both paths call the same mock LLM and produce
+    // the identical AiAgent output envelope. We deliberately do NOT assert
+    // checkpoint-traffic parity here: the generated loop checkpoints the LLM
+    // call under a bespoke `agent::<step>/llm/<iter>` key (storing the raw
+    // choice), while direct mode reuses the standard Agent checkpoint
+    // (`agent::ai-tools::chat-completion::<step>`, storing the capability's
+    // `{choice, usage}`). Both are internally consistent for crash/resume; the
+    // keys legitimately differ because the two lower the LLM call differently.
+    assert!(
+        components.status_success,
+        "components AiAgent run failed:\n{}",
+        components.stderr
+    );
+    assert!(
+        direct.status_success,
+        "direct AiAgent run failed:\n{}",
+        direct.stderr
+    );
+    assert!(components.error_json.is_none() && direct.error_json.is_none());
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "AiAgent completion payload mismatch"
+    );
+    // The finish step maps `answer <- steps.ai.outputs.response`.
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert_eq!(
+        direct_out.get("answer"),
+        Some(&serde_json::json!(MOCK_AI_RESPONSE))
+    );
 }
 
 #[test]
