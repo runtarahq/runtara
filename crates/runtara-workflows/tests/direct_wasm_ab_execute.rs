@@ -64,6 +64,7 @@ const SPLIT_NESTED_SPLIT: &str = include_str!("fixtures/split_nested_split.json"
 const WHILE_NESTED_SPLIT: &str = include_str!("fixtures/while_nested_split.json");
 const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
 const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
+const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json");
 const SPLIT_DONT_STOP_NESTED_SPLIT_ERROR: &str =
     include_str!("fixtures/split_dont_stop_nested_split_error.json");
 const SPLIT_DONT_STOP_DEEP_NESTED_WHILE_SPLIT_ERROR: &str =
@@ -4582,6 +4583,54 @@ fn direct_wasm_split_on_error_preserves_structured_error() {
     assert_eq!(
         components_out.get("category"),
         Some(&serde_json::json!("unknown"))
+    );
+}
+
+/// An Agent step carrying a `compensation` (saga) config must behave exactly
+/// like a plain agent: compensation is dead code end-to-end (codegen never
+/// emits it, the SDK records `compensation_step_id: None`, the host
+/// `CompensationManager` is never triggered), so generated Rust accepts and
+/// ignores the field. Direct mode ungates it as the same no-op rather than
+/// rejecting it, and this asserts full execution parity to prove the field is
+/// inert in both paths.
+#[test]
+fn direct_wasm_matches_components_agent_compensation_noop() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("agent-compensation", AGENT_COMPENSATION);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "agent-compensation", AGENT_COMPENSATION);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"value":{"hello":"world"}}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-agent-compensation",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-agent-compensation",
+        workflow_input,
+    );
+
+    // Full parity: the compensation field changes nothing, so both artifacts
+    // produce the identical return-input completion payload and event stream.
+    assert_success_parity("agent-compensation", 0, &components, &direct);
+    // Sanity that the agent actually ran (not an empty completion): the
+    // return-input payload propagated into the finish output.
+    let output_str =
+        serde_json::to_string(direct.output_json.as_ref().expect("direct completion")).unwrap();
+    assert!(
+        output_str.contains("hello") && output_str.contains("world"),
+        "agent output should carry the return-input payload: {output_str}"
     );
 }
 

@@ -588,7 +588,12 @@ fn supports_direct_control_step_inner(
 }
 
 fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    step.timeout.is_none() && step.compensation.is_none()
+    // `compensation` is intentionally not gated: it is a no-op end-to-end in the
+    // generated Rust path too (codegen never emits it, the SDK always records
+    // `compensation_step_id: None`, and the host `CompensationManager` is never
+    // triggered). Accepting + ignoring it matches generated behavior; rejecting
+    // it would make direct mode stricter than generated. See `collect_agent_step_unsupported`.
+    step.timeout.is_none()
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
@@ -1188,12 +1193,11 @@ fn collect_agent_step_unsupported(
             "Agent direct lowering needs timeout enforcement",
         );
     }
-    if step.compensation.is_some() {
-        push(
-            "agent-compensation",
-            "Agent direct lowering needs compensation/saga propagation",
-        );
-    }
+    // `compensation` is deliberately accepted as a no-op rather than gated: it is
+    // dead end-to-end in the generated Rust path (never emitted, never wired to
+    // the host saga manager). Direct mode ignores it to keep the accepted-graph
+    // set identical to generated. Real saga support is out of scope for the
+    // emitter and would require host/SDK wiring that does not exist for either path.
 }
 
 fn collect_delay_step_unsupported(
@@ -2553,18 +2557,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_timeout_and_compensation_remain_rejected() {
+    fn agent_timeout_remains_rejected() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
         };
         agent.timeout = Some(1_000);
-        agent.compensation = Some(CompensationConfig {
-            compensation_step: "finish".to_string(),
-            compensation_data: None,
-            trigger: None,
-            order: None,
-        });
 
         let report = analyze_direct_wasm_support(&graph);
 
@@ -2574,11 +2572,35 @@ mod tests {
                 && feature.step_type.as_deref() == Some("Agent")
                 && feature.feature == "agent-timeout"
         }));
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("transform")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "agent-compensation"
-        }));
+    }
+
+    /// Compensation is dead code end-to-end (codegen never emits it, the SDK
+    /// records `compensation_step_id: None`, the host `CompensationManager` is
+    /// never triggered). Generated Rust accepts + ignores it, so direct must too
+    /// rather than rejecting workflows generated compiles. The field is inert.
+    #[test]
+    fn agent_compensation_is_accepted_as_noop() {
+        let mut graph = fixture("transform");
+        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
+            panic!("expected Agent fixture step");
+        };
+        agent.compensation = Some(CompensationConfig {
+            compensation_step: "finish".to_string(),
+            compensation_data: None,
+            trigger: None,
+            order: None,
+        });
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "agent-compensation"),
+            "compensation must not produce an unsupported feature"
+        );
     }
 
     #[test]
