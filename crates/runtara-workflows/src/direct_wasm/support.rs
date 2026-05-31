@@ -771,8 +771,10 @@ fn supports_ai_agent_step_baseline(
     // Tool loop (chat-turn): every tool must target an Agent step or an
     // EmbedWorkflow step whose child graph is preloaded and itself directly
     // lowerable (run as a tool — its output is fed back to the model); MCP tools
-    // were validated above; and the step must have no onError (the loop does not
-    // yet route onError).
+    // were validated above; and the step must have no onError. An onError edge on
+    // an AiAgent is inert in the generated path (`can_have_on_error` excludes
+    // AiAgent), but the dead handler subgraph trips the direct emitter's
+    // single-terminal / routing invariants, so such graphs fall back for now.
     let has_on_error = graph
         .execution_plan
         .iter()
