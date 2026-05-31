@@ -348,9 +348,15 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
             if matches!(step, Step::Finish(_) | Step::Error(_)) {
                 return false;
             }
-            let is_branching = branching::is_branching_step(step)
-                || has_conditioned_normal_flow_edges(step_id, graph);
-            !is_branching || step_branches_remerge(step_id, graph)
+            // Conditioned normal-flow edges (an EdgeRoute) are lowered without
+            // merge detection, so a re-merging one would duplicate the merge —
+            // keep those rejected mid-order. Actual branching steps (Conditional /
+            // routing Switch) are lowered as diamonds when their branches
+            // re-converge, so accept those.
+            if has_conditioned_normal_flow_edges(step_id, graph) {
+                return false;
+            }
+            !branching::is_branching_step(step) || step_branches_remerge(step_id, graph)
         })
     })
 }
