@@ -759,40 +759,14 @@ pub async fn compile_workflow_handler(
     if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
         let redis_url = valkey_config.connection_url();
 
-        if crate::config::direct_wasm_compile_enabled() {
-            tracing::debug!(
-                workflow_id = %workflow_id,
-                version = version_num,
-                "Direct WASM compile gate enabled; deferring cache decision to compilation service"
-            );
-        } else {
-            // Check if already compiled. When direct mode is enabled this
-            // source-only check is bypassed so the service can evaluate the
-            // desired compiler mode before deciding whether the cache is fresh.
-            let repository = WorkflowRepository::new(pool.clone());
-            match repository
-                .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
-                .await
-            {
-                Ok(Some(image_id)) => {
-                    let response = json!({
-                        "success": true,
-                        "message": "Workflow already compiled",
-                        "workflowId": workflow_id,
-                        "version": version,
-                        "imageId": image_id,
-                        "registered": true,
-                        "recompiled": false,
-                        "timestamp": chrono::Utc::now().to_rfc3339()
-                    });
-                    return (StatusCode::OK, Json(response));
-                }
-                Ok(None) => {} // Not compiled yet, proceed to queue
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to check compilation status, proceeding to queue");
-                }
-            }
-        }
+        // Direct WASM is the only compile path now; defer the cache decision
+        // to CompilationService so it can evaluate the desired compiler mode
+        // before deciding whether the cache is fresh.
+        tracing::debug!(
+            workflow_id = %workflow_id,
+            version = version_num,
+            "Deferring cache decision to compilation service"
+        );
 
         // Enqueue the compilation request
         match crate::workers::compilation_worker::enqueue_compilation(

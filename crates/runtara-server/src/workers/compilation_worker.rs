@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
 
 use crate::api::repositories::workflows::WorkflowRepository;
-use crate::api::repositories::workflows::workflow_definition_checksum;
 use crate::api::services::compilation::{
     CompilationService, direct_compilation_settings_from_config,
 };
@@ -159,47 +158,12 @@ pub async fn run(
                     "Processing compilation request"
                 );
 
-                // Check if already compiled (skip if successful compilation exists).
-                // When the direct gate is enabled, defer cache decisions to
-                // CompilationService so it can account for the desired compiler
-                // mode instead of relying on this older source-only check.
-                let should_compile = if request.force_recompile
-                    || crate::config::direct_wasm_compile_enabled()
+                // Direct WASM is the only compile path now, so cache decisions
+                // are always deferred to CompilationService (which accounts for
+                // the desired compiler mode) instead of an older source-only
+                // check here. The service short-circuits when a fresh image
+                // already exists, so the worker always hands the request off.
                 {
-                    true
-                } else {
-                    match check_compilation_status(
-                        &pool,
-                        &request.tenant_id,
-                        &request.workflow_id,
-                        request.version,
-                    )
-                    .await
-                    {
-                        Ok(CompilationStatus::Success) => {
-                            info!(
-                                tenant_id = %request.tenant_id,
-                                workflow_id = %request.workflow_id,
-                                version = request.version,
-                                "Workflow already compiled, skipping"
-                            );
-                            false
-                        }
-                        Ok(CompilationStatus::NotCompiled) | Ok(CompilationStatus::Failed) => true,
-                        Err(e) => {
-                            error!(
-                                tenant_id = %request.tenant_id,
-                                workflow_id = %request.workflow_id,
-                                version = request.version,
-                                error = %e,
-                                "Failed to check compilation status, will attempt compilation"
-                            );
-                            true
-                        }
-                    }
-                };
-
-                if should_compile {
                     let compile_start = Instant::now();
                     let attributes = [
                         KeyValue::new("tenant_id", request.tenant_id.clone()),
@@ -306,67 +270,6 @@ pub async fn run(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
-    }
-}
-
-/// Compilation status from database
-enum CompilationStatus {
-    Success,
-    Failed,
-    NotCompiled,
-}
-
-/// Check if a workflow version is already compiled
-async fn check_compilation_status(
-    pool: &PgPool,
-    tenant_id: &str,
-    workflow_id: &str,
-    version: i32,
-) -> Result<CompilationStatus, sqlx::Error> {
-    let result = sqlx::query(
-        r#"
-        SELECT sc.compilation_status,
-               sc.registered_image_id,
-               sc.source_checksum,
-               wd.definition
-        FROM workflow_definitions wd
-        LEFT JOIN workflow_compilations sc
-          ON sc.tenant_id = wd.tenant_id
-         AND sc.workflow_id = wd.workflow_id
-         AND sc.version = wd.version
-        WHERE wd.tenant_id = $1
-          AND wd.workflow_id = $2
-          AND wd.version = $3
-          AND wd.deleted_at IS NULL
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(workflow_id)
-    .bind(version)
-    .fetch_optional(pool)
-    .await?;
-
-    match result {
-        Some(record) => {
-            let compilation_status: Option<String> = record.try_get("compilation_status")?;
-            let registered_image_id: Option<String> = record.try_get("registered_image_id")?;
-            let source_checksum: Option<String> = record.try_get("source_checksum")?;
-            let definition: serde_json::Value = record.try_get("definition")?;
-            let current_checksum = workflow_definition_checksum(&definition);
-
-            if compilation_status.as_deref() == Some("success")
-                && registered_image_id.is_some()
-                && source_checksum.as_deref() == Some(current_checksum.as_str())
-            {
-                Ok(CompilationStatus::Success)
-            } else if compilation_status.as_deref() == Some("failed") {
-                Ok(CompilationStatus::Failed)
-            } else {
-                // Partial compilation (compiled but not registered) - retry
-                Ok(CompilationStatus::NotCompiled)
-            }
-        }
-        None => Ok(CompilationStatus::NotCompiled),
     }
 }
 
@@ -547,46 +450,5 @@ mod tests {
         };
 
         assert!(config.connection_service_url.is_none());
-    }
-
-    // =========================================================================
-    // CompilationStatus tests
-    // =========================================================================
-
-    #[test]
-    fn test_compilation_status_success_variant() {
-        let status = CompilationStatus::Success;
-        assert!(matches!(status, CompilationStatus::Success));
-    }
-
-    #[test]
-    fn test_compilation_status_failed_variant() {
-        let status = CompilationStatus::Failed;
-        assert!(matches!(status, CompilationStatus::Failed));
-    }
-
-    #[test]
-    fn test_compilation_status_not_compiled_variant() {
-        let status = CompilationStatus::NotCompiled;
-        assert!(matches!(status, CompilationStatus::NotCompiled));
-    }
-
-    #[test]
-    fn test_compilation_status_exhaustive_match() {
-        // This test verifies all variants can be matched
-        // Compiler will fail if enum changes without updating this
-        let statuses = [
-            CompilationStatus::Success,
-            CompilationStatus::Failed,
-            CompilationStatus::NotCompiled,
-        ];
-
-        for status in statuses {
-            match status {
-                CompilationStatus::Success => {}
-                CompilationStatus::Failed => {}
-                CompilationStatus::NotCompiled => {}
-            }
-        }
     }
 }

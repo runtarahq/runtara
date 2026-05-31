@@ -6,12 +6,7 @@ const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
 const RUNTARA_MCP_SESSION_STORE_ENV: &str = "RUNTARA_MCP_SESSION_STORE";
 const RUNTARA_MCP_SESSION_TTL_SECONDS_ENV: &str = "RUNTARA_MCP_SESSION_TTL_SECONDS";
-const RUNTARA_DIRECT_WASM_COMPILE_ENV: &str = "RUNTARA_DIRECT_WASM_COMPILE";
-const RUNTARA_DIRECT_WASM_SHADOW_ENV: &str = "RUNTARA_DIRECT_WASM_SHADOW";
-const RUNTARA_DIRECT_WASM_REQUIRE_ENV: &str = "RUNTARA_DIRECT_WASM_REQUIRE";
 const RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV: &str = "RUNTARA_DIRECT_WASM_COMPONENTS_DIR";
-const RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST_ENV: &str = "RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST";
-const RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST_ENV: &str = "RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST";
 const DEFAULT_MCP_SESSION_TTL_SECONDS: u64 = 86_400;
 
 /// Global application configuration.
@@ -57,22 +52,9 @@ pub struct Config {
     /// embedded wasmtime path instead of the legacy dispatcher image.
     /// See docs/wasm-components-migration-plan.md § 6.
     pub agent_components_dir: Option<std::path::PathBuf>,
-    /// Whether workflow compilation should try the direct WASM emitter before
-    /// falling back to the Rust/codegen component pipeline.
-    pub direct_wasm_compile: bool,
-    /// Whether workflow compilation should compile a direct WASM artifact in
-    /// the background while still serving/registering the Rust/codegen artifact.
-    pub direct_wasm_shadow: bool,
-    /// Whether selected direct WASM compilations should fail instead of
-    /// falling back to Rust/codegen.
-    pub direct_wasm_require: bool,
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
-    /// Optional tenant allowlist for direct WASM compilation.
-    pub direct_wasm_tenant_allowlist: Option<BTreeSet<String>>,
-    /// Optional workflow-id allowlist for direct WASM compilation.
-    pub direct_wasm_workflow_allowlist: Option<BTreeSet<String>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -162,28 +144,13 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
-        // This branch compiles workflows with the direct WASM emitter ONLY: it is
-        // enabled by default and required (no silent fallback to the Rust/codegen
-        // compiler). Both stay env-overridable — set the env vars to `false` to
-        // re-enable the legacy path or fallback.
-        let direct_wasm_compile = parse_bool_or(RUNTARA_DIRECT_WASM_COMPILE_ENV, true)?;
-        let direct_wasm_shadow = parse_bool_or(RUNTARA_DIRECT_WASM_SHADOW_ENV, false)?;
-        let direct_wasm_require = parse_bool_or(RUNTARA_DIRECT_WASM_REQUIRE_ENV, true)?;
+        // Workflows compile with the direct WASM emitter only. The component
+        // directory defaults to `agent_components_dir`.
         let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
             std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
                 .ok()
                 .as_deref(),
             agent_components_dir.as_deref(),
-        );
-        let direct_wasm_tenant_allowlist = csv_allowlist_from_raw(
-            std::env::var(RUNTARA_DIRECT_WASM_TENANT_ALLOWLIST_ENV)
-                .ok()
-                .as_deref(),
-        );
-        let direct_wasm_workflow_allowlist = csv_allowlist_from_raw(
-            std::env::var(RUNTARA_DIRECT_WASM_WORKFLOW_ALLOWLIST_ENV)
-                .ok()
-                .as_deref(),
         );
 
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
@@ -248,12 +215,7 @@ impl Config {
             object_model_url,
             agent_service_url,
             agent_components_dir,
-            direct_wasm_compile,
-            direct_wasm_shadow,
-            direct_wasm_require,
             direct_wasm_components_dir,
-            direct_wasm_tenant_allowlist,
-            direct_wasm_workflow_allowlist,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -396,17 +358,6 @@ fn direct_wasm_components_dir_from_raw(
         .or_else(|| agent_components_dir.map(std::path::Path::to_path_buf))
 }
 
-fn csv_allowlist_from_raw(raw: Option<&str>) -> Option<BTreeSet<String>> {
-    let values: BTreeSet<String> = raw?
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect();
-
-    (!values.is_empty()).then_some(values)
-}
-
 fn mcp_allowed_hosts_from_raw(raw: Option<&str>) -> Vec<String> {
     let mut hosts: Vec<String> = DEFAULT_MCP_ALLOWED_HOSTS
         .iter()
@@ -540,36 +491,9 @@ pub fn object_model_bulk_request_limit() -> usize {
     )
 }
 
-/// Whether the server should try direct WASM workflow compilation.
-pub fn direct_wasm_compile_enabled() -> bool {
-    get().direct_wasm_compile
-}
-
-/// Whether the server should compile direct WASM artifacts in the background
-/// for comparison while serving Rust/codegen artifacts.
-pub fn direct_wasm_shadow_enabled() -> bool {
-    get().direct_wasm_shadow
-}
-
-/// Whether selected direct WASM workflow compilations should fail without
-/// falling back to Rust/codegen.
-pub fn direct_wasm_require_enabled() -> bool {
-    get().direct_wasm_require
-}
-
 /// Directory containing components used by direct WASM static composition.
 pub fn direct_wasm_components_dir() -> Option<std::path::PathBuf> {
     get().direct_wasm_components_dir.clone()
-}
-
-/// Optional tenant allowlist for direct WASM workflow compilation.
-pub fn direct_wasm_tenant_allowlist() -> Option<BTreeSet<String>> {
-    get().direct_wasm_tenant_allowlist.clone()
-}
-
-/// Optional workflow-id allowlist for direct WASM workflow compilation.
-pub fn direct_wasm_workflow_allowlist() -> Option<BTreeSet<String>> {
-    get().direct_wasm_workflow_allowlist.clone()
 }
 
 /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
@@ -653,21 +577,6 @@ mod tests {
             direct_wasm_components_dir_from_raw(None, Some(agent_dir)),
             Some(agent_dir.to_path_buf())
         );
-    }
-
-    #[test]
-    fn csv_allowlist_from_raw_trims_and_deduplicates_values() {
-        let values = csv_allowlist_from_raw(Some(" tenant-a,tenant-b,, tenant-a "));
-
-        assert_eq!(
-            values,
-            Some(BTreeSet::from([
-                "tenant-a".to_string(),
-                "tenant-b".to_string()
-            ]))
-        );
-        assert_eq!(csv_allowlist_from_raw(Some(" , ")), None);
-        assert_eq!(csv_allowlist_from_raw(None), None);
     }
 
     #[test]
