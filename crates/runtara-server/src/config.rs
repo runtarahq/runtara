@@ -162,9 +162,13 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
-        let direct_wasm_compile = parse_bool_or(RUNTARA_DIRECT_WASM_COMPILE_ENV, false)?;
+        // This branch compiles workflows with the direct WASM emitter ONLY: it is
+        // enabled by default and required (no silent fallback to the Rust/codegen
+        // compiler). Both stay env-overridable — set the env vars to `false` to
+        // re-enable the legacy path or fallback.
+        let direct_wasm_compile = parse_bool_or(RUNTARA_DIRECT_WASM_COMPILE_ENV, true)?;
         let direct_wasm_shadow = parse_bool_or(RUNTARA_DIRECT_WASM_SHADOW_ENV, false)?;
-        let direct_wasm_require = parse_bool_or(RUNTARA_DIRECT_WASM_REQUIRE_ENV, false)?;
+        let direct_wasm_require = parse_bool_or(RUNTARA_DIRECT_WASM_REQUIRE_ENV, true)?;
         let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
             std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
                 .ok()
