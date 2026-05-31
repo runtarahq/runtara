@@ -4,6 +4,13 @@ Status: **Draft**
 Owner: Platform
 Supersedes: previous `.deb` packaging (removed)
 
+> **Note:** since this draft was written, workflow compilation moved fully
+> in-process (the direct emitter + `wac-graph`). The bundle no longer ships a
+> Rust toolchain, `cargo-component`, `wac`, or a `compile-src/` mirror — it
+> carries only the server, `wasmtime`, and the prebuilt agent/shared WASM
+> components. Goals 6–7 (no user-managed toolchain, isolated runtime) still hold;
+> the layout / "Rust toolchain" sections below are now overstated.
+
 ## Goals
 
 A single, script-based installation and update path for Runtara that:

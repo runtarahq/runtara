@@ -1,20 +1,28 @@
 # Direct WebAssembly Workflow Emitter Production Migration Plan
 
+> **STATUS: COMPLETE (historical).** This migration is done. The direct emitter
+> is the *only* workflow compiler; the Rust-codegen compiler and the
+> `direct_wasm_poc` PoC have been deleted, and final composition runs in-process
+> via `wac-graph` (no `wac` CLI, no Rust toolchain at runtime). This document is
+> kept as the design log of how we got here — for the current architecture see
+> [`direct-compilation-architecture.md`](./direct-compilation-architecture.md).
+> Sections below describing a direct→generated fallback, the PoC binaries, or the
+> `RUNTARA_DIRECT_WASM_*` feature gates are historical and no longer match the code.
+
 ## Status
 
 Production migration plan. This document describes the step-by-step path from
-the current Rust-codegen workflow compiler to a production direct WebAssembly
-emitter that produces small workflow-specific Wasm components and reuses
-prebuilt shared components for workflow stdlib behavior and agents.
+the (now-removed) Rust-codegen workflow compiler to a production direct
+WebAssembly emitter that produces small workflow-specific Wasm components and
+reuses prebuilt shared components for workflow stdlib behavior and agents.
 
-The current proof of concept lives in:
+The proof of concept (now deleted) lived in:
 
 - `crates/runtara-workflows/src/direct_wasm_poc.rs`
 - `crates/runtara-workflows/src/bin/direct_wasm_poc.rs`
 
-That PoC emits a valid core Wasm module for a tiny control-flow subset. It is
-not the production ABI and should be treated only as context for measurement
-and learning.
+That PoC emitted a valid core Wasm module for a tiny control-flow subset. It was
+not the production ABI and should be treated only as historical context.
 
 Current implementation progress on `codex/wasm-direct-emitter`:
 

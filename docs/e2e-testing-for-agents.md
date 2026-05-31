@@ -3,22 +3,29 @@
 How to run end-to-end tests locally against a real `runtara-server` with
 embedded WASM runner and Postgres.
 
+> **Compilation is in-process.** The standalone `runtara-compile` CLI has been
+> removed. Workflows are compiled by the **server**: the direct emitter
+> byte-emits the workflow-logic module and composes the final `workflow.wasm`
+> in-process via `wac-graph` — no `cargo component build`, no `wac` CLI. The
+> canonical automated execution coverage is the cargo test
+> `RUNTARA_RUN_DIRECT_WASM_E2E=1 RUNTARA_AGENT_COMPONENTS_DIR=target/wasm32-wasip2/release
+> cargo test -p runtara-workflows --test direct_wasm_execute`. The manual
+> upload/start/status walkthrough below (steps 6–9) is still valid once the
+> server has produced and registered an image; the old "compile to a file with
+> `runtara-compile`" steps (1 and 5) no longer apply.
+
 ## Prerequisites
 
 - Docker with a running Postgres container (any version 14+). The dev
   `runtara-dev-postgres` container is fine — e2e uses its own databases.
-- `wasm32-wasip2` Rust target (`rustup target add wasm32-wasip2`)
+- `wasm32-wasip2` Rust target (`rustup target add wasm32-wasip2`) — for building
+  the agent components (below), not for compiling workflows.
 - `wasmtime` CLI (`curl https://wasmtime.dev/install.sh -sSf | bash`)
-- `cargo-component` (`cargo install cargo-component --locked`)
-- `wac-cli` (`cargo install wac-cli --locked`)
+- `cargo-component` (`cargo install cargo-component --locked`) — used by
+  `scripts/build-agent-components.sh` to build the agent/shared components.
 - Pre-built agent components staged at `target/wasm32-wasip2/release/` — run
-  `scripts/build-agent-components.sh` once. The workflow compile pipeline
-  `wac compose`s these into every `workflow.wasm` (see step 2).
-
-`runtara-compile` always produces a composed `workflow.wasm` via
-`cargo component build` + `wac compose`. The stdlib is compiled from source as
-part of each workflow crate; there is no rustc-direct path and no
-`native_cache_wasm` / `RUNTARA_LTO` step anymore.
+  `scripts/build-agent-components.sh` once. The server composes these prebuilt
+  `.wasm` components into every `workflow.wasm` in-process (no `wac` CLI).
 
 ## 1. Build binaries
 
@@ -28,11 +35,13 @@ bin isn't named, and `runtara-server` never gets built. Build the server with
 its own command:
 
 ```bash
-cargo build -p runtara-workflows --bin runtara-compile \
-            -p runtara-management-sdk --bin runtara-ctl
+cargo build -p runtara-management-sdk --bin runtara-ctl
 
 cargo build -p runtara-server --bin runtara-server
 ```
+
+(There is no separate compiler binary — the server compiles workflows
+in-process.)
 
 ## 2. Build agent components
 
@@ -58,8 +67,10 @@ cargo component build --release --target wasm32-wasip2 -p runtara-agent-<id>
 cargo run -p runtara-agent-bundle-emit --bin emit-meta -- target/wasm32-wasip2/release
 ```
 
-The composed `workflow.wasm` is self-contained, so the **server** doesn't need
-the components dir at runtime — only the compiler (step 4) does.
+The **server** needs this components dir at *compile* time (it composes the
+prebuilt components into each `workflow.wasm` in-process). The composed
+`workflow.wasm` is self-contained, so nothing needs the components dir to
+*execute* an already-built image.
 
 ## 3. Create test databases
 
@@ -113,20 +124,25 @@ your e2e port: `kill $(lsof -ti tcp:18004)`. Never `pkill runtara-server`.
 
 ## 5. Compile a workflow
 
-The id flag is `--workflow-id`; `--workflow` is the JSON file path.
+There is no standalone compile-to-file step anymore — the server compiles a
+workflow in-process when you create/deploy it and registers the resulting image
+itself. Drive this through the workflow API or the MCP `compile_workflow` tool;
+the server reads `RUNTARA_AGENT_COMPONENTS_DIR` (step 2) at compile time and
+composes the final `workflow.wasm` via `wac-graph`.
+
+For an end-to-end *automated* check of the emit→compose→execute path against the
+staged components, prefer the cargo test:
 
 ```bash
-target/debug/runtara-compile \
-  --workflow e2e/workflows/simple_passthrough.json \
-  --tenant test --workflow-id passthrough \
-  --output /tmp/test_binary.wasm
+RUNTARA_RUN_DIRECT_WASM_E2E=1 \
+RUNTARA_AGENT_COMPONENTS_DIR=target/wasm32-wasip2/release \
+cargo test -p runtara-workflows --test direct_wasm_execute -- --test-threads=1
 ```
 
-`--emit-source <path>` writes the generated workflow source (`src/lib.rs`). The
-full generated crate (incl. `bindings.rs`) lives at
-`$DATA_DIR/workflow-builds-components/<tenant>/<workflow-id>/<version>/` — note
-this is the **compiler's** `DATA_DIR` (default `.data`), separate from the
-server's `DATA_DIR`.
+The direct emitter produces no Rust source — there is no `--emit-source`,
+`src/lib.rs`, or `bindings.rs`. The per-build scratch (the emitted
+`workflow-logic.wasm`, `workflow.wac`, and composed `workflow.wasm`) lives under
+the server's build directory.
 
 ## 6. Register as a WASM image
 
@@ -202,13 +218,9 @@ resumes it from its last checkpoint.
 
 ## Workflow input format
 
-The generated code extracts `data` from the top-level input JSON:
-
-```rust
-let data = input_json.get("data").cloned().unwrap_or_default();
-```
-
-So if your workflow references `data.input.foo`, send:
+The compiled workflow reads `data` from the top-level input JSON envelope
+(equivalent to `input_json.get("data")`). So if your workflow references
+`data.input.foo`, send:
 
 ```json
 {"data": {"input": {"foo": "bar"}}}
@@ -220,15 +232,12 @@ So if your workflow references `data.input.foo`, send:
 
 | Problem | Fix |
 |---------|-----|
-| Built `runtara-compile`/`runtara-ctl` but `runtara-server` is missing | `--bin` is a global filter — build the server separately (step 1) |
+| Built `runtara-ctl` but `runtara-server` is missing | `--bin` is a global filter — build the server separately (step 1) |
 | `agent component '<x>' missing` | Build components (step 2): `scripts/build-agent-components.sh`, or the single-agent path + `emit-meta` |
-| `--workflow-id is required` | Pass the id with `--workflow-id`; `--workflow` is the JSON path (step 5) |
-| `cargo component build returned non-zero status` | Re-run `scripts/build-agent-components.sh`; ensure `cargo-component` is installed |
-| `current package believes it's in a workspace when it's not` | Outdated compile cache — `rm -rf $DATA_DIR/workflow-builds-components` and retry |
+| `cargo component build returned non-zero status` (building agents) | Re-run `scripts/build-agent-components.sh`; ensure `cargo-component` is installed |
 | Health/upload hits the wrong server, or `Address already in use` | A dev server holds 8001–8004 / 7001–7002; shift the e2e server to 17xxx/18xxx and target `RUNTARA_ENV_HTTP_PORT` (step 4) |
 | e2e server migrates/writes the dev DB | The server auto-loads `.env`; override all three `*_DATABASE_URL` (and ports) inline (step 4) |
 | `runtara-ctl get: Unknown command` | It's `runtara-ctl status <instance_id>` now (step 8) |
-| `--emit-source` errors `No such file or directory` and `--output` is never written | Fixed on main (reads `src/lib.rs`, non-fatal). On older builds, read `$DATA_DIR/workflow-builds-components/<tenant>/<workflow-id>/<version>/src/lib.rs` |
 | `migration was previously applied but is missing` | Use separate databases for server vs environment (step 3) |
 | `migration was previously applied but has been modified` | Drop and recreate both databases |
 | `delay_in_ms: invalid type: null` or other `data.*` ref is null | Wrap input in `{"data": {...}, "variables": {}}` envelope |

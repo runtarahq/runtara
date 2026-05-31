@@ -2,6 +2,13 @@
 
 Pluggable agents via the WebAssembly Component Model. Replaces the monolithic dispatcher + static-linked workflow pipeline with per-agent components composed at build time and loaded by an embedded wasmtime host.
 
+> **STATUS: historical.** The per-agent-component model described here is in
+> production. Note that the *workflow* compile half has since evolved past this
+> plan: workflows are no longer built via `cargo component build` + the `wac`
+> CLI — the direct emitter byte-emits the workflow-logic module and composes it
+> in-process via `wac-graph`. See
+> [`direct-compilation-architecture.md`](./direct-compilation-architecture.md).
+
 ---
 
 ## 1. Executive summary
