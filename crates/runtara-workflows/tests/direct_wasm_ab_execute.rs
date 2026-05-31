@@ -74,6 +74,8 @@ const AI_AGENT_WAIT_TOOL: &str = include_str!("fixtures/ai_agent_wait_tool.json"
 const EMBED_AGENT_CHILD_PARENT: &str = include_str!("fixtures/embed_agent_child_parent.json");
 const EMBED_AGENT_CHILD: &str = include_str!("fixtures/embed_agent_child.json");
 const CONDITIONAL_DIAMOND: &str = include_str!("fixtures/conditional_diamond.json");
+const CONDITIONAL_DIAMOND_ASYMMETRIC: &str =
+    include_str!("fixtures/conditional_diamond_asymmetric.json");
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
@@ -5898,6 +5900,69 @@ fn direct_wasm_matches_components_conditional_diamond() {
                 "{case}: merge step `decided` must run exactly once"
             );
         }
+    }
+}
+
+/// A nested conditional diamond (a Conditional inside the true branch, all paths
+/// re-merging at a shared step) exercised across all three path combinations.
+/// Direct must match the generated artifact for each.
+#[test]
+fn direct_wasm_matches_components_nested_conditional_diamond() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("conditional-diamond-nested", CONDITIONAL_DIAMOND_ASYMMETRIC);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "conditional-diamond-nested",
+        CONDITIONAL_DIAMOND_ASYMMETRIC,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    for (case, flag, urgent) in [
+        ("true-urgent", true, true),
+        ("true-normal", true, false),
+        ("false", false, false),
+    ] {
+        let workflow_input =
+            serde_json::to_vec(&serde_json::json!({ "flag": flag, "urgent": urgent })).unwrap();
+        let components_input = components_sdk_input(&workflow_input);
+        let components = execute_artifact(
+            &components_artifact,
+            &format!("ab-components-cond-diamond-nested-{case}"),
+            &components_input,
+        );
+        let direct = execute_artifact(
+            &direct_artifact.path,
+            &format!("ab-direct-cond-diamond-nested-{case}"),
+            &workflow_input,
+        );
+
+        assert!(
+            components.status_success,
+            "{case}: components run failed:\n{}\nerror={:?}",
+            components.stderr, components.error_json
+        );
+        assert!(
+            direct.status_success,
+            "{case}: direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+            direct.stderr, direct.error_json, direct.output_json
+        );
+        assert_eq!(
+            components.output_json, direct.output_json,
+            "{case}: nested-diamond completion payload mismatch"
+        );
+        assert_eq!(
+            direct.output_json,
+            Some(serde_json::json!({ "flag": flag })),
+            "{case}: nested diamond should finish with the input flag"
+        );
     }
 }
 

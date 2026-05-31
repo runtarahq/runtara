@@ -19,6 +19,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "conditional_diamond" => {
             include_str!("../../../tests/fixtures/conditional_diamond.json")
         }
+        "conditional_diamond_asymmetric" => {
+            include_str!("../../../tests/fixtures/conditional_diamond_asymmetric.json")
+        }
         "conditional_nested" => {
             include_str!("../../../tests/fixtures/conditional_nested.json")
         }
@@ -2519,6 +2522,34 @@ fn direct_compile_supports_conditional_diamond_graph() {
     assert!(
         merge_plan.is_some(),
         "the diamond's shared continuation should be a merge plan, not duplicated"
+    );
+}
+
+#[test]
+fn direct_compile_supports_nested_conditional_diamond_graph() {
+    // A nested diamond (a Conditional inside the true branch, all re-merging at a
+    // shared step) must lower directly — exercising recursive merge handling.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "conditional-diamond-nested".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("conditional_diamond_asymmetric"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct nested conditional-diamond compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct nested conditional-diamond artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "a nested re-merging conditional must lower directly: {:?}",
+        result.support_report.unsupported
     );
 }
 
