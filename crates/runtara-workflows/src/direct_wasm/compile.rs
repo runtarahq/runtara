@@ -7,10 +7,11 @@
 //! to the caller's fallback on any unsupported feature), then emits the core
 //! module byte-by-byte and lifts it into a component via `wit_component`,
 //! appending the manifest/support/ABI JSON as custom sections.
-//! `compose_direct_workflow` is the separate second phase that shells out to
-//! `wac compose` to link that `workflow-logic.wasm` against the prebuilt shared +
-//! per-agent components into the runnable `workflow.wasm` (so the emitted logic is
-//! an inspectable artifact before the heavyweight compose step).
+//! `compose_direct_workflow` is the separate second phase that composes that
+//! `workflow-logic.wasm` against the prebuilt shared + per-agent components into
+//! the runnable `workflow.wasm` (so the emitted logic is an inspectable artifact
+//! before the compose step). Composition runs in-process through the
+//! `wac-parser`/`wac-resolver`/`wac-graph` crates — no external `wac` binary.
 //!
 //! This file also owns the bank of `DIRECT_*` constants: the hand-assigned Wasm
 //! local-variable slots and Canonical-ABI struct/offset layout that every per-step
@@ -52,7 +53,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
@@ -419,54 +419,25 @@ pub fn compose_direct_workflow(
         &result.component_artifacts.agent_components,
     )?;
 
-    let mut cmd = Command::new("wac");
-    cmd.arg("compose")
-        .arg(&result.wac_path)
-        .arg("-d")
-        .arg(format!(
-            "runtara:workflow-logic={}",
-            result.workflow_logic_wasm_path.display()
-        ));
-
+    let mut overrides: HashMap<String, PathBuf> = HashMap::new();
+    overrides.insert(
+        "runtara:workflow-logic".to_string(),
+        result.workflow_logic_wasm_path.clone(),
+    );
     for component in &shared_components {
-        cmd.arg("-d").arg(format!(
-            "{}={}",
-            component.package,
-            component.wasm_path.display()
-        ));
+        overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
     for component in &agent_components {
-        cmd.arg("-d").arg(format!(
-            "{}={}",
-            component.package,
-            component.wasm_path.display()
-        ));
+        overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
 
-    cmd.arg("-o").arg(&composed_path);
-    let status = cmd.status().map_err(|err| {
-        DirectCompileError::Component(format!(
-            "wac compose failed to launch for direct workflow (is wac-cli installed?): {err}"
-        ))
-    })?;
-    if !status.success() {
-        return Err(DirectCompileError::Component(format!(
-            "wac compose returned non-zero status {} for direct workflow (wac script: {})",
-            status,
-            result.wac_path.display()
-        )));
-    }
-    if !composed_path.exists() {
-        return Err(DirectCompileError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "wac compose succeeded but direct composed artifact was not written at {}",
-                composed_path.display()
-            ),
-        )));
-    }
+    let composed_wasm = compose_workflow_component_in_process(
+        &result.component_artifacts.wac_source,
+        &result.build_dir,
+        overrides,
+    )?;
+    fs::write(&composed_path, &composed_wasm)?;
 
-    let composed_wasm = fs::read(&composed_path)?;
     let composed_wasm_size = composed_wasm.len();
     let composed_wasm_checksum = sha256_hex(&composed_wasm);
 
@@ -492,6 +463,59 @@ pub fn compose_direct_workflow(
     write_artifact_metadata(&result.artifact_metadata_path, &result.artifact_metadata)?;
 
     Ok(composed_path)
+}
+
+/// Statically compose a direct workflow component in-process.
+///
+/// This is the in-process equivalent of `wac compose <wac> -d pkg=path ...`,
+/// reusing the exact `workflow.wac` document the direct compiler already emits.
+/// `wac_source` is the WAC script, `deps_dir` is the search root for any package
+/// not in `overrides` (none are, in practice), and `overrides` maps each WAC
+/// package name (e.g. `runtara:workflow-logic`, `runtara:agent-http`) to its
+/// prebuilt `.wasm` path. Composition runs through `wac-parser`/`wac-resolver`/
+/// `wac-graph` — the same crates the `wac` CLI uses — so the output is identical
+/// to the former subprocess, with no external `wac` binary required.
+fn compose_workflow_component_in_process(
+    wac_source: &str,
+    deps_dir: &Path,
+    overrides: HashMap<String, PathBuf>,
+) -> Result<Vec<u8>, DirectCompileError> {
+    use wac_graph::EncodeOptions;
+    use wac_parser::Document;
+    use wac_resolver::{FileSystemPackageResolver, packages};
+
+    let document = Document::parse(wac_source).map_err(|err| {
+        DirectCompileError::Component(format!(
+            "failed to parse direct workflow wac document: {err}"
+        ))
+    })?;
+    let keys = packages(&document).map_err(|err| {
+        DirectCompileError::Component(format!(
+            "failed to collect direct workflow wac packages: {err}"
+        ))
+    })?;
+    let resolver = FileSystemPackageResolver::new(deps_dir, overrides, false);
+    let resolved = resolver.resolve(&keys).map_err(|err| {
+        DirectCompileError::Component(format!(
+            "failed to resolve direct workflow wac packages: {err}"
+        ))
+    })?;
+    let resolution = document.resolve(resolved).map_err(|err| {
+        DirectCompileError::Component(format!(
+            "failed to resolve direct workflow wac document: {err}"
+        ))
+    })?;
+    resolution
+        .encode(EncodeOptions {
+            define_components: true,
+            validate: true,
+            ..Default::default()
+        })
+        .map_err(|err| {
+            DirectCompileError::Component(format!(
+                "failed to encode composed direct workflow component: {err}"
+            ))
+        })
 }
 
 /// Compile and statically compose a direct workflow into the final

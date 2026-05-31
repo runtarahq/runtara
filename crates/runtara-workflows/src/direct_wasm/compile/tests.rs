@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use super::super::manifest::build_direct_workflow_manifest;
 use super::*;

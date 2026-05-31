@@ -15,6 +15,9 @@ compiler = [
     "dep:wasm-encoder",
     "dep:wit-component",
     "dep:wit-parser",
+    "dep:wac-parser",
+    "dep:wac-resolver",
+    "dep:wac-graph",
 ]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
@@ -34,6 +37,9 @@ minijinja = "2.5"
 wasm-encoder = { version = "0.247", optional = true }
 wit-component = { version = "0.247", optional = true }
 wit-parser = { version = "0.247", optional = true }
+wac-parser = { version = "0.10", optional = true }
+wac-resolver = { version = "0.10", default-features = false, optional = true }
+wac-graph = { version = "0.10", optional = true }
 
 [[bin]]
 name = "runtara-compile"
