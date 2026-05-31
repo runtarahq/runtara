@@ -129,10 +129,10 @@ pub struct ChildWorkflowInput {
     pub execution_graph: ExecutionGraph,
 }
 
-/// Sync progress callback invoked from inside `compile_workflow_components`
-/// at coarse stage boundaries ("generating", "building", "composing") and
-/// for sub-progress ("Compiling agent-foo") parsed out of cargo-component's
-/// JSON output. Called on the blocking thread that runs the build, so
+/// Sync progress callback invoked from inside `compile_workflow_direct`
+/// at coarse stage boundaries ("emitting", "composing") as the direct
+/// emitter byte-emits the workflow-logic component and composes the final
+/// `workflow.wasm`. Called on the blocking thread that runs the build, so
 /// implementations should be cheap (a channel send is ideal — drain it on
 /// the async side).
 ///
@@ -240,11 +240,12 @@ pub struct NativeCompilationResult {
     pub binary_checksum: String,
     /// Path to the per-workflow build directory.
     pub build_dir: std::path::PathBuf,
-    /// Size of the generated crate's source files in bytes — sums
-    /// `Cargo.toml`, `src/lib.rs`, `wit/world.wit`, and `workflow.wac`.
-    /// Excludes the staged WIT deps (shared across workflows) and the
-    /// `target/` directory (build artifacts). Lets the frontend show how
-    /// large the codegen output is for a given workflow.
+    /// Size of the emitted artifact files in bytes — sums
+    /// `workflow-logic.wasm`, `manifest.json`, `support-report.json`, the
+    /// artifact metadata file, `wit/world.wit`, and `workflow.wac`. Excludes
+    /// the staged WIT deps and shared agent components (shared across
+    /// workflows). Lets the frontend show how large the emitted output is
+    /// for a given workflow.
     pub package_size: usize,
     /// Whether the workflow has side effects (e.g., HTTP calls, external actions).
     pub has_side_effects: bool,

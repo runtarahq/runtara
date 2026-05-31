@@ -3,11 +3,9 @@
 //! Shared AI-agent orchestration primitives.
 //!
 //! [`run_completion`] is the single source of truth for issuing one LLM chat
-//! completion in the Ai Agent loop. It mirrors the body of the generated
-//! `__ai_llm_durable` inner function (see
-//! `runtara-workflows/src/codegen/ast/steps/ai_agent.rs`) so that the
-//! generated-Rust workflow path and the `chat-completion` agent capability used
-//! by the direct-WASM emitter issue byte-identical provider requests.
+//! completion in the Ai Agent loop. It backs the `chat-completion` agent
+//! capability that the direct-WASM emitter wires into the Ai Agent loop (see
+//! `runtara-workflows/src/direct_wasm/compile/ai_agent_loop.rs`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -60,13 +60,6 @@ ensure_tool cargo-component cargo-component 0.21.1
 # crates/runtara-agent-wit/wit/deps.toml. Only needed for first-time
 # checkouts or after a deps.toml bump; the lockfile is committed.
 ensure_tool wit-deps wit-deps-cli
-# wac-cli is reserved for the Phase 3 composition step (single bundled
-# .wasm). Not strictly needed by this script today, so we warn rather
-# than fail when it's missing.
-if ! command -v wac >/dev/null 2>&1; then
-    echo "note: \`wac\` (Phase 3 composition tool) not installed — skipping."
-    echo "      install with: cargo install wac-cli --locked"
-fi
 
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace"

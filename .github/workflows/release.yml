@@ -89,16 +89,15 @@ jobs:
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
 
-      # The bundle's compile-pipeline gate has moved to the components-mode
-      # path: scripts/build-bundle.sh now invokes scripts/build-agent-components.sh
-      # which drives `cargo component build` and emits the sidecar
-      # meta.json for all 24 agent crates. Any breakage there fails the
-      # bundle build itself before this step would run. The downstream
-      # `smoke:` job extracts the resulting tarball and runs the full
-      # server end-to-end (with RUNTARA_AGENT_COMPONENTS_DIR and
-      # RUNTARA_COMPILE_SOURCE_DIR pointing into the bundled tarball) —
-      # which exercises the actual server compile path against the
-      # bundled compile-src tree.
+      # The bundle's agent-component gate lives in
+      # scripts/build-bundle.sh, which invokes scripts/build-agent-components.sh
+      # to drive `cargo component build` and emit the sidecar meta.json for all
+      # agent crates. Any breakage there fails the bundle build itself before
+      # this step would run. The downstream `smoke:` job extracts the resulting
+      # tarball and runs the full server end-to-end (with
+      # RUNTARA_AGENT_COMPONENTS_DIR pointing into the bundled tarball) — which
+      # exercises the actual server compile path (in-process direct emitter)
+      # against the bundled components.
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4

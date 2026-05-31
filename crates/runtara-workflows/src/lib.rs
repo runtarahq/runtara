@@ -1,10 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Runtara Workflows - Workflow Compilation to Native Binaries
+//! Runtara Workflows - Workflow Compilation to WebAssembly Components
 //!
-//! This crate compiles workflow definitions (DSL workflows) into native Linux binaries.
-//! The compiled binaries are standalone executables that communicate with runtara-core
-//! via the SDK for durability, checkpointing, and signal handling.
+//! This crate compiles workflow definitions (DSL workflows) into WebAssembly
+//! component-model modules. The composed `workflow.wasm` communicates with
+//! runtara-core via the SDK for durability, checkpointing, and signal handling.
 //!
 //! # Architecture
 //!
@@ -14,15 +14,15 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!
 //!     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-//!     │    DSL      │      │    Rust     │      │   Native    │
-//!     │  Workflow   │─────▶│    AST      │─────▶│   Binary    │
-//!     │  (JSON)     │      │  (codegen)  │      │  (rustc)    │
+//!     │    DSL      │      │  workflow-  │      │  workflow   │
+//!     │  Workflow   │─────▶│ logic.wasm  │─────▶│   .wasm     │
+//!     │  (JSON)     │      │ (emitter)   │      │ (wac-graph) │
 //!     └─────────────┘      └─────────────┘      └─────────────┘
 //!           │                                         │
 //!           ▼                                         ▼
 //!     ┌─────────────┐                          ┌─────────────┐
-//!     │ Dependency  │                          │ OCI Image   │
-//!     │  Analysis   │                          │ (optional)  │
+//!     │ Dependency  │                          │  Composed   │
+//!     │  Analysis   │                          │ w/ agents   │
 //!     └─────────────┘                          └─────────────┘
 //! ```
 //!
@@ -30,10 +30,10 @@
 //!
 //! 1. **Parse**: Load the DSL workflow from JSON
 //! 2. **Analyze Dependencies**: Identify child workflows and agent dependencies
-//! 3. **Generate AST**: Convert the execution graph to Rust AST using `codegen`
-//! 4. **Write Source**: Write generated Rust code to temp directory
-//! 5. **Invoke rustc**: Compile with musl target for static linking
-//! 6. **Package**: Optionally create OCI image for containerized execution
+//! 3. **Emit**: Byte-emit the `workflow-logic` component directly from the
+//!    execution graph (the direct WebAssembly emitter — no Rust source)
+//! 4. **Compose**: Statically link the emitted logic with the shared and agent
+//!    components into the final `workflow.wasm` via in-process `wac-graph`
 //!
 //! # Usage
 //!
@@ -41,7 +41,7 @@
 //! use runtara_workflows::{compile_workflow_direct, CompilationInput, DirectWorkflowCompileOptions};
 //!
 //! let result = compile_workflow_direct(input, options)?;
-//! println!("Binary at: {:?}", result.binary_path);
+//! println!("Composed component at: {:?}", result.binary_path);
 //! ```
 //!
 //! # Important Notes
