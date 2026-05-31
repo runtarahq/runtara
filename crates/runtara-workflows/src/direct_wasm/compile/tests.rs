@@ -9831,10 +9831,11 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
 
 #[test]
 fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
-    // A parallel fan-out (multiple unconditioned normal edges from one step) is
-    // a durably-deferred routing shape, so it is a stable choice for asserting
-    // unsupported-graph rejection that will not become supported as individual
-    // step features (timeouts, compensation, etc.) are lowered over time.
+    // Parallel fan-out to two distinct Finish steps (multiple unconditioned
+    // normal edges that never re-converge) is a permanently-invalid graph — an
+    // ambiguous exit the shared validation layer rejects (E073). It is a stable
+    // choice for asserting direct's defense-in-depth unsupported-graph rejection,
+    // since it will never become supported as step features are lowered.
     let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
         "steps": {
             "log": { "stepType": "Log", "id": "log", "message": "fanout" },

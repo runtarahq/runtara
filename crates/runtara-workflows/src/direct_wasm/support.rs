@@ -2252,7 +2252,12 @@ mod tests {
     }
 
     #[test]
-    fn parallel_normal_fanout_is_rejected_until_parallel_semantics_are_lowered() {
+    fn parallel_normal_fanout_to_distinct_terminals_is_rejected() {
+        // Unconditional parallel fan-out to two distinct Finish steps that never
+        // re-converge is an ambiguous exit — an invalid graph the shared
+        // validation layer rejects up front (E073 ParallelFanoutNoMerge). The
+        // direct support gate also rejects it as defense-in-depth: two terminal
+        // sinks cannot linearize onto a single backbone.
         let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
             "steps": {
                 "log": {

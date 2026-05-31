@@ -310,6 +310,15 @@ pub enum ValidationError {
         label: Option<String>,
         targets: Vec<String>,
     },
+    /// A step fans out to multiple unconditional (parallel) successors whose
+    /// branches never re-converge at a single merge point. Parallel branches all
+    /// run, so non-converging branches produce more than one independent exit —
+    /// an ambiguous workflow result. Valid parallel fan-out must rejoin (a
+    /// diamond) before terminating.
+    ParallelFanoutNoMerge {
+        from_step: String,
+        targets: Vec<String>,
+    },
     /// Conditional outgoing edge is not a true/false branch.
     InvalidConditionalEdge {
         from_step: String,
@@ -803,6 +812,18 @@ impl std::fmt::Display for ValidationError {
                      At most one default (condition-less) edge is allowed. Targets: {}",
                     from_step,
                     label_str,
+                    targets.join(", ")
+                )
+            }
+            ValidationError::ParallelFanoutNoMerge { from_step, targets } => {
+                write!(
+                    f,
+                    "[E073] Step '{}' fans out to parallel branches that never re-converge: {}. \
+                     Unconditional parallel branches all execute, so non-merging branches \
+                     produce more than one independent exit (an ambiguous result). Re-join the \
+                     branches at a single merge step, or make the edges conditional so exactly \
+                     one runs.",
+                    from_step,
                     targets.join(", ")
                 )
             }
@@ -3184,6 +3205,28 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
                 label: label.clone(),
                 targets: default_edges.iter().map(|e| e.to_step.clone()).collect(),
             });
+        }
+
+        // Genuine parallel fan-out: an unlabeled step with 2+ unconditional
+        // successors and no conditional edges. All branches execute, so they must
+        // re-converge at a single merge point — otherwise the parallel branches
+        // terminate independently and the workflow has more than one exit (an
+        // ambiguous result). Conditional/Switch branches are exclusive and so are
+        // exempt; a re-joining diamond (e.g. fan-out that rejoins at a Finish) is
+        // allowed.
+        if label.is_none() && conditional_edges.is_empty() && default_edges.len() > 1 {
+            let branch_starts: Vec<Option<String>> = default_edges
+                .iter()
+                .map(|edge| Some(edge.to_step.clone()))
+                .collect();
+            if crate::codegen::ast::steps::branching::find_merge_point_n(&branch_starts, graph)
+                .is_none()
+            {
+                result.errors.push(ValidationError::ParallelFanoutNoMerge {
+                    from_step: from_step.clone(),
+                    targets: default_edges.iter().map(|e| e.to_step.clone()).collect(),
+                });
+            }
         }
 
         // Check for duplicate priorities among conditional edges
@@ -8746,8 +8789,10 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_condition_unlabeled_parallel_edges_pass() {
-        // Multiple unlabeled edges without conditions should pass (parallel execution)
+    fn test_edge_condition_unlabeled_parallel_fanout_to_distinct_finishes_rejected() {
+        // Unconditional parallel fan-out to two distinct Finish steps that never
+        // re-converge is an ambiguous exit: both branches run, so the workflow
+        // would reach two independent terminals. This must be rejected.
         let mut steps = HashMap::new();
         // Use Log steps to avoid capability validation issues
         steps.insert("start".to_string(), create_log_step("start", None));
@@ -8774,17 +8819,20 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
         assert!(
-            !result.has_errors(),
-            "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ParallelFanoutNoMerge { from_step, .. } if from_step == "start"
+            )),
+            "Non-merging parallel fan-out to distinct finishes must be rejected. Errors: {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn test_edge_condition_next_label_parallel_edges_pass() {
-        // Multiple "next"-labeled edges without conditions should pass (parallel execution).
-        // "next" is a reserved label meaning "continue to next step" and is semantically
-        // equivalent to no label — it should not prevent parallel fork patterns.
+    fn test_edge_condition_next_label_parallel_fanout_to_distinct_finishes_rejected() {
+        // "next" is a reserved label meaning "continue to next step" and is
+        // semantically equivalent to no label, so "next"-labeled parallel fan-out
+        // to distinct finishes is the same ambiguous-exit case and is rejected too.
         let mut steps = HashMap::new();
         steps.insert("start".to_string(), create_log_step("start", None));
         steps.insert("branch1".to_string(), create_finish_step("branch1", None));
@@ -8810,8 +8858,64 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
         assert!(
-            !result.has_errors(),
-            "Should pass: multiple 'next'-labeled edges can run in parallel. Errors: {:?}",
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ParallelFanoutNoMerge { from_step, .. } if from_step == "start"
+            )),
+            "'next'-labeled non-merging parallel fan-out must be rejected. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_parallel_fanout_rejoining_at_finish_passes() {
+        // Valid parallel fan-out: both branches run and re-converge at a single
+        // Finish (a diamond). One unambiguous exit — must pass.
+        let mut steps = HashMap::new();
+        steps.insert("start".to_string(), create_log_step("start", None));
+        steps.insert("left".to_string(), create_log_step("left", None));
+        steps.insert("right".to_string(), create_log_step("right", None));
+        steps.insert("join".to_string(), create_finish_step("join", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "left".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "right".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "left".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "right".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ParallelFanoutNoMerge { .. })),
+            "Re-joining parallel fan-out (diamond) must pass. Errors: {:?}",
             result.errors
         );
     }

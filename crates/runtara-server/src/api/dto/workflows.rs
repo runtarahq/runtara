@@ -317,6 +317,18 @@ impl ValidationErrorDto {
                 None,
                 Some(targets.clone()),
             ),
+            ValidationError::ParallelFanoutNoMerge { from_step, targets } => (
+                "E083".to_string(),
+                format!(
+                    "Step '{}' fans out to parallel branches that never re-converge ({}); \
+                     re-join them at a single merge step or make the edges conditional",
+                    from_step,
+                    targets.join(", ")
+                ),
+                Some(from_step.clone()),
+                Some("executionPlan".to_string()),
+                Some(targets.clone()),
+            ),
             ValidationError::InvalidConditionalEdge {
                 from_step,
                 to_step,
