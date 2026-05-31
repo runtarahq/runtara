@@ -1572,6 +1572,58 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
 }
 
 /// Compute the set of steps reachable from the entry point.
+/// Whether the unconditional parallel branches starting at `branch_starts` all
+/// re-converge at a shared downstream step (a diamond). Used by the E073
+/// parallel-fan-out-no-merge check. Self-contained (no `codegen` dependency) so
+/// it also compiles for the browser validation WASM target, where `codegen` is
+/// gated out.
+fn parallel_branches_reconverge(graph: &ExecutionGraph, branch_starts: &[String]) -> bool {
+    if branch_starts.len() < 2 {
+        return false;
+    }
+    let reachable_sets: Vec<HashSet<String>> = branch_starts
+        .iter()
+        .map(|start| reachable_over_normal_flow(graph, start))
+        .collect();
+    let Some((first, rest)) = reachable_sets.split_first() else {
+        return false;
+    };
+    // A merge point is any step reachable from EVERY branch start.
+    first
+        .iter()
+        .any(|node| rest.iter().all(|set| set.contains(node)))
+}
+
+/// Steps reachable from `start` following normal-flow edges (everything except
+/// `onError` handlers). Includes `start` itself.
+fn reachable_over_normal_flow(graph: &ExecutionGraph, start: &str) -> HashSet<String> {
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &graph.execution_plan {
+        if edge.label.as_deref() != Some("onError") {
+            adjacency
+                .entry(edge.from_step.as_str())
+                .or_default()
+                .push(edge.to_step.as_str());
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut stack = vec![start.to_string()];
+    while let Some(step_id) = stack.pop() {
+        if !reachable.insert(step_id.clone()) {
+            continue;
+        }
+        if let Some(neighbors) = adjacency.get(step_id.as_str()) {
+            for neighbor in neighbors {
+                if !reachable.contains(*neighbor) {
+                    stack.push((*neighbor).to_string());
+                }
+            }
+        }
+    }
+    reachable
+}
+
 fn compute_reachable_steps(graph: &ExecutionGraph) -> HashSet<String> {
     let mut reachable = HashSet::new();
     let mut queue = vec![graph.entry_point.clone()];
@@ -3215,16 +3267,12 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
         // exempt; a re-joining diamond (e.g. fan-out that rejoins at a Finish) is
         // allowed.
         if label.is_none() && conditional_edges.is_empty() && default_edges.len() > 1 {
-            let branch_starts: Vec<Option<String>> = default_edges
-                .iter()
-                .map(|edge| Some(edge.to_step.clone()))
-                .collect();
-            if crate::codegen::ast::steps::branching::find_merge_point_n(&branch_starts, graph)
-                .is_none()
-            {
+            let branch_starts: Vec<String> =
+                default_edges.iter().map(|e| e.to_step.clone()).collect();
+            if !parallel_branches_reconverge(graph, &branch_starts) {
                 result.errors.push(ValidationError::ParallelFanoutNoMerge {
                     from_step: from_step.clone(),
-                    targets: default_edges.iter().map(|e| e.to_step.clone()).collect(),
+                    targets: branch_starts,
                 });
             }
         }
