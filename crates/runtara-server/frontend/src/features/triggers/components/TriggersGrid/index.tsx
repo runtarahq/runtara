@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { Pencil, Trash2, Loader2, Copy } from 'lucide-react';
@@ -24,6 +24,11 @@ import {
   TableRow,
 } from '@/shared/components/ui/table';
 import {
+  ConsoleTableShell,
+  StatusPill,
+  TableStatusFooter,
+} from '@/shared/components/console';
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -40,6 +45,11 @@ import {
 
 interface TriggersGridProps {
   data?: EnrichedTrigger[];
+  /** Pinned console toolbar (breadcrumb + actions) from the page. */
+  toolbar?: ReactNode;
+  isFetching?: boolean;
+  isError?: boolean;
+  error?: unknown;
 }
 
 function getTriggerTypeLabel(type?: TriggerType): string {
@@ -69,7 +79,13 @@ function getEndpoint(trigger: EnrichedTrigger): string | null {
   return null;
 }
 
-export function TriggersGrid({ data = [] }: TriggersGridProps) {
+export function TriggersGrid({
+  data = [],
+  toolbar,
+  isFetching = false,
+  isError = false,
+  error,
+}: TriggersGridProps) {
   const [deleteTarget, setDeleteTarget] = useState<EnrichedTrigger | null>(null);
 
   const removeMutation = useCustomMutation({
@@ -98,10 +114,57 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
     toast.success('Endpoint copied to clipboard');
   };
 
-  if (!data || data.length === 0) {
-    return (
-      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
-        <Icons.inbox className="mx-auto mb-4 h-10 w-10 text-muted-foreground" />
+  // Sort triggers by workflow name
+  const sortedTriggers = [...data].sort((a, b) =>
+    (a.workflowName || '').localeCompare(b.workflowName || '')
+  );
+
+  const hasContent = sortedTriggers.length > 0;
+
+  let body: ReactNode;
+  if (isFetching) {
+    body = (
+      <div className="divide-y divide-border/50">
+        {[...Array(8)].map((_, i) => (
+          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
+            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
+            <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
+            <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
+            <div className="ml-auto h-4 w-48 animate-pulse rounded bg-muted/60" />
+          </div>
+        ))}
+      </div>
+    );
+  } else if (isError) {
+    const err = error as any;
+    const isNetworkError =
+      err?.message?.includes('fetch') ||
+      err?.code === 'ERR_NETWORK' ||
+      !err?.response;
+    body = (
+      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
+        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
+        <p className="text-base font-semibold text-foreground">
+          {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+        </p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {isNetworkError
+            ? 'Please check that the backend service is running and try again.'
+            : 'There was a problem loading triggers. Please try again.'}
+        </p>
+        {import.meta.env.DEV && err && (
+          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
+            <p className="break-words font-mono text-xs text-destructive">
+              {err.message || 'Unknown error'}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  } else if (!hasContent) {
+    body = (
+      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
+        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
         <p className="text-base font-semibold text-foreground">
           No triggers yet
         </p>
@@ -110,17 +173,10 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
         </p>
       </div>
     );
-  }
-
-  // Sort triggers by workflow name
-  const sortedTriggers = [...data].sort((a, b) =>
-    (a.workflowName || '').localeCompare(b.workflowName || '')
-  );
-
-  return (
-    <TooltipProvider delayDuration={150}>
-      <div className="rounded-lg border overflow-hidden">
-        <Table>
+  } else {
+    body = (
+      <TooltipProvider delayDuration={150}>
+        <Table variant="console">
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
@@ -149,9 +205,10 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
-                    <Badge variant={trigger.active ? 'success' : 'muted'}>
-                      {trigger.active ? 'Active' : 'Inactive'}
-                    </Badge>
+                    <StatusPill
+                      tone={trigger.active ? 'success' : 'neutral'}
+                      label={trigger.active ? 'Active' : 'Inactive'}
+                    />
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {endpoint ? (
@@ -215,12 +272,28 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
             })}
           </TableBody>
         </Table>
-      </div>
+      </TooltipProvider>
+    );
+  }
 
-      <ModalDialog
-        open={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
+  return (
+    <>
+      <ConsoleTableShell
+        toolbar={toolbar}
+        footer={
+          hasContent && !isFetching && !isError ? (
+            <TableStatusFooter
+              left={`${sortedTriggers.length} trigger${
+                sortedTriggers.length === 1 ? '' : 's'
+              }`}
+            />
+          ) : undefined
+        }
       >
+        {body}
+      </ConsoleTableShell>
+
+      <ModalDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
           <DialogTitle>Delete Trigger</DialogTitle>
           <DialogDescription>
@@ -248,6 +321,6 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
           </Button>
         </DialogFooter>
       </ModalDialog>
-    </TooltipProvider>
+    </>
   );
 }

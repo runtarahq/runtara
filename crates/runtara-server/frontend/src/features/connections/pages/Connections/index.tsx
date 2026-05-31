@@ -12,7 +12,7 @@ import {
   getConnections,
 } from '@/features/connections/queries';
 import { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
-import { TilesPage } from '@/shared/components/tiles-page';
+import { Breadcrumb, ConsoleToolbar } from '@/shared/components/console';
 
 export function Connections() {
   const navigate = useNavigate();
@@ -38,38 +38,39 @@ export function Connections() {
   };
 
   usePageTitle('Connections');
+
+  const toolbar = (
+    <ConsoleToolbar
+      left={<Breadcrumb items={[{ label: 'Connections' }]} />}
+      actions={
+        <Button
+          disabled={
+            isFetching ||
+            connectionTypes.length === 0 ||
+            connectionTypesError ||
+            connectionsError
+          }
+          onClick={() => setIsModalOpen(true)}
+        >
+          {isFetching ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Loading...
+            </>
+          ) : (
+            <>
+              <Plus className="mr-2 h-4 w-4" />
+              New connection
+            </>
+          )}
+        </Button>
+      }
+    />
+  );
+
   return (
     <>
-      <TilesPage
-        kicker="Connections"
-        title="Manage connections"
-        action={
-          <Button
-            className="w-full sm:w-auto sm:px-4"
-            disabled={
-              isFetching ||
-              connectionTypes.length === 0 ||
-              connectionTypesError ||
-              connectionsError
-            }
-            onClick={() => setIsModalOpen(true)}
-          >
-            {isFetching ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Loading...
-              </>
-            ) : (
-              <>
-                <Plus className="mr-2 h-4 w-4" />
-                New connection
-              </>
-            )}
-          </Button>
-        }
-      >
-        <ExistingConnections />
-      </TilesPage>
+      <ExistingConnections toolbar={toolbar} />
 
       <ConnectionPickerModal
         open={isModalOpen}

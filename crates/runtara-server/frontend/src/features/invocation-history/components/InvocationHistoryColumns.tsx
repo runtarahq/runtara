@@ -1,16 +1,10 @@
 import { ColumnDef } from '@tanstack/react-table';
 import { Link } from 'react-router';
-import {
-  Loader2,
-  ExternalLink,
-  Eye,
-  Zap,
-  MessageSquare,
-  Bug,
-} from 'lucide-react';
+import { ExternalLink, Eye, Zap, MessageSquare, Bug } from 'lucide-react';
 import { ExecutionHistoryItem } from '../types';
 import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
+import { StatusPill, executionStatusPill } from '@/shared/components/console';
 import { isActiveStatus } from '@/shared/utils/status-display';
 import { ReplayButton } from '@/features/workflows/components/ReplayButton';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
@@ -35,106 +29,17 @@ const getDurationColorClass = (seconds: number | null | undefined): string => {
   return 'text-red-600 dark:text-red-400';
 };
 
-// Status badge component with consistent width
+// Status badge — delegates to the shared console StatusPill with a consistent width
 const StatusBadge = ({ status }: { status: string }) => {
-  const baseClasses =
-    'inline-flex items-center justify-center gap-1.5 min-w-[90px] px-2.5 py-1 text-xs font-medium rounded-full';
-
-  if (status === 'Completed') {
-    return (
-      <span
-        className={`${baseClasses} text-emerald-700 bg-emerald-50 border border-emerald-200/60 dark:text-emerald-400 dark:bg-emerald-900/30 dark:border-emerald-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full dark:bg-emerald-400"></span>
-        Completed
-      </span>
-    );
-  }
-
-  if (status === 'Failed') {
-    return (
-      <span
-        className={`${baseClasses} text-red-700 bg-red-50 border border-red-200/60 dark:text-red-400 dark:bg-red-900/30 dark:border-red-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-red-500 rounded-full dark:bg-red-400"></span>
-        Failed
-      </span>
-    );
-  }
-
-  if (status === 'Timeout') {
-    return (
-      <span
-        className={`${baseClasses} text-amber-700 bg-amber-50 border border-amber-200/60 dark:text-amber-400 dark:bg-amber-900/30 dark:border-amber-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-amber-500 rounded-full dark:bg-amber-400"></span>
-        Timeout
-      </span>
-    );
-  }
-
-  if (status === 'Cancelled') {
-    return (
-      <span
-        className={`${baseClasses} text-slate-700 bg-slate-100 border border-slate-200/60 dark:text-slate-400 dark:bg-slate-800 dark:border-slate-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-slate-500 rounded-full dark:bg-slate-400"></span>
-        Cancelled
-      </span>
-    );
-  }
-
-  if (status === 'Running') {
-    return (
-      <span
-        className={`${baseClasses} text-blue-700 bg-blue-50 border border-blue-200/60 dark:text-blue-400 dark:bg-blue-900/30 dark:border-blue-700/40`}
-      >
-        <Loader2 className="w-3 h-3 animate-spin" />
-        Running
-      </span>
-    );
-  }
-
-  if (status === 'Compiling') {
-    return (
-      <span
-        className={`${baseClasses} text-violet-700 bg-violet-50 border border-violet-200/60 dark:text-violet-400 dark:bg-violet-900/30 dark:border-violet-700/40`}
-      >
-        <Loader2 className="w-3 h-3 animate-spin" />
-        Compiling
-      </span>
-    );
-  }
-
-  if (status === 'Queued') {
-    return (
-      <span
-        className={`${baseClasses} text-slate-600 bg-slate-100 border border-slate-200/60 dark:text-slate-400 dark:bg-slate-800 dark:border-slate-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-slate-400 rounded-full dark:bg-slate-500"></span>
-        Queued
-      </span>
-    );
-  }
-
-  if (status === 'suspended') {
-    return (
-      <span
-        className={`${baseClasses} text-blue-700 bg-blue-50 border border-blue-200/60 dark:text-blue-400 dark:bg-blue-900/30 dark:border-blue-700/40`}
-      >
-        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse dark:bg-blue-400"></span>
-        Suspended
-      </span>
-    );
-  }
-
-  // Default/unknown status
+  const { tone, label, spin, pulse } = executionStatusPill(status);
   return (
-    <span
-      className={`${baseClasses} text-slate-700 bg-slate-100 border border-slate-200/60 dark:text-slate-400 dark:bg-slate-800 dark:border-slate-700/40`}
-    >
-      {status}
-    </span>
+    <StatusPill
+      tone={tone}
+      label={label}
+      spin={spin}
+      pulse={pulse}
+      className="min-w-[90px]"
+    />
   );
 };
 

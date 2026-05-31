@@ -4,7 +4,11 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw, Link, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Icons } from '@/shared/components/icons';
-import { TilesPage } from '@/shared/components/tiles-page';
+import {
+  Breadcrumb,
+  ConsoleTableShell,
+  ConsoleToolbar,
+} from '@/shared/components/console';
 import {
   DateRangeOption,
   DateRangeSelector,
@@ -134,25 +138,36 @@ export function RateLimits() {
       !(error as { response?: unknown })?.response);
 
   return (
-    <TilesPage
-      kicker="Analytics"
-      title="Rate Limits"
-      action={
-        <Button
-          onClick={handleRefresh}
-          variant="outline"
-          size="sm"
-          className="text-muted-foreground"
-        >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Refresh
-        </Button>
-      }
+    <ConsoleTableShell
+      bodyClassName="p-4 md:p-6"
       toolbar={
-        <DateRangeSelector
-          value={dateRange}
-          onChange={handleDateRangeChange}
-          options={VALID_DATE_RANGES}
+        <ConsoleToolbar
+          left={
+            <Breadcrumb
+              items={[
+                { label: 'Analytics', to: '/analytics/usage' },
+                { label: 'Rate Limits' },
+              ]}
+            />
+          }
+          actions={
+            <div className="flex items-center gap-2">
+              <DateRangeSelector
+                value={dateRange}
+                onChange={handleDateRangeChange}
+                options={VALID_DATE_RANGES}
+              />
+              <Button
+                onClick={handleRefresh}
+                variant="outline"
+                size="sm"
+                className="text-muted-foreground"
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh
+              </Button>
+            </div>
+          }
         />
       }
     >
@@ -252,6 +267,6 @@ export function RateLimits() {
         )}
         </div>
       )}
-    </TilesPage>
+    </ConsoleTableShell>
   );
 }

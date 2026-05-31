@@ -3,19 +3,23 @@ import { RowSelectionState, SortingState } from '@tanstack/react-table';
 import { Button } from '@/shared/components/ui/button';
 import {
   Download,
-  Filter,
   Loader2,
   Pencil,
   Plus,
   Trash2,
   Upload,
 } from 'lucide-react';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/shared/components/ui/collapsible';
 import { DataTable } from '@/shared/components/table';
+import {
+  Breadcrumb,
+  ConsoleTableShell,
+  ConsoleToolbar,
+  FilterPopover,
+  SelectionActionBar,
+  TablePagination,
+  TableStatusFooter,
+} from '@/shared/components/console';
+import { ObjectModelConnectionSelector } from '../ObjectModelConnectionSelector';
 import { Instance, Schema, Condition } from '@/generated/RuntaraRuntimeApi';
 import {
   useBulkCreateObjectInstances,
@@ -88,7 +92,6 @@ export function ObjectInstanceDtosTable({
   objectSchemaDto,
   connectionId,
 }: ObjectInstanceDtosTableProps) {
-  const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [filterCondition, setFilterCondition] = useState<Condition | null>(
     null
   );
@@ -594,119 +597,144 @@ export function ObjectInstanceDtosTable({
   );
 
   return (
-    <div
-      ref={tableRef}
-      data-table-container
-      onKeyDown={handleKeyDown}
-      tabIndex={0}
-      className="outline-none"
-    >
-      <style>{`
-        @keyframes row-flash-success {
-          0% { background-color: rgba(34, 197, 94, 0); }
-          50% { background-color: rgba(34, 197, 94, 0.2); }
-          100% { background-color: rgba(34, 197, 94, 0); }
-        }
-        .row-animating {
-          animation: row-flash-success 1s ease-in-out;
-        }
-      `}</style>
-      <Collapsible
-        open={isFilterOpen}
-        onOpenChange={setIsFilterOpen}
-        className="mb-6"
-      >
-        <div className="flex justify-between items-center ml-3">
-          <div className="flex gap-2">
-            <CollapsibleTrigger asChild>
-              <Button variant="outline" size="sm">
-                <Filter className="h-4 w-4 mr-2" />
-                {isFilterOpen ? 'Hide Filters' : 'Show Filters'}
-              </Button>
-            </CollapsibleTrigger>
-            {objectSchemaDto.name && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleExportCsv}
-                  disabled={exportCsvMutation.isPending}
+    <>
+      <ConsoleTableShell
+        ref={tableRef}
+        data-table-container
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        className="outline-none"
+        toolbar={
+          <>
+            <ConsoleToolbar
+              left={
+                <Breadcrumb
+                  items={[
+                    { label: 'Objects', to: '/objects/types' },
+                    { label: objectSchemaDto.name ?? 'Records' },
+                  ]}
+                />
+              }
+              filter={
+                <FilterPopover
+                  title="Filter records"
+                  activeCount={filterCondition ? 1 : 0}
+                  onClear={() => handleFilterChange(null)}
+                  contentClassName="w-[480px]"
                 >
-                  {exportCsvMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Download className="h-4 w-4 mr-2" />
+                  <FilterComposer
+                    value={filterCondition}
+                    onChange={handleFilterChange}
+                    schemaDefinition={filterSchemaDefinition}
+                  />
+                </FilterPopover>
+              }
+              actions={
+                <div className="flex items-center gap-2">
+                  <ObjectModelConnectionSelector />
+                  {objectSchemaDto.name && (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleExportCsv}
+                        disabled={exportCsvMutation.isPending}
+                      >
+                        {exportCsvMutation.isPending ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="mr-2 h-4 w-4" />
+                        )}
+                        Export
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowImportDialog(true)}
+                      >
+                        <Upload className="mr-2 h-4 w-4" />
+                        Import
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowBulkInsertDialog(true)}
+                      >
+                        <Plus className="mr-2 h-4 w-4" />
+                        Bulk insert
+                      </Button>
+                    </>
                   )}
-                  Export CSV
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowImportDialog(true)}
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  Import CSV
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowBulkInsertDialog(true)}
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Bulk Insert
-                </Button>
-              </>
-            )}
-          </div>
-          {selectedCount > 0 && (
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowBulkEditDialog(true)}
-              >
-                <Pencil className="h-4 w-4 mr-2" />
-                Edit {selectedCount} selected
-              </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setShowBulkDeleteDialog(true)}
-              >
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete {selectedCount} selected
-              </Button>
-            </div>
-          )}
-        </div>
-
-        <CollapsibleContent>
-          <div className="m-3 p-4 border rounded-lg bg-muted/30">
-            <FilterComposer
-              value={filterCondition}
-              onChange={handleFilterChange}
-              schemaDefinition={filterSchemaDefinition}
+                </div>
+              }
             />
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
-
-      {isMissingSchemaName && (
-        <Alert variant="destructive" className="mb-4 mx-3">
-          <AlertDescription>
-            This schema does not have a name defined. Filtering and sorting are
-            not available. Please contact your administrator to add a name to
-            this schema.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <div className="rounded-lg border shadow-sm overflow-hidden">
+            {isMissingSchemaName && (
+              <Alert variant="destructive" className="m-3">
+                <AlertDescription>
+                  This schema does not have a name defined. Filtering and sorting
+                  are not available. Please contact your administrator to add a
+                  name to this schema.
+                </AlertDescription>
+              </Alert>
+            )}
+          </>
+        }
+        selectionBar={
+          <SelectionActionBar
+            count={selectedCount}
+            onClear={() => setRowSelection({})}
+          >
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowBulkEditDialog(true)}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setShowBulkDeleteDialog(true)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </Button>
+          </SelectionActionBar>
+        }
+        footer={
+          <TableStatusFooter
+            left={`${totalElements.toLocaleString()} record${
+              totalElements === 1 ? '' : 's'
+            }`}
+            right={
+              <TablePagination
+                pageIndex={currentPage}
+                pageSize={pageSize}
+                pageCount={totalPages}
+                onPageChange={handlePageChange}
+                onPageSizeChange={handlePageSizeChange}
+              />
+            }
+          />
+        }
+      >
+        <style>{`
+          @keyframes row-flash-success {
+            0% { background-color: rgba(34, 197, 94, 0); }
+            50% { background-color: rgba(34, 197, 94, 0.2); }
+            100% { background-color: rgba(34, 197, 94, 0); }
+          }
+          .row-animating {
+            animation: row-flash-success 1s ease-in-out;
+          }
+        `}</style>
         <DataTable
           columns={columns}
           data={records}
           isFetching={isLoading}
-          shouldRenderPagination={true}
+          shouldRenderPagination={false}
+          stickyHeader
           pagination={{
             pageIndex: currentPage,
             pageSize: pageSize,
@@ -727,7 +755,7 @@ export function ObjectInstanceDtosTable({
           }
           beforePaginationSlot={<AddRowButton onClick={handleAddRow} />}
         />
-      </div>
+      </ConsoleTableShell>
 
       <BulkEditDialog
         open={showBulkEditDialog}
@@ -776,6 +804,6 @@ export function ObjectInstanceDtosTable({
         objectSchemaDto={objectSchemaDto}
         connectionId={connectionId}
       />
-    </div>
+    </>
   );
 }

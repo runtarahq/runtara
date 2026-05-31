@@ -55,10 +55,6 @@ export const objectInstancesColumns = ({
       },
       enableSorting: false,
       enableHiding: false,
-      meta: {
-        cellClassName: 'border-r border-slate-100 dark:border-slate-800',
-        headerClassName: 'border-r border-slate-100 dark:border-slate-800',
-      },
     });
   }
 
@@ -71,8 +67,8 @@ export const objectInstancesColumns = ({
     enableHiding: false,
     cell: ({ row }) => <IdColumnCell id={row.original.id!} />,
     meta: {
-      cellClassName: 'border-r border-slate-100 !px-3 dark:border-slate-800',
-      headerClassName: 'border-r border-slate-100 !px-3 dark:border-slate-800',
+      cellClassName: '!px-3',
+      headerClassName: '!px-3',
     },
   });
 

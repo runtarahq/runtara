@@ -1,12 +1,25 @@
-import { useMemo, useCallback, useEffect } from 'react';
+import { useMemo, useCallback, useEffect, useState } from 'react';
 import { SortingState } from '@tanstack/react-table';
 import { DataTable } from '@/shared/components/table';
+import {
+  Breadcrumb,
+  ConsoleTableShell,
+  ConsoleToolbar,
+  FilterPopover,
+  TablePagination,
+  TableStatusFooter,
+  ToolbarSearch,
+} from '@/shared/components/console';
 import { useTableQuery } from '@/shared/hooks/api';
 import { usePagination } from '@/shared/hooks/usePagination';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAllExecutions } from '../queries';
-import { ExecutionHistoryFilters } from '../types';
+import { ExecutionHistoryFilters, ExecutionHistoryItem } from '../types';
 import { invocationHistoryColumns } from './InvocationHistoryColumns';
+import {
+  InvocationHistoryFilters,
+  countActiveInvocationFilters,
+} from './InvocationHistoryFilters';
 
 // Map column IDs to API sort field names
 // Note: Backend only supports sorting by createdAt and completedAt
@@ -25,6 +38,7 @@ export function InvocationHistoryTable({
   onFiltersChange,
 }: InvocationHistoryTableProps) {
   const { pagination, setPagination } = usePagination();
+  const [search, setSearch] = useState('');
 
   // Convert filters to table sorting state
   const sorting = useMemo<SortingState>(() => {
@@ -76,17 +90,92 @@ export function InvocationHistoryTable({
     [filters, onFiltersChange]
   );
 
+  // Client-side quick search over the currently loaded page (mirrors the mockup)
+  const query = search.trim().toLowerCase();
+  const filteredData = useMemo(() => {
+    if (!query) return data;
+    return (data as ExecutionHistoryItem[]).filter((item) =>
+      [
+        item.workflowName,
+        item.workflowId,
+        item.instanceId,
+        item.status,
+        item.version,
+      ]
+        .filter((v) => v !== undefined && v !== null)
+        .some((v) => String(v).toLowerCase().includes(query))
+    );
+  }, [data, query]);
+
+  const footerLeft = query
+    ? `${filteredData.length} match “${search.trim()}” on this page`
+    : `${data.length} on this page`;
+
+  const handlePageChange = (page: number) =>
+    setPagination((prev) => ({ ...prev, pageIndex: page }));
+  const handlePageSizeChange = (size: number) =>
+    setPagination({ pageIndex: 0, pageSize: size });
+
+  const activeFilterCount = countActiveInvocationFilters(filters);
+  const handleClearFilters = () =>
+    onFiltersChange({
+      ...filters,
+      workflowId: undefined,
+      status: undefined,
+      createdFrom: undefined,
+      createdTo: undefined,
+      completedFrom: undefined,
+      completedTo: undefined,
+    });
+
   return (
-    <div className="rounded-lg border shadow-sm overflow-hidden">
+    <ConsoleTableShell
+      toolbar={
+        <ConsoleToolbar
+          left={<Breadcrumb items={[{ label: 'Invocation History' }]} />}
+          search={
+            <ToolbarSearch
+              value={search}
+              onChange={setSearch}
+              placeholder="Search this page…"
+              className="w-56"
+            />
+          }
+          filter={
+            <FilterPopover
+              activeCount={activeFilterCount}
+              onClear={handleClearFilters}
+            >
+              <InvocationHistoryFilters
+                filters={filters}
+                onFiltersChange={onFiltersChange}
+              />
+            </FilterPopover>
+          }
+        />
+      }
+      footer={
+        <TableStatusFooter
+          left={footerLeft}
+          right={
+            <TablePagination
+              pageIndex={pagination.pageIndex}
+              pageSize={pagination.pageSize}
+              pageCount={totalPages ?? 1}
+              onPageChange={handlePageChange}
+              onPageSizeChange={handlePageSizeChange}
+            />
+          }
+        />
+      }
+    >
       <DataTable
         columns={invocationHistoryColumns}
-        data={data}
+        data={filteredData}
         pagination={{
           ...pagination,
-          onPageChange: (page) =>
-            setPagination((prev) => ({ ...prev, pageIndex: page })),
-          onPageSizeChange: (size) =>
-            setPagination({ pageIndex: 0, pageSize: size }),
+          onPageChange: handlePageChange,
+          onPageSizeChange: handlePageSizeChange,
         }}
         totalPages={totalPages}
         setPagination={setPagination}
@@ -94,8 +183,10 @@ export function InvocationHistoryTable({
         sorting={sorting}
         onSortingChange={handleSortingChange}
         manualSorting
+        stickyHeader
+        shouldRenderPagination={false}
         getRowClassName={() => 'group'}
       />
-    </div>
+    </ConsoleTableShell>
   );
 }

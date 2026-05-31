@@ -1,7 +1,11 @@
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw, Cpu, HardDrive, MemoryStick } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
-import { TilesPage } from '@/shared/components/tiles-page';
+import {
+  Breadcrumb,
+  ConsoleTableShell,
+  ConsoleToolbar,
+} from '@/shared/components/console';
 import { Card } from '@/shared/components/ui/card';
 import { Progress } from '@/shared/components/ui/progress';
 import { useSystemAnalytics } from '../../hooks/useAnalytics';
@@ -21,19 +25,30 @@ export function System() {
   };
 
   return (
-    <TilesPage
-      kicker="Analytics"
-      title="System"
-      action={
-        <Button
-          onClick={handleRefresh}
-          variant="outline"
-          size="sm"
-          className="text-muted-foreground"
-        >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Refresh
-        </Button>
+    <ConsoleTableShell
+      bodyClassName="p-4 md:p-6"
+      toolbar={
+        <ConsoleToolbar
+          left={
+            <Breadcrumb
+              items={[
+                { label: 'Analytics', to: '/analytics/usage' },
+                { label: 'System' },
+              ]}
+            />
+          }
+          actions={
+            <Button
+              onClick={handleRefresh}
+              variant="outline"
+              size="sm"
+              className="text-muted-foreground"
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Refresh
+            </Button>
+          }
+        />
       }
     >
       <div className="space-y-4">
@@ -201,6 +216,6 @@ export function System() {
           </div>
         </section>
       </div>
-    </TilesPage>
+    </ConsoleTableShell>
   );
 }

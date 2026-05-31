@@ -8,8 +8,6 @@ import {
 import { ObjectInstanceDtosTable } from '../../components/ObjectInstancesTable';
 import { useObjectSchemaDto } from '../../hooks/useObjectSchema';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { TileList, TilesPage } from '@/shared/components/tiles-page';
-import { ObjectModelConnectionSelector } from '../../components/ObjectModelConnectionSelector';
 import { useObjectModelConnectionSelection } from '../../hooks/useObjectModelConnectionSelection';
 
 export function ManageInstances() {
@@ -27,40 +25,34 @@ export function ManageInstances() {
       : 'Object Instances'
   );
 
-  return (
-    <TilesPage
-      kicker="Objects"
-      title={`Manage ${objectSchemaDto?.name ?? typeName}`}
-      className="py-6 lg:px-10"
-      contentClassName="gap-6"
-    >
-      <div className="flex justify-end">
-        <ObjectModelConnectionSelector />
+  if (isLoading) {
+    return (
+      <div className="flex h-dvh items-center justify-center text-muted-foreground">
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        Loading records...
       </div>
-      {isLoading ? (
-        <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground">
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          Loading records...
-        </div>
-      ) : !objectSchemaDto ? (
-        <div className="max-w-3xl">
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Object type not found</AlertTitle>
-            <AlertDescription>
-              The requested object type could not be loaded. Verify the URL or
-              return to the objects list.
-            </AlertDescription>
-          </Alert>
-        </div>
-      ) : (
-        <TileList>
-          <ObjectInstanceDtosTable
-            objectSchemaDto={objectSchemaDto}
-            connectionId={selectedConnectionId}
-          />
-        </TileList>
-      )}
-    </TilesPage>
+    );
+  }
+
+  if (!objectSchemaDto) {
+    return (
+      <div className="flex h-dvh items-center justify-center p-6">
+        <Alert variant="destructive" className="max-w-2xl">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Object type not found</AlertTitle>
+          <AlertDescription>
+            The requested object type could not be loaded. Verify the URL or
+            return to the objects list.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <ObjectInstanceDtosTable
+      objectSchemaDto={objectSchemaDto}
+      connectionId={selectedConnectionId}
+    />
   );
 }

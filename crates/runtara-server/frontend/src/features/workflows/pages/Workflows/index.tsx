@@ -1,24 +1,20 @@
 import { useState, useMemo, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { PlusIcon, Search, X } from 'lucide-react';
+import { PlusIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/components/ui/button.tsx';
-import { Input } from '@/shared/components/ui/input.tsx';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
+  Breadcrumb,
+  ConsoleToolbar,
+  ToolbarSearch,
+  type BreadcrumbItem,
+} from '@/shared/components/console';
 import { WorkflowsGrid } from '../../components/WorkflowsGrid';
-import { FolderBreadcrumb } from '../../components/FolderBreadcrumb';
 import {
   RenameFolderDialog,
   DeleteFolderDialog,
 } from '../../components/FolderDialogs';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { TilesPage, TileList } from '@/shared/components/tiles-page';
 import { useCustomQuery, useDebounce } from '@/shared/hooks';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getWorkflows } from '@/features/workflows/queries';
@@ -35,7 +31,6 @@ export function Workflows() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchTerm, setSearchTerm] = useState('');
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
-  const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated');
 
   // Folder navigation state - derived from URL search params for proper browser history support
   const currentFolderPath = searchParams.get('folder') || '/';
@@ -90,7 +85,6 @@ export function Workflows() {
   const handleFolderNavigate = useCallback(
     (path: string) => {
       if (path === '/') {
-        // Remove folder param when navigating to root
         setSearchParams((prev) => {
           const next = new URLSearchParams(prev);
           next.delete('folder');
@@ -118,7 +112,6 @@ export function Workflows() {
         await renameFolderMutation.mutateAsync({ currentPath, newPath });
         toast.success('Folder renamed successfully');
         setRenameFolderTarget(null);
-        // If we were inside the renamed folder, update current path in URL
         if (currentFolderPath === currentPath) {
           setSearchParams(
             (prev) => {
@@ -143,7 +136,6 @@ export function Workflows() {
         await deleteFolderMutation.mutateAsync(path);
         toast.success('Folder deleted successfully');
         setDeleteFolderTarget(null);
-        // If we were inside the deleted folder, go back to root
         if (currentFolderPath.startsWith(path)) {
           setSearchParams(
             (prev) => {
@@ -161,87 +153,62 @@ export function Workflows() {
     [deleteFolderMutation, currentFolderPath, setSearchParams]
   );
 
-  const isAtRoot = currentFolderPath === '/';
+  // Breadcrumb path: Workflows / <folder> / <subfolder> …
+  const breadcrumbItems = useMemo<BreadcrumbItem[]>(() => {
+    const items: BreadcrumbItem[] = [
+      { label: 'Workflows', onClick: () => handleFolderNavigate('/') },
+    ];
+    if (currentFolderPath && currentFolderPath !== '/') {
+      const segments = currentFolderPath
+        .replace(/^\/|\/$/g, '')
+        .split('/')
+        .filter(Boolean);
+      let acc = '';
+      segments.forEach((segment) => {
+        acc += '/' + segment;
+        const path = acc + '/';
+        items.push({ label: segment, onClick: () => handleFolderNavigate(path) });
+      });
+    }
+    return items;
+  }, [currentFolderPath, handleFolderNavigate]);
 
-  return (
-    <TilesPage
-      kicker="Workflows"
-      title="Build and iterate automation flows"
-      action={
-        <Link to="/workflows/create" className="w-full sm:w-auto">
-          <Button
-            className="w-full sm:w-auto sm:px-4"
-            disabled={isError}
-          >
+  const toolbar = (
+    <ConsoleToolbar
+      left={<Breadcrumb items={breadcrumbItems} />}
+      search={
+        <ToolbarSearch
+          value={searchTerm}
+          onChange={setSearchTerm}
+          placeholder="Search workflows…"
+          className="w-56"
+        />
+      }
+      actions={
+        <Link to="/workflows/create">
+          <Button disabled={isError}>
             <PlusIcon className="mr-2 h-4 w-4" />
             New workflow
           </Button>
         </Link>
       }
-      toolbar={
-        <div className="space-y-4">
-          {/* Breadcrumb navigation */}
-          {!isAtRoot && (
-            <FolderBreadcrumb
-              currentPath={currentFolderPath}
-              folders={foldersData?.raw || []}
-              onNavigate={handleFolderNavigate}
-            />
-          )}
+    />
+  );
 
-          {/* Search and sort */}
-          <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-center">
-            <div className="relative w-full sm:flex-[2]">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-                placeholder="Search workflows..."
-                className="w-full pl-9 pr-9"
-              />
-              {searchTerm && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6"
-                  onClick={() => setSearchTerm('')}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              )}
-            </div>
-            <Select
-              value={sortBy}
-              onValueChange={(value) => setSortBy(value as 'updated' | 'name')}
-            >
-              <SelectTrigger className="w-full sm:flex-1">
-                <SelectValue placeholder="Sort by" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="updated">Sort by: Updated</SelectItem>
-                <SelectItem value="name">Sort by: Name</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      }
-    >
-      <TileList>
-        {/* Folders + workflows in a single table */}
-        <WorkflowsGrid
-          searchTerm={debouncedSearchTerm}
-          sortBy={sortBy}
-          folderPath={currentFolderPath}
-          showMoveAction={true}
-          folders={childFolders}
-          folderWorkflowCounts={folderWorkflowCounts}
-          onFolderNavigate={handleFolderNavigate}
-          onFolderRename={setRenameFolderTarget}
-          onFolderDelete={setDeleteFolderTarget}
-        />
-      </TileList>
+  return (
+    <>
+      <WorkflowsGrid
+        toolbar={toolbar}
+        searchTerm={debouncedSearchTerm}
+        folderPath={currentFolderPath}
+        showMoveAction={true}
+        folders={childFolders}
+        folderWorkflowCounts={folderWorkflowCounts}
+        onFolderNavigate={handleFolderNavigate}
+        onFolderRename={setRenameFolderTarget}
+        onFolderDelete={setDeleteFolderTarget}
+      />
 
-      {/* Rename Folder Dialog */}
       <RenameFolderDialog
         open={!!renameFolderTarget}
         onOpenChange={(open) => !open && setRenameFolderTarget(null)}
@@ -250,7 +217,6 @@ export function Workflows() {
         isLoading={renameFolderMutation.isPending}
       />
 
-      {/* Delete Folder Dialog */}
       <DeleteFolderDialog
         open={!!deleteFolderTarget}
         onOpenChange={(open) => !open && setDeleteFolderTarget(null)}
@@ -261,6 +227,6 @@ export function Workflows() {
         }
         isLoading={deleteFolderMutation.isPending}
       />
-    </TilesPage>
+    </>
   );
 }

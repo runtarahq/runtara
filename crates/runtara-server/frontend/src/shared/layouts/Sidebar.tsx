@@ -22,13 +22,12 @@ import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
-import { DollarSign, Folder, Settings } from 'lucide-react';
+import { DollarSign, Settings } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router';
-import { useFolders } from '@/features/workflows/hooks/useFolders';
 
 export function Sidebar() {
   return (
@@ -90,7 +89,6 @@ function HeaderMenu() {
 
 function AppMenu() {
   const location = useLocation();
-  const { data: foldersData } = useFolders();
 
   const userGroups = useAuthStore((state) => state.userGroups);
   const entitlements = useEntitlements();
@@ -100,33 +98,12 @@ function AppMenu() {
     [userGroups, entitlements]
   );
 
-  const menuWithFolders = useMemo(() => {
-    return allowedMenu.map((menuItem) => {
-      if (
-        menuItem.key === 'workflows' &&
-        foldersData?.root &&
-        foldersData.root.length > 0
-      ) {
-        return {
-          ...menuItem,
-          children: foldersData.root.map((folder) => ({
-            key: folder.path,
-            title: folder.name,
-            to: `/workflows?folder=${encodeURIComponent(folder.path)}`,
-            icon: <Folder className="h-4 w-4 text-amber-500" />,
-          })),
-        };
-      }
-      return menuItem;
-    });
-  }, [allowedMenu, foldersData?.root]);
-
   const isHomePage = location.pathname === '/';
 
   return (
     <SidebarMenu>
       <SidebarGroup className="gap-0.5 group-data-[state=collapsed]:items-center">
-        {menuWithFolders.map((menuItem) => (
+        {allowedMenu.map((menuItem) => (
           <SideBarNavLink
             key={menuItem.key}
             route={menuItem}

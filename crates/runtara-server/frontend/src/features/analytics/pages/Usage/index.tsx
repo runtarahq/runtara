@@ -4,7 +4,11 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Icons } from '@/shared/components/icons';
-import { TilesPage } from '@/shared/components/tiles-page';
+import {
+  Breadcrumb,
+  ConsoleTableShell,
+  ConsoleToolbar,
+} from '@/shared/components/console';
 import {
   DateRangeOption,
   DateRangeSelector,
@@ -333,22 +337,36 @@ export function Usage() {
       !(error as { response?: unknown })?.response);
 
   return (
-    <TilesPage
-      kicker="Analytics"
-      title="Usage"
-      action={
-        <Button
-          onClick={handleRefresh}
-          variant="outline"
-          size="sm"
-          className="text-muted-foreground"
-        >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Refresh
-        </Button>
-      }
+    <ConsoleTableShell
+      bodyClassName="p-4 md:p-6"
       toolbar={
-        <DateRangeSelector value={dateRange} onChange={handleDateRangeChange} />
+        <ConsoleToolbar
+          left={
+            <Breadcrumb
+              items={[
+                { label: 'Analytics', to: '/analytics/usage' },
+                { label: 'Usage' },
+              ]}
+            />
+          }
+          actions={
+            <div className="flex items-center gap-2">
+              <DateRangeSelector
+                value={dateRange}
+                onChange={handleDateRangeChange}
+              />
+              <Button
+                onClick={handleRefresh}
+                variant="outline"
+                size="sm"
+                className="text-muted-foreground"
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh
+              </Button>
+            </div>
+          }
+        />
       }
     >
       {metricsError && !metricsLoading ? (
@@ -422,6 +440,6 @@ export function Usage() {
         </section>
         </div>
       )}
-    </TilesPage>
+    </ConsoleTableShell>
   );
 }

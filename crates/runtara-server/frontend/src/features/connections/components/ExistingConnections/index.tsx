@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { Activity, Pencil, Trash2, Loader2 } from 'lucide-react';
@@ -15,6 +15,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/shared/components/ui/table';
+import {
+  ConsoleTableShell,
+  StatusPill,
+  TableStatusFooter,
+  type StatusTone,
+} from '@/shared/components/console';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import {
   DialogClose,
@@ -23,11 +29,28 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/shared/components/ui/dialog';
+import { ConnectionStatus } from '@/generated/RuntaraRuntimeApi';
 import { EnrichedConnection } from '@/features/connections/types';
 import {
   getConnections,
   removeConnection,
 } from '@/features/connections/queries';
+
+function connectionStatusPill(status: ConnectionStatus): {
+  tone: StatusTone;
+  label: string;
+} {
+  switch (status) {
+    case 'ACTIVE':
+      return { tone: 'success', label: 'Connected' };
+    case 'REQUIRES_RECONNECTION':
+      return { tone: 'warning', label: 'Reconnect required' };
+    case 'INVALID_CREDENTIALS':
+      return { tone: 'error', label: 'Invalid credentials' };
+    default:
+      return { tone: 'neutral', label: 'Unknown' };
+  }
+}
 
 function formatNumber(num: number): string {
   if (num >= 1000000) {
@@ -59,7 +82,12 @@ function ConnectionUsage({ connection }: { connection: EnrichedConnection }) {
   );
 }
 
-export function ExistingConnections() {
+interface ExistingConnectionsProps {
+  /** Pinned console toolbar (breadcrumb + actions) from the page. */
+  toolbar?: ReactNode;
+}
+
+export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
   const [deleteTarget, setDeleteTarget] = useState<EnrichedConnection | null>(
     null
   );
@@ -93,30 +121,31 @@ export function ExistingConnections() {
     }
   };
 
+  const hasConnections = !!connections && connections.length > 0;
+
+  let body: ReactNode;
   if (isFetching) {
-    return (
-      <div className="rounded-lg border divide-y">
-        {[...Array(6)].map((_, i) => (
-          <div key={i} className="flex items-center gap-4 px-3 py-2.5">
-            <div className="h-4 w-40 rounded bg-muted/60 animate-pulse" />
-            <div className="h-4 w-24 rounded bg-muted/60 animate-pulse" />
-            <div className="ml-auto h-4 w-32 rounded bg-muted/60 animate-pulse" />
+    body = (
+      <div className="divide-y divide-border/50">
+        {[...Array(8)].map((_, i) => (
+          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
+            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
+            <div className="h-4 w-24 animate-pulse rounded bg-muted/60" />
+            <div className="ml-auto h-4 w-32 animate-pulse rounded bg-muted/60" />
           </div>
         ))}
       </div>
     );
-  }
-
-  if (isError) {
+  } else if (isError) {
     const err = error as any;
     const isNetworkError =
       err?.message?.includes('fetch') ||
       err?.code === 'ERR_NETWORK' ||
       !err?.response;
 
-    return (
-      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
-        <Icons.warning className="mx-auto mb-4 h-10 w-10 text-destructive" />
+    body = (
+      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
+        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
         <p className="text-base font-semibold text-foreground">
           {isNetworkError
             ? 'Unable to connect to backend'
@@ -128,50 +157,51 @@ export function ExistingConnections() {
             : 'There was a problem loading connections. Please try again.'}
         </p>
         {import.meta.env.DEV && error && (
-          <div className="mt-4 max-w-md mx-auto rounded-lg bg-destructive/10 p-3 text-left">
-            <p className="text-xs font-mono text-destructive break-words">
+          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
+            <p className="break-words font-mono text-xs text-destructive">
               {error.message || 'Unknown error'}
             </p>
           </div>
         )}
       </div>
     );
-  }
-
-  if (!connections || connections.length === 0) {
-    return (
-      <div className="rounded-lg border bg-muted/20 px-6 py-10 text-center">
-        <Icons.inbox className="mx-auto mb-4 h-10 w-10 text-muted-foreground" />
+  } else if (!hasConnections) {
+    body = (
+      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
+        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
         <p className="text-base font-semibold text-foreground">
           No connections configured
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Add a connection from the available options below.
+          Add a connection using the New connection button above.
         </p>
       </div>
     );
-  }
-
-  return (
-    <>
-      <div className="rounded-lg border overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Connection</TableHead>
-              <TableHead>Integration</TableHead>
-              <TableHead>Usage</TableHead>
-              <TableHead className="w-0" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {(connections as EnrichedConnection[]).map((connection) => (
+  } else {
+    body = (
+      <Table variant="console">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Connection</TableHead>
+            <TableHead>Integration</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Usage</TableHead>
+            <TableHead className="w-0" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {(connections as EnrichedConnection[]).map((connection) => {
+            const statusPill = connectionStatusPill(connection.status);
+            return (
               <TableRow key={connection.id}>
                 <TableCell className="font-medium text-foreground">
                   {connection.title}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {connection.connectionType?.displayName || 'Connection'}
+                </TableCell>
+                <TableCell>
+                  <StatusPill tone={statusPill.tone} label={statusPill.label} />
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   <ConnectionUsage connection={connection} />
@@ -205,10 +235,29 @@ export function ExistingConnections() {
                   </div>
                 </TableCell>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            );
+          })}
+        </TableBody>
+      </Table>
+    );
+  }
+
+  return (
+    <>
+      <ConsoleTableShell
+        toolbar={toolbar}
+        footer={
+          hasConnections && !isFetching && !isError ? (
+            <TableStatusFooter
+              left={`${connections.length} connection${
+                connections.length === 1 ? '' : 's'
+              }`}
+            />
+          ) : undefined
+        }
+      >
+        {body}
+      </ConsoleTableShell>
 
       <ModalDialog
         open={!!deleteTarget}

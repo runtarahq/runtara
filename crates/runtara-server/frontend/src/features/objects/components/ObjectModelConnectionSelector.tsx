@@ -1,13 +1,13 @@
-import { Database, Loader2 } from 'lucide-react';
+import { useState } from 'react';
+import { Check, Database, Loader2 } from 'lucide-react';
 import { Link } from 'react-router';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
 import { Button } from '@/shared/components/ui/button';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/shared/components/ui/popover';
+import { cn } from '@/lib/utils';
 import { useObjectModelConnectionSelection } from '../hooks/useObjectModelConnectionSelection';
 
 export function ObjectModelConnectionSelector() {
@@ -18,19 +18,25 @@ export function ObjectModelConnectionSelector() {
     isLoading,
     isError,
   } = useObjectModelConnectionSelection();
+  const [open, setOpen] = useState(false);
 
   if (isLoading) {
     return (
-      <div className="flex h-9 items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground">
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-9 w-9 shrink-0"
+        disabled
+        aria-label="Loading database connections"
+      >
         <Loader2 className="h-4 w-4 animate-spin" />
-        Loading database connections
-      </div>
+      </Button>
     );
   }
 
   if (isError || connections.length === 0) {
     return (
-      <Button asChild variant="outline" className="h-9 rounded-lg">
+      <Button asChild variant="outline" size="sm">
         <Link to="/connections/postgres/create">
           <Database className="mr-2 h-4 w-4" />
           Add database connection
@@ -39,30 +45,55 @@ export function ObjectModelConnectionSelector() {
     );
   }
 
+  const current = connections.find((c) => c.id === selectedConnectionId);
+
   return (
-    <div className="flex items-center gap-2">
-      <Database className="h-4 w-4 text-muted-foreground" />
-      <Select
-        value={selectedConnectionId ?? ''}
-        onValueChange={setSelectedConnectionId}
-      >
-        <SelectTrigger
-          className="h-9 w-[min(22rem,calc(100vw-2rem))] rounded-lg"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-9 w-9 shrink-0"
           aria-label="Database connection"
+          title={
+            current ? `Database: ${current.title}` : 'Database connection'
+          }
         >
-          <SelectValue placeholder="Database connection" />
-        </SelectTrigger>
-        <SelectContent>
-          {connections.map((connection) => (
-            <SelectItem key={connection.id} value={connection.id}>
-              {connection.title}
-              {connection.defaultFor?.includes('object_model')
-                ? ' (default)'
-                : ''}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
+          <Database className="h-4 w-4" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 p-0">
+        <div className="border-b px-3 py-2 text-sm font-medium">
+          Database connection
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1">
+          {connections.map((connection) => {
+            const selected = connection.id === selectedConnectionId;
+            return (
+              <button
+                key={connection.id}
+                type="button"
+                onClick={() => {
+                  setSelectedConnectionId(connection.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  'flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted',
+                  selected && 'text-primary'
+                )}
+              >
+                <span className="truncate">
+                  {connection.title}
+                  {connection.defaultFor?.includes('object_model')
+                    ? ' (default)'
+                    : ''}
+                </span>
+                {selected && <Check className="h-4 w-4 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

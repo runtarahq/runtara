@@ -18,26 +18,48 @@ export interface FolderInfo {
 }
 
 /**
- * Parse folder paths into structured folder info
+ * Parse folder paths into structured folder info.
+ *
+ * Every ancestor is materialized, not just the literal paths the API returns:
+ * e.g. if the only path is "/Demo/Test/", an intermediate "/Demo/" folder is
+ * synthesized so it still shows up at its level and stays navigable. Without
+ * this, a nested folder whose parent has no direct workflows would be
+ * unreachable (the parent never appears as a row to click into).
  */
 function parseFolderPaths(paths: readonly string[]): FolderInfo[] {
-  return paths
-    .filter((path) => path && path !== '/')
-    .map((path) => {
-      // Remove leading/trailing slashes and split
-      const segments = path.replace(/^\/|\/$/g, '').split('/');
-      const name = segments[segments.length - 1] || '';
-      const parentPath =
-        segments.length > 1 ? '/' + segments.slice(0, -1).join('/') + '/' : '/';
+  const byPath = new Map<string, FolderInfo>();
 
-      return {
-        path,
-        name,
-        parentPath,
-        depth: segments.length,
-      };
-    })
-    .sort((a, b) => a.path.localeCompare(b.path));
+  paths
+    .filter((path) => path && path !== '/')
+    .forEach((path) => {
+      const segments = path
+        .replace(/^\/|\/$/g, '')
+        .split('/')
+        .filter(Boolean);
+
+      // Walk each prefix so ancestors are included (and de-duplicated).
+      for (let depth = 1; depth <= segments.length; depth++) {
+        const prefix = segments.slice(0, depth);
+        const fullPath = '/' + prefix.join('/') + '/';
+        if (byPath.has(fullPath)) continue;
+
+        const parentPath =
+          prefix.length > 1
+            ? '/' + prefix.slice(0, -1).join('/') + '/'
+            : '/';
+
+        byPath.set(fullPath, {
+          path: fullPath,
+          name: prefix[prefix.length - 1] || '',
+          parentPath,
+          depth: prefix.length,
+        });
+      }
+    });
+
+  return Array.from(byPath.values()).sort((a, b) =>
+    a.path.localeCompare(b.path)
+  );
 }
 
 /**

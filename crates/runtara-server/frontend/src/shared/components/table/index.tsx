@@ -20,9 +20,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/shared/components/ui/table.tsx';
-import { Icons } from '@/shared/components/icons.tsx';
 import { SkeletonTable } from './skeleton-table.tsx';
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ChevronFirst,
   ChevronLast,
   ChevronLeft,
@@ -57,6 +59,12 @@ interface DataTableProps<TData, TValue> {
   sorting?: SortingState;
   onSortingChange?: OnChangeFn<SortingState>;
   manualSorting?: boolean;
+  /**
+   * Console look: sticky table header, no inner scroll wrapper (the table is
+   * meant to live inside a ConsoleTableShell scroll body), refined sort icons
+   * and a primary-tinted selected row.
+   */
+  stickyHeader?: boolean;
   enableRowSelection?: boolean;
   rowSelection?: RowSelectionState;
   onRowSelectionChange?: (selection: RowSelectionState) => void;
@@ -84,6 +92,7 @@ export function DataTable<TData, TValue>({
   sorting: controlledSorting,
   onSortingChange,
   manualSorting = false,
+  stickyHeader = false,
   enableRowSelection = false,
   rowSelection = {},
   onRowSelectionChange,
@@ -179,11 +188,18 @@ export function DataTable<TData, TValue>({
     <div
       className={cn(
         'flex flex-1 flex-col',
-        isNested ? 'w-full' : 'max-w-full overflow-hidden'
+        isNested
+          ? 'w-full'
+          : stickyHeader
+            ? 'w-full'
+            : 'max-w-full overflow-hidden'
       )}
     >
       <div className="w-full">
-        <Table variant={isNested ? 'nested' : 'default'}>
+        <Table
+          variant={isNested ? 'nested' : stickyHeader ? 'console' : 'default'}
+          className={stickyHeader ? 'min-w-max' : undefined}
+        >
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
@@ -194,13 +210,17 @@ export function DataTable<TData, TValue>({
                       : {};
 
                   const canSort = header.column.getCanSort();
+                  const meta = header.column.columnDef.meta as any;
+                  const alignRight = meta?.align === 'right';
+                  const sorted = header.column.getIsSorted();
 
                   return (
                     <TableHead
                       key={header.id}
                       style={styles}
                       className={cn(
-                        (header.column.columnDef.meta as any)?.headerClassName
+                        alignRight && 'text-right',
+                        meta?.headerClassName
                       )}
                     >
                       {header.isPlaceholder ? null : (
@@ -223,18 +243,23 @@ export function DataTable<TData, TValue>({
                               : undefined
                           }
                         >
-                          <div className="flex items-center gap-1">
+                          <div
+                            className={cn(
+                              'flex items-center gap-1',
+                              alignRight && 'justify-end'
+                            )}
+                          >
                             {flexRender(
                               header.column.columnDef.header,
                               header.getContext()
                             )}
                             {canSort &&
-                              (header.column.getIsSorted() === 'asc' ? (
-                                <Icons.chevronUp className="w-4 h-4" />
-                              ) : header.column.getIsSorted() === 'desc' ? (
-                                <Icons.chevronDown className="w-4 h-4" />
+                              (sorted === 'asc' ? (
+                                <ArrowUp className="h-3.5 w-3.5 text-primary" />
+                              ) : sorted === 'desc' ? (
+                                <ArrowDown className="h-3.5 w-3.5 text-primary" />
                               ) : (
-                                <Icons.chevronsUpDown className="w-4 h-4 opacity-50" />
+                                <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground/40" />
                               ))}
                           </div>
                         </div>
@@ -253,19 +278,24 @@ export function DataTable<TData, TValue>({
                     data-state={row.getIsSelected() && 'selected'}
                     className={getRowClassName?.(row)}
                   >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell
-                        key={cell.id}
-                        className={cn(
-                          (cell.column.columnDef.meta as any)?.cellClassName
-                        )}
-                      >
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext()
-                        )}
-                      </TableCell>
-                    ))}
+                    {row.getVisibleCells().map((cell) => {
+                      const cellMeta = cell.column.columnDef.meta as any;
+                      return (
+                        <TableCell
+                          key={cell.id}
+                          className={cn(
+                            cellMeta?.align === 'right' && 'text-right',
+                            cellMeta?.mono && 'font-mono text-[12.5px]',
+                            cellMeta?.cellClassName
+                          )}
+                        >
+                          {flexRender(
+                            cell.column.columnDef.cell,
+                            cell.getContext()
+                          )}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
                   {row.getIsExpanded() && (
                     <tr className="hover:bg-transparent">

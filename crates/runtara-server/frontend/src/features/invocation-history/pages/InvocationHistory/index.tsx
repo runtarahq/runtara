@@ -1,9 +1,7 @@
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { TilesPage } from '@/shared/components/tiles-page';
 import { InvocationHistoryTable } from '../../components/InvocationHistoryTable';
-import { InvocationHistoryFilters } from '../../components/InvocationHistoryFilters';
 import { ExecutionHistoryFilters } from '../../types';
 
 export function InvocationHistory() {
@@ -35,20 +33,9 @@ export function InvocationHistory() {
   };
 
   return (
-    <TilesPage
-      kicker="History"
-      title="Invocation History"
-      toolbar={
-        <InvocationHistoryFilters
-          filters={filters}
-          onFiltersChange={handleFiltersChange}
-        />
-      }
-    >
-      <InvocationHistoryTable
-        filters={filters}
-        onFiltersChange={handleFiltersChange}
-      />
-    </TilesPage>
+    <InvocationHistoryTable
+      filters={filters}
+      onFiltersChange={handleFiltersChange}
+    />
   );
 }
