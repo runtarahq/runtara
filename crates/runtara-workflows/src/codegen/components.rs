@@ -126,7 +126,13 @@ fn emit_components_header(_agents: &[String]) -> TokenStream {
     // imported agent (named after the import alias) plus the standard
     // wasi:cli/run export.
     quote! {
-        #![allow(non_snake_case, unused_imports, unused_variables, dead_code)]
+        // `unreachable_code`: the onError routing emits a defensive
+        // `return Err(__error)` re-raise after the handler branch; it is genuinely
+        // needed when the handler doesn't terminate, but unreachable when the
+        // handler ends in a Finish. Suppressing it (vs. per-branch control-flow
+        // analysis in the codegen) is the pragmatic choice for this generated
+        // artifact. The other lints are the usual machine-emitted-code noise.
+        #![allow(non_snake_case, unused_imports, unused_variables, dead_code, unreachable_code)]
 
         #[allow(warnings)]
         mod bindings;
