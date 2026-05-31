@@ -94,6 +94,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "embed_agent_child" => {
             include_str!("../../../tests/fixtures/embed_agent_child.json")
         }
+        "embed_split_child_parent" => {
+            include_str!("../../../tests/fixtures/embed_split_child_parent.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2420,6 +2423,40 @@ fn direct_compile_supports_embed_workflow_child_with_agent_step() {
             .any(|id| id == "utils"),
         "the child's utils agent must be imported by the composed parent, got {:?}",
         manifest.feature_summary.agent_ids
+    );
+}
+
+#[test]
+fn direct_compile_supports_embed_workflow_child_with_split_step() {
+    // A frame-heavy Split step inside an embed child must emit valid WASM (no
+    // local/frame conflict with the embed child attempt).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "embed-split-child".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_split_child_parent"),
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_split".to_string(),
+            workflow_id: "split-child".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: fixture("split"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct embed-with-split-child compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct embed-with-split-child artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "embed child with a Split step must lower directly: {:?}",
+        result.support_report.unsupported
     );
 }
 

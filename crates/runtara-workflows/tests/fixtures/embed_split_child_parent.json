@@ -1,0 +1,39 @@
+{
+  "name": "Embed Split Child Parent",
+  "description": "Direct-emitter fixture: an EmbedWorkflow whose child graph runs a frame-heavy Split step, exercising nested Split frames inside an embed child attempt.",
+  "durable": true,
+  "steps": {
+    "call_split": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_split",
+      "childWorkflowId": "split-child",
+      "childVersion": "latest",
+      "inputMapping": {
+        "items": {
+          "valueType": "reference",
+          "value": "data.items"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_split.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_split",
+  "executionPlan": [
+    {
+      "fromStep": "call_split",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
