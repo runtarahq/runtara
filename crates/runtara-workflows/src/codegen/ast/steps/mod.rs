@@ -189,10 +189,11 @@ pub fn emit_breakpoint_check(
         .unwrap_or(quote! { None::<serde_json::Value> });
 
     quote! {
-        // Breakpoint check for step #step_id
-        {
-            if std::env::var("DEBUG_MODE").unwrap_or_default() == "true" {
-                let __bp_key = {
+        // Breakpoint check for step #step_id (no wrapping block: the locals below
+        // are already scoped to the `if` body, and an outer block trips the
+        // `unused_braces` lint under CI's `-D warnings`).
+        if std::env::var("DEBUG_MODE").unwrap_or_default() == "true" {
+            let __bp_key = {
                     let __loop_indices = (*#inputs_var.variables)
                         .as_object()
                         .and_then(|vars| vars.get("_loop_indices"))
@@ -238,7 +239,6 @@ pub fn emit_breakpoint_check(
                     return Err(format!("Breakpoint paused at step '{}'", #step_id));
                 }
             }
-        }
     }
 }
 

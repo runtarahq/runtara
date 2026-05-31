@@ -843,7 +843,6 @@ pub fn emit(
                                 match part {
                                     UserContent::Text(t) => Some(t.text.clone()),
                                     UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
-                                    _ => None,
                                 }
                             }).collect::<Vec<_>>().join(" ");
                             ("user", preview)
@@ -1186,7 +1185,6 @@ pub fn emit(
                                 match part {
                                     UserContent::Text(t) => Some(t.text.clone()),
                                     UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
-                                    _ => None,
                                 }
                             }).collect::<Vec<_>>().join(" ");
                             ("user", preview)
