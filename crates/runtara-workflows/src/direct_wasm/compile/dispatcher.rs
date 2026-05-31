@@ -231,6 +231,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::EdgeRoute {
             branches,
             default_plan,
+            merge_plan,
         } => {
             emit_edge_route_dispatch(
                 body,
@@ -255,6 +256,33 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
             );
+            // Diamond: all conditioned branches (and default) reach the merge as a
+            // `Join` and fall through the nested dispatch, so the shared
+            // continuation runs once here at the original depth.
+            if let Some(merge_plan) = merge_plan {
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    merge_plan,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
         }
         DirectRunPlan::GroupBy {
             step_id,

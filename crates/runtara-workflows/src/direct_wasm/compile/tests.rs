@@ -34,6 +34,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "log" => include_str!("../../../tests/fixtures/log_no_context.json"),
         "error" => include_str!("../../../tests/fixtures/error_direct_simple.json"),
         "edge_condition" => include_str!("../../../tests/fixtures/edge_condition_priority.json"),
+        "edge_condition_diamond" => {
+            include_str!("../../../tests/fixtures/edge_condition_diamond.json")
+        }
         "split" => include_str!("../../../tests/fixtures/split_workflow.json"),
         "split_on_error" => include_str!("../../../tests/fixtures/split_on_error.json"),
         "split_timeout" => include_str!("../../../tests/fixtures/split_timeout.json"),
@@ -417,12 +420,16 @@ fn collect_run_plan_ids(
         DirectRunPlan::EdgeRoute {
             branches,
             default_plan,
+            merge_plan,
         } => {
             for branch in branches {
                 condition_ids.push(branch.condition_id);
                 collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
             }
             collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
+            if let Some(merge_plan) = merge_plan {
+                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+            }
         }
         DirectRunPlan::GroupBy { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
@@ -2549,6 +2556,34 @@ fn direct_compile_supports_nested_conditional_diamond_graph() {
     assert!(
         result.support_report.supported,
         "a nested re-merging conditional must lower directly: {:?}",
+        result.support_report.unsupported
+    );
+}
+
+#[test]
+fn direct_compile_supports_edge_condition_diamond_graph() {
+    // A step whose conditioned NORMAL-flow edges (an EdgeRoute) re-merge and
+    // continue must lower directly with a single shared continuation.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "edge-condition-diamond".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("edge_condition_diamond"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct edge-condition-diamond compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct edge-condition-diamond artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "a re-merging EdgeRoute must lower directly: {:?}",
         result.support_report.unsupported
     );
 }
@@ -9373,6 +9408,7 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
     let DirectRunPlan::EdgeRoute {
         branches,
         default_plan,
+        ..
     } = next_plan.as_ref()
     else {
         panic!("expected edge-condition route plan");

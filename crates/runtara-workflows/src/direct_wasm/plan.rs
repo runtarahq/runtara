@@ -40,6 +40,9 @@ pub(super) enum DirectRunPlan {
     EdgeRoute {
         branches: Vec<DirectEdgeConditionPlan>,
         default_plan: Box<DirectRunPlan>,
+        /// Shared continuation when the conditioned normal-flow edges re-converge,
+        /// emitted once after the dispatch. `None` when terminal.
+        merge_plan: Option<Box<DirectRunPlan>>,
     },
     GroupBy {
         step_id: String,
@@ -1236,6 +1239,17 @@ fn normal_flow_plan(
             ))
     });
 
+    // Detect a diamond: where the conditioned edges (and default) re-converge, so
+    // the merge runs once as a shared continuation rather than duplicated.
+    let branch_starts: Vec<Option<String>> = conditional_edges
+        .iter()
+        .map(|edge| Some(edge.to_step.clone()))
+        .chain(std::iter::once(Some(default_edge.to_step.clone())))
+        .collect();
+    let merge =
+        direct_find_merge_point(graph, &branch_starts).filter(|m| Some(m.as_str()) != stop_at);
+    let branch_stop = merge.as_deref().or(stop_at);
+
     stack.push(from_step.to_string());
     let branches = conditional_edges
         .into_iter()
@@ -1251,7 +1265,7 @@ fn normal_flow_plan(
                 &edge.to_step,
                 stack,
                 include_on_error,
-                stop_at,
+                branch_stop,
             )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
@@ -1265,13 +1279,25 @@ fn normal_flow_plan(
         &default_edge.to_step,
         stack,
         include_on_error,
-        stop_at,
+        branch_stop,
     )?;
+    let merge_plan = match &merge {
+        Some(merge_step) => Some(Box::new(step_run_plan_inner(
+            graph,
+            child_workflows,
+            merge_step,
+            stack,
+            include_on_error,
+            stop_at,
+        )?)),
+        None => None,
+    };
     stack.pop();
 
     Ok(DirectRunPlan::EdgeRoute {
         branches,
         default_plan: Box::new(default_plan),
+        merge_plan,
     })
 }
 
