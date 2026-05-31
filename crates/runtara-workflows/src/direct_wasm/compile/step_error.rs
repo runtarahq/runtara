@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Generic step-level error capture used by direct `onError` wrappers.
+//!
+//! Wasm has no exceptions, so an `onError` edge is modeled as a labelled block
+//! plus a `Br` out of it. This keeps a three-register "error frame"
+//! (flag/ptr/len) with push/pop helpers to save it across nesting; when a step
+//! fails into a `DirectFailureTarget::StepError`, `emit_step_error_and_continue`
+//! stashes the caught error and emits `Br(branch_depth)` to unwind to exactly the
+//! handler — no further. The depth is kept step-relative and bumped by
+//! `DirectFailureTarget::nested` as the dispatcher descends, so a deeply nested
+//! failure reaches its own handler and not past it.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

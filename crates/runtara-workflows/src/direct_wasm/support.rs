@@ -1,6 +1,19 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct-emitter support reporting.
+//!
+//! The support gate. `analyze_direct_wasm_support` decides — before any emission —
+//! whether the emitter can fully lower a graph, returning the unsupported features
+//! (each with a step id, stable key, and actionable reason) so the caller can fall
+//! back to the generated compiler instead of mis-compiling. The core check
+//! requires the backbone to be topologically linearizable (every branching step
+//! must re-converge, so fan-out to two distinct terminals can't linearize and is
+//! rejected) and then demands total coverage — every step reachable and every
+//! execution-plan edge consumed — which is what guarantees no unmodeled routing
+//! slips through. Its rules are kept in lockstep with the generated compiler's
+//! branching/merge logic so the two accept exactly the same graphs (parity), and
+//! the standing aim is to keep narrowing the rejections until this gate never
+//! fires — the zero-fallback goal.
 
 use std::collections::{BTreeMap, BTreeSet};
 

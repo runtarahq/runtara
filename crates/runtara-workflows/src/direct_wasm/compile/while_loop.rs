@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! While step lowering for the direct workflow core Wasm emitter.
+//!
+//! Repeatedly evaluates a condition and runs the nested subgraph until it is
+//! false, max-iterations is hit, the timeout expires, or the instance is
+//! cancelled. Like Split, it composes a long-running loop with onError capture,
+//! timeout, and durability — all adding block nesting — so it uses the same
+//! `DirectFailureTarget` depth-offset discipline, frame spilling, and step-error
+//! capture pattern. Timeout and cancellation are enforced per-iteration with early
+//! returns (not delegated to the host), which is what keeps an unbounded loop
+//! durably interruptible.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

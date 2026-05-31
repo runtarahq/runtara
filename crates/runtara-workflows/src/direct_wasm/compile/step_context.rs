@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared lowering for pure JSON steps that return an updated steps context.
+//!
+//! Filter, value-`Switch`, and `GroupBy` differ only in which stdlib function they
+//! call; everything around them is identical — breakpoint/debug events, retptr
+//! handling, folding the returned steps-context back into a fresh source (so
+//! downstream `steps.X` references see the result), and tail-recursing into
+//! `next_plan`. `emit_step_context_plan` is that one parameterized template,
+//! collapsing three step types into a single lowering ("thin module" applied at
+//! the lowering level).
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

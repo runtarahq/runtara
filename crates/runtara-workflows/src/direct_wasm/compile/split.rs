@@ -1,6 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Split step lowering and dontStopOnFailed failure aggregation helpers.
+//!
+//! The most control-flow-dense step: fan out over a list, run the nested subgraph
+//! per item, and aggregate the results — multiplexing retry x durable x
+//! dontStopOnFailed x timeout x onError, each of which adds Wasm block nesting.
+//! `emit_split_plan` is built around explicit operand-stack frames and
+//! `DirectFailureTarget` depth math so branch targets stay correct under every
+//! combination (including nested splits); a `dontStopOnFailed` item appends its
+//! error and continues the loop, otherwise it fails fast. This file also hosts
+//! `emit_split_append_error_payload_and_continue`, the central hook every other
+//! step's failure path calls to feed an enclosing split's aggregation.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

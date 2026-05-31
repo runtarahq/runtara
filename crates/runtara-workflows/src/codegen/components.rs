@@ -126,7 +126,7 @@ fn emit_components_header(_agents: &[String]) -> TokenStream {
     // imported agent (named after the import alias) plus the standard
     // wasi:cli/run export.
     quote! {
-        #![allow(non_snake_case, unused_imports, unused_variables, dead_code)]
+        #![allow(non_snake_case, unused_imports, unused_variables, dead_code, unused_braces)]
 
         #[allow(warnings)]
         mod bindings;

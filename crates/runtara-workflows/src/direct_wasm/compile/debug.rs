@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Debug event and breakpoint lowering shared by direct core step lowerers.
+//!
+//! Cross-cutting observability that every step type needs identically: step
+//! start/end events, breakpoint pause/resume, and agent-error events. Each helper
+//! early-returns when its gate (`track_events` / `breakpoint`) is off, so a
+//! non-debug build pays nothing. `emit_step_breakpoint` is checkpoint-guarded — it
+//! pauses via `runtime_breakpoint_pause` and returns to suspend the instance,
+//! giving breakpoints the same durable suspend/resume semantics as the generated
+//! compiler. Isolating these keeps the per-step lowerers focused on semantics.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

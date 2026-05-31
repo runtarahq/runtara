@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared error type for direct workflow compilation.
+//!
+//! One `DirectCompileError` enum threaded through every stage, with `From` impls
+//! so the multi-stage flow can use `?` freely. The one variant that matters for
+//! control flow is `Unsupported` (the support gate rejected the graph): it carries
+//! the boxed report and is the signal that makes `compile_workflow_with_direct_fallback`
+//! drop to the legacy generated compiler instead of hard-failing. `Component(String)`
+//! is intentionally loose because the wrapped `wit-component`/`wac` errors share no
+//! common Rust type to preserve.
 
 use std::fmt;
 

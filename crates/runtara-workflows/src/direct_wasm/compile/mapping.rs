@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Source-envelope and mapping helper lowering for the direct core emitter.
+//!
+//! The two most-repeated stdlib calls in any lowering. `emit_build_source`
+//! assembles a step's evaluation context (`data` + workflow `variables` +
+//! accumulated step outputs) via `stdlib_build_source`; `emit_apply_mapping` runs
+//! a DSL mapping over that source via `stdlib_apply_mapping`, addressing the
+//! mapping by its numeric manifest id. Every step rebuilds its source after
+//! producing output (so downstream `steps.X` references resolve) and most apply a
+//! mapping, so factoring these out keeps the lowerers small and guarantees every
+//! step constructs its context identically.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

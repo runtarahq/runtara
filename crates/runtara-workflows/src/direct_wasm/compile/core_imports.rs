@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct core WIT import indexing and import/export classifiers.
+//!
+//! Core Wasm calls functions by numeric index in declaration order, but the
+//! emitter wants to call them by meaning ("apply-mapping", "load-input"). This is
+//! the name-to-index binding layer: as the world's imports are walked,
+//! `import_core_function` declares each host/stdlib/per-agent WIT function and
+//! records its assigned index into `DirectCoreImportIndices`; `require_all` then
+//! converts that into the non-optional `DirectCoreFunctionIndices`, turning a
+//! missing import (e.g. from a stale WIT world) into a hard compile error rather
+//! than a module that traps at link time.
 
 use std::collections::BTreeMap;
 

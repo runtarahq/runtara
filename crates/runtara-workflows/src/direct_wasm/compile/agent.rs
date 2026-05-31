@@ -1,6 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent step lowering for the direct workflow core Wasm emitter.
+//!
+//! The convergence point for every flavour of capability invocation.
+//! `emit_agent_plan` applies the input mapping, validates input, injects stored
+//! connection params, then invokes the agent component — optionally wrapped in a
+//! retry/backoff loop and/or a durable-checkpoint `if/else` (a cache hit
+//! short-circuits the invoke). Errors route through the shared onError-or-fail
+//! path; success shapes the step output and chains into `next_plan`. An `output_fn`
+//! parameter lets a single-shot `AiAgent` step reuse this entire invoke/retry/
+//! checkpoint machinery while only swapping the final result-envelope call, so
+//! those concerns aren't duplicated per step kind.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

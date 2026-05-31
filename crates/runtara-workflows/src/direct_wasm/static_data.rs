@@ -1,6 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Static data layout for directly emitted workflow core Wasm modules.
+//!
+//! Because the module is emitted byte-by-byte with no allocator or string table,
+//! every constant must live at a statically known address. `DirectCoreStaticData`
+//! walks a growing offset (starting past a reserved 256-byte low-memory scratch
+//! prefix), laying each constant — the manifest JSON, default variables,
+//! event-kind tags, interned step ids/edge labels, per-agent capability/connection/
+//! integration ids — as a data segment addressed by `(offset, len)`, which is the
+//! Wasm-native way to pass a string across the stdlib ABI. Segments are re-aligned
+//! as the offset advances; the final offset becomes `heap_base` and rounds up to
+//! `memory_min_pages`, telling the module how much memory to declare and where its
+//! runtime bump heap may safely begin.
 
 use std::collections::BTreeMap;
 

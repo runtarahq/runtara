@@ -1,6 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! EmbedWorkflow lowering for statically composed child workflow graphs.
+//!
+//! Runs a preloaded child graph inline (not linked at runtime), with its own
+//! retry / durability / onError. `emit_embed_workflow_plan` maps parent source
+//! into the child's input, computes the child's variable scope, then emits the
+//! child's own `DirectRunPlan` with a `DirectFailureTarget::EmbedWorkflow` so child
+//! failures branch out via a shared error flag instead of failing the parent.
+//! Because the child reuses the parent's shared linear-memory locals (data / steps
+//! / source), the pervasive save/restore-frame discipline and `.nested(1)` depth
+//! shadowing are what make arbitrary nesting (embed-in-embed, embed-in-split) emit
+//! correct branch targets and keep `data.*` resolvable after the child clobbers the
+//! shared data local. `emit_embed_workflow_tool_arm` is the AiAgent-tool variant.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Routing Switch step lowering for the direct workflow core Wasm emitter.
+//!
+//! A routing `Switch` computes a route label at runtime (`stdlib_process_switch`)
+//! while the branch labels are compile-time constants, so the match is unrolled
+//! into inline byte-equality (`emit_route_equals`: a length check plus a per-byte
+//! compare) rather than calling a string-compare helper — a concrete instance of
+//! "emit the control flow, keep the module thin". `emit_switch_route_dispatch`
+//! recurses over the branches emitting `if/else`, falling to the default when
+//! exhausted, and (like the other branching lowerings) leaves the single shared
+//! merge to the dispatcher.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg, ValType};
 

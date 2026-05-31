@@ -1,6 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Component-facing artifacts for the direct workflow compiler.
+//!
+//! Generates the composition scaffolding that lets independently-built components
+//! link together: `emit_world_wit` prints the `runtara:workflow` world the core
+//! module is encoded against (imports stdlib/runtime + one interface per agent,
+//! exports `wasi:cli/run`), and `emit_wac` prints the `wac` script that
+//! instantiates and wires them. `DIRECT_SHARED_COMPONENT_REQUIREMENTS` and the
+//! per-agent requirement records pin, in one typed place, the several names each
+//! component is known by (wac package, WIT package, build-output filename,
+//! `.meta.json`, CAS file) so the world the module is encoded against can't drift
+//! from the files actually staged on disk. Contracts over coupling: the module
+//! names imports it never defines, and `wac` resolves them.
 
 use runtara_workflow_wit::{RUNTIME_PACKAGE, STDLIB_PACKAGE, WORKFLOW_WIT_VERSION};
 

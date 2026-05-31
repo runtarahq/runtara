@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent error payload and onError route lowering for the direct core emitter.
+//!
+//! Turns a failed invoke into the structured error envelope (reading the per-field
+//! error struct out of the result and calling `stdlib_agent_error`) and then
+//! decides its fate at the shared `emit_agent_error_route_or_fail`: if the step has
+//! an `onError` plan, inject the error into `steps`, rebuild source, and dispatch
+//! the conditioned branches; otherwise either append to an enclosing split's
+//! failure aggregation or terminate the workflow. Agent / embed / while / split all
+//! fail identically, so they all delegate here; the `.nested(n)` depth offsets keep
+//! the routing `Br`s correct no matter how many loops/blocks wrap the failure site.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 

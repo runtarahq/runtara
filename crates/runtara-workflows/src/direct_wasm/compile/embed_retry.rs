@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! EmbedWorkflow retry and backoff helper lowering.
+//!
+//! Retry/backoff for a child-workflow attempt. A child failure surfaces as a
+//! generic workflow-error envelope (not an agent capability error), so this
+//! classifies it with the `stdlib_workflow_error_*` helpers rather than the
+//! agent-specific ones — but keeps the same shape as the agent/split retry modules:
+//! rate-limited errors retry within a hard ~60s wait budget, others within
+//! `max_retries`, with durable per-attempt sleep keys. Broken out so the dense
+//! `embed_workflow.rs` body just calls named helpers.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
 

@@ -1,6 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct run-plan dispatcher lowering.
+//!
+//! The recursive heart of the emitter. `emit_run_plan_mapping` walks the
+//! `DirectRunPlan` tree and emits instructions for each node — delegating leaf/
+//! linear steps to their dedicated lowerers (`emit_agent_plan`, `emit_split_plan`,
+//! …) and emitting structured control flow inline for branching ones. A
+//! `Conditional`/`SwitchRoute`/`EdgeRoute` becomes a Wasm `if/else`; because a
+//! graph diamond re-converges but Wasm has only structured control flow, the
+//! shared continuation (`merge_plan`) is emitted *once* after the `End` at the
+//! parent block depth — both arms reach it as a `Join` no-op and fall through —
+//! while `failure_target`/`handled_target` are bumped via `.nested(n)` so error
+//! `Br`s still target the right enclosing block.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 

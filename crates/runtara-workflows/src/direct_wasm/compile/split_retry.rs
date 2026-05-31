@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Split retry and backoff helper lowering.
+//!
+//! The whole-iteration retry loop for a Split, structurally identical to
+//! `embed_retry` but over the split's reserved locals. A split item's failure is
+//! also a workflow-error envelope, so it uses the generic `stdlib_workflow_error_*`
+//! classifier, retries rate-limited errors within a ~60s accumulated-wait budget
+//! and others within `max_retries`, and sleeps durably per attempt. Split out so
+//! the dense `emit_split_plan` body just calls named helpers, kept parallel to the
+//! agent/embed retry modules for uniform backoff semantics.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
 

@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Conditional edge-route dispatch lowering for the direct core emitter.
+//!
+//! When a step's outgoing edges carry conditions, the rule is "take the first edge
+//! whose guard passes, else the default" — which maps naturally onto a nested
+//! if/else cascade. `emit_edge_route_dispatch` recurses over the branch slice,
+//! evaluating each condition with `stdlib_eval_condition` and emitting an `If`
+//! whose else-arm handles the remaining branches; `.nested(1)` at each level keeps
+//! the error/handled `Br` targets correct as the cascade deepens. The single merge
+//! continuation is left to the dispatcher, since each branch tail is a `Join`.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 

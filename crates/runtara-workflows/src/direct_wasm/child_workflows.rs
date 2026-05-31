@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Static child-workflow metadata for direct workflow artifacts.
+//!
+//! `EmbedWorkflow` steps inline a child graph *into* the parent component rather
+//! than linking it at runtime, so the set of preloaded children must match what
+//! the graph references at compile time. This cross-checks that closure — every
+//! embedded step has a child whose id/version agree, no duplicates — and rebuilds
+//! each child's manifest to record its checksum and feature summary into the
+//! artifact sidecar (provenance + cache invalidation). A mismatch fails fast here
+//! instead of surfacing later as an obscure `wac compose` error.
 
 use std::collections::BTreeMap;
 

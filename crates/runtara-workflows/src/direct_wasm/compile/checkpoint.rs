@@ -1,6 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtime checkpoint lookup/save helper lowering for direct core execution.
+//!
+//! The durability primitive that every durable step (agent / embed / split)
+//! shares. `emit_checkpoint_lookup` opens an `if` on a cache hit so the expensive
+//! work runs only on a miss; `emit_checkpoint_save` persists the result and folds
+//! in signal-handling — if the runtime reports a pending signal and asks to
+//! suspend, the function returns early, parking the instance. Folding signal
+//! handling into save is what makes a checkpoint the natural durable-suspension
+//! point rather than a place that blocks.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

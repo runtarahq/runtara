@@ -2,9 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Opt-in direct workflow compilation entry point.
 //!
-//! This is the first production-shaped entry point, not the PoC ABI. It emits
-//! a deterministic component artifact for finish-only graphs and writes the
-//! manifest/support sidecars that later graph-lowering work will consume.
+//! Orchestrates the whole DSL-graph -> core-Wasm -> composed-component pipeline.
+//! `compile_direct_workflow` builds the manifest, runs the support gate (bailing
+//! to the caller's fallback on any unsupported feature), then emits the core
+//! module byte-by-byte and lifts it into a component via `wit_component`,
+//! appending the manifest/support/ABI JSON as custom sections.
+//! `compose_direct_workflow` is the separate second phase that shells out to
+//! `wac compose` to link that `workflow-logic.wasm` against the prebuilt shared +
+//! per-agent components into the runnable `workflow.wasm` (so the emitted logic is
+//! an inspectable artifact before the heavyweight compose step).
+//!
+//! This file also owns the bank of `DIRECT_*` constants: the hand-assigned Wasm
+//! local-variable slots and Canonical-ABI struct/offset layout that every per-step
+//! lowerer in `compile/*` shares. There is no `rustc` here to allocate locals or
+//! compute struct layouts, so the emitter fixes them once and all lowerers agree;
+//! the deliberate slot aliasing (e.g. While reusing Split slots) encodes that
+//! mutually-exclusive control-flow constructs can safely share scratch registers.
 
 mod abi;
 mod agent;

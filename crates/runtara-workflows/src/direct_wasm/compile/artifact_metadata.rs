@@ -1,6 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct workflow artifact metadata and component dependency sidecars.
+//!
+//! The composed workflow links independently-built shared + per-agent components,
+//! so the artifact carries a verifiable manifest of exactly which component bytes
+//! it was built against. These serde structs capture identity, the schema/ABI/
+//! manifest/template versions (which drive cache invalidation), source/manifest
+//! checksums, and the dependency lists; `resolve_*_component_dependencies` locate
+//! each dependency under the components dir, hash it, and cross-check against its
+//! `.meta.json`, hard-erroring on any mismatch — catching a drifted or stale
+//! pre-staged component at compile time instead of as a mysterious runtime link
+//! failure.
 
 use std::fs;
 use std::path::{Path, PathBuf};

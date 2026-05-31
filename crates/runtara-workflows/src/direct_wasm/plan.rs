@@ -1,6 +1,23 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct core run-plan model and construction used by the Wasm emitter.
+//!
+//! Turns the flat manifest into the `DirectRunPlan` — a structured, tree-shaped
+//! execution model (one variant per lowerable concern) that captures what runs in
+//! what order. A tree, not an arbitrary CFG, because core Wasm offers only
+//! structured control flow (`block`/`loop`/`if`/`br`): every diamond must
+//! re-converge at exactly one point. Branching steps (Conditional / routing Switch
+//! / conditioned edges) lower to if/else carrying per-branch sub-plans plus a
+//! single `merge_plan` — the shared continuation, emitted once rather than
+//! duplicated into every branch (which would be exponential); each branch recurses
+//! with the merge as its stop point and reaches it as a `Join` no-op.
+//! Unconditional fan-out is topologically linearised (Kahn's algorithm) into one
+//! sequential chain, and `direct_find_merge_point` locates where branches
+//! re-converge. `Split`/`While`/`WaitForSignal`/`EmbedWorkflow` get dedicated
+//! lowerings, and `DirectFailureTarget`/`DirectHandledTarget` track how many
+//! enclosing Wasm blocks a failure must `Br` out through. The traversal
+//! deliberately mirrors the generated compiler so both accept the same graphs and
+//! execute them identically (A/B parity).
 
 use super::error::DirectCompileError;
 use super::manifest::{

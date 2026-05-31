@@ -1,6 +1,12 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Terminal Error step lowering for the direct workflow core Wasm emitter.
+//!
+//! The explicit "stop and fail with this message" node, distinct from an agent
+//! invoke that happens to error. It emits an error custom event, builds the final
+//! error output, then terminates — either by appending to an enclosing split's
+//! failure aggregation (when it's the body of a `dontStopOnFailed` split item) or
+//! by calling `runtime_fail`. It has no `next_plan`: it is always terminal.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

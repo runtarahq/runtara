@@ -1,6 +1,19 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Versioned manifest emitted by the production direct WebAssembly compiler.
+//!
+//! Flattens a parsed DSL `ExecutionGraph` (plus any preloaded child graphs) into
+//! the `DirectWorkflowManifest` — the normalized IR the rest of the emitter reads
+//! instead of touching raw DSL. Steps are walked in id order and their config
+//! pulled into per-kind tables, each assigned a stable manifest-wide integer id,
+//! because raw Wasm can only address data by small numeric ids and segment
+//! offsets (not by walking a tree). Everything is canonicalized (key-sorted JSON,
+//! sorted edges) and SHA-256 checksummed with the checksum field omitted, so
+//! identical graphs produce byte-identical artifacts — deterministic,
+//! content-addressable caching. It also performs direct-path-only desugaring with
+//! no DSL equivalent: lowering an `AiAgent` step into `ai-tools` capability calls
+//! (request mapping, tool defs from labelled edges, memory providers) and merging
+//! child-graph agent ids up into the parent so composition imports them.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;

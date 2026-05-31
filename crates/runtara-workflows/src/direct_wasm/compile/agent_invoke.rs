@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent component invocation argument lowering for the direct core emitter.
+//!
+//! Independently-built agent components share no Rust types, so the emitter speaks
+//! their lowered WIT ABI by hand. `emit_agent_invoke` handles both call shapes:
+//! the canonical two-pointer form writes the capability-id and input `(ptr, len)`
+//! plus a tagged connection sub-struct into a fixed args struct in linear memory
+//! and calls with a pointer to it; other shapes push the args directly on the
+//! stack. Connection metadata is written as a tagged struct carrying the
+//! connection/integration id (never the secrets) — the host resolves the real
+//! params from the id at call time.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 use wit_parser::abi::WasmType;

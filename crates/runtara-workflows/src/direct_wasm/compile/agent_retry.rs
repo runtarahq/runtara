@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent retry and backoff helper lowering for the direct core emitter.
+//!
+//! The retry/backoff state machine that `agent.rs` stitches into its invoke loop,
+//! split into individually-testable emit helpers. Retry policy is subtle — a
+//! separate budget for rate-limit waits vs. an attempt count for normal retryable
+//! errors, and a server-supplied `retry-after` taking precedence over computed
+//! exponential backoff — so each decision (classify error, compute the predicate,
+//! compute the delay, sleep, record the attempt) is its own helper. Sleeps use
+//! durable per-attempt checkpoint keys so a resumed instance doesn't re-sleep an
+//! already-elapsed delay.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
 

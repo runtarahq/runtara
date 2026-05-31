@@ -1,6 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Structural tests for the direct workflow compiler.
+//!
+//! The emitter writes raw Wasm bytes, so these tests build fixture graphs, run
+//! them through manifest/plan/emit, and parse the result back with `wasmparser`
+//! to assert structure rather than behaviour: the expected host/stdlib/agent
+//! imports are present, calls appear in the right order and position (e.g. a
+//! breakpoint check before its import), the manifest/support/ABI custom sections
+//! are embedded, `wasi:cli/run` is exported, and each supported graph shape lowers
+//! at all. They are the fast safety net that catches a malformed module without
+//! executing it — observable runtime parity with the generated compiler is the job
+//! of the separate A/B integration suite under `tests/`.
 
 use std::collections::HashMap;
 use std::fs;

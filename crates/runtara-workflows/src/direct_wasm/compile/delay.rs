@@ -1,6 +1,13 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Delay step lowering for the direct workflow core Wasm emitter.
+//!
+//! A thin step whose only real choice is durable vs. blocking sleep. The duration
+//! is computed in the stdlib (`stdlib_delay_duration_ms`) from the resolved
+//! source; a durable delay sleeps via `runtime_durable_sleep_checkpoint` keyed by
+//! step id so a resumed instance skips an already-elapsed sleep, a non-durable one
+//! blocks. Everything else is the usual build-output / rebuild-source /
+//! continue-to-next tail.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

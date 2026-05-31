@@ -1,9 +1,20 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Production direct WebAssembly compiler scaffolding.
+//! Production direct WebAssembly compiler.
 //!
-//! This module is separate from `direct_wasm_poc`: the PoC proves core Wasm can
-//! be emitted, while this module owns the production migration surface.
+//! Separate from `direct_wasm_poc`: the PoC proves core Wasm can be emitted, while
+//! this module owns the production compiler that turns a workflow DSL graph into a
+//! runnable WASI component *without* `rustc` — emitting the core module byte-by-byte
+//! and composing it with prebuilt shared + per-agent components.
+//!
+//! Pipeline (see `docs/direct-compilation-architecture.md` for the overview):
+//! `manifest` flattens the DSL graph into a normalized, integer-addressable IR;
+//! `support` gates whether that graph is fully lowerable (else the caller falls
+//! back to the generated compiler); `plan` shapes it into a structured run-plan
+//! tree; `static_data` lays the constants into linear memory; and `compile` emits
+//! the core Wasm and composes it (via `wac`) into the final `workflow.wasm`.
+//! `component` supplies the WIT world + `wac` recipe those depend on, while
+//! `child_workflows` and `error` are supporting concerns.
 
 #[cfg(feature = "compiler")]
 mod child_workflows;

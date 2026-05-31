@@ -1,6 +1,12 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Log step lowering for the direct workflow core Wasm emitter.
+//!
+//! The simplest lowerer: emit the log payload to the host as a `workflow_log`
+//! custom event (the same event stream the runtime/UI consume), then build the
+//! step's `steps.X` output so the rest of the graph can reference it, and continue.
+//! Logging is observability, not control flow, so there is no retry/onError
+//! machinery.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

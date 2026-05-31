@@ -1,6 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! WaitForSignal and onWait lowering for the direct workflow core emitter.
+//!
+//! Suspends the workflow until an external/human signal arrives. Because the wait
+//! must survive suspension/resume, the signal id is derived deterministically
+//! (instance + step + source, stable across replays) and the wait is a durable
+//! poll loop — poll the named signal, heartbeat, check lifecycle signals
+//! (early-return to suspend), enforce an optional timeout — rather than a host
+//! blocking wait. An optional `onWait` subgraph runs first; its lowering
+//! saves/restores the outer wait's shared locals on the operand stack so a wait
+//! nested inside another wait's onWait branch stays correct. `emit_ai_wait_tool_arm`
+//! is the AiAgent human-in-the-loop tool variant.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

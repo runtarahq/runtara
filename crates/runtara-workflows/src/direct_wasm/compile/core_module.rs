@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Direct core Wasm module assembly and export wiring.
+//!
+//! Plays the role `rustc` + the linker would in the generated path. `emit_direct_core_module`
+//! emits the complete module: types, imports, the single real `wasi:cli/run` body
+//! (`direct_run_function` — init manifest, load input, build the initial source,
+//! lower the whole run plan, complete), zero-return stubs for the other exports,
+//! the Canonical-ABI-mandated realloc/initialize/post-return intrinsics, one linear
+//! memory sized to the static-data layout, the seeded heap-base global, and the
+//! data segments. The shape must match exactly what `wac compose` expects, while
+//! all real logic stays in the one `run` body.
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection,

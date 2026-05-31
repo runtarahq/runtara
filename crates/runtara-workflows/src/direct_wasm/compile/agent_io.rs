@@ -1,6 +1,13 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Agent stdlib input/cache helper lowering for the direct core emitter.
+//!
+//! Two small, conditional pre-invoke prep steps. `emit_agent_connection_input`
+//! (only when the agent has a connection) merges connection-derived fields into
+//! the input buffer; `emit_agent_cache_key` (only for durable agents) derives the
+//! deterministic checkpoint key from the agent id + resolved source. Computing the
+//! key from the same canonical source the step sees is what gives stable cache hits
+//! across retries and replays.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 

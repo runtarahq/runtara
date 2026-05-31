@@ -1,6 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Core Wasm ABI and retptr helper emission.
+//!
+//! Every data operation is delegated to a shared component, and those imported
+//! functions return their results indirectly into a fixed scratch region at
+//! `DIRECT_RUN_RETPTR_OFFSET` whose first byte is an ok/err discriminant. This
+//! module is the single hand-coded view of that Canonical-ABI return convention:
+//! it reads the retptr (`load_retptr_*`), emits the ubiquitous "check the tag,
+//! then return or branch to a `DirectFailureTarget`" error idiom, and translates
+//! `wit_parser` `WasmType`s into `wasm_encoder` `ValType`s. Centralizing it keeps
+//! ABI bookkeeping out of the per-step lowerers and makes error handling uniform.
 
 use wasm_encoder::{
     BlockType, Function as WasmFunction, Ieee32, Ieee64, Instruction, MemArg, TypeSection, ValType,
