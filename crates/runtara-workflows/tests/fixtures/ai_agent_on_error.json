@@ -1,0 +1,41 @@
+{
+  "name": "AiAgent with inert onError",
+  "description": "Direct-emitter fixture: a single-shot AiAgent carrying an onError edge. The generated path never routes AiAgent failures to onError (the handler is dead but compiled); direct must accept the graph and match, not fall back.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Answer",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": { "valueType": "immediate", "value": "You are a helpful assistant." },
+        "userPrompt": { "valueType": "reference", "value": "data.question" },
+        "provider": "openai",
+        "model": "gpt-4o"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+      }
+    },
+    "handle_error": {
+      "stepType": "Finish",
+      "id": "handle_error",
+      "inputMapping": {
+        "handled": { "valueType": "immediate", "value": true }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    { "fromStep": "ai", "toStep": "finish" },
+    { "fromStep": "ai", "toStep": "handle_error", "label": "onError" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

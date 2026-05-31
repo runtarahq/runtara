@@ -66,6 +66,7 @@ const WHILE_ON_ERROR: &str = include_str!("fixtures/while_on_error.json");
 const SPLIT_ON_ERROR: &str = include_str!("fixtures/split_on_error.json");
 const AGENT_COMPENSATION: &str = include_str!("fixtures/agent_compensation.json");
 const AI_AGENT_SINGLE_SHOT: &str = include_str!("fixtures/ai_agent_single_shot.json");
+const AI_AGENT_ON_ERROR: &str = include_str!("fixtures/ai_agent_on_error.json");
 const AI_AGENT_STRUCTURED: &str = include_str!("fixtures/ai_agent_structured.json");
 const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json");
 const AI_AGENT_EMBED_TOOL: &str = include_str!("fixtures/ai_agent_embed_tool.json");
@@ -6023,6 +6024,61 @@ fn direct_wasm_matches_components_edge_condition_diamond() {
             "{case}: edge-condition diamond should finish with the input tier"
         );
     }
+}
+
+/// An AiAgent carrying an inert onError edge (the generated path never routes
+/// AiAgent failures to it; the handler is dead but compiled). Direct must accept
+/// the graph, run the AiAgent normally to the finish, leave the handler dead, and
+/// match the generated artifact.
+#[test]
+fn direct_wasm_matches_components_ai_agent_inert_on_error() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact = compile_components_artifact("ai-agent-on-error", AI_AGENT_ON_ERROR);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "ai-agent-on-error", AI_AGENT_ON_ERROR);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"question":"What is 2+2?"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-ai-agent-on-error",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-ai-agent-on-error",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+        direct.stderr, direct.error_json, direct.output_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "AiAgent-with-onError completion payload mismatch"
+    );
+    // The AiAgent succeeds and finishes via the normal edge; the dead onError
+    // handler (`handled: true`) is never reached.
+    let direct_out = direct.output_json.as_ref().expect("direct completion");
+    assert!(
+        direct_out.get("answer").is_some() && direct_out.get("handled").is_none(),
+        "the normal finish (not the dead onError handler) must run: {direct_out:?}"
+    );
 }
 
 #[test]

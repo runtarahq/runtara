@@ -231,6 +231,14 @@ fn collect_graph_support_inner(
     }
 
     for edge in &graph.execution_plan {
+        // An onError edge on an AiAgent is inert (never routed by the generated
+        // path); direct accepts it and leaves the handler dead, so it is not an
+        // unsupported routing shape.
+        if edge.label.as_deref() == Some("onError")
+            && matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_)))
+        {
+            continue;
+        }
         let condition_route_supported = if edge.label.as_deref() == Some("onError") {
             on_error_route_shape_supported(graph, &edge.from_step)
         } else {
@@ -667,6 +675,19 @@ fn supports_direct_control_step_inner(
                     reachable.insert(edge.to_step.clone());
                 }
             }
+            // An onError edge on an AiAgent is INERT — the generated path's
+            // `can_have_on_error` excludes AiAgent, so an AiAgent failure
+            // propagates fatally and the handler is never invoked (compiled but
+            // dead). Direct does not lower the handler either; it marks the dead
+            // handler subgraph reachable + its edges used so the graph-wide
+            // reachable/used invariants hold, without support-checking it (it may
+            // be any shape since it is never lowered).
+            for (index, edge) in graph.execution_plan.iter().enumerate() {
+                if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
+                    used_edges.insert(index);
+                    mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
+                }
+            }
             supports_normal_flow_step(
                 graph,
                 child_workflows,
@@ -676,18 +697,34 @@ fn supports_direct_control_step_inner(
                 stack,
                 child_stack,
                 include_on_error,
-            ) && (!include_on_error
-                || supports_on_error_flow_step(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                ))
+            )
         }
         _ => false,
+    }
+}
+
+/// Mark a subgraph reachable and all its outgoing edges used WITHOUT
+/// support-checking the steps. Used for an inert AiAgent onError handler: the
+/// handler is never lowered (matching the generated path, which compiles but
+/// never calls it), so it may be any shape, but the graph-wide reachable/used
+/// invariants must still hold for the direct support check.
+fn mark_dead_subgraph_reachable(
+    graph: &ExecutionGraph,
+    start: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+) {
+    let mut queue = vec![start.to_string()];
+    while let Some(step_id) = queue.pop() {
+        if !reachable.insert(step_id.clone()) {
+            continue;
+        }
+        for (index, edge) in graph.execution_plan.iter().enumerate() {
+            if edge.from_step == step_id {
+                used_edges.insert(index);
+                queue.push(edge.to_step.clone());
+            }
+        }
     }
 }
 
@@ -771,29 +808,22 @@ fn supports_ai_agent_step_baseline(
     // Tool loop (chat-turn): every tool must target an Agent step or an
     // EmbedWorkflow step whose child graph is preloaded and itself directly
     // lowerable (run as a tool — its output is fed back to the model); MCP tools
-    // were validated above; and the step must have no onError. An onError edge on
-    // an AiAgent is inert in the generated path (`can_have_on_error` excludes
-    // AiAgent), but the dead handler subgraph trips the direct emitter's
-    // single-terminal / routing invariants, so such graphs fall back for now.
-    let has_on_error = graph
-        .execution_plan
+    // were validated above. An onError edge is inert (generated never routes
+    // AiAgent failures to it) and is handled by the caller, so it is not gated.
+    tool_targets
         .iter()
-        .any(|edge| edge.from_step == step.id && edge.label.as_deref() == Some("onError"));
-    !has_on_error
-        && tool_targets
-            .iter()
-            .all(|edge| match graph.steps.get(&edge.to_step) {
-                Some(Step::Agent(_)) => true,
-                Some(Step::EmbedWorkflow(embed)) => {
-                    supports_embed_workflow_step_baseline(embed, child_workflows, &mut Vec::new())
-                }
-                // A WaitForSignal tool is lowered as a durable poll inside the
-                // loop. The generated tool arm ignores `onWait` entirely (it never
-                // runs the subgraph for a tool), so direct does too — accepting
-                // such targets keeps parity without falling back.
-                Some(Step::WaitForSignal(_)) => true,
-                _ => false,
-            })
+        .all(|edge| match graph.steps.get(&edge.to_step) {
+            Some(Step::Agent(_)) => true,
+            Some(Step::EmbedWorkflow(embed)) => {
+                supports_embed_workflow_step_baseline(embed, child_workflows, &mut Vec::new())
+            }
+            // A WaitForSignal tool is lowered as a durable poll inside the
+            // loop. The generated tool arm ignores `onWait` entirely (it never
+            // runs the subgraph for a tool), so direct does too — accepting
+            // such targets keeps parity without falling back.
+            Some(Step::WaitForSignal(_)) => true,
+            _ => false,
+        })
 }
 
 fn supports_delay_step_baseline(_graph: &ExecutionGraph, _step: &DelayStep) -> bool {
