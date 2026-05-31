@@ -33,6 +33,9 @@ pub(super) enum DirectRunPlan {
         breakpoint: bool,
         branches: Vec<DirectSwitchRoutePlan>,
         default_plan: Box<DirectRunPlan>,
+        /// Shared continuation from the point where all routes (and default)
+        /// re-converge, emitted once after the dispatch. `None` when terminal.
+        merge_plan: Option<Box<DirectRunPlan>>,
     },
     EdgeRoute {
         branches: Vec<DirectEdgeConditionPlan>,
@@ -149,7 +152,16 @@ pub(super) enum DirectRunPlan {
         breakpoint: bool,
         true_plan: Box<DirectRunPlan>,
         false_plan: Box<DirectRunPlan>,
+        /// When the two branches re-converge (a diamond), the shared continuation
+        /// from the merge point onward, emitted ONCE after the `if/else` so the
+        /// merge is not duplicated in each branch (which would be exponential).
+        /// `None` when the branches are terminal (no merge).
+        merge_plan: Option<Box<DirectRunPlan>>,
     },
+    /// A branch that has reached its enclosing branching step's merge point. The
+    /// merge (and everything after it) is emitted once by the parent as the shared
+    /// continuation, so this terminal emits nothing — control falls through to it.
+    Join,
 }
 
 /// A tool the AiAgent loop can dispatch, by the capability-resolved tool index
@@ -331,7 +343,7 @@ fn step_run_plan(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, true)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, true, None)
 }
 
 fn step_run_plan_without_on_error(
@@ -340,7 +352,7 @@ fn step_run_plan_without_on_error(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, false)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, false, None)
 }
 
 fn step_breakpoint_enabled(graph: &DirectGraphManifest, step: &DirectStepManifest) -> bool {
@@ -358,7 +370,14 @@ fn step_run_plan_inner(
     step_id: &str,
     stack: &mut Vec<String>,
     include_on_error: bool,
+    // When set, the merge point of an enclosing branching step: reaching it ends
+    // this branch with a `Join` (the merge is emitted once by the parent as the
+    // shared continuation), so the branch does not recurse through it.
+    stop_at: Option<&str>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
+    if stop_at == Some(step_id) {
+        return Ok(DirectRunPlan::Join);
+    }
     if stack.iter().any(|visited| visited == step_id) {
         return Err(DirectCompileError::Component(format!(
             "direct run plan contains a cycle at step '{step_id}'"
@@ -379,8 +398,14 @@ fn step_run_plan_inner(
         }),
         "Filter" => {
             let filter_id = filter_id(graph, step_id)?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::Filter {
                 step_id: step_id.to_string(),
@@ -396,6 +421,26 @@ fn step_run_plan_inner(
                 let mut branches = Vec::new();
 
                 stack.push(step_id.to_string());
+                // Detect a diamond: where all routes (and default) re-converge,
+                // so the merge runs once as a shared continuation rather than
+                // duplicated in every branch.
+                let mut branch_starts: Vec<Option<String>> = route_labels
+                    .iter()
+                    .map(|label| {
+                        branch_target(graph, step_id, label)
+                            .map(|t| Some(t.to_string()))
+                            .unwrap_or(None)
+                    })
+                    .collect();
+                branch_starts.push(
+                    branch_target(graph, step_id, "default")
+                        .map(|t| Some(t.to_string()))
+                        .unwrap_or(None),
+                );
+                let merge = direct_find_merge_point(graph, &branch_starts)
+                    .filter(|m| Some(m.as_str()) != stop_at);
+                let branch_stop = merge.as_deref().or(stop_at);
+
                 for label in route_labels {
                     let target = branch_target(graph, step_id, &label)?.to_string();
                     let plan = step_run_plan_inner(
@@ -404,6 +449,7 @@ fn step_run_plan_inner(
                         &target,
                         stack,
                         include_on_error,
+                        branch_stop,
                     )?;
                     branches.push(DirectSwitchRoutePlan {
                         label,
@@ -417,7 +463,19 @@ fn step_run_plan_inner(
                     &default_target,
                     stack,
                     include_on_error,
+                    branch_stop,
                 )?;
+                let merge_plan = match &merge {
+                    Some(merge_step) => Some(Box::new(step_run_plan_inner(
+                        graph,
+                        child_workflows,
+                        merge_step,
+                        stack,
+                        include_on_error,
+                        stop_at,
+                    )?)),
+                    None => None,
+                };
                 stack.pop();
 
                 Ok(DirectRunPlan::SwitchRoute {
@@ -426,10 +484,17 @@ fn step_run_plan_inner(
                     breakpoint: step_breakpoint_enabled(graph, step),
                     branches,
                     default_plan: Box::new(default_plan),
+                    merge_plan,
                 })
             } else {
-                let next_plan =
-                    normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+                let next_plan = normal_flow_plan(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    stack,
+                    include_on_error,
+                    stop_at,
+                )?;
 
                 Ok(DirectRunPlan::SwitchValue {
                     step_id: step_id.to_string(),
@@ -441,8 +506,14 @@ fn step_run_plan_inner(
         }
         "GroupBy" => {
             let group_id = group_by_id(graph, step_id)?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::GroupBy {
                 step_id: step_id.to_string(),
@@ -461,8 +532,14 @@ fn step_run_plan_inner(
                 &nested_graph.entry_point,
                 &mut Vec::new(),
             )?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
             } else {
@@ -492,8 +569,14 @@ fn step_run_plan_inner(
                 &nested_graph.entry_point,
                 &mut Vec::new(),
             )?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
             } else {
@@ -518,8 +601,14 @@ fn step_run_plan_inner(
                 &child.graph.entry_point,
                 &mut Vec::new(),
             )?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
             } else {
@@ -545,8 +634,14 @@ fn step_run_plan_inner(
         }
         "Delay" => {
             let delay = delay_config(graph, step_id)?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::Delay {
                 step_id: step_id.to_string(),
@@ -567,8 +662,14 @@ fn step_run_plan_inner(
                     )
                 })
                 .transpose()?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::WaitForSignal {
                 step_id: step_id.to_string(),
@@ -579,8 +680,14 @@ fn step_run_plan_inner(
         }
         "Log" => {
             let log_id = log_id(graph, step_id)?;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::Log {
                 step_id: step_id.to_string(),
@@ -595,8 +702,14 @@ fn step_run_plan_inner(
             let max_retries = agent_effective_max_retries(agent);
             let retry_delay_ms = agent_effective_retry_delay_ms(agent);
             let rate_limit_budget_ms = graph.rate_limit_budget_ms;
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
             } else {
@@ -637,8 +750,14 @@ fn step_run_plan_inner(
                 .collect::<Vec<_>>();
 
             if agent.capability_id == "chat-completion" {
-                let next_plan =
-                    normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+                let next_plan = normal_flow_plan(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    stack,
+                    include_on_error,
+                    stop_at,
+                )?;
                 let error_plan = if include_on_error {
                     on_error_plan(graph, child_workflows, step_id, stack)?
                 } else {
@@ -815,8 +934,14 @@ fn step_run_plan_inner(
                 }
                 _ => None,
             };
-            let next_plan =
-                normal_flow_plan(graph, child_workflows, step_id, stack, include_on_error)?;
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
 
             Ok(DirectRunPlan::AiAgentLoop {
                 step_id: step_id.to_string(),
@@ -851,11 +976,46 @@ fn step_run_plan_inner(
             let true_step = branch_target(graph, step_id, "true")?.to_string();
             let false_step = branch_target(graph, step_id, "false")?.to_string();
 
+            // Detect a diamond: where the true/false branches re-converge. The
+            // merge (and everything after) is emitted once as a shared
+            // continuation, so each branch stops at it. `None` when the branches
+            // are terminal (no re-merge). Don't treat the enclosing stop_at as a
+            // new local merge.
+            let merge = direct_find_merge_point(
+                graph,
+                &[Some(true_step.clone()), Some(false_step.clone())],
+            )
+            .filter(|m| Some(m.as_str()) != stop_at);
+            let branch_stop = merge.as_deref().or(stop_at);
+
             stack.push(step_id.to_string());
-            let true_plan =
-                step_run_plan_inner(graph, child_workflows, &true_step, stack, include_on_error)?;
-            let false_plan =
-                step_run_plan_inner(graph, child_workflows, &false_step, stack, include_on_error)?;
+            let true_plan = step_run_plan_inner(
+                graph,
+                child_workflows,
+                &true_step,
+                stack,
+                include_on_error,
+                branch_stop,
+            )?;
+            let false_plan = step_run_plan_inner(
+                graph,
+                child_workflows,
+                &false_step,
+                stack,
+                include_on_error,
+                branch_stop,
+            )?;
+            let merge_plan = match &merge {
+                Some(merge_step) => Some(Box::new(step_run_plan_inner(
+                    graph,
+                    child_workflows,
+                    merge_step,
+                    stack,
+                    include_on_error,
+                    stop_at,
+                )?)),
+                None => None,
+            };
             stack.pop();
 
             Ok(DirectRunPlan::Conditional {
@@ -864,6 +1024,7 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 true_plan: Box::new(true_plan),
                 false_plan: Box::new(false_plan),
+                merge_plan,
             })
         }
         other => Err(DirectCompileError::Component(format!(
@@ -1001,6 +1162,7 @@ fn normal_flow_plan(
     from_step: &str,
     stack: &mut Vec<String>,
     include_on_error: bool,
+    stop_at: Option<&str>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     let edges = normal_flow_edges(graph, from_step);
 
@@ -1037,8 +1199,14 @@ fn normal_flow_plan(
             edge.to_step.clone()
         };
         stack.push(from_step.to_string());
-        let next_plan =
-            step_run_plan_inner(graph, child_workflows, &next_step, stack, include_on_error)?;
+        let next_plan = step_run_plan_inner(
+            graph,
+            child_workflows,
+            &next_step,
+            stack,
+            include_on_error,
+            stop_at,
+        )?;
         stack.pop();
         return Ok(next_plan);
     }
@@ -1083,6 +1251,7 @@ fn normal_flow_plan(
                 &edge.to_step,
                 stack,
                 include_on_error,
+                stop_at,
             )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
@@ -1096,6 +1265,7 @@ fn normal_flow_plan(
         &default_edge.to_step,
         stack,
         include_on_error,
+        stop_at,
     )?;
     stack.pop();
 
@@ -1103,6 +1273,75 @@ fn normal_flow_plan(
         branches,
         default_plan: Box::new(default_plan),
     })
+}
+
+/// Control-flow successors of a step that the merge analysis follows: the
+/// branch-labeled edges of a branching step (Conditional / routing Switch), the
+/// normal-flow edges otherwise; never `onError`. Mirrors the generated
+/// `branching::collect_reachable_steps` successor rule.
+fn direct_control_successors(graph: &DirectGraphManifest, step_id: &str) -> Vec<String> {
+    let Some(step) = graph.steps.iter().find(|step| step.id == step_id) else {
+        return Vec::new();
+    };
+    if matches!(step.step_type.as_str(), "Finish" | "Error") {
+        return Vec::new();
+    }
+    if direct_is_branching_step(graph, step) {
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from_step == step_id && edge.label.as_deref() != Some("onError"))
+            .map(|edge| edge.to_step.clone())
+            .collect()
+    } else {
+        normal_flow_edges(graph, step_id)
+            .into_iter()
+            .map(|edge| edge.to_step.clone())
+            .collect()
+    }
+}
+
+/// Steps reachable from `start` via control-flow successors, in BFS order.
+fn direct_collect_reachable(graph: &DirectGraphManifest, start: &str) -> Vec<String> {
+    let mut reachable = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(start.to_string());
+    while let Some(current) = queue.pop_front() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        reachable.push(current.clone());
+        for next in direct_control_successors(graph, &current) {
+            if !visited.contains(&next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    reachable
+}
+
+/// The first step reachable from ALL branch starts — the diamond merge point —
+/// or `None` if fewer than two valid branches exist or they never re-converge.
+/// Mirrors the generated `branching::find_merge_point_n` so the direct emitter
+/// structures conditional/switch diamonds the same way (the merge is a shared
+/// continuation emitted once, not duplicated in each branch).
+fn direct_find_merge_point(
+    graph: &DirectGraphManifest,
+    branch_starts: &[Option<String>],
+) -> Option<String> {
+    let starts: Vec<&String> = branch_starts.iter().filter_map(|s| s.as_ref()).collect();
+    if starts.len() < 2 {
+        return None;
+    }
+    let reachable_sets: Vec<Vec<String>> = starts
+        .iter()
+        .map(|start| direct_collect_reachable(graph, start))
+        .collect();
+    reachable_sets[0]
+        .iter()
+        .find(|step_id| reachable_sets[1..].iter().all(|set| set.contains(step_id)))
+        .cloned()
 }
 
 fn on_error_plan(

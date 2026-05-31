@@ -73,6 +73,7 @@ const EMBED_TOOL_CHILD: &str = include_str!("fixtures/embed_tool_child.json");
 const AI_AGENT_WAIT_TOOL: &str = include_str!("fixtures/ai_agent_wait_tool.json");
 const EMBED_AGENT_CHILD_PARENT: &str = include_str!("fixtures/embed_agent_child_parent.json");
 const EMBED_AGENT_CHILD: &str = include_str!("fixtures/embed_agent_child.json");
+const CONDITIONAL_DIAMOND: &str = include_str!("fixtures/conditional_diamond.json");
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
@@ -5827,6 +5828,77 @@ fn direct_wasm_matches_components_embed_workflow_agent_child() {
         components.output_json, direct.output_json,
         "embed-agent-child completion payload mismatch"
     );
+}
+
+/// A Conditional whose true/false branches re-converge at a shared merge step
+/// and continue to a Finish (a diamond). Direct lowers it as `if/else` branches
+/// up to the merge, then the merge once — and must match the generated artifact
+/// for BOTH branch outcomes.
+#[test]
+fn direct_wasm_matches_components_conditional_diamond() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("conditional-diamond", CONDITIONAL_DIAMOND);
+    let direct_artifact =
+        compile_direct_artifact(&components_dir, "conditional-diamond", CONDITIONAL_DIAMOND);
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    for (case, flag) in [("true-branch", true), ("false-branch", false)] {
+        let workflow_input = serde_json::to_vec(&serde_json::json!({ "flag": flag })).unwrap();
+        let components_input = components_sdk_input(&workflow_input);
+        let components = execute_artifact(
+            &components_artifact,
+            &format!("ab-components-conditional-diamond-{case}"),
+            &components_input,
+        );
+        let direct = execute_artifact(
+            &direct_artifact.path,
+            &format!("ab-direct-conditional-diamond-{case}"),
+            &workflow_input,
+        );
+
+        assert!(
+            components.status_success,
+            "{case}: components run failed:\n{}\nerror={:?}",
+            components.stderr, components.error_json
+        );
+        assert!(
+            direct.status_success,
+            "{case}: direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+            direct.stderr, direct.error_json, direct.output_json
+        );
+        assert_eq!(
+            components.output_json, direct.output_json,
+            "{case}: conditional-diamond completion payload mismatch"
+        );
+        assert_eq!(
+            direct.output_json,
+            Some(serde_json::json!({ "flag": flag })),
+            "{case}: diamond should finish with the input flag"
+        );
+        // The merge step runs exactly once (not duplicated per branch).
+        let decided = normalized_events(&direct.events)
+            .into_iter()
+            .filter(|(subtype, payload)| {
+                subtype == "step_debug"
+                    && payload.get("step_id").and_then(|v| v.as_str()) == Some("decided")
+                    && payload.get("phase").and_then(|v| v.as_str()) == Some("finishing")
+            })
+            .count();
+        if decided > 0 {
+            assert_eq!(
+                decided, 1,
+                "{case}: merge step `decided` must run exactly once"
+            );
+        }
+    }
 }
 
 #[test]

@@ -16,6 +16,9 @@ fn fixture(name: &str) -> ExecutionGraph {
     let json = match name {
         "simple" => include_str!("../../../tests/fixtures/simple_passthrough.json"),
         "conditional" => include_str!("../../../tests/fixtures/conditional_workflow.json"),
+        "conditional_diamond" => {
+            include_str!("../../../tests/fixtures/conditional_diamond.json")
+        }
         "conditional_nested" => {
             include_str!("../../../tests/fixtures/conditional_nested.json")
         }
@@ -397,12 +400,16 @@ fn collect_run_plan_ids(
         DirectRunPlan::SwitchRoute {
             branches,
             default_plan,
+            merge_plan,
             ..
         } => {
             for branch in branches {
                 collect_run_plan_ids(&branch.plan, condition_ids, mapping_ids);
             }
             collect_run_plan_ids(default_plan, condition_ids, mapping_ids);
+            if let Some(merge_plan) = merge_plan {
+                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+            }
         }
         DirectRunPlan::EdgeRoute {
             branches,
@@ -506,12 +513,17 @@ fn collect_run_plan_ids(
             condition_id,
             true_plan,
             false_plan,
+            merge_plan,
             ..
         } => {
             condition_ids.push(*condition_id);
             collect_run_plan_ids(true_plan, condition_ids, mapping_ids);
             collect_run_plan_ids(false_plan, condition_ids, mapping_ids);
+            if let Some(merge_plan) = merge_plan {
+                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+            }
         }
+        DirectRunPlan::Join => {}
     }
 }
 
@@ -719,7 +731,9 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::AiAgent { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::EdgeRoute { .. } | DirectRunPlan::AiAgentLoop { .. } => None,
+        DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::AiAgentLoop { .. }
+        | DirectRunPlan::Join => None,
     }
 }
 
@@ -2457,6 +2471,54 @@ fn direct_compile_supports_embed_workflow_child_with_split_step() {
         result.support_report.supported,
         "embed child with a Split step must lower directly: {:?}",
         result.support_report.unsupported
+    );
+}
+
+#[test]
+fn direct_compile_supports_conditional_diamond_graph() {
+    // A Conditional whose branches re-merge and continue must lower directly
+    // (diamond) instead of falling back, with the merge as a shared continuation.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "conditional-diamond".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("conditional_diamond"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct conditional-diamond compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct conditional-diamond artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "a re-merging conditional must lower directly: {:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::Conditional { merge_plan, .. } = &core_config.run_plan else {
+        panic!(
+            "expected a Conditional run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    assert!(
+        merge_plan.is_some(),
+        "the diamond's shared continuation should be a merge plan, not duplicated"
     );
 }
 

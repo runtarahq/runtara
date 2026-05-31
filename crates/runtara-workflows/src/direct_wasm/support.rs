@@ -336,17 +336,37 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
     if order.len() <= 1 {
         return true;
     }
-    // Every step before the last must continue to its topological successor: not
-    // a terminal (Finish/Error) and not a branching step. Two terminal sinks
-    // (e.g. fan-out to two Finish steps) cannot linearize — the second would be
-    // unreachable after the first returns.
+    // Every step before the last must either continue to its topological
+    // successor (a non-terminal, non-branching step) OR be a branching step whose
+    // branches RE-CONVERGE at a merge point — a diamond, which the plan lowers as
+    // `if/switch { branches up to merge } then merge-once`. A branching step that
+    // does NOT re-merge (its branches end in separate terminals) is a backbone
+    // sink and must be last. Two terminal sinks (fan-out to two Finish) cannot
+    // linearize — the second would be unreachable after the first returns.
     order[..order.len() - 1].iter().all(|step_id| {
         graph.steps.get(step_id).is_some_and(|step| {
-            !matches!(step, Step::Finish(_) | Step::Error(_))
-                && !branching::is_branching_step(step)
-                && !has_conditioned_normal_flow_edges(step_id, graph)
+            if matches!(step, Step::Finish(_) | Step::Error(_)) {
+                return false;
+            }
+            let is_branching = branching::is_branching_step(step)
+                || has_conditioned_normal_flow_edges(step_id, graph);
+            !is_branching || step_branches_remerge(step_id, graph)
         })
     })
+}
+
+/// Whether a branching step's normal-flow branches (excluding `onError`)
+/// re-converge at a shared merge point — a diamond the direct plan can lower with
+/// a single shared continuation.
+fn step_branches_remerge(step_id: &str, graph: &ExecutionGraph) -> bool {
+    use crate::codegen::ast::steps::branching;
+    let branch_starts: Vec<Option<String>> = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id && edge.label.as_deref() != Some("onError"))
+        .map(|edge| Some(edge.to_step.clone()))
+        .collect();
+    branching::find_merge_point_n(&branch_starts, graph).is_some()
 }
 
 fn supports_direct_control_step(

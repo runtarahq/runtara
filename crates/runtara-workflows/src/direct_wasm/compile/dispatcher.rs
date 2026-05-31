@@ -172,6 +172,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             branches,
             default_plan,
+            merge_plan,
         } => {
             emit_switch_route_plan(
                 body,
@@ -199,6 +200,33 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
             );
+            // Diamond: all routes (and default) reach the merge as a `Join` and
+            // fall through the nested dispatch, so the shared continuation runs
+            // once here at the original depth.
+            if let Some(merge_plan) = merge_plan {
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    merge_plan,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
         }
         DirectRunPlan::EdgeRoute {
             branches,
@@ -646,6 +674,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             true_plan,
             false_plan,
+            merge_plan,
         } => {
             emit_step_breakpoint(
                 body,
@@ -750,6 +779,38 @@ pub(super) fn emit_run_plan_mapping(
                 handled_target.map(|target| target.nested(1)),
             );
             body.instruction(&Instruction::End);
+            // Diamond: both branches reach the merge as a `Join` (no-op) and fall
+            // through the `if/else`, so the shared continuation is emitted once
+            // here at the original block depth (not nested in the branches).
+            if let Some(merge_plan) = merge_plan {
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    merge_plan,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
+        }
+        DirectRunPlan::Join => {
+            // A branch that reached its enclosing branching step's merge point;
+            // the merge is emitted by the parent as the shared continuation, so
+            // this falls through and emits nothing.
         }
     }
 }

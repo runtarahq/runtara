@@ -1,0 +1,84 @@
+{
+  "name": "Conditional Diamond",
+  "description": "Direct-emitter fixture: a Conditional whose true/false branches re-converge at a shared merge step and continue. Exercises diamond lowering (branches up to merge, then merge emitted once).",
+  "durable": true,
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.flag"
+          },
+          {
+            "valueType": "immediate",
+            "value": true
+          }
+        ]
+      }
+    },
+    "approve": {
+      "stepType": "Log",
+      "id": "approve",
+      "name": "Approve",
+      "level": "info",
+      "message": "approved"
+    },
+    "reject": {
+      "stepType": "Log",
+      "id": "reject",
+      "name": "Reject",
+      "level": "info",
+      "message": "rejected"
+    },
+    "decided": {
+      "stepType": "Log",
+      "id": "decided",
+      "name": "Decided",
+      "level": "info",
+      "message": "decided"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "flag": {
+          "valueType": "reference",
+          "value": "data.flag"
+        }
+      }
+    }
+  },
+  "entryPoint": "check",
+  "executionPlan": [
+    {
+      "fromStep": "check",
+      "toStep": "approve",
+      "label": "true"
+    },
+    {
+      "fromStep": "check",
+      "toStep": "reject",
+      "label": "false"
+    },
+    {
+      "fromStep": "approve",
+      "toStep": "decided"
+    },
+    {
+      "fromStep": "reject",
+      "toStep": "decided"
+    },
+    {
+      "fromStep": "decided",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
