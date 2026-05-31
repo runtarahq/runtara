@@ -40,13 +40,6 @@ pub mod switch_helpers;
 // Connection envelope types for generated workflow code.
 pub mod connections;
 
-// Instance output handling (for Environment communication)
-pub mod instance_output;
-
-// Deep-resolve nested {valueType:"reference"} envelopes inside capability
-// inputs (e.g. references buried inside a `condition: ConditionExpression`).
-pub mod value_resolver;
-
 // Re-export serde at top level
 pub use serde;
 pub use serde_json;
@@ -97,9 +90,6 @@ pub mod prelude {
     // Connection envelope types (codegen builds these as stubs; credentials
     // are injected server-side via the runtara-http proxy, not in-workflow).
     pub use crate::connections::{ConnectionResponse, RateLimitState};
-
-    // Note: instance_output removed from prelude - SDK events are now the single source
-    // of truth for instance state. Test harness can import directly if needed.
 
     // Serde types
     pub use serde::{Deserialize, Serialize};
