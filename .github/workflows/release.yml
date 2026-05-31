@@ -76,15 +76,15 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 
-      # build-bundle.sh installs cargo-component (~5 min cold) and
-      # downloads wac + wasmtime into this directory keyed by version.
-      # Cache it so re-runs of the release matrix amortize the install.
-      # Cache key includes pinned versions so any version bump invalidates.
+      # build-bundle.sh installs cargo-component (~5 min cold, used to build
+      # the agent/shared components) and downloads wasmtime into this directory
+      # keyed by version. Cache it so re-runs of the release matrix amortize the
+      # install. Cache key includes pinned versions so any version bump invalidates.
       - name: Cache bundle build dependencies
         uses: actions/cache@v4
         with:
           path: ~/.cache/runtara-bundle-build
-          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wac-0.10.0-wasmtime-43.0.0-locked
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wasmtime-43.0.0-locked
 
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
@@ -202,17 +202,12 @@ jobs:
       - name: Start release backend
         run: |
           mkdir -p "$DATA_DIR"
-          export PATH="${RUNTARA_BUNDLE_DIR}/toolchain/bin:${RUNTARA_BUNDLE_DIR}/bin:${PATH}"
-          export LD_LIBRARY_PATH="${RUNTARA_BUNDLE_DIR}/toolchain/lib:${LD_LIBRARY_PATH:-}"
+          export PATH="${RUNTARA_BUNDLE_DIR}/bin:${PATH}"
           export WASMTIME_PATH="${RUNTARA_BUNDLE_DIR}/bin/wasmtime"
           # Without this the dispatcher silently falls through to the
           # static-registry path and the smoke test never exercises the
           # bundled .wasm + .meta.json pairs.
           export RUNTARA_AGENT_COMPONENTS_DIR="${RUNTARA_BUNDLE_DIR}/agents"
-          # Compile-source mirror — without this cargo-component reads the
-          # CI-time CARGO_MANIFEST_DIR path baked into the binary, which
-          # doesn't exist on the smoke-test runner.
-          export RUNTARA_COMPILE_SOURCE_DIR="${RUNTARA_BUNDLE_DIR}/compile-src"
 
           "$RUNTARA_SERVER_BIN" > "$DATA_DIR/runtara-server.log" 2>&1 &
           echo "$!" > "$DATA_DIR/runtara-server.pid"
@@ -391,7 +386,7 @@ jobs:
   #
   # Repackages the already-built, smoke-tested linux bundles into an OCI image
   # published to ghcr.io/<owner>/runtara. Each arch is built natively (the
-  # bundle embeds an arch-specific rustc/wasmtime/wac/cargo-component), pushed
+  # bundle embeds arch-specific wasmtime + prebuilt WASM components), pushed
   # by digest, then merged into one multi-arch manifest by `docker-merge`.
   docker:
     name: Build Docker Image (${{ matrix.arch }})

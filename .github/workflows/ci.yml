@@ -432,34 +432,7 @@ jobs:
         if: steps.cache-cargo-component.outputs.cache-hit != 'true'
         run: cargo install cargo-component --version 0.21.1
 
-      # wac compose is needed by the workflow-compile e2e tests
-      # (RUNTARA_RUN_COMPONENTS_E2E=1). Upstream ships prebuilt static
-      # binaries — bypass cargo install to keep this fast.
-      - name: Cache wac binary
-        id: cache-wac
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/wac
-          key: wac-${{ runner.os }}-${{ runner.arch }}-0.10.0
-
-      - name: Install wac
-        if: steps.cache-wac.outputs.cache-hit != 'true'
-        env:
-          RUNNER_ARCH_LOCAL: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          case "$RUNNER_ARCH_LOCAL" in
-            X64) asset="wac-cli-x86_64-unknown-linux-musl" ;;
-            ARM64) asset="wac-cli-aarch64-unknown-linux-musl" ;;
-            *) echo "Unsupported runner arch: $RUNNER_ARCH_LOCAL" >&2; exit 1 ;;
-          esac
-          mkdir -p ~/.cargo/bin
-          curl -fSL -o ~/.cargo/bin/wac \
-            "https://github.com/bytecodealliance/wac/releases/download/v0.10.0/${asset}"
-          chmod +x ~/.cargo/bin/wac
-          wac --version
-
-      # components_execute and direct_wasm_execute run the composed artifacts
+      # direct_wasm_execute runs the composed artifacts
       # through the same CLI used by bundled environments. Keep the version
       # aligned with scripts/build-bundle.sh.
       - name: Cache wasmtime binary
@@ -512,34 +485,19 @@ jobs:
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --tests
 
-      # End-to-end: drive `cargo component build` + `wac compose` against
-      # real workflows that import the freshly-staged agent components,
-      # then load and execute the composed .wasm. This is the gate that
-      # catches drift between the per-agent WIT, the workflow logic crate,
-      # and the wac composition graph — none of which the lower-level
-      # tests cover.
-      - name: Run components-mode workflow e2e tests
-        env:
-          RUNTARA_RUN_COMPONENTS_E2E: "1"
-          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
-        run: |
-          cargo test -p runtara-workflows \
-            --test components_smoke \
-            --test components_e2e \
-            --test components_execute \
-            -- --test-threads=1
-
-      # Direct A/B smoke: use the same staged stdlib/runtime/agent component
-      # bundle, then compile direct workflow fixtures, statically compose
-      # them, execute the final artifacts, and assert the fake SDK observed the
-      # expected completion/failure/events for the supported feature classes.
+      # Direct WASM smoke: use the staged stdlib/runtime/agent component
+      # bundle, then compile direct workflow fixtures, compose them in-process
+      # (wac-graph), execute the final artifacts, and assert the fake SDK
+      # observed the expected completion/failure/events for the supported
+      # feature classes. This is the gate that catches drift between the
+      # per-agent WIT, the emitted workflow-logic module, and the in-process
+      # composition graph.
       - name: Run direct WASM workflow execution smoke tests
         env:
           RUNTARA_RUN_DIRECT_WASM_E2E: "1"
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
         run: |
           cargo test -p runtara-workflows \
-            --test direct_wasm_ab_execute \
             --test direct_wasm_execute \
             -- --test-threads=1
 

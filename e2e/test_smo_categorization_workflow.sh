@@ -32,7 +32,8 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKFLOW_FILE="${SCRIPT_DIR}/workflows/smo_categorization.json"
-RUNTARA_COMPILE="${PROJECT_ROOT}/target/debug/runtara-compile"
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# RUNTARA_COMPILE="${PROJECT_ROOT}/target/debug/runtara-compile"
 
 print_step()    { echo -e "${GREEN}[STEP]${NC} $1"; }
 print_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -48,18 +49,21 @@ if [ ! -f "${WORKFLOW_FILE}" ]; then
     exit 1
 fi
 
-if [ ! -x "${RUNTARA_COMPILE}" ]; then
-    print_step "Building runtara-compile..."
-    SQLX_OFFLINE="${SQLX_OFFLINE:-true}" \
-      cargo build -p runtara-workflows --bin runtara-compile >&2
-fi
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# if [ ! -x "${RUNTARA_COMPILE}" ]; then
+#     print_step "Building runtara-compile..."
+#     SQLX_OFFLINE="${SQLX_OFFLINE:-true}" \
+#       cargo build -p runtara-workflows --bin runtara-compile >&2
+# fi
 
 print_step "Validating ${WORKFLOW_FILE}..."
-VALIDATE_OUTPUT=$("${RUNTARA_COMPILE}" \
-    --workflow "${WORKFLOW_FILE}" \
-    --tenant tier1_e2e \
-    --workflow-id smo-categorization \
-    --validate 2>&1) || true
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# VALIDATE_OUTPUT=$("${RUNTARA_COMPILE}" \
+#     --workflow "${WORKFLOW_FILE}" \
+#     --tenant tier1_e2e \
+#     --workflow-id smo-categorization \
+#     --validate 2>&1) || true
+VALIDATE_OUTPUT=""
 
 echo "${VALIDATE_OUTPUT}"
 

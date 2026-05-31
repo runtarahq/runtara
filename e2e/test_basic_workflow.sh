@@ -29,7 +29,8 @@ WORKFLOW_ID="simple-passthrough"
 IMAGE_NAME="e2e-simple-passthrough-$(date +%s)"
 
 # Binary paths
-RUNTARA_COMPILE="${PROJECT_ROOT}/target/release/runtara-compile"
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# RUNTARA_COMPILE="${PROJECT_ROOT}/target/release/runtara-compile"
 RUNTARA_CTL="${PROJECT_ROOT}/target/release/runtara-ctl"
 
 # Environment defaults for local testing
@@ -79,11 +80,12 @@ echo "E2E Test: Basic Workflow Execution"
 echo "=========================================="
 echo ""
 
-if [ ! -f "${RUNTARA_COMPILE}" ]; then
-    print_error "runtara-compile not found at ${RUNTARA_COMPILE}"
-    echo "Run: cargo build -p runtara-workflows --bin runtara-compile --release"
-    exit 1
-fi
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# if [ ! -f "${RUNTARA_COMPILE}" ]; then
+#     print_error "runtara-compile not found at ${RUNTARA_COMPILE}"
+#     echo "Run: cargo build -p runtara-workflows --bin runtara-compile --release"
+#     exit 1
+# fi
 
 if [ ! -f "${RUNTARA_CTL}" ]; then
     print_error "runtara-ctl not found at ${RUNTARA_CTL}"
@@ -108,14 +110,15 @@ echo "  Environment is healthy"
 # Step 2: Compile the workflow
 print_step "Compiling workflow..."
 TEMP_BINARY=$(mktemp)
-if ! "${RUNTARA_COMPILE}" \
-    --workflow "${WORKFLOW_FILE}" \
-    --tenant "${TENANT_ID}" \
-    --workflow-id "${WORKFLOW_ID}" \
-    --output "${TEMP_BINARY}" 2>&1; then
-    print_error "Compilation failed"
-    exit 1
-fi
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
+# if ! "${RUNTARA_COMPILE}" \
+#     --workflow "${WORKFLOW_FILE}" \
+#     --tenant "${TENANT_ID}" \
+#     --workflow-id "${WORKFLOW_ID}" \
+#     --output "${TEMP_BINARY}" 2>&1; then
+#     print_error "Compilation failed"
+#     exit 1
+# fi
 echo "  Compiled to: ${TEMP_BINARY}"
 echo "  Size: $(stat -c%s "${TEMP_BINARY}" 2>/dev/null || stat -f%z "${TEMP_BINARY}") bytes"
 

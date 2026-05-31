@@ -22,11 +22,10 @@ echo "=========================================="
 echo ""
 
 # Build binaries if needed
+# NOTE: runtara-compile removed; workflows compile in-process via the server /compile API
 echo "Checking binaries..."
-if [ ! -f "${PROJECT_ROOT}/target/release/runtara-compile" ] || \
-   [ ! -f "${PROJECT_ROOT}/target/release/runtara-ctl" ]; then
+if [ ! -f "${PROJECT_ROOT}/target/release/runtara-ctl" ]; then
     echo "Building required binaries..."
-    cargo build -p runtara-workflows --bin runtara-compile --release
     cargo build -p runtara-management-sdk --bin runtara-ctl --release
 fi
 echo ""
