@@ -350,8 +350,8 @@ fn supports_direct_control_graph_inner(
 /// steps are sinks of the backbone (their successors are emitted by branch
 /// sub-plans), so a supported graph has at most one, and it is last.
 fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
-    use crate::codegen::ast::steps::{
-        branching, build_execution_order, has_conditioned_normal_flow_edges,
+    use super::graph_order::{
+        build_execution_order, has_conditioned_normal_flow_edges, is_branching_step,
     };
     let order = build_execution_order(graph);
     if order.len() <= 1 {
@@ -373,8 +373,8 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
             // branching step (Conditional / routing Switch) or carry conditioned
             // normal-flow edges (an EdgeRoute) whose branches RE-CONVERGE — all
             // three are lowered as diamonds with a single shared continuation.
-            let is_branching = branching::is_branching_step(step)
-                || has_conditioned_normal_flow_edges(step_id, graph);
+            let is_branching =
+                is_branching_step(step) || has_conditioned_normal_flow_edges(step_id, graph);
             !is_branching || step_branches_remerge(step_id, graph)
         })
     })
@@ -384,14 +384,14 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
 /// re-converge at a shared merge point — a diamond the direct plan can lower with
 /// a single shared continuation.
 fn step_branches_remerge(step_id: &str, graph: &ExecutionGraph) -> bool {
-    use crate::codegen::ast::steps::branching;
+    use super::graph_order::find_merge_point_n;
     let branch_starts: Vec<Option<String>> = graph
         .execution_plan
         .iter()
         .filter(|edge| edge.from_step == step_id && edge.label.as_deref() != Some("onError"))
         .map(|edge| Some(edge.to_step.clone()))
         .collect();
-    branching::find_merge_point_n(&branch_starts, graph).is_some()
+    find_merge_point_n(&branch_starts, graph).is_some()
 }
 
 fn supports_direct_control_step(

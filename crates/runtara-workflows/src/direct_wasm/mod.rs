@@ -24,6 +24,7 @@ pub mod compile;
 pub mod component;
 #[cfg(feature = "compiler")]
 mod error;
+mod graph_order;
 pub mod manifest;
 #[cfg(feature = "compiler")]
 mod plan;
