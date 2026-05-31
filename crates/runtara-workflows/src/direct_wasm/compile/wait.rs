@@ -543,6 +543,17 @@ fn emit_wait_on_wait_plan(
         source_len_local,
         Some(on_wait_failure_target),
     );
+    // Save the outer wait's signal id / deadline / timeout onto the operand stack
+    // around the onWait subgraph: if it contains a nested WaitForSignal, that
+    // nested wait reuses these shared locals, so they must be restored before the
+    // outer poll resumes. The save is LIFO (nesting-safe), survives the onWait's
+    // handled `br` (it targets the Block, leaving these beneath untouched), and is
+    // abandoned harmlessly on the onWait failure path (which returns).
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
@@ -567,6 +578,13 @@ fn emit_wait_on_wait_plan(
         Some(DirectHandledTarget { branch_depth: 0 }),
     );
     body.instruction(&Instruction::End);
+    // Restore the outer wait's signal id / deadline / timeout (reverse push order)
+    // before the route/steps restore below re-derives `route` from the signal id.
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(steps_ptr_local));

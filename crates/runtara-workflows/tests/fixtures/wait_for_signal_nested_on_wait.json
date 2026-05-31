@@ -1,0 +1,101 @@
+{
+  "name": "Wait for Signal Nested OnWait",
+  "description": "Direct-emitter fixture: a WaitForSignal whose onWait subgraph itself contains a nested WaitForSignal. The onWait emission saves/restores the outer wait's signal-id/deadline/timeout locals around the subgraph, so the nested wait's reuse of those shared locals does not corrupt the outer poll. Direct must accept and not fall back.",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "onWait": {
+        "name": "Acknowledge wait",
+        "entryPoint": "inner_wait",
+        "steps": {
+          "inner_wait": {
+            "stepType": "WaitForSignal",
+            "id": "inner_wait",
+            "name": "Acknowledge",
+            "pollIntervalMs": 0,
+            "responseSchema": {
+              "acknowledged": {
+                "type": "boolean",
+                "required": true
+              }
+            },
+            "action": {
+              "key": "acknowledge_notice",
+              "correlation": {
+                "case_id": {
+                  "valueType": "reference",
+                  "value": "data.case_id"
+                }
+              }
+            }
+          },
+          "notify": {
+            "stepType": "Log",
+            "id": "notify",
+            "name": "Notify Wait",
+            "level": "info",
+            "message": "Acknowledged, waiting for approval",
+            "context": {
+              "acknowledged": {
+                "valueType": "reference",
+                "value": "steps.inner_wait.outputs.acknowledged"
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish"
+          }
+        },
+        "executionPlan": [
+          {
+            "fromStep": "inner_wait",
+            "toStep": "notify"
+          },
+          {
+            "fromStep": "notify",
+            "toStep": "finish"
+          }
+        ]
+      },
+      "responseSchema": {
+        "approved": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "action": {
+        "key": "approval_decision",
+        "correlation": {
+          "case_id": {
+            "valueType": "reference",
+            "value": "data.case_id"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": {
+          "valueType": "reference",
+          "value": "steps.wait.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    {
+      "fromStep": "wait",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

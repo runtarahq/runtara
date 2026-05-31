@@ -104,6 +104,8 @@ const WAIT_FOR_SIGNAL_DIRECT_ON_WAIT: &str =
     include_str!("fixtures/wait_for_signal_direct_on_wait.json");
 const WAIT_FOR_SIGNAL_DIRECT_ON_WAIT_ERROR: &str =
     include_str!("fixtures/wait_for_signal_direct_on_wait_error.json");
+const WAIT_FOR_SIGNAL_NESTED_ON_WAIT: &str =
+    include_str!("fixtures/wait_for_signal_nested_on_wait.json");
 const WAIT_FOR_SIGNAL_DIRECT_BREAKPOINT: &str = r#"{
   "name": "Wait for Signal Direct Breakpoint",
   "durable": true,
@@ -366,6 +368,11 @@ struct ServerState {
     pending_signal: Mutex<Option<String>>,
     pending_checkpoint_signal: Mutex<Option<String>>,
     custom_signal_payload: Mutex<Option<Vec<u8>>>,
+    // When true, the custom signal payload is returned on every poll instead of
+    // being consumed once. Required to drive sequential waits (e.g. a nested
+    // WaitForSignal inside an onWait subgraph), where two distinct waits each
+    // poll their own checkpoint and must both observe the injected payload.
+    custom_signal_repeat: bool,
 }
 
 #[derive(Default)]
@@ -374,6 +381,7 @@ struct ExecuteOptions {
     pending_signal: Option<String>,
     pending_checkpoint_signal: Option<String>,
     custom_signal_payload: Option<Vec<u8>>,
+    custom_signal_repeat: bool,
     debug_mode: bool,
 }
 
@@ -383,12 +391,14 @@ impl ServerState {
         pending_signal: Option<String>,
         pending_checkpoint_signal: Option<String>,
         custom_signal_payload: Option<Vec<u8>>,
+        custom_signal_repeat: bool,
     ) -> Self {
         Self {
             checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
             pending_signal: Mutex::new(pending_signal),
             pending_checkpoint_signal: Mutex::new(pending_checkpoint_signal),
             custom_signal_payload: Mutex::new(custom_signal_payload),
+            custom_signal_repeat,
         }
     }
 }
@@ -1237,17 +1247,21 @@ fn route(
         if method == "GET"
             && let Some(checkpoint_id) = endpoint.strip_prefix("signals/")
         {
-            let custom_signal = server_state
+            let mut guard = server_state
                 .custom_signal_payload
                 .lock()
-                .expect("custom signal lock")
-                .take()
-                .map(|payload| {
-                    serde_json::json!({
-                        "checkpoint_id": checkpoint_id,
-                        "payload": base64::engine::general_purpose::STANDARD.encode(payload),
-                    })
-                });
+                .expect("custom signal lock");
+            let payload = if server_state.custom_signal_repeat {
+                guard.clone()
+            } else {
+                guard.take()
+            };
+            let custom_signal = payload.map(|payload| {
+                serde_json::json!({
+                    "checkpoint_id": checkpoint_id,
+                    "payload": base64::engine::general_purpose::STANDARD.encode(payload),
+                })
+            });
             return (
                 200,
                 serde_json::json!({
@@ -1542,6 +1556,27 @@ fn execute_artifact_with_custom_signal(
     )
 }
 
+fn execute_artifact_with_repeating_custom_signal(
+    binary_path: &Path,
+    instance_id: &str,
+    workflow_input: &[u8],
+    signal_payload: &[u8],
+) -> CapturedRun {
+    // Returns the same custom-signal payload on every poll, so sequential waits
+    // (e.g. a nested WaitForSignal in an onWait subgraph followed by the outer
+    // wait) each resume from the one injected payload.
+    execute_artifact_with_options(
+        binary_path,
+        instance_id,
+        workflow_input,
+        ExecuteOptions {
+            custom_signal_payload: Some(signal_payload.to_vec()),
+            custom_signal_repeat: true,
+            ..ExecuteOptions::default()
+        },
+    )
+}
+
 fn execute_artifact_with_debug_mode(
     binary_path: &Path,
     instance_id: &str,
@@ -1593,6 +1628,7 @@ fn execute_artifact_with_options(
         options.pending_signal,
         options.pending_checkpoint_signal,
         options.custom_signal_payload,
+        options.custom_signal_repeat,
     ));
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_handle =
@@ -3164,6 +3200,46 @@ fn direct_wasm_matches_components_wait_for_signal_on_wait_callback() {
             .map(|(subtype, _)| subtype.as_str())
             .collect::<Vec<_>>(),
         vec!["workflow_log", "external_input_requested"]
+    );
+}
+
+#[test]
+fn direct_wasm_matches_components_wait_for_signal_nested_on_wait() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let components_artifact =
+        compile_components_artifact("wait-signal-nested-on-wait", WAIT_FOR_SIGNAL_NESTED_ON_WAIT);
+    let direct_artifact = compile_direct_artifact(
+        &components_dir,
+        "wait-signal-nested-on-wait",
+        WAIT_FOR_SIGNAL_NESTED_ON_WAIT,
+    );
+    let workflow_input = br#"{"case_id":"case-nested-onwait"}"#;
+    // One payload satisfies both the inner (acknowledged) and outer (approved)
+    // waits; the repeating signal returns it on every poll so each wait resumes.
+    let signal_payload = br#"{"approved":true,"acknowledged":true}"#;
+    let components_input = components_sdk_input(workflow_input);
+
+    let components = execute_artifact_with_repeating_custom_signal(
+        &components_artifact,
+        "ab-components-wait-signal-nested-on-wait-0",
+        &components_input,
+        signal_payload,
+    );
+    let direct = execute_artifact_with_repeating_custom_signal(
+        &direct_artifact.path,
+        "ab-direct-wait-signal-nested-on-wait-0",
+        workflow_input,
+        signal_payload,
+    );
+
+    assert_success_parity("wait-signal-nested-on-wait", 0, &components, &direct);
+    assert_eq!(
+        direct.output_json,
+        Some(serde_json::json!({"approved": true}))
     );
 }
 

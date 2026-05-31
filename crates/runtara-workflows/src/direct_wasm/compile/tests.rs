@@ -121,6 +121,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "wait_on_wait_error" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_on_wait_error.json")
         }
+        "wait_for_signal_nested_on_wait" => {
+            include_str!("../../../tests/fixtures/wait_for_signal_nested_on_wait.json")
+        }
         "embed_workflow" => include_str!("../../../tests/fixtures/embed_workflow_workflow.json"),
         "embed_workflow_on_error_parent" => {
             include_str!("../../../tests/fixtures/embed_workflow_on_error_parent.json")
@@ -2402,6 +2405,37 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
     assert!(
         result.support_report.supported,
         "wait tool with onWait must lower directly (no fallback): {:?}",
+        result.support_report.unsupported
+    );
+}
+
+#[test]
+fn direct_compile_supports_wait_for_signal_with_nested_on_wait() {
+    // A WaitForSignal whose onWait subgraph contains a nested WaitForSignal must
+    // lower directly. The onWait emission saves/restores the outer wait's
+    // signal-id/deadline/timeout locals around the subgraph (LIFO, nesting-safe),
+    // so the nested wait reusing those shared locals does not corrupt the outer
+    // poll. This must compile, validate, and not fall back.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "wait-nested-on-wait".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("wait_for_signal_nested_on_wait"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct nested-onWait wait compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct nested-onWait wait artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "WaitForSignal with a nested WaitForSignal in onWait must lower directly (no fallback): {:?}",
         result.support_report.unsupported
     );
 }

@@ -843,8 +843,11 @@ fn supports_wait_for_signal_on_wait_graph_baseline(
     graph: &ExecutionGraph,
     child_workflows: &DirectSupportChildWorkflows<'_>,
 ) -> bool {
+    // A nested WaitForSignal inside an onWait subgraph is allowed: the onWait
+    // emission saves/restores the outer wait's signal-id/deadline/timeout locals
+    // around the subgraph (LIFO, nesting-safe), so the nested wait's reuse of
+    // those shared locals does not corrupt the outer poll when it resumes.
     supports_direct_control_graph(graph, child_workflows)
-        && !graph_contains_step(graph, |step| matches!(step, Step::WaitForSignal(_)))
 }
 
 fn supports_embed_workflow_step_baseline(
@@ -895,13 +898,6 @@ fn supports_while_step_baseline(_step: &WhileStep) -> bool {
     // so there is no remaining While-specific baseline restriction. Kept as an
     // extension point for future While config gating.
     true
-}
-
-fn graph_contains_step(graph: &ExecutionGraph, predicate: impl Fn(&Step) -> bool + Copy) -> bool {
-    graph.steps.values().any(|step| {
-        predicate(step)
-            || nested_step_graphs(step).any(|graph| graph_contains_step(graph, predicate))
-    })
 }
 
 fn nested_step_graphs(step: &Step) -> impl Iterator<Item = &ExecutionGraph> {
@@ -1355,12 +1351,9 @@ fn collect_wait_for_signal_step_unsupported(
     };
 
     if let Some(on_wait) = &step.on_wait {
-        if graph_contains_step(on_wait, |step| matches!(step, Step::WaitForSignal(_))) {
-            push(
-                "wait-for-signal-on-wait-nested-wait",
-                "WaitForSignal onWait subgraphs cannot contain nested WaitForSignal steps yet",
-            );
-        }
+        // Nested WaitForSignal inside onWait is supported: the onWait emission
+        // saves/restores the outer wait's signal-id/deadline/timeout locals around
+        // the subgraph (LIFO, nesting-safe), so a nested wait may reuse them.
         if !supports_direct_control_graph(on_wait, child_workflows) {
             push(
                 "wait-for-signal-on-wait-shape",
