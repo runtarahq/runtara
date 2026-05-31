@@ -840,5 +840,14 @@ pub(super) fn emit_run_plan_mapping(
             // the merge is emitted by the parent as the shared continuation, so
             // this falls through and emits nothing.
         }
+        DirectRunPlan::ImplicitFinish => {
+            // No explicit Finish step: complete the workflow with a `null` output
+            // (the generated compiler returns `Ok(Value::Null)` in this case).
+            // `runtime.complete` runs on `output_ptr/len` after the plan.
+            body.instruction(&Instruction::I32Const(static_data.output_null.offset));
+            body.instruction(&Instruction::LocalSet(output_ptr_local));
+            body.instruction(&Instruction::I32Const(static_data.output_null.len_i32()));
+            body.instruction(&Instruction::LocalSet(output_len_local));
+        }
     }
 }

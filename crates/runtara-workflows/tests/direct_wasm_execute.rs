@@ -69,6 +69,28 @@ const AGENT_CACHED_REPLAY: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// A single Agent step with no Finish and no edges — the agent is both entry
+/// point and terminal. Compiles via an implicit finish; the workflow output is
+/// `null` (matching the generated compiler).
+const SINGLE_AGENT_NO_FINISH: &str = r#"{
+  "steps": {
+    "agent": {
+      "stepType": "Agent",
+      "id": "agent",
+      "name": "Random Double",
+      "agentId": "utils",
+      "capabilityId": "random-double",
+      "maxRetries": 1,
+      "retryDelay": 1000
+    }
+  },
+  "entryPoint": "agent",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
@@ -824,6 +846,24 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     );
 
     assert_eq!(output, serde_json::json!({ "result": "direct-finish" }));
+}
+
+#[test]
+fn direct_wasm_execute_single_agent_without_finish_returns_null() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // The agent runs (random-double), but with no Finish step the workflow
+    // completes with a null output, matching the generated compiler.
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-single-agent-no-finish",
+        SINGLE_AGENT_NO_FINISH,
+        br#"{}"#,
+    );
+
+    assert_eq!(output, Value::Null);
 }
 
 #[test]

@@ -540,6 +540,7 @@ fn collect_run_plan_ids(
             }
         }
         DirectRunPlan::Join => {}
+        DirectRunPlan::ImplicitFinish => {}
     }
 }
 
@@ -759,7 +760,8 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::EdgeRoute { .. }
         | DirectRunPlan::AiAgentLoop { .. }
-        | DirectRunPlan::Join => None,
+        | DirectRunPlan::Join
+        | DirectRunPlan::ImplicitFinish => None,
     }
 }
 
@@ -9964,5 +9966,56 @@ fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
             .next()
             .is_none(),
         "unsupported graphs should not create build output"
+    );
+}
+
+#[test]
+fn direct_compile_supports_single_agent_without_finish() {
+    // A workflow that is a single Agent step with no Finish and no edges (the
+    // agent is both entry point and terminal). The generated compiler returns
+    // `Ok(Value::Null)` for a graph with no Finish; direct must compile it via
+    // an implicit finish rather than erroring "missing normal branch".
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "steps": {
+            "agent": {
+                "stepType": "Agent",
+                "id": "agent",
+                "name": "Random Double",
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "maxRetries": 1,
+                "retryDelay": 1000
+            }
+        },
+        "entryPoint": "agent",
+        "executionPlan": [],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "single-agent-no-finish".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("single-agent-no-finish should compile direct (implicit finish)");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("implicit-finish artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "single agent without a Finish must lower directly: {:?}",
+        result.support_report.unsupported
     );
 }

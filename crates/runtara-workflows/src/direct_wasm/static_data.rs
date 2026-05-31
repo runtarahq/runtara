@@ -18,6 +18,9 @@ const DIRECT_BREAKPOINT_HIT_STATE: &[u8] = b"\"breakpoint_hit\"";
 const DIRECT_EXTERNAL_INPUT_REQUESTED_KIND: &[u8] = b"external_input_requested";
 const DIRECT_AGENT_EMPTY_INTEGRATION_ID: &[u8] = b"";
 const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
+/// Workflow output for an implicit finish (a terminal step with no explicit
+/// `Finish`); matches the generated compiler's `Ok(Value::Null)`.
+const DIRECT_OUTPUT_NULL: &[u8] = b"null";
 pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
 /// Structured failure payload emitted when a `While` step exceeds its configured
 /// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
@@ -79,6 +82,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) external_input_requested_kind: DirectDataSegment,
     pub(super) agent_empty_integration_id: DirectDataSegment,
     pub(super) agent_empty_parameters: DirectDataSegment,
+    pub(super) output_null: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
@@ -193,6 +197,9 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let output_null = DirectDataSegment::new(offset, DIRECT_OUTPUT_NULL);
+        offset = align_i32(checked_offset_add(offset, DIRECT_OUTPUT_NULL.len())?, 16);
+
         let agent_rate_limit_wait = DirectDataSegment::new(offset, DIRECT_AGENT_RATE_LIMIT_WAIT);
         offset = align_i32(
             checked_offset_add(offset, DIRECT_AGENT_RATE_LIMIT_WAIT.len())?,
@@ -254,6 +261,7 @@ impl DirectCoreStaticData {
             external_input_requested_kind,
             agent_empty_integration_id,
             agent_empty_parameters,
+            output_null,
             agent_rate_limit_wait,
             while_timeout_error,
             split_timeout_error,
@@ -306,6 +314,7 @@ impl DirectCoreStaticData {
             &self.external_input_requested_kind,
             &self.agent_empty_integration_id,
             &self.agent_empty_parameters,
+            &self.output_null,
             &self.agent_rate_limit_wait,
             &self.while_timeout_error,
             &self.split_timeout_error,

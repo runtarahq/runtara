@@ -165,6 +165,11 @@ pub(super) enum DirectRunPlan {
     /// merge (and everything after it) is emitted once by the parent as the shared
     /// continuation, so this terminal emits nothing — control falls through to it.
     Join,
+    /// A terminal step that has no successor and no explicit `Finish` (e.g. a
+    /// single-Agent workflow with no Finish step). The generated compiler returns
+    /// `Ok(Value::Null)` in this case, so the workflow output is `null`; this
+    /// plan node sets the output to `null` before `runtime.complete` runs.
+    ImplicitFinish,
 }
 
 /// A tool the AiAgent loop can dispatch, by the capability-resolved tool index
@@ -1190,9 +1195,11 @@ fn normal_flow_plan(
             next
         } else {
             if edges.is_empty() {
-                return Err(DirectCompileError::Component(format!(
-                    "missing normal branch for direct step '{from_step}'"
-                )));
+                // Terminal step with no successor and no explicit Finish (e.g. a
+                // single-Agent workflow). Match the generated compiler, which
+                // returns `Ok(Value::Null)`: complete the workflow with a null
+                // output instead of failing to build the plan.
+                return Ok(DirectRunPlan::ImplicitFinish);
             }
             let [edge] = default_edges.as_slice() else {
                 return Err(DirectCompileError::Component(format!(
