@@ -122,8 +122,22 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             // Breakpoint (after input resolution, before execution)
             #breakpoint_check
 
-            // Extract just the "outputs" field if it exists, otherwise use the whole value
-            let #outputs_var = #outputs_var.get("outputs").cloned().unwrap_or(#outputs_var);
+            // Unwrap a sole `outputs` field (the single-output convention:
+            // `{ outputs: X }` returns X). A multi-field mapping that merely
+            // includes an `outputs` key (e.g. a Split dontStop aggregation
+            // `{ data, stats, outputs }`) is returned whole — unwrapping would
+            // silently drop the sibling fields.
+            let #outputs_var = {
+                let __v = #outputs_var;
+                let __sole_outputs = __v
+                    .as_object()
+                    .is_some_and(|__m| __m.len() == 1 && __m.contains_key("outputs"));
+                if __sole_outputs {
+                    __v.get("outputs").cloned().unwrap_or(__v)
+                } else {
+                    __v
+                }
+            };
 
             let #step_var =
                 __step_output_envelope(#step_id, #step_name_display, "Finish", &#outputs_var);

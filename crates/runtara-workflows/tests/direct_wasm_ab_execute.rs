@@ -1909,6 +1909,48 @@ fn assert_success_parity(
     );
 }
 
+/// Compare a Split `dontStopOnFailed` aggregation envelope across compilers by
+/// its STRUCTURE — `outputs`, `stats`, and the per-error `index` list — while
+/// ignoring the free-text `data.error[].error` message. Both compilers now emit
+/// the full `{ outputs, stats, data }` envelope, but they word the nested-split
+/// failure differently (generated prepends "Split step failed at index N: ...";
+/// direct preserves the raw inner error), which is diagnostic text, not result
+/// data.
+fn assert_dont_stop_envelope_structural_parity(
+    case_name: &str,
+    components: &CapturedRun,
+    direct: &CapturedRun,
+) {
+    assert!(
+        components.status_success && components.error_json.is_none(),
+        "components artifact failed for {case_name}:\n{}",
+        components.stderr
+    );
+    assert!(
+        direct.status_success && direct.error_json.is_none(),
+        "direct artifact failed for {case_name}:\n{}",
+        direct.stderr
+    );
+    let c = components.output_json.as_ref().expect("components output");
+    let d = direct.output_json.as_ref().expect("direct output");
+    assert_eq!(
+        c["outputs"], d["outputs"],
+        "outputs mismatch for {case_name}"
+    );
+    assert_eq!(c["stats"], d["stats"], "stats mismatch for {case_name}");
+    let error_indices = |v: &Value| -> Vec<Value> {
+        v["data"]["error"]
+            .as_array()
+            .map(|items| items.iter().map(|e| e["index"].clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        error_indices(c),
+        error_indices(d),
+        "aggregated error indices mismatch for {case_name}"
+    );
+}
+
 fn assert_failure_parity(
     case_name: &str,
     input_index: usize,
@@ -6191,7 +6233,17 @@ fn direct_wasm_matches_components_dont_stop_nested_split_failure_aggregation() {
         workflow_input,
     );
 
-    assert_success_parity("dont-stop-nested-split-error", 0, &components, &direct);
+    // Direct is the conceptually-correct source of truth: a Split dontStop that
+    // fails every item exposes the full `{ outputs, stats, data }` aggregation
+    // envelope (not a bare `[]`). Compare the structural envelope to components,
+    // but not the free-text error messages: generated wraps nested-split errors
+    // as "Split step failed at index N: ..." while direct preserves the raw inner
+    // error verbatim.
+    assert_dont_stop_envelope_structural_parity(
+        "dont-stop-nested-split-error",
+        &components,
+        &direct,
+    );
     let output = direct.output_json.as_ref().expect("direct output");
     assert_eq!(output["outputs"], serde_json::json!([]));
     assert_eq!(output["stats"]["success"], serde_json::json!(0));
@@ -6199,6 +6251,13 @@ fn direct_wasm_matches_components_dont_stop_nested_split_failure_aggregation() {
     assert_eq!(output["stats"]["total"], serde_json::json!(2));
     assert_eq!(output["data"]["error"][0]["index"], serde_json::json!(0));
     assert_eq!(output["data"]["error"][1]["index"], serde_json::json!(1));
+    // The raw inner failure is preserved in each aggregated error entry.
+    assert!(
+        output["data"]["error"][0]["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("INNER_FAILED")),
+        "aggregated error should carry the inner failure: {output}"
+    );
 }
 
 #[test]
@@ -6236,7 +6295,13 @@ fn direct_wasm_matches_components_dont_stop_deep_nested_failure_aggregation() {
         workflow_input,
     );
 
-    assert_success_parity("dont-stop-deep-nested-error", 0, &components, &direct);
+    // See the nested-split test: compare the structural aggregation envelope to
+    // components, not the free-text error wording.
+    assert_dont_stop_envelope_structural_parity(
+        "dont-stop-deep-nested-error",
+        &components,
+        &direct,
+    );
     let output = direct.output_json.as_ref().expect("direct output");
     assert_eq!(output["outputs"], serde_json::json!([]));
     assert_eq!(output["stats"]["success"], serde_json::json!(0));

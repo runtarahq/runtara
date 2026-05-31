@@ -111,7 +111,7 @@ impl DirectJsonManifest {
             .ok_or_else(|| format!("unknown direct mapping id {mapping_id}"))?;
         let mut output = apply_input_mapping(&mapping.value, &source)?;
         if mapping.purpose == "finish.inputMapping" {
-            output = output.get("outputs").cloned().unwrap_or(output);
+            output = unwrap_finish_outputs(output);
         }
         serde_json::to_vec(&output)
             .map_err(|err| format!("failed to serialize mapping output: {err}"))
@@ -2005,8 +2005,7 @@ impl DirectJsonManifest {
                 let mapping = self
                     .finish_mapping(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Finish mapping for '{}'", step.id))?;
-                let mut output = apply_input_mapping(&mapping.value, source)?;
-                output = output.get("outputs").cloned().unwrap_or(output);
+                let output = unwrap_finish_outputs(apply_input_mapping(&mapping.value, source)?);
                 Ok(step_output_envelope(step, output, None))
             }
             "Conditional" => {
@@ -3925,6 +3924,23 @@ fn eval_length_as_value(args: &[Value], source: &Value) -> Result<Value, String>
     Ok(Value::Number(len.into()))
 }
 
+/// Resolve a Finish step's mapped output to the workflow's return value.
+///
+/// A Finish whose mapping is exactly `{ "outputs": X }` returns `X` directly —
+/// the common single-output convention, so `outputs: steps.prev.outputs` yields
+/// `prev`'s value rather than `{ "outputs": <value> }`. A multi-field mapping
+/// that merely includes an `outputs` key (e.g. a Split `dontStopOnFailed`
+/// aggregation envelope `{ data, stats, outputs }`) is returned whole;
+/// unwrapping it would silently drop the sibling `data`/`stats` fields.
+fn unwrap_finish_outputs(output: Value) -> Value {
+    match &output {
+        Value::Object(map) if map.len() == 1 && map.contains_key("outputs") => {
+            map.get("outputs").cloned().unwrap_or(output)
+        }
+        _ => output,
+    }
+}
+
 fn apply_input_mapping(mapping: &Value, source: &Value) -> Result<Value, String> {
     let Value::Object(entries) = mapping else {
         return Err("input mapping must be a JSON object".to_string());
@@ -5016,6 +5032,53 @@ mod tests {
         let output: Value = serde_json::from_slice(&output).expect("output json");
 
         assert_eq!(output, json!({ "value": 7 }));
+    }
+
+    #[test]
+    fn finish_mapping_keeps_envelope_when_outputs_is_one_of_several_fields() {
+        // A multi-field Finish mapping that merely INCLUDES an `outputs` key (e.g.
+        // a Split dontStop aggregation `{ data, stats, outputs }`) must be returned
+        // whole — unwrapping `outputs` would silently drop the sibling fields.
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "outputs": { "valueType": "reference", "value": "data.outs" },
+            "stats": { "valueType": "reference", "value": "data.st" },
+            "marker": { "valueType": "immediate", "value": "X" }
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"outs":[],"st":{"success":0,"error":2,"total":2}}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output,
+            json!({
+                "outputs": [],
+                "stats": { "success": 0, "error": 2, "total": 2 },
+                "marker": "X"
+            })
+        );
+    }
+
+    #[test]
+    fn finish_mapping_unwraps_sole_outputs_array() {
+        // The single-output convention still applies when `outputs` is the only
+        // field, even if its value is an array: `{ outputs: [] }` returns `[]`.
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "outputs": { "valueType": "reference", "value": "data.outs" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"outs":[1,2,3]}"#, b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!([1, 2, 3]));
     }
 
     #[test]
