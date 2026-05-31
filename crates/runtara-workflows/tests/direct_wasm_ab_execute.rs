@@ -1727,14 +1727,16 @@ fn components_sdk_input(workflow_input: &[u8]) -> Vec<u8> {
 }
 
 fn remove_direct_workflow_id_variable(value: &mut Value) {
-    if let Some(variables) = value.get_mut("variables").and_then(Value::as_object_mut) {
-        variables.remove("_workflow_id");
-    }
-    if let Some(variables) = value
-        .pointer_mut("/workflow/inputs/variables")
-        .and_then(Value::as_object_mut)
-    {
-        variables.remove("_workflow_id");
+    // Drop the per-run identity variables before comparing breakpoint payloads.
+    // `_workflow_id` embeds the instance id, and `_instance_id` is the instance
+    // id itself — both legitimately differ between the components run
+    // ("ab-components-...") and the direct run ("ab-direct-..."). `_tenant_id`
+    // ("unknown" for both) stays compared.
+    for path in ["/variables", "/workflow/inputs/variables"] {
+        if let Some(variables) = value.pointer_mut(path).and_then(Value::as_object_mut) {
+            variables.remove("_workflow_id");
+            variables.remove("_instance_id");
+        }
     }
 }
 

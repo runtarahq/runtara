@@ -2203,12 +2203,37 @@ impl DirectJsonManifest {
     }
 }
 
+/// Inject the synthetic runtime-identity variables `_instance_id` and
+/// `_tenant_id` that the generated compiler exposes on every `variables`
+/// snapshot (codegen `emit_main`), read from the same env vars generated uses.
+/// Only filled in when ABSENT so a child/iteration scope that already inherited
+/// them is never clobbered.
+///
+/// `_workflow_id` is intentionally NOT injected here: it is already baked into
+/// the manifest variables segment at compile time (`direct_core_variables_json`)
+/// and is the agent cache-key prefix, so synthesizing it from env would alter
+/// cache keys. `_instance_id`/`_tenant_id` do not participate in cache keys.
+fn inject_runtime_identity_variables(variables: &mut Value) {
+    let Some(obj) = variables.as_object_mut() else {
+        return;
+    };
+    obj.entry("_instance_id".to_string()).or_insert_with(|| {
+        Value::String(
+            std::env::var("RUNTARA_INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string()),
+        )
+    });
+    obj.entry("_tenant_id".to_string()).or_insert_with(|| {
+        Value::String(std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string()))
+    });
+}
+
 /// Build the source envelope consumed by direct mapping/condition helpers.
 pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u8>, String> {
     let data: Value =
         serde_json::from_slice(data).map_err(|err| format!("failed to parse data: {err}"))?;
-    let variables: Value = serde_json::from_slice(variables)
+    let mut variables: Value = serde_json::from_slice(variables)
         .map_err(|err| format!("failed to parse variables: {err}"))?;
+    inject_runtime_identity_variables(&mut variables);
     let steps: Value =
         serde_json::from_slice(steps).map_err(|err| format!("failed to parse steps: {err}"))?;
 
@@ -6440,7 +6465,25 @@ mod tests {
             ),
         ];
 
-        for (step_type, step_id, collections, expected_inputs) in cases {
+        for (step_type, step_id, collections, mut expected_inputs) in cases {
+            // build_source injects the synthetic runtime-identity variables
+            // `_instance_id`/`_tenant_id` (env unset in tests -> "unknown"), just
+            // like the generated compiler. Mirror them into the expected inputs
+            // so the comparison stays focused on the step inputs themselves. Only
+            // the build_source-shaped envelope carries them (it has a `workflow`
+            // key); a Split's breakpoint inputs are the raw step config, whose
+            // `variables` field is not a build_source variables snapshot.
+            if expected_inputs.get("workflow").is_some() {
+                for path in ["/variables", "/workflow/inputs/variables"] {
+                    if let Some(vars) = expected_inputs
+                        .pointer_mut(path)
+                        .and_then(Value::as_object_mut)
+                    {
+                        vars.insert("_instance_id".to_string(), json!("unknown"));
+                        vars.insert("_tenant_id".to_string(), json!("unknown"));
+                    }
+                }
+            }
             let manifest =
                 DirectJsonManifest::parse(&debug_manifest(step_type, step_id, None, collections))
                     .expect("manifest");
