@@ -820,13 +820,11 @@ fn supports_embed_workflow_child_graph_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
+    // A child graph runs inline through the normal run-plan dispatcher, so any
+    // directly-lowerable graph shape is allowed (Agent/Split/While/etc.), not just
+    // trivial control flow. The composed parent imports the child's agent
+    // components (see the agent-id merge in `build_direct_workflow_manifest_*`).
     supports_direct_control_graph_inner(graph, child_workflows, child_stack)
-        && !graph_contains_step(graph, |step| {
-            !matches!(
-                step,
-                Step::Finish(_) | Step::Conditional(_) | Step::Error(_) | Step::EmbedWorkflow(_)
-            )
-        })
 }
 
 fn supports_split_step_baseline(_step: &SplitStep) -> bool {
@@ -1354,7 +1352,7 @@ fn collect_embed_workflow_step_unsupported(
     if !supports_embed_workflow_child_graph_baseline(child, child_workflows, &mut child_stack) {
         push(
             "embed-workflow-child-shape",
-            "direct EmbedWorkflow lowering supports child graphs made only of Finish, Conditional, Error, and statically preloaded nested EmbedWorkflow steps",
+            "direct EmbedWorkflow lowering requires the child graph itself to be a directly-lowerable shape",
         );
     }
 }

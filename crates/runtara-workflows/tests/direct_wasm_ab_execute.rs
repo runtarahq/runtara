@@ -71,6 +71,8 @@ const AI_AGENT_TOOL_LOOP: &str = include_str!("fixtures/ai_agent_tool_loop.json"
 const AI_AGENT_EMBED_TOOL: &str = include_str!("fixtures/ai_agent_embed_tool.json");
 const EMBED_TOOL_CHILD: &str = include_str!("fixtures/embed_tool_child.json");
 const AI_AGENT_WAIT_TOOL: &str = include_str!("fixtures/ai_agent_wait_tool.json");
+const EMBED_AGENT_CHILD_PARENT: &str = include_str!("fixtures/embed_agent_child_parent.json");
+const EMBED_AGENT_CHILD: &str = include_str!("fixtures/embed_agent_child.json");
 const AI_AGENT_MULTI_TOOL: &str = include_str!("fixtures/ai_agent_multi_tool.json");
 const AI_AGENT_MEMORY: &str = include_str!("fixtures/ai_agent_memory.json");
 const AI_AGENT_MEMORY_COMPACTION: &str = include_str!("fixtures/ai_agent_memory_compaction.json");
@@ -5760,6 +5762,70 @@ fn direct_wasm_matches_components_ai_agent_wait_for_signal_tool() {
             .iter()
             .any(|(subtype, _)| subtype == "external_input_requested"),
         "direct wait-tool run should emit an external_input_requested event"
+    );
+}
+
+/// An EmbedWorkflow whose child graph runs a real Agent step (utils/return-input)
+/// rather than trivial control flow. Both artifacts compose the child's agent
+/// component, run the child inline, and the parent finishes with the echoed
+/// value. Direct must match the generated artifact.
+#[test]
+fn direct_wasm_matches_components_embed_workflow_agent_child() {
+    let Some(components_dir) = direct_ab_components_dir() else {
+        return;
+    };
+    let _data = setup_data_dir();
+
+    let child_workflows = vec![ChildWorkflowInput {
+        step_id: "call_child".to_string(),
+        workflow_id: "agent-child".to_string(),
+        version_requested: "latest".to_string(),
+        version_resolved: 1,
+        execution_graph: graph_from_fixture(EMBED_AGENT_CHILD),
+    }];
+
+    let components_artifact = compile_components_artifact_with_child_workflows(
+        "embed-agent-child",
+        EMBED_AGENT_CHILD_PARENT,
+        &child_workflows,
+    );
+    let direct_artifact = compile_direct_artifact_with_child_workflows(
+        &components_dir,
+        "embed-agent-child",
+        EMBED_AGENT_CHILD_PARENT,
+        &child_workflows,
+    );
+    assert_eq!(
+        direct_artifact.compiler_mode,
+        WorkflowCompilerMode::DirectWasm
+    );
+
+    let workflow_input = br#"{"q":"hello"}"#;
+    let components_input = components_sdk_input(workflow_input);
+    let components = execute_artifact(
+        &components_artifact,
+        "ab-components-embed-agent-child",
+        &components_input,
+    );
+    let direct = execute_artifact(
+        &direct_artifact.path,
+        "ab-direct-embed-agent-child",
+        workflow_input,
+    );
+
+    assert!(
+        components.status_success,
+        "components run failed:\n{}\nerror={:?}",
+        components.stderr, components.error_json
+    );
+    assert!(
+        direct.status_success,
+        "direct run failed:\nstderr={}\nerror={:?}\noutput={:?}",
+        direct.stderr, direct.error_json, direct.output_json
+    );
+    assert_eq!(
+        components.output_json, direct.output_json,
+        "embed-agent-child completion payload mismatch"
     );
 }
 

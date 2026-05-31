@@ -88,6 +88,12 @@ fn fixture(name: &str) -> ExecutionGraph {
         "ai_agent_wait_tool_on_wait" => {
             include_str!("../../../tests/fixtures/ai_agent_wait_tool_on_wait.json")
         }
+        "embed_agent_child_parent" => {
+            include_str!("../../../tests/fixtures/embed_agent_child_parent.json")
+        }
+        "embed_agent_child" => {
+            include_str!("../../../tests/fixtures/embed_agent_child.json")
+        }
         "wait_simple" => {
             include_str!("../../../tests/fixtures/wait_for_signal_direct_simple.json")
         }
@@ -2367,6 +2373,53 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
         result.support_report.supported,
         "wait tool with onWait must lower directly (no fallback): {:?}",
         result.support_report.unsupported
+    );
+}
+
+#[test]
+fn direct_compile_supports_embed_workflow_child_with_agent_step() {
+    // An EmbedWorkflow whose child graph contains a real Agent step must lower
+    // directly (not fall back); the composed parent must import the child's agent.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "embed-agent-child".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("embed_agent_child_parent"),
+        child_workflows: vec![crate::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "agent-child".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: fixture("embed_agent_child"),
+        }],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct embed-with-agent-child compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("direct embed-with-agent-child artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "embed child with an Agent step must lower directly: {:?}",
+        result.support_report.unsupported
+    );
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    assert!(
+        manifest
+            .feature_summary
+            .agent_ids
+            .iter()
+            .any(|id| id == "utils"),
+        "the child's utils agent must be imported by the composed parent, got {:?}",
+        manifest.feature_summary.agent_ids
     );
 }
 

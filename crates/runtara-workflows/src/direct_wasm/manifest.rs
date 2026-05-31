@@ -538,6 +538,29 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         })
         .collect::<Result<Vec<_>, DirectManifestError>>()?;
 
+    // Each EmbedWorkflow child runs inline in the composed parent, so the parent
+    // must import every agent component its children reference (and ai-tools if a
+    // child uses an AiAgent step). Without this merge a child Agent/AiAgent step
+    // would have no matching import and fail composition — the reason embed
+    // children were previously restricted to trivial control-flow-only graphs.
+    for child in &child_workflows {
+        for agent_id in &child.feature_summary.agent_ids {
+            if !feature_summary.agent_ids.contains(agent_id) {
+                feature_summary.agent_ids.push(agent_id.clone());
+            }
+        }
+        if child
+            .feature_summary
+            .features
+            .contains(&WorkflowFeature::AiAgent)
+            && !feature_summary.agent_ids.iter().any(|id| id == "ai-tools")
+        {
+            feature_summary.agent_ids.push("ai-tools".to_string());
+        }
+    }
+    feature_summary.agent_ids.sort();
+    feature_summary.agent_ids.dedup();
+
     let mut manifest = DirectWorkflowManifest {
         version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: TEMPLATE_MAJOR_VERSION.to_string(),
