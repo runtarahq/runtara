@@ -769,6 +769,7 @@ fn compile_components_artifact_with_child_workflows_and_tracking(
         connection_service_url: None,
         agent_catalog: None,
         progress_callback: None,
+        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("components compile succeeds");
 
@@ -837,6 +838,7 @@ fn compile_direct_artifact_with_child_workflows_and_tracking(
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
+            connection_integration_ids: std::collections::HashMap::new(),
         },
         DirectWorkflowCompileOptions {
             output_dir: temp.path().to_path_buf(),

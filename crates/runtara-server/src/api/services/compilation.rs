@@ -1937,6 +1937,7 @@ mod tests {
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
+            connection_integration_ids: std::collections::HashMap::new(),
         }
     }
 

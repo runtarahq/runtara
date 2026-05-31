@@ -680,6 +680,7 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,
+            connection_integration_ids: std::collections::HashMap::new(),
         },
         components_dir,
     )
@@ -773,6 +774,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
+            connection_integration_ids: std::collections::HashMap::new(),
         },
         DirectWorkflowCompileOptions {
             output_dir: temp.path().to_path_buf(),

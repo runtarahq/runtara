@@ -285,6 +285,7 @@ pub fn compile_workflow_direct(
         connection_service_url: _,
         agent_catalog,
         progress_callback,
+        connection_integration_ids,
     } = input;
 
     let child_dependencies = child_dependencies_from_inputs(&child_workflows);
@@ -306,6 +307,7 @@ pub fn compile_workflow_direct(
         output_dir: options.output_dir,
         track_events,
         agent_catalog,
+        connection_integration_ids,
     })
     .map_err(direct_compile_error_to_io)?;
 
@@ -479,6 +481,7 @@ mod tests {
                 connection_service_url: None,
                 agent_catalog: None,
                 progress_callback: None,
+                connection_integration_ids: std::collections::HashMap::new(),
             },
             DirectWorkflowCompileOptions {
                 output_dir: output_dir.clone(),

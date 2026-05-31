@@ -35,6 +35,7 @@ mod wait;
 mod while_loop;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -328,6 +329,14 @@ pub struct DirectCompilationInput {
     /// `None` falls back to the statically linked registry, matching the Rust
     /// codegen compiler's transition behavior.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// Pre-resolved `connection_id -> integration_id` map for the graph's agent
+    /// steps. Component-backed agents (e.g. `ai-tools`) dispatch on
+    /// `integration_id`, which the runner can't fetch from inside the WASM
+    /// module, so the compile pipeline resolves it once and the direct emitter
+    /// bakes it into the agent's connection ABI args. Mirrors the generated
+    /// path's `CompilationInput::connection_integration_ids`; empty entries fall
+    /// back to the empty-string behavior for agents that don't read it.
+    pub connection_integration_ids: HashMap<String, String>,
 }
 
 /// Result of opt-in direct workflow compilation.
@@ -538,6 +547,7 @@ pub fn compile_direct_workflow(
         &support_json,
         input.track_events,
         &input.workflow_id,
+        &input.connection_integration_ids,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -605,6 +615,7 @@ fn emit_direct_artifact(
     support_json: &[u8],
     track_events: bool,
     workflow_id: &str,
+    connection_integration_ids: &HashMap<String, String>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -618,7 +629,13 @@ fn emit_direct_artifact(
         "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
     }))?;
 
-    let mut component = emit_direct_component(manifest, manifest_json, track_events, workflow_id)?;
+    let mut component = emit_direct_component(
+        manifest,
+        manifest_json,
+        track_events,
+        workflow_id,
+        connection_integration_ids,
+    )?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -639,11 +656,17 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
     workflow_id: &str,
+    connection_integration_ids: &HashMap<String, String>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) =
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)?;
-    let core_config =
-        DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?;
+    let core_config = DirectCoreConfig::new_with_workflow_id(
+        manifest,
+        manifest_json,
+        track_events,
+        workflow_id,
+        connection_integration_ids,
+    )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;

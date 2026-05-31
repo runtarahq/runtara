@@ -211,6 +211,7 @@ fn run() -> Result<(), String> {
             connection_service_url: None,
             agent_catalog: catalog,
             progress_callback: None,
+            connection_integration_ids: std::collections::HashMap::new(),
         })
         .map_err(|err| format!("current Rust/component compile failed: {err}"))?;
 
