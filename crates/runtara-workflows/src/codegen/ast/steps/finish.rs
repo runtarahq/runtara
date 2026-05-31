@@ -112,9 +112,12 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in span scope
-        // The block returns the finish output value
-        let __finish_output: serde_json::Value = __step_span.in_scope(|| {
+        // Wrap step execution in span scope. The closure returns a Result so the
+        // breakpoint check's `return Err(...)` early-return (used to suspend at a
+        // breakpoint) type-checks here — the success path returns the finish
+        // output value, propagated out with `?`.
+        let __finish_output: serde_json::Value =
+            __step_span.in_scope(|| -> std::result::Result<serde_json::Value, String> {
             #debug_start
 
             let #outputs_var = #outputs;
@@ -146,8 +149,8 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-            #outputs_var
-        });
+            Ok(#outputs_var)
+        })?;
 
         // Return immediately with the outputs
         return Ok(__finish_output);
