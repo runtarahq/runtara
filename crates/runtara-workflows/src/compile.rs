@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Workflow compilation entry point.
 //!
-//! Every workflow goes through the components-mode pipeline now: codegen emits
-//! a workflow-logic crate that imports each used agent as a per-agent WIT
-//! package, `cargo component build` produces a Component, and `wac compose`
-//! statically links it with the required agent components into a single
-//! self-contained `workflow.wasm`. The actual pipeline lives in
-//! [`components_compile`](crate::components_compile); this module owns the
-//! public types and the entry-point shim.
+//! Every workflow is compiled by the direct WebAssembly emitter: it byte-emits
+//! a workflow-logic core module, lifts it into a Component, and composes it
+//! in-process with the prebuilt shared + per-agent components into a single
+//! self-contained `workflow.wasm`. The emitter lives in
+//! [`direct_wasm`](crate::direct_wasm); this module owns the public compilation
+//! types and the [`compile_workflow_direct`] entry point.
 //!
 //! Cache invalidation: image metadata stores the **major** version of this
 //! crate ([`TEMPLATE_MAJOR_VERSION`]). The server-side cache check requires
@@ -212,10 +211,11 @@ impl std::fmt::Debug for CompilationInput {
 }
 
 /// Compiler path used to produce a workflow artifact.
+///
+/// Only the direct WebAssembly emitter remains; the variant is retained so the
+/// stored `compilerMode` metadata and cache-keying stay explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowCompilerMode {
-    /// Rust codegen plus cargo-component and static WAC composition.
-    ComponentsCodegen,
     /// Direct WebAssembly emitter plus static WAC composition.
     DirectWasm,
 }
@@ -224,7 +224,6 @@ impl WorkflowCompilerMode {
     /// Stable metadata value for registration and diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ComponentsCodegen => "rust-codegen-components",
             Self::DirectWasm => "direct-wasm",
         }
     }
@@ -259,18 +258,12 @@ pub struct NativeCompilationResult {
     pub compiler_mode: WorkflowCompilerMode,
 }
 
-/// Compile a workflow into a composed `workflow.wasm`. Always routes through
-/// the components-mode pipeline; the `rustc`-direct path is gone.
-pub fn compile_workflow(input: CompilationInput) -> std::io::Result<NativeCompilationResult> {
-    crate::components_compile::compile_workflow_components(input)
-}
-
-/// Compile a workflow through the production direct WebAssembly emitter and
-/// return the same artifact contract as [`compile_workflow`].
+/// Compile a workflow through the production direct WebAssembly emitter into a
+/// composed `workflow.wasm`.
 ///
-/// The caller must provide explicit direct output/component paths so server
-/// rollout can stay gated and deterministic. Unsupported graphs return
-/// [`io::ErrorKind::Unsupported`] before any direct build output is written.
+/// The caller provides explicit direct output/component paths. Unsupported
+/// graphs return [`io::ErrorKind::Unsupported`] before any direct build output
+/// is written.
 pub fn compile_workflow_direct(
     input: CompilationInput,
     options: DirectWorkflowCompileOptions,
@@ -438,10 +431,6 @@ mod tests {
 
     #[test]
     fn workflow_compiler_mode_metadata_values_are_stable() {
-        assert_eq!(
-            WorkflowCompilerMode::ComponentsCodegen.as_str(),
-            "rust-codegen-components"
-        );
         assert_eq!(WorkflowCompilerMode::DirectWasm.as_str(), "direct-wasm");
     }
 

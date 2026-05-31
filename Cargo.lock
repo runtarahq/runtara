@@ -4846,8 +4846,6 @@ version = "7.2.6"
 dependencies = [
  "base64",
  "minijinja",
- "proc-macro2",
- "quote",
  "runtara-agents",
  "runtara-dsl",
  "runtara-workflow-stdlib",
@@ -4855,7 +4853,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "syn 2.0.117",
  "tempfile",
  "tracing",
  "tracing-subscriber",

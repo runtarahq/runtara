@@ -1118,11 +1118,6 @@ mod tests {
         ));
         assert!(!image_cache_hits(
             &image,
-            "source-sha256",
-            WorkflowCompilerMode::ComponentsCodegen
-        ));
-        assert!(!image_cache_hits(
-            &image,
             "other-source",
             WorkflowCompilerMode::DirectWasm
         ));
@@ -1222,14 +1217,6 @@ mod tests {
             .await
             .expect("direct artifact metadata should load");
         assert_eq!(loaded, artifact);
-
-        let rust_result =
-            native_result_with_mode(WorkflowCompilerMode::ComponentsCodegen, build_dir.clone());
-        assert!(
-            direct_artifact_metadata_for_image(&rust_result)
-                .await
-                .is_none()
-        );
 
         let _ = std::fs::remove_dir_all(build_dir);
     }

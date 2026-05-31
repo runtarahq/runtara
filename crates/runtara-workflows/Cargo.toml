@@ -31,8 +31,6 @@ serde_json = "1.0"
 sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-proc-macro2 = "1.0"
-quote = "1.0"
 minijinja = "2.5"
 wasm-encoder = { version = "0.247", optional = true }
 wit-component = { version = "0.247", optional = true }
@@ -41,19 +39,8 @@ wac-parser = { version = "0.10", optional = true }
 wac-resolver = { version = "0.10", default-features = false, optional = true }
 wac-graph = { version = "0.10", optional = true }
 
-[[bin]]
-name = "runtara-compile"
-path = "src/bin/compile.rs"
-required-features = ["compiler"]
-
-[[bin]]
-name = "runtara-direct-wasm-poc"
-path = "src/bin/direct_wasm_poc.rs"
-required-features = ["compiler"]
-
 [dev-dependencies]
 tempfile = "3"
-syn = { version = "2.0", features = ["full", "parsing"] }
 base64 = { workspace = true }
 wasmparser = "0.247"
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "7.2", default-features = false }

@@ -38,22 +38,9 @@
 //! # Usage
 //!
 //! ```ignore
-//! use runtara_workflows::{compile_workflow, CompilationInput};
+//! use runtara_workflows::{compile_workflow_direct, CompilationInput, DirectWorkflowCompileOptions};
 //!
-//! // Load workflow from JSON
-//! let workflow: Workflow = serde_json::from_str(&json)?;
-//!
-//! // Compile to native binary
-//! let input = CompilationInput {
-//!     workflow: &workflow,
-//!     tenant_id: "tenant-1",
-//!     workflow_id: "workflow-1",
-//!     version: 1,
-//!     output_dir: PathBuf::from("./output"),
-//!     child_workflows: vec![],
-//! };
-//!
-//! let result = compile_workflow(&input).await?;
+//! let result = compile_workflow_direct(input, options)?;
 //! println!("Binary at: {:?}", result.binary_path);
 //! ```
 //!
@@ -61,37 +48,22 @@
 //!
 //! - This crate has **NO database dependencies**. Child workflows must be loaded
 //!   by the caller and passed to compilation functions.
-//! - Compilation requires `rustc` and `musl-tools` to be installed.
-//! - The generated binary is statically linked for maximum portability.
+//! - Compilation is fully in-process: the direct emitter byte-emits the
+//!   workflow-logic module and composes the final `workflow.wasm` via
+//!   `wac-graph`. No `rustc`, `cargo`, or external toolchain is invoked.
 //!
 //! # Modules
 //!
-//! - [`codegen`]: AST code generation from execution graphs
-//! - [`compile`]: Public compile entry point (routes to components-mode)
-//! - [`components_compile`]: components-mode pipeline (cargo-component + wac compose)
+//! - [`compile`]: Public compile entry point (direct WebAssembly emitter)
+//! - [`direct_wasm`]: Direct WebAssembly emitter
 //! - [`dependency_analysis`]: Dependency resolution for child workflows
 //! - [`paths`]: File path utilities for workflows and data
 
 #![deny(missing_docs)]
 
-/// AST code generation from execution graphs.
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub mod codegen;
-
-/// Compile entry point (routes to components-mode).
+/// Compile entry point (direct WebAssembly emitter).
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod compile;
-
-/// Phase 3 components-mode compile pipeline (cargo component + wac compose).
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub mod components_compile;
-
-/// Proof-of-concept direct WebAssembly emitter for workflow DSL graphs.
-#[cfg(all(
-    feature = "compiler",
-    not(all(target_family = "wasm", not(target_os = "wasi")))
-))]
-pub mod direct_wasm_poc;
 
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
@@ -120,8 +92,8 @@ pub mod workflow_features;
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions,
-    NativeCompilationResult, TEMPLATE_MAJOR_VERSION, WorkflowCompilerMode, compile_workflow,
-    compile_workflow_direct, workflow_has_side_effects,
+    NativeCompilationResult, TEMPLATE_MAJOR_VERSION, WorkflowCompilerMode, compile_workflow_direct,
+    workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
 pub use input_validation::{
