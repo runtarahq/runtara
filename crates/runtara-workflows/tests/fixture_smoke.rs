@@ -16,9 +16,11 @@
 //! - `EMBED` — has an `EmbedWorkflow` step. Standalone emit must *require*
 //!   children (proving the embed contract); the full child-wired lowering is
 //!   asserted in `src/direct_wasm/compile/tests.rs`.
-//! - `KNOWN_UNSUPPORTED` — graph shapes the direct emitter rejects today
-//!   (multiple terminal steps reached via conditional routing). Pinned so a
-//!   future capability bump is a conscious table edit, not a silent change.
+//! - `KNOWN_UNSUPPORTED` — graph shapes the direct emitter genuinely cannot
+//!   lower (e.g. an arbitrary back-edge cycle rather than a `While`/`maxRetries`
+//!   loop). Currently empty — every corpus fixture validates and emits — but
+//!   kept as a conscious escape hatch so a future unsupported shape is an
+//!   explicit table edit, not a silent runtime failure.
 //! - `VALID` — everything else: must emit a component that validates.
 //!
 //! The completeness guard at the end fails if any fixture file went unvisited.
@@ -31,12 +33,12 @@ use runtara_workflows::ExecutionGraph;
 use runtara_workflows::direct_wasm::{DirectCompilationInput, compile_direct_workflow};
 use wasmparser::Validator;
 
-/// Fixtures that are invalid graphs the direct emitter rejects (and that
-/// `validate_workflow` also rejects — so the two layers agree):
-/// `http_structured_errors` lowers a fan-out the emitter doesn't support.
-/// They emit-fail today; this list records that contract. If a fixture starts
-/// emitting, the assertion flags it so it can move to VALID consciously.
-const KNOWN_UNSUPPORTED: &[&str] = &["http_structured_errors"];
+/// Graph shapes the direct emitter genuinely cannot lower (it linearizes any
+/// DAG — diamonds included — but not an arbitrary back-edge cycle; structured
+/// loops use `While`/Agent `maxRetries`). Currently empty: the whole corpus
+/// validates and emits. Kept as an explicit escape hatch — adding a fixture
+/// here must be a conscious decision, asserted to emit-fail, not a silent gap.
+const KNOWN_UNSUPPORTED: &[&str] = &[];
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

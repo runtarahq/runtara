@@ -1,6 +1,6 @@
 {
   "name": "HTTP Structured Errors",
-  "description": "Workflow demonstrating HTTP agent error classification and routing",
+  "description": "HTTP call with transient retries handled by the Agent (maxRetries) and a permanent-error terminal on exhaustion.",
   "steps": {
     "call_api": {
       "stepType": "Agent",
@@ -8,6 +8,8 @@
       "name": "Make HTTP Request",
       "agentId": "http",
       "capabilityId": "http-request",
+      "maxRetries": 3,
+      "retryDelay": 1000,
       "inputMapping": {
         "method": {
           "valueType": "immediate",
@@ -34,24 +36,13 @@
         }
       }
     },
-    "handle_transient_error": {
-      "stepType": "Log",
-      "id": "handle_transient_error",
-      "message": "Transient error - will be retried by #[resilient]",
-      "context": {
-        "error": {
-          "valueType": "reference",
-          "value": "__error"
-        }
-      }
-    },
     "handle_permanent_error": {
       "stepType": "Error",
       "id": "handle_permanent_error",
       "name": "Permanent API Error",
       "category": "permanent",
       "code": "API_ERROR",
-      "message": "API returned permanent error",
+      "message": "API returned a permanent error (or exhausted transient retries)",
       "severity": "error",
       "context": {
         "originalError": {
@@ -70,7 +61,7 @@
       "inputMapping": {
         "result": {
           "valueType": "reference",
-          "value": "call_api.output.body"
+          "value": "steps.call_api.outputs"
         }
       }
     }
@@ -87,47 +78,8 @@
     },
     {
       "fromStep": "call_api",
-      "toStep": "handle_transient_error",
-      "label": "onError",
-      "condition": {
-        "type": "operation",
-        "op": "EQ",
-        "arguments": [
-          {
-            "valueType": "reference",
-            "value": "__error.category"
-          },
-          {
-            "valueType": "immediate",
-            "value": "transient"
-          }
-        ]
-      },
-      "priority": 10
-    },
-    {
-      "fromStep": "call_api",
       "toStep": "handle_permanent_error",
-      "label": "onError",
-      "condition": {
-        "type": "operation",
-        "op": "EQ",
-        "arguments": [
-          {
-            "valueType": "reference",
-            "value": "__error.category"
-          },
-          {
-            "valueType": "immediate",
-            "value": "permanent"
-          }
-        ]
-      },
-      "priority": 5
-    },
-    {
-      "fromStep": "handle_transient_error",
-      "toStep": "call_api"
+      "label": "onError"
     }
   ],
   "variables": {},
