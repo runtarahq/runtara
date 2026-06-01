@@ -9,8 +9,14 @@
       "name": "Agent",
       "connectionId": "openai-conn",
       "config": {
-        "systemPrompt": { "valueType": "immediate", "value": "Use the calc tool, then answer." },
-        "userPrompt": { "valueType": "reference", "value": "data.q" },
+        "systemPrompt": {
+          "valueType": "immediate",
+          "value": "Use the calc tool, then answer."
+        },
+        "userPrompt": {
+          "valueType": "reference",
+          "value": "data.q"
+        },
         "provider": "openai",
         "model": "gpt-4o",
         "maxIterations": 5
@@ -23,21 +29,38 @@
       "agentId": "utils",
       "capabilityId": "calculate",
       "inputMapping": {
-        "expression": { "valueType": "reference", "value": "data.q" }
+        "expression": {
+          "valueType": "reference",
+          "value": "data.q"
+        },
+        "variables": {
+          "valueType": "immediate",
+          "value": {}
+        }
       }
     },
     "finish": {
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+        "answer": {
+          "valueType": "reference",
+          "value": "steps.ai.outputs.response"
+        }
       }
     }
   },
   "entryPoint": "ai",
   "executionPlan": [
-    { "fromStep": "ai", "toStep": "calc", "label": "calc" },
-    { "fromStep": "ai", "toStep": "finish" }
+    {
+      "fromStep": "ai",
+      "toStep": "calc",
+      "label": "calc"
+    },
+    {
+      "fromStep": "ai",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

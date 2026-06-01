@@ -22,11 +22,11 @@
             "agentId": "transform",
             "capabilityId": "extract",
             "inputMapping": {
-              "source": {
+              "value": {
                 "valueType": "reference",
                 "value": "data.item"
               },
-              "path": {
+              "property_path": {
                 "valueType": "immediate",
                 "value": "$.value"
               }
@@ -53,8 +53,14 @@
           }
         },
         "executionPlan": [
-          { "fromStep": "process", "toStep": "delay" },
-          { "fromStep": "delay", "toStep": "finish" }
+          {
+            "fromStep": "process",
+            "toStep": "delay"
+          },
+          {
+            "fromStep": "delay",
+            "toStep": "finish"
+          }
         ],
         "variables": {},
         "inputSchema": {},
@@ -74,7 +80,10 @@
   },
   "entryPoint": "split",
   "executionPlan": [
-    { "fromStep": "split", "toStep": "finish" }
+    {
+      "fromStep": "split",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {

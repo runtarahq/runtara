@@ -7,11 +7,20 @@
       "id": "call_api",
       "name": "Make HTTP Request",
       "agentId": "http",
-      "capabilityId": "request",
+      "capabilityId": "http-request",
       "inputMapping": {
-        "method": { "valueType": "immediate", "value": "GET" },
-        "url": { "valueType": "reference", "value": "data.apiUrl" },
-        "failOnError": { "valueType": "immediate", "value": true }
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "url": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        },
+        "failOnError": {
+          "valueType": "immediate",
+          "value": true
+        }
       }
     },
     "handle_success": {
@@ -19,7 +28,10 @@
       "id": "handle_success",
       "message": "API call succeeded",
       "context": {
-        "response": { "valueType": "reference", "value": "steps.call_api.outputs" }
+        "response": {
+          "valueType": "reference",
+          "value": "steps.call_api.outputs"
+        }
       }
     },
     "handle_transient_error": {
@@ -27,7 +39,10 @@
       "id": "handle_transient_error",
       "message": "Transient error - will be retried by #[resilient]",
       "context": {
-        "error": { "valueType": "reference", "value": "__error" }
+        "error": {
+          "valueType": "reference",
+          "value": "__error"
+        }
       }
     },
     "handle_permanent_error": {
@@ -39,22 +54,37 @@
       "message": "API returned permanent error",
       "severity": "error",
       "context": {
-        "originalError": { "valueType": "reference", "value": "__error.message" },
-        "statusCode": { "valueType": "reference", "value": "__error.attributes.status_code" }
+        "originalError": {
+          "valueType": "reference",
+          "value": "__error.message"
+        },
+        "statusCode": {
+          "valueType": "reference",
+          "value": "__error.attributes.status_code"
+        }
       }
     },
     "finish": {
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "result": { "valueType": "reference", "value": "call_api.output.body" }
+        "result": {
+          "valueType": "reference",
+          "value": "call_api.output.body"
+        }
       }
     }
   },
   "entryPoint": "call_api",
   "executionPlan": [
-    { "fromStep": "call_api", "toStep": "handle_success" },
-    { "fromStep": "handle_success", "toStep": "finish" },
+    {
+      "fromStep": "call_api",
+      "toStep": "handle_success"
+    },
+    {
+      "fromStep": "handle_success",
+      "toStep": "finish"
+    },
     {
       "fromStep": "call_api",
       "toStep": "handle_transient_error",
@@ -63,8 +93,14 @@
         "type": "operation",
         "op": "EQ",
         "arguments": [
-          { "valueType": "reference", "value": "__error.category" },
-          { "valueType": "immediate", "value": "transient" }
+          {
+            "valueType": "reference",
+            "value": "__error.category"
+          },
+          {
+            "valueType": "immediate",
+            "value": "transient"
+          }
         ]
       },
       "priority": 10
@@ -77,13 +113,22 @@
         "type": "operation",
         "op": "EQ",
         "arguments": [
-          { "valueType": "reference", "value": "__error.category" },
-          { "valueType": "immediate", "value": "permanent" }
+          {
+            "valueType": "reference",
+            "value": "__error.category"
+          },
+          {
+            "valueType": "immediate",
+            "value": "permanent"
+          }
         ]
       },
       "priority": 5
     },
-    { "fromStep": "handle_transient_error", "toStep": "call_api" }
+    {
+      "fromStep": "handle_transient_error",
+      "toStep": "call_api"
+    }
   ],
   "variables": {},
   "inputSchema": {

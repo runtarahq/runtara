@@ -31,10 +31,12 @@ use runtara_workflows::ExecutionGraph;
 use runtara_workflows::direct_wasm::{DirectCompilationInput, compile_direct_workflow};
 use wasmparser::Validator;
 
-/// Fixtures the direct emitter does not lower yet: each routes a `Conditional`
-/// to several distinct terminal steps (multiple `Error`/`Finish` endpoints).
-/// They emit-fail today; this list records that contract. If the emitter gains
-/// support, the failing assertion flags it and the fixture moves to VALID.
+/// Fixtures that are invalid graphs the direct emitter rejects (and that
+/// `validate_workflow` also rejects — so the two layers agree):
+/// `error_all_categories` has an unreachable error branch, and
+/// `http_structured_errors` lowers a fan-out the emitter doesn't support.
+/// They emit-fail today; this list records that contract. If a fixture starts
+/// emitting, the assertion flags it so it can move to VALID consciously.
 const KNOWN_UNSUPPORTED: &[&str] = &["error_all_categories", "http_structured_errors"];
 
 fn fixtures_dir() -> PathBuf {

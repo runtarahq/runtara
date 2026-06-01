@@ -7,7 +7,7 @@
       "id": "prepare-data",
       "name": "Prepare Test Data",
       "agentId": "transform",
-      "capabilityId": "parse-json",
+      "capabilityId": "from-json-string",
       "inputMapping": {
         "value": {
           "valueType": "immediate",

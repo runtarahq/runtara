@@ -6,12 +6,26 @@
       "stepType": "Agent",
       "id": "init",
       "name": "Initialize Order",
-      "agentId": "transform",
-      "capabilityId": "passthrough",
+      "agentId": "utils",
+      "capabilityId": "return-input",
       "inputMapping": {
-        "orderId": { "valueType": "reference", "value": "data.orderId" },
-        "amount": { "valueType": "reference", "value": "data.amount" },
-        "limit": { "valueType": "immediate", "value": 1000 }
+        "value": {
+          "valueType": "composite",
+          "value": {
+            "orderId": {
+              "valueType": "reference",
+              "value": "data.orderId"
+            },
+            "amount": {
+              "valueType": "reference",
+              "value": "data.amount"
+            },
+            "limit": {
+              "valueType": "immediate",
+              "value": 1000
+            }
+          }
+        }
       }
     },
     "check_limit": {
@@ -22,8 +36,14 @@
         "type": "operation",
         "op": "LTE",
         "arguments": [
-          { "valueType": "reference", "value": "steps.init.outputs.amount" },
-          { "valueType": "reference", "value": "steps.init.outputs.limit" }
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.amount"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.limit"
+          }
         ]
       }
     },
@@ -36,29 +56,58 @@
       "message": "Order amount exceeds credit limit",
       "severity": "warning",
       "context": {
-        "orderId": { "valueType": "reference", "value": "steps.init.outputs.orderId" },
-        "requestedAmount": { "valueType": "reference", "value": "steps.init.outputs.amount" },
-        "creditLimit": { "valueType": "reference", "value": "steps.init.outputs.limit" }
+        "orderId": {
+          "valueType": "reference",
+          "value": "steps.init.outputs.orderId"
+        },
+        "requestedAmount": {
+          "valueType": "reference",
+          "value": "steps.init.outputs.amount"
+        },
+        "creditLimit": {
+          "valueType": "reference",
+          "value": "steps.init.outputs.limit"
+        }
       }
     },
     "finish": {
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "result": { "valueType": "immediate", "value": "approved" }
+        "result": {
+          "valueType": "immediate",
+          "value": "approved"
+        }
       }
     }
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "check_limit" },
-    { "fromStep": "check_limit", "toStep": "finish", "label": "true" },
-    { "fromStep": "check_limit", "toStep": "error_over_limit", "label": "false" }
+    {
+      "fromStep": "init",
+      "toStep": "check_limit"
+    },
+    {
+      "fromStep": "check_limit",
+      "toStep": "finish",
+      "label": "true"
+    },
+    {
+      "fromStep": "check_limit",
+      "toStep": "error_over_limit",
+      "label": "false"
+    }
   ],
   "variables": {},
   "inputSchema": {
-    "orderId": { "type": "string", "required": true },
-    "amount": { "type": "number", "required": true }
+    "orderId": {
+      "type": "string",
+      "required": true
+    },
+    "amount": {
+      "type": "number",
+      "required": true
+    }
   },
   "outputSchema": {}
 }
