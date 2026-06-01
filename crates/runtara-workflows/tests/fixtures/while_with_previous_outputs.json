@@ -9,15 +9,15 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "items": "$.items",
-            "count": "$.count"
+            "$.items": "items",
+            "$.count": "count"
           }
         }
       }
@@ -30,8 +30,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "loop.index" },
-          { "valueType": "reference", "value": "steps.init.outputs.count" }
+          {
+            "valueType": "reference",
+            "value": "loop.index"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.count"
+          }
         ]
       },
       "subgraph": {
@@ -44,15 +50,15 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "variables"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "index": "$._index",
-                  "previousData": "$._previousOutputs"
+                  "$._index": "index",
+                  "$._previousOutputs": "previousData"
                 }
               }
             }
@@ -74,7 +80,10 @@
         },
         "entryPoint": "accumulate",
         "executionPlan": [
-          { "fromStep": "accumulate", "toStep": "finish" }
+          {
+            "fromStep": "accumulate",
+            "toStep": "finish"
+          }
         ]
       },
       "config": {
@@ -94,8 +103,14 @@
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "accumulator_loop" },
-    { "fromStep": "accumulator_loop", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "accumulator_loop"
+    },
+    {
+      "fromStep": "accumulator_loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

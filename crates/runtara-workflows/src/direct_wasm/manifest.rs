@@ -1801,11 +1801,12 @@ mod tests {
         assert_eq!(mapping.step_id, "transform");
         assert_eq!(mapping.step_type, "Agent");
         assert_eq!(mapping.purpose, "agent.inputMapping");
-        assert_eq!(mapping.value["source"]["valueType"], "reference");
-        assert_eq!(mapping.value["source"]["value"], "data");
+        assert_eq!(mapping.value["source_data"]["valueType"], "reference");
+        assert_eq!(mapping.value["source_data"]["value"], "data");
+        // `mappings` is { source_path: target_field } for the map-fields capability.
         assert_eq!(
-            mapping.value["mapping"]["value"]["output_field"],
-            "$.input_field"
+            mapping.value["mappings"]["value"]["$.input_field"],
+            "output_field"
         );
     }
 

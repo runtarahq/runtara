@@ -9,14 +9,14 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "count": "$.count"
+            "$.count": "count"
           }
         }
       }
@@ -42,8 +42,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "loop.index" },
-          { "valueType": "reference", "value": "steps.init.outputs.count" }
+          {
+            "valueType": "reference",
+            "value": "loop.index"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.count"
+          }
         ]
       },
       "subgraph": {
@@ -72,14 +78,14 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "variables"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "iteration": "$._index"
+                  "$._index": "iteration"
                 }
               }
             }
@@ -97,8 +103,14 @@
         },
         "entryPoint": "log_iteration",
         "executionPlan": [
-          { "fromStep": "log_iteration", "toStep": "process" },
-          { "fromStep": "process", "toStep": "finish" }
+          {
+            "fromStep": "log_iteration",
+            "toStep": "process"
+          },
+          {
+            "fromStep": "process",
+            "toStep": "finish"
+          }
         ]
       },
       "config": {
@@ -131,10 +143,22 @@
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "log_start" },
-    { "fromStep": "log_start", "toStep": "loop" },
-    { "fromStep": "loop", "toStep": "log_end" },
-    { "fromStep": "log_end", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "log_start"
+    },
+    {
+      "fromStep": "log_start",
+      "toStep": "loop"
+    },
+    {
+      "fromStep": "loop",
+      "toStep": "log_end"
+    },
+    {
+      "fromStep": "log_end",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

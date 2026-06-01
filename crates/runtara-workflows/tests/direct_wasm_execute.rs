@@ -1696,15 +1696,9 @@ const EXECUTION_SMOKE_CASES: &[SmokeCase] = &[
         input: br#"{"count":3}"#,
         expect: ExpectedOutcome::Completes,
     },
-    // NOTE: split_workflow / split_parallel_workflow and the other transform-
-    // agent fixtures (log_with_context, while_simple, transform_workflow, …)
-    // are intentionally NOT executed here. Their subgraphs call
-    // `transform/map-fields` with the pre-rename input shape
-    // (`source`/`mapping`); the current capability expects
-    // `source_data`/`mappings`, so they fail at runtime even though they emit
-    // cleanly (covered by Tier A). Re-authoring those mappings to the current
-    // transform schema is tracked as follow-up; until then they stay Tier-A
-    // only so this battery reflects real, passing execution.
+    // Transform-agent fixtures (split_*, while_*, log_*, transform_workflow)
+    // now execute too — their map-fields input mappings were corrected to the
+    // current `source_data` + `mappings` schema. See the section below.
     // --- Fails: explicit error / timeout ----------------------------------
     SmokeCase {
         fixture: "error_direct_simple",
@@ -1731,6 +1725,82 @@ const EXECUTION_SMOKE_CASES: &[SmokeCase] = &[
         fixture: "delay_dynamic",
         input: br#"{"waitTime":5}"#,
         expect: ExpectedOutcome::Sleeps,
+    },
+    // --- transform-agent fixtures (map-fields), now on the corrected schema --
+    // These drive their subgraphs/loops through `transform/map-fields`; with
+    // the input mappings fixed to `source_data` + `mappings` they execute.
+    SmokeCase {
+        fixture: "transform_workflow",
+        input: br#"{"input_field":"hello"}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "split_workflow",
+        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "split_parallel_workflow",
+        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    // NOTE: split_with_schemas / split_with_schemas_failing are Tier-A only.
+    // Their per-item input/output schemas make the terminal outcome
+    // input-specific (a generic item either traps or passes regardless of the
+    // "_failing" intent), so they aren't meaningful as input-agnostic smoke.
+    // While loops that terminate via `loop.index` against a bound from input.
+    SmokeCase {
+        fixture: "while_with_loop_index",
+        input: br#"{"maxIterations":3}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "while_with_previous_outputs",
+        input: br#"{"items":[1,2],"count":2}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "while_max_iterations",
+        input: br#"{"value":0}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    // While loops whose condition reads a constant `steps.init.outputs.*`;
+    // seeded so the guard is already false (zero iterations) — exercises
+    // condition eval + clean exit without risking a non-terminating loop.
+    SmokeCase {
+        fixture: "while_simple",
+        input: br#"{"counter":5,"target":3}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "while_workflow",
+        input: br#"{"counter":5,"target":3}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "while_break_on_first",
+        input: br#"{"counter":0,"target":10}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "log_with_context",
+        input: br#"{"value":"v","timestamp":"t"}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "log_workflow",
+        input: br#"{"value":"v"}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "log_error_handling",
+        input: br#"{"value":"v"}"#,
+        expect: ExpectedOutcome::Completes,
+    },
+    SmokeCase {
+        fixture: "log_in_loop",
+        input: br#"{"count":3}"#,
+        expect: ExpectedOutcome::Completes,
     },
 ];
 

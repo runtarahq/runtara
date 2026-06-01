@@ -23,15 +23,15 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "item"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "processed": "$.value",
-                  "index": "$._index"
+                  "$.value": "processed",
+                  "$._index": "index"
                 }
               }
             }

@@ -9,14 +9,14 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "processed": "$.value"
+            "$.value": "processed"
           }
         }
       }
@@ -86,10 +86,23 @@
   },
   "entryPoint": "process",
   "executionPlan": [
-    { "fromStep": "process", "toStep": "log_success" },
-    { "fromStep": "process", "toStep": "log_error", "label": "onError" },
-    { "fromStep": "log_success", "toStep": "success_finish" },
-    { "fromStep": "log_error", "toStep": "error_finish" }
+    {
+      "fromStep": "process",
+      "toStep": "log_success"
+    },
+    {
+      "fromStep": "process",
+      "toStep": "log_error",
+      "label": "onError"
+    },
+    {
+      "fromStep": "log_success",
+      "toStep": "success_finish"
+    },
+    {
+      "fromStep": "log_error",
+      "toStep": "error_finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

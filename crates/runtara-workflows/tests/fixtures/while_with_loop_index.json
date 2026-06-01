@@ -9,14 +9,14 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "maxIterations": "$.maxIterations"
+            "$.maxIterations": "maxIterations"
           }
         }
       }
@@ -29,8 +29,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "loop.index" },
-          { "valueType": "reference", "value": "steps.init.outputs.maxIterations" }
+          {
+            "valueType": "reference",
+            "value": "loop.index"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.maxIterations"
+          }
         ]
       },
       "subgraph": {
@@ -43,14 +49,14 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "variables"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "currentIteration": "$._index"
+                  "$._index": "currentIteration"
                 }
               }
             }
@@ -68,7 +74,10 @@
         },
         "entryPoint": "use_index",
         "executionPlan": [
-          { "fromStep": "use_index", "toStep": "finish" }
+          {
+            "fromStep": "use_index",
+            "toStep": "finish"
+          }
         ]
       },
       "config": {
@@ -92,8 +101,14 @@
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "indexed_loop" },
-    { "fromStep": "indexed_loop", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "indexed_loop"
+    },
+    {
+      "fromStep": "indexed_loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},
