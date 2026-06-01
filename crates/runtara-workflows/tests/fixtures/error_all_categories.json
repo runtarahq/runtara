@@ -10,8 +10,33 @@
         "type": "operation",
         "op": "EQ",
         "arguments": [
-          { "valueType": "reference", "value": "data.errorType" },
-          { "valueType": "immediate", "value": "transient" }
+          {
+            "valueType": "reference",
+            "value": "data.errorType"
+          },
+          {
+            "valueType": "immediate",
+            "value": "transient"
+          }
+        ]
+      }
+    },
+    "check_business": {
+      "stepType": "Conditional",
+      "id": "check_business",
+      "name": "Check Permanent Error Kind",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.errorType"
+          },
+          {
+            "valueType": "immediate",
+            "value": "business"
+          }
         ]
       }
     },
@@ -24,15 +49,6 @@
       "message": "Network request timed out",
       "severity": "warning"
     },
-    "error_permanent_technical": {
-      "stepType": "Error",
-      "id": "error_permanent_technical",
-      "name": "Permanent Technical Error",
-      "category": "permanent",
-      "code": "RESOURCE_NOT_FOUND",
-      "message": "Requested resource does not exist",
-      "severity": "error"
-    },
     "error_permanent_business": {
       "stepType": "Error",
       "id": "error_permanent_business",
@@ -42,23 +58,38 @@
       "message": "Order amount exceeds credit limit",
       "severity": "warning"
     },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": {
-        "result": {
-          "valueType": "immediate",
-          "value": "success"
-        }
-      }
+    "error_permanent_technical": {
+      "stepType": "Error",
+      "id": "error_permanent_technical",
+      "name": "Permanent Technical Error",
+      "category": "permanent",
+      "code": "RESOURCE_NOT_FOUND",
+      "message": "Requested resource does not exist",
+      "severity": "error"
     }
   },
   "entryPoint": "check_condition",
   "executionPlan": [
-    { "fromStep": "check_condition", "toStep": "error_transient", "label": "true" },
-    { "fromStep": "check_condition", "toStep": "error_permanent_technical", "label": "false" },
-    { "fromStep": "error_transient", "toStep": "finish" },
-    { "fromStep": "error_permanent_technical", "toStep": "finish" }
+    {
+      "fromStep": "check_condition",
+      "toStep": "error_transient",
+      "label": "true"
+    },
+    {
+      "fromStep": "check_condition",
+      "toStep": "check_business",
+      "label": "false"
+    },
+    {
+      "fromStep": "check_business",
+      "toStep": "error_permanent_business",
+      "label": "true"
+    },
+    {
+      "fromStep": "check_business",
+      "toStep": "error_permanent_technical",
+      "label": "false"
+    }
   ],
   "variables": {},
   "inputSchema": {

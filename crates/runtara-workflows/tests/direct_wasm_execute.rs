@@ -1705,6 +1705,28 @@ const EXECUTION_SMOKE_CASES: &[SmokeCase] = &[
         input: br#"{"requestId":"r1"}"#,
         expect: ExpectedOutcome::Fails,
     },
+    // Conditional-routed Error fixtures; inputs steer each to its Error branch
+    // (these also exercise the passthrough->return-input composite fix).
+    SmokeCase {
+        fixture: "error_permanent",
+        input: br#"{"resourceId":"res-1","found":false}"#,
+        expect: ExpectedOutcome::Fails,
+    },
+    SmokeCase {
+        fixture: "error_transient",
+        input: br#"{"success":false}"#,
+        expect: ExpectedOutcome::Fails,
+    },
+    SmokeCase {
+        fixture: "error_with_context",
+        input: br#"{"orderId":"o-1","amount":5000}"#,
+        expect: ExpectedOutcome::Fails,
+    },
+    SmokeCase {
+        fixture: "error_all_categories",
+        input: br#"{"errorType":"transient"}"#,
+        expect: ExpectedOutcome::Fails,
+    },
     SmokeCase {
         fixture: "while_timeout",
         input: br#"{}"#,
