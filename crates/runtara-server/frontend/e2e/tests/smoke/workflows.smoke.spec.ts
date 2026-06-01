@@ -11,12 +11,11 @@ test.describe('Workflows Smoke Tests', () => {
     await page.goto(appPath('/workflows'));
     await page.waitForLoadState('networkidle');
 
-    // Page header should be visible (kicker is in <p>, title in <h1>)
+    // Page header is a console toolbar breadcrumb
     await expect(
-      page.getByRole('main').getByText('Workflows', { exact: true })
-    ).toBeVisible();
-    await expect(
-      page.getByRole('heading', { name: /build and iterate automation flows/i })
+      page
+        .getByRole('navigation', { name: 'Breadcrumb' })
+        .getByText('Workflows', { exact: true })
     ).toBeVisible();
   });
 

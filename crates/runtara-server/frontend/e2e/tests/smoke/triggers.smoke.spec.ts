@@ -11,12 +11,11 @@ test.describe('Triggers Smoke Tests', () => {
     await page.goto(appPath('/invocation-triggers'));
     await page.waitForLoadState('networkidle');
 
-    // Page header should be visible (kicker is in <p>, title in <h1>)
+    // Page header is a console toolbar breadcrumb
     await expect(
-      page.getByRole('main').getByText('Invocation triggers', { exact: true })
-    ).toBeVisible();
-    await expect(
-      page.getByRole('heading', { name: /manage event sources/i })
+      page
+        .getByRole('navigation', { name: 'Breadcrumb' })
+        .getByText('Triggers', { exact: true })
     ).toBeVisible();
   });
 

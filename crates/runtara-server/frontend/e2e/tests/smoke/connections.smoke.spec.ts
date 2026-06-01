@@ -11,12 +11,11 @@ test.describe('Connections Smoke Tests', () => {
     await page.goto(appPath('/connections'));
     await page.waitForLoadState('networkidle');
 
-    // Page header should be visible (kicker is in <p>, title in <h1>)
+    // Page header is a console toolbar breadcrumb
     await expect(
-      page.getByRole('main').getByText('Connections', { exact: true })
-    ).toBeVisible();
-    await expect(
-      page.getByRole('heading', { name: /manage connections/i })
+      page
+        .getByRole('navigation', { name: 'Breadcrumb' })
+        .getByText('Connections', { exact: true })
     ).toBeVisible();
   });
 

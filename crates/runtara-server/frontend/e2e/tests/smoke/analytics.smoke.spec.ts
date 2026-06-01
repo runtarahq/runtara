@@ -11,11 +11,10 @@ test.describe('Analytics Smoke Tests', () => {
     await page.goto(appPath('/analytics'));
     await page.waitForLoadState('networkidle');
 
-    // Page header should be visible (kicker "Analytics" is in <p>, title "Usage" in <h1>)
-    await expect(
-      page.getByRole('main').getByText('Analytics', { exact: true })
-    ).toBeVisible();
-    await expect(page.getByRole('heading', { name: /usage/i })).toBeVisible();
+    // Page header is a console toolbar breadcrumb (Analytics / Usage)
+    const breadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' });
+    await expect(breadcrumb.getByText('Analytics', { exact: true })).toBeVisible();
+    await expect(breadcrumb.getByText('Usage', { exact: true })).toBeVisible();
   });
 
   test('refresh button is present', async ({ page }) => {
