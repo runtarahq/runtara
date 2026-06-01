@@ -1,0 +1,101 @@
+{
+  "name": "While with Loop Index",
+  "description": "While loop that uses _index variable in subgraph to track iteration count",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "maxIterations": "$.maxIterations"
+          }
+        }
+      }
+    },
+    "indexed_loop": {
+      "stepType": "While",
+      "id": "indexed_loop",
+      "name": "Process with Index",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "steps.init.outputs.maxIterations" }
+        ]
+      },
+      "subgraph": {
+        "name": "Use Index",
+        "steps": {
+          "use_index": {
+            "stepType": "Agent",
+            "id": "use_index",
+            "name": "Access Index",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "variables"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "currentIteration": "$._index"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "iterationNumber": {
+                "valueType": "reference",
+                "value": "steps.use_index.outputs.currentIteration"
+              }
+            }
+          }
+        },
+        "entryPoint": "use_index",
+        "executionPlan": [
+          { "fromStep": "use_index", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 100
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "totalIterations": {
+          "valueType": "reference",
+          "value": "steps.indexed_loop.outputs.iterations"
+        },
+        "lastIterationOutput": {
+          "valueType": "reference",
+          "value": "steps.indexed_loop.outputs.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "indexed_loop" },
+    { "fromStep": "indexed_loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

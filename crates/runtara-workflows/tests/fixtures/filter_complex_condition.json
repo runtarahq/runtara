@@ -1,0 +1,106 @@
+{
+  "name": "Complex Filter Workflow",
+  "description": "A workflow that filters with nested AND/OR conditions: (status = 'active' AND age > 18) OR role = 'admin'",
+  "steps": {
+    "filter": {
+      "stepType": "Filter",
+      "id": "filter",
+      "name": "Filter Users",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.users"
+        },
+        "condition": {
+          "type": "operation",
+          "op": "OR",
+          "arguments": [
+            {
+              "type": "operation",
+              "op": "AND",
+              "arguments": [
+                {
+                  "type": "operation",
+                  "op": "EQ",
+                  "arguments": [
+                    {
+                      "valueType": "reference",
+                      "value": "item.status"
+                    },
+                    {
+                      "valueType": "immediate",
+                      "value": "active"
+                    }
+                  ]
+                },
+                {
+                  "type": "operation",
+                  "op": "GT",
+                  "arguments": [
+                    {
+                      "valueType": "reference",
+                      "value": "item.age"
+                    },
+                    {
+                      "valueType": "immediate",
+                      "value": 18
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "operation",
+              "op": "EQ",
+              "arguments": [
+                {
+                  "valueType": "reference",
+                  "value": "item.role"
+                },
+                {
+                  "valueType": "immediate",
+                  "value": "admin"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "users": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.items"
+        },
+        "count": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.count"
+        }
+      }
+    }
+  },
+  "entryPoint": "filter",
+  "executionPlan": [
+    {
+      "fromStep": "filter",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "users": {
+      "type": "array"
+    }
+  },
+  "outputSchema": {
+    "users": {
+      "type": "array"
+    },
+    "count": {
+      "type": "number"
+    }
+  }
+}

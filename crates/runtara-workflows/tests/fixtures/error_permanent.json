@@ -1,0 +1,61 @@
+{
+  "name": "Error Permanent",
+  "description": "Workflow demonstrating permanent error (non-retryable)",
+  "steps": {
+    "lookup_resource": {
+      "stepType": "Agent",
+      "id": "lookup_resource",
+      "name": "Lookup Resource",
+      "agentId": "transform",
+      "capabilityId": "passthrough",
+      "inputMapping": {
+        "resourceId": { "valueType": "reference", "value": "data.resourceId" },
+        "found": { "valueType": "reference", "value": "data.found" }
+      }
+    },
+    "check_found": {
+      "stepType": "Conditional",
+      "id": "check_found",
+      "name": "Check Resource Found",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.lookup_resource.outputs.found" },
+          { "valueType": "immediate", "value": true }
+        ]
+      }
+    },
+    "error_not_found": {
+      "stepType": "Error",
+      "id": "error_not_found",
+      "name": "Resource Not Found",
+      "category": "permanent",
+      "code": "RESOURCE_NOT_FOUND",
+      "message": "The requested resource does not exist",
+      "severity": "error",
+      "context": {
+        "resourceId": { "valueType": "reference", "value": "steps.lookup_resource.outputs.resourceId" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "resource": { "valueType": "reference", "value": "steps.lookup_resource.outputs" }
+      }
+    }
+  },
+  "entryPoint": "lookup_resource",
+  "executionPlan": [
+    { "fromStep": "lookup_resource", "toStep": "check_found" },
+    { "fromStep": "check_found", "toStep": "finish", "label": "true" },
+    { "fromStep": "check_found", "toStep": "error_not_found", "label": "false" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "resourceId": { "type": "string", "required": true },
+    "found": { "type": "boolean", "required": true }
+  },
+  "outputSchema": {}
+}

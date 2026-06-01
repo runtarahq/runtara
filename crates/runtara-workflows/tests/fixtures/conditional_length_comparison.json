@@ -1,0 +1,66 @@
+{
+  "name": "Conditional Length Comparison",
+  "description": "A workflow that branches based on GT(LENGTH(string), 150) — tests LENGTH as a numeric value in comparisons",
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "GT",
+        "arguments": [
+          {
+            "type": "operation",
+            "op": "LENGTH",
+            "arguments": [
+              {
+                "valueType": "reference",
+                "value": "data.description"
+              }
+            ]
+          },
+          {
+            "valueType": "immediate",
+            "value": 150
+          }
+        ]
+      }
+    },
+    "long_finish": {
+      "stepType": "Finish",
+      "id": "long_finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "long"
+        }
+      }
+    },
+    "short_finish": {
+      "stepType": "Finish",
+      "id": "short_finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "short"
+        }
+      }
+    }
+  },
+  "entryPoint": "check",
+  "executionPlan": [
+    {
+      "fromStep": "check",
+      "toStep": "long_finish",
+      "label": "true"
+    },
+    {
+      "fromStep": "check",
+      "toStep": "short_finish",
+      "label": "false"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

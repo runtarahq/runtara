@@ -1,0 +1,100 @@
+{
+  "name": "GroupBy in Multi-Step Workflow",
+  "description": "A workflow where GroupBy follows a Split step, grouping split results by action",
+  "steps": {
+    "split-items": {
+      "stepType": "Split",
+      "id": "split-items",
+      "name": "Process Items",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        }
+      },
+      "subgraph": {
+        "entryPoint": "process",
+        "steps": {
+          "process": {
+            "stepType": "Finish",
+            "id": "process",
+            "inputMapping": {
+              "item": {
+                "valueType": "reference",
+                "value": "item"
+              },
+              "action": {
+                "valueType": "immediate",
+                "value": "processed"
+              }
+            }
+          }
+        },
+        "executionPlan": [],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+      },
+      "inputSchema": {},
+      "outputSchema": {}
+    },
+    "group-results": {
+      "stepType": "GroupBy",
+      "id": "group-results",
+      "name": "Group Results by Action",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "steps.split-items.outputs"
+        },
+        "key": "action"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "groups": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.groups"
+        },
+        "counts": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.counts"
+        },
+        "total_groups": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.total_groups"
+        }
+      }
+    }
+  },
+  "entryPoint": "split-items",
+  "executionPlan": [
+    {
+      "fromStep": "split-items",
+      "toStep": "group-results"
+    },
+    {
+      "fromStep": "group-results",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": {
+      "type": "array"
+    }
+  },
+  "outputSchema": {
+    "groups": {
+      "type": "object"
+    },
+    "counts": {
+      "type": "object"
+    },
+    "total_groups": {
+      "type": "integer"
+    }
+  }
+}

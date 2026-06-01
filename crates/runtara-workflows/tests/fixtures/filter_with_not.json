@@ -1,0 +1,73 @@
+{
+  "name": "Filter with NOT Condition",
+  "description": "A workflow that uses NOT operator to exclude items",
+  "steps": {
+    "filter": {
+      "stepType": "Filter",
+      "id": "filter",
+      "name": "Exclude Failed Items",
+      "config": {
+        "value": {
+          "valueType": "immediate",
+          "value": [
+            {"id": 1, "status": "active"},
+            {"id": 2, "status": "failed"},
+            {"id": 3, "status": "active"},
+            {"id": 4, "status": "failed"}
+          ]
+        },
+        "condition": {
+          "type": "operation",
+          "op": "NOT",
+          "arguments": [
+            {
+              "type": "operation",
+              "op": "EQ",
+              "arguments": [
+                {
+                  "valueType": "reference",
+                  "value": "item.status"
+                },
+                {
+                  "valueType": "immediate",
+                  "value": "failed"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "nonFailed": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.items"
+        },
+        "count": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.count"
+        }
+      }
+    }
+  },
+  "entryPoint": "filter",
+  "executionPlan": [
+    {
+      "fromStep": "filter",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {
+    "nonFailed": {
+      "type": "array"
+    },
+    "count": {
+      "type": "number"
+    }
+  }
+}

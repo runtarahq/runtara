@@ -1,0 +1,142 @@
+{
+  "name": "Log in While Loop",
+  "description": "Log step inside a while loop subgraph for iteration tracking",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "count": "$.count"
+          }
+        }
+      }
+    },
+    "log_start": {
+      "stepType": "Log",
+      "id": "log_start",
+      "name": "Log Loop Start",
+      "level": "info",
+      "message": "Starting loop processing",
+      "context": {
+        "totalIterations": {
+          "valueType": "reference",
+          "value": "steps.init.outputs.count"
+        }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Processing Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "steps.init.outputs.count" }
+        ]
+      },
+      "subgraph": {
+        "name": "Loop with Logging",
+        "steps": {
+          "log_iteration": {
+            "stepType": "Log",
+            "id": "log_iteration",
+            "name": "Log Iteration",
+            "level": "debug",
+            "message": "Processing iteration",
+            "context": {
+              "iterationNumber": {
+                "valueType": "reference",
+                "value": "variables._index"
+              },
+              "previousOutput": {
+                "valueType": "reference",
+                "value": "variables._previousOutputs"
+              }
+            }
+          },
+          "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "variables"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "iteration": "$._index"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "completed": {
+                "valueType": "reference",
+                "value": "steps.process.outputs"
+              }
+            }
+          }
+        },
+        "entryPoint": "log_iteration",
+        "executionPlan": [
+          { "fromStep": "log_iteration", "toStep": "process" },
+          { "fromStep": "process", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 10
+      }
+    },
+    "log_end": {
+      "stepType": "Log",
+      "id": "log_end",
+      "name": "Log Loop End",
+      "level": "info",
+      "message": "Loop completed",
+      "context": {
+        "totalIterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "log_start" },
+    { "fromStep": "log_start", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "log_end" },
+    { "fromStep": "log_end", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
