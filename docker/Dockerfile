@@ -5,9 +5,10 @@
 # Built FROM a pre-built, smoke-tested release bundle (the same
 # runtara-<ver>-<arch>-linux.tar.gz published to GitHub Releases) rather than
 # compiled from source — the image ships exactly what the release pipeline
-# already verified. The bundle embeds a native rustc toolchain + wasmtime +
-# wac + cargo-component, so this image is arch-specific: each platform consumes
-# its own-arch bundle and the multi-arch manifest is merged in CI.
+# already verified. The bundle embeds wasmtime + the prebuilt agent/shared
+# WASM components (workflow compilation is fully in-process), so this image is
+# arch-specific: each platform consumes its own-arch bundle and the multi-arch
+# manifest is merged in CI.
 #
 # The CI step stages the extracted bundle into ./runtara/ (tar
 # --strip-components=1) before building, so the layout below is deterministic
@@ -15,14 +16,13 @@
 FROM ubuntu:22.04
 
 # glibc note: bundles are built on ubuntu-22.04 runners, so the runtime base
-# must be ubuntu:22.04 (or a newer-glibc derivative). Distroless is not an
-# option — the workflow compile pipeline shells out to a C linker.
-#   - ca-certificates: outbound HTTPS (integrations + crates.io fallback)
-#   - gcc, libc6-dev:  required by the workflow compile pipeline's linker
+# must be ubuntu:22.04 (or a newer-glibc derivative) for ABI compatibility with
+# the dynamically-linked runtara-server binary.
+#   - ca-certificates: outbound HTTPS (integrations)
 #   - curl:            container HEALTHCHECK only
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates gcc libc6-dev curl \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user whose primary group is root (GID 0). The bundle
@@ -41,20 +41,17 @@ COPY runtara/ /opt/runtara/
 
 # Same env contract as scripts/install.sh and e2e/install-test/Dockerfile,
 # rebased onto /opt/runtara.
-ENV PATH="/opt/runtara/toolchain/bin:/opt/runtara/bin:${PATH}" \
-    LD_LIBRARY_PATH="/opt/runtara/toolchain/lib" \
+ENV PATH="/opt/runtara/bin:${PATH}" \
     WASMTIME_PATH="/opt/runtara/bin/wasmtime" \
     RUNTARA_AGENT_COMPONENTS_DIR="/opt/runtara/agents" \
-    RUNTARA_COMPILE_SOURCE_DIR="/opt/runtara/compile-src" \
     HOME="/home/runtara" \
-    CARGO_HOME="/home/runtara/.cargo" \
     DATA_DIR="/data" \
     SERVER_HOST="0.0.0.0" \
     SERVER_PORT="7001"
 
-# Workflow build cache + runtime state. Owned by GID 0 and group-writable, so a
-# fresh named volume inherits that ownership and bind mounts stay writable under
-# any uid. Declared as a volume so it can be persisted across restarts.
+# Runtime state (instance data, direct compose scratch). Owned by GID 0 and
+# group-writable, so a fresh named volume inherits that ownership and bind
+# mounts stay writable under any uid. Declared as a volume so it persists.
 RUN mkdir -p /data && chown -R 10001:0 /data && chmod -R g=u /data
 VOLUME ["/data"]
 

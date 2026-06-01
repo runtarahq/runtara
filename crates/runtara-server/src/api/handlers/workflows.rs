@@ -759,30 +759,14 @@ pub async fn compile_workflow_handler(
     if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
         let redis_url = valkey_config.connection_url();
 
-        // Check if already compiled
-        let repository = WorkflowRepository::new(pool.clone());
-        match repository
-            .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
-            .await
-        {
-            Ok(Some(image_id)) => {
-                let response = json!({
-                    "success": true,
-                    "message": "Workflow already compiled",
-                    "workflowId": workflow_id,
-                    "version": version,
-                    "imageId": image_id,
-                    "registered": true,
-                    "recompiled": false,
-                    "timestamp": chrono::Utc::now().to_rfc3339()
-                });
-                return (StatusCode::OK, Json(response));
-            }
-            Ok(None) => {} // Not compiled yet, proceed to queue
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to check compilation status, proceeding to queue");
-            }
-        }
+        // Direct WASM is the only compile path now; defer the cache decision
+        // to CompilationService so it can evaluate the desired compiler mode
+        // before deciding whether the cache is fresh.
+        tracing::debug!(
+            workflow_id = %workflow_id,
+            version = version_num,
+            "Deferring cache decision to compilation service"
+        );
 
         // Enqueue the compilation request
         match crate::workers::compilation_worker::enqueue_compilation(
@@ -893,7 +877,10 @@ pub async fn compile_workflow_handler(
         connection_service_url,
         runtime_client,
     )
-    .with_connections_facade(connections);
+    .with_connections_facade(connections)
+    .with_direct_compilation(
+        crate::api::services::compilation::direct_compilation_settings_from_config(),
+    );
 
     match compilation_service
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
@@ -902,7 +889,7 @@ pub async fn compile_workflow_handler(
         Ok(result) => {
             let mut response = json!({
                 "success": true,
-                "message": "Workflow compiled to native binary successfully",
+                "message": "Workflow compiled successfully",
                 "workflowId": result.workflow_id,
                 "version": result.version.to_string(),
                 "buildDir": result.build_dir,

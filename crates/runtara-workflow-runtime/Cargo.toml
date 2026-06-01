@@ -1,0 +1,28 @@
+[package]
+name = "runtara-workflow-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workflow runtime component for direct-emitted runtara workflow Wasm"
+keywords = ["workflow", "runtime", "wasm", "component"]
+categories = ["development-tools", "wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["native"]
+native = ["runtara-sdk/native"]
+wasi = ["runtara-sdk/wasi"]
+
+[dependencies]
+runtara-sdk = { path = "../runtara-sdk", version = "7.2", default-features = false, features = ["http"] }
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "runtara:workflow-runtime"
+
+[package.metadata.component.target]
+path = "../runtara-workflow-wit/wit/runtime"
+world = "workflow-runtime"

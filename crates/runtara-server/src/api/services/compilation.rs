@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -10,11 +12,18 @@ use crate::api::repositories::workflows::{
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
 use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
+use opentelemetry::KeyValue;
 use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::compile::ProgressCallback;
-use runtara_workflows::{ChildWorkflowInput, CompilationInput, compile_workflow};
+use runtara_workflows::direct_wasm::{
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata,
+};
+use runtara_workflows::{
+    ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
+    WorkflowCompilerMode, compile_workflow_direct,
+};
 
 /// Global semaphore limiting concurrent compilations across all code paths.
 /// Prevents OOM when multiple compilations are triggered simultaneously.
@@ -56,12 +65,188 @@ fn image_template_major(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
-/// Whether `image` is a cache hit for the current source + compiler major.
-/// Both must match — pre-existing images lack `templateMajor` so they always
-/// miss, forcing a recompile through the components path.
-fn image_cache_hits(image: &ImageSummary, source_checksum: &str) -> bool {
+fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/compilerMode"))
+        .and_then(|v| v.as_str())
+}
+
+/// Whether `image` is a cache hit for the current source, compiler major, and
+/// desired compiler mode. Older images that lack either provenance field miss
+/// once and are refreshed through the selected compile path.
+fn image_cache_hits(
+    image: &ImageSummary,
+    source_checksum: &str,
+    compiler_mode: WorkflowCompilerMode,
+) -> bool {
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        && image_compiler_mode(image) == Some(compiler_mode.as_str())
+}
+
+fn workflow_image_metadata(
+    compilation_result: &NativeCompilationResult,
+    workflow_id: &str,
+    version: u32,
+    source_checksum: &str,
+    direct_artifact: Option<&DirectArtifactMetadata>,
+) -> serde_json::Value {
+    let mut workflow = serde_json::json!({
+        "workflowId": workflow_id,
+        "version": version,
+        "sourceChecksum": source_checksum,
+        // Major version of `runtara-workflows`. Cache miss on major
+        // bump invalidates every workflow on next deploy.
+        "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+        "compilerMode": compilation_result.compiler_mode.as_str(),
+        "directWasm": {
+            "enabled": true,
+            "outcome": "success",
+            "reason": "none",
+        },
+    });
+
+    if let Some(direct_artifact) = direct_artifact {
+        workflow["directArtifact"] = serde_json::to_value(direct_artifact)
+            .expect("direct artifact metadata should serialize");
+    }
+
+    serde_json::json!({
+        "variables": compilation_result.default_variables,
+        "workflow": workflow
+    })
+}
+
+async fn direct_artifact_metadata_for_image(
+    compilation_result: &NativeCompilationResult,
+) -> Option<DirectArtifactMetadata> {
+    if compilation_result.compiler_mode != WorkflowCompilerMode::DirectWasm {
+        return None;
+    }
+
+    let path = compilation_result
+        .build_dir
+        .join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => match serde_json::from_slice::<DirectArtifactMetadata>(&bytes) {
+            Ok(metadata) => Some(metadata),
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to parse direct workflow artifact metadata; image registration will omit direct artifact provenance"
+                );
+                None
+            }
+        },
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "Failed to read direct workflow artifact metadata; image registration will omit direct artifact provenance"
+            );
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkflowImageRegistration<'a> {
+    tenant_id: &'a str,
+    workflow_id: &'a str,
+    version: u32,
+    source_checksum: &'a str,
+}
+
+/// Direct WASM compilation settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectCompilationSettings {
+    /// Directory containing prebuilt shared workflow and agent components.
+    pub components_dir: Option<PathBuf>,
+}
+
+/// Build direct compilation settings from the process configuration.
+pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
+    DirectCompilationSettings {
+        components_dir: crate::config::direct_wasm_components_dir(),
+    }
+}
+
+fn compile_workflow_direct_only(
+    input: CompilationInput,
+    source_checksum: String,
+    components_dir: Option<PathBuf>,
+) -> std::io::Result<NativeCompilationResult> {
+    let Some(components_dir) = components_dir else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "direct WASM compilation requires a configured component directory (RUNTARA_AGENT_COMPONENTS_DIR / RUNTARA_DIRECT_WASM_COMPONENTS_DIR)",
+        ));
+    };
+
+    let direct_start = Instant::now();
+    let options = DirectWorkflowCompileOptions {
+        output_dir: direct_output_dir(&input.tenant_id),
+        components_dir,
+        source_checksum: Some(source_checksum),
+    };
+
+    match compile_workflow_direct(input.clone(), options) {
+        Ok(result) => {
+            record_direct_compilation_outcome("success", "none", direct_start.elapsed());
+            info!(
+                workflow_id = %input.workflow_id,
+                version = input.version,
+                binary_size = result.binary_size,
+                "Direct WASM workflow compilation succeeded"
+            );
+            Ok(result)
+        }
+        Err(err) => {
+            record_direct_compilation_outcome("failed", "direct-error", direct_start.elapsed());
+            warn!(
+                workflow_id = %input.workflow_id,
+                version = input.version,
+                error = %err,
+                "Direct WASM workflow compilation failed"
+            );
+            Err(err)
+        }
+    }
+}
+
+fn record_direct_compilation_outcome(
+    outcome: &'static str,
+    reason: &'static str,
+    duration: Duration,
+) {
+    if let Some(metrics) = crate::observability::metrics() {
+        let attrs = [
+            KeyValue::new("outcome", outcome),
+            KeyValue::new("reason", reason),
+        ];
+        metrics.direct_compilations_total.add(1, &attrs);
+        metrics
+            .direct_compilation_duration
+            .record(duration.as_secs_f64(), &attrs);
+    }
+}
+
+fn direct_output_dir(tenant_id: &str) -> PathBuf {
+    data_dir().join("workflow-builds-direct").join(tenant_id)
+}
+
+fn data_dir() -> PathBuf {
+    let raw = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+    if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&raw))
+            .unwrap_or(raw)
+    }
 }
 
 /// Service for workflow compilation operations
@@ -88,6 +273,9 @@ pub struct CompilationService {
     /// `ai-tools::text-completion`) see a populated value rather than the
     /// empty stub the workflow runner cannot fill in from inside the WASM.
     connections_facade: Option<Arc<runtara_connections::ConnectionsFacade>>,
+    /// Direct WASM compiler settings (component directory). Direct compilation
+    /// is the only path; a missing component directory fails the compile.
+    direct_compilation: DirectCompilationSettings,
 }
 
 impl CompilationService {
@@ -103,6 +291,9 @@ impl CompilationService {
             agent_catalog: None,
             redis_manager: None,
             connections_facade: None,
+            direct_compilation: DirectCompilationSettings {
+                components_dir: None,
+            },
         }
     }
 
@@ -135,6 +326,13 @@ impl CompilationService {
     /// state — the frontend will see `unknown` until the DB row lands.
     pub fn with_redis_manager(mut self, manager: ConnectionManager) -> Self {
         self.redis_manager = Some(manager);
+        self
+    }
+
+    /// Plug in direct WASM compilation settings (the component directory).
+    /// Direct compilation is the only path; if it fails, the compile fails.
+    pub fn with_direct_compilation(mut self, settings: DirectCompilationSettings) -> Self {
+        self.direct_compilation = settings;
         self
     }
 
@@ -279,6 +477,7 @@ impl CompilationService {
             agent_catalog: self.agent_catalog.clone(),
             progress_callback,
         };
+        let desired_compiler_mode = WorkflowCompilerMode::DirectWasm;
 
         // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
         // This prevents FK constraint violations when re-compiling workflows that are already registered.
@@ -288,7 +487,12 @@ impl CompilationService {
             None
         } else {
             self.repository
-                .get_fresh_registered_image_id(tenant_id, workflow_id, version)
+                .get_fresh_registered_image_id_for_compiler(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    desired_compiler_mode.as_str(),
+                )
                 .await
                 .map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
@@ -297,6 +501,7 @@ impl CompilationService {
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
             found = existing_image_id.is_some(),
+            desired_compiler_mode = desired_compiler_mode.as_str(),
             "compile: step 5 completed - database check done"
         );
 
@@ -332,8 +537,13 @@ impl CompilationService {
                 .await
             {
                 Ok(Some(existing_image))
-                    if image_cache_hits(&existing_image, source_checksum.as_str()) =>
+                    if image_cache_hits(
+                        &existing_image,
+                        source_checksum.as_str(),
+                        desired_compiler_mode,
+                    ) =>
                 {
+                    let compiler_mode = image_compiler_mode(&existing_image).map(str::to_string);
                     let existing_id = existing_image.image_id;
                     info!(
                         duration_ms = step_start.elapsed().as_millis(),
@@ -352,6 +562,7 @@ impl CompilationService {
                             version,
                             &existing_id,
                             Some(&source_checksum),
+                            compiler_mode.as_deref(),
                         )
                         .await;
                     if let Some(r) = &progress_reporter {
@@ -369,7 +580,8 @@ impl CompilationService {
                 Ok(Some(_)) => {
                     debug!(
                         duration_ms = step_start.elapsed().as_millis(),
-                        "compile: step 5b found image name but source checksum differed or was absent; rebuilding"
+                        desired_compiler_mode = desired_compiler_mode.as_str(),
+                        "compile: step 5b found image name but source checksum, template major, or compiler mode differed or was absent; rebuilding"
                     );
                 }
                 Ok(None) => {
@@ -388,7 +600,7 @@ impl CompilationService {
             }
         }
 
-        // 6. Compile to native binary
+        // 6. Compile to workflow.wasm
         // IMPORTANT: compile_workflow is a synchronous blocking function that runs cargo build.
         // We MUST use spawn_blocking to prevent blocking the tokio runtime, which would
         // starve all other async tasks (API handlers, database queries, etc.) during compilation.
@@ -402,19 +614,26 @@ impl CompilationService {
         })?;
         debug!(
             wait_ms = step_start.elapsed().as_millis(),
-            "compile: step 6 - semaphore acquired, compiling to native binary"
+            "compile: step 6 - semaphore acquired, compiling workflow artifact"
         );
         let compile_start_time = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || compile_workflow(compilation_input))
-            .await
-            .map_err(|e| {
-                ServiceError::CompilationError(format!("Compilation task panicked: {}", e))
-            })?
-            .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
+        let direct_compilation = self.direct_compilation.clone();
+        let compile_source_checksum = source_checksum.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            compile_workflow_direct_only(
+                compilation_input,
+                compile_source_checksum,
+                direct_compilation.components_dir,
+            )
+        })
+        .await
+        .map_err(|e| ServiceError::CompilationError(format!("Compilation task panicked: {}", e)))?
+        .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
         debug!(
             duration_ms = compile_start_time.elapsed().as_millis(),
             binary_size = result.binary_size,
-            "compile: step 6 completed - native binary compiled"
+            compiler_mode = result.compiler_mode.as_str(),
+            "compile: step 6 completed - workflow artifact compiled"
         );
 
         // spawn_blocking returned, so the build callbacks are done firing.
@@ -442,6 +661,7 @@ impl CompilationService {
                 package_size: result.package_size as i32,
                 binary_checksum: &result.binary_checksum,
                 source_checksum: &source_checksum,
+                compiler_mode: result.compiler_mode.as_str(),
             })
             .await
             .map_err(|e| {
@@ -476,11 +696,13 @@ impl CompilationService {
         let image_id = self
             .register_image(
                 client,
-                tenant_id,
-                workflow_id,
-                version_u32,
                 &result,
-                &source_checksum,
+                WorkflowImageRegistration {
+                    tenant_id,
+                    workflow_id,
+                    version: version_u32,
+                    source_checksum: &source_checksum,
+                },
             )
             .await?;
         debug!(
@@ -499,6 +721,7 @@ impl CompilationService {
                 version,
                 &image_id,
                 Some(&source_checksum),
+                Some(result.compiler_mode.as_str()),
             )
             .await
             .map_err(|e| {
@@ -724,14 +947,11 @@ impl CompilationService {
     async fn register_image(
         &self,
         client: &RuntimeClient,
-        tenant_id: &str,
-        workflow_id: &str,
-        version: u32,
         compilation_result: &runtara_workflows::NativeCompilationResult,
-        source_checksum: &str,
+        registration: WorkflowImageRegistration<'_>,
     ) -> Result<String, ServiceError> {
         // Build the image name: {workflow_id}:{version}
-        let image_name = format!("{}:{}", workflow_id, version);
+        let image_name = format!("{}:{}", registration.workflow_id, registration.version);
 
         // Get binary path and size (use binary_path from compilation result,
         // which is target-aware: "workflow" for native, "workflow.wasm" for WASM)
@@ -743,27 +963,28 @@ impl CompilationService {
 
         info!(
             "Registering image {} for tenant {} ({} bytes)",
-            image_name, tenant_id, binary_size
+            image_name, registration.tenant_id, binary_size
         );
 
         // Create registration options with workflow variables as metadata.
         // Every compile produces a components-mode `workflow.wasm`, so the
         // runner type is always `Wasm` now.
-        let options = RegisterImageStreamOptions::new(tenant_id, &image_name, binary_size)
-            .with_description(format!("Workflow {} version {}", workflow_id, version))
-            .with_runner_type(RunnerType::Wasm)
-            .with_sha256(&compilation_result.binary_checksum)
-            .with_metadata(serde_json::json!({
-                "variables": compilation_result.default_variables,
-                "workflow": {
-                    "workflowId": workflow_id,
-                    "version": version,
-                    "sourceChecksum": source_checksum,
-                    // Major version of `runtara-workflows`. Cache miss on major
-                    // bump invalidates every workflow on next deploy.
-                    "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
-                }
-            }));
+        let direct_artifact = direct_artifact_metadata_for_image(compilation_result).await;
+        let options =
+            RegisterImageStreamOptions::new(registration.tenant_id, &image_name, binary_size)
+                .with_description(format!(
+                    "Workflow {} version {}",
+                    registration.workflow_id, registration.version
+                ))
+                .with_runner_type(RunnerType::Wasm)
+                .with_sha256(&compilation_result.binary_checksum)
+                .with_metadata(workflow_image_metadata(
+                    compilation_result,
+                    registration.workflow_id,
+                    registration.version,
+                    registration.source_checksum,
+                    direct_artifact.as_ref(),
+                ));
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {
@@ -829,6 +1050,9 @@ impl std::error::Error for ServiceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_workflows::direct_wasm::{
+        DirectArtifactFileMetadata, DirectComponentDependencyMetadata,
+    };
 
     // =========================================================================
     // ServiceError Display tests
@@ -874,6 +1098,209 @@ mod tests {
         let error: Box<dyn std::error::Error> =
             Box::new(ServiceError::CompilationError("test".to_string()));
         assert!(error.to_string().contains("Compilation error"));
+    }
+
+    #[test]
+    fn image_cache_hit_requires_matching_compiler_mode() {
+        let metadata = serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+                "compilerMode": "direct-wasm"
+            }
+        });
+        let image = image_summary_with_metadata(metadata);
+
+        assert!(image_cache_hits(
+            &image,
+            "source-sha256",
+            WorkflowCompilerMode::DirectWasm
+        ));
+        assert!(!image_cache_hits(
+            &image,
+            "other-source",
+            WorkflowCompilerMode::DirectWasm
+        ));
+
+        let missing_mode = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION
+            }
+        }));
+        assert!(!image_cache_hits(
+            &missing_mode,
+            "source-sha256",
+            WorkflowCompilerMode::DirectWasm
+        ));
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_compiler_mode_and_direct_wasm_block() {
+        let result = NativeCompilationResult {
+            binary_path: "/tmp/workflow.wasm".into(),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir: "/tmp/build".into(),
+            package_size: 99,
+            has_side_effects: false,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({ "limit": 5 }),
+            compiler_mode: WorkflowCompilerMode::DirectWasm,
+        };
+
+        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", None);
+
+        assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
+        assert_eq!(metadata["workflow"]["workflowId"], "workflow-a");
+        assert_eq!(metadata["workflow"]["version"], 7);
+        assert_eq!(metadata["workflow"]["sourceChecksum"], "source-sha256");
+        assert_eq!(
+            metadata["workflow"]["templateMajor"],
+            runtara_workflows::TEMPLATE_MAJOR_VERSION
+        );
+        assert_eq!(metadata["workflow"]["compilerMode"], "direct-wasm");
+        assert_eq!(metadata["workflow"]["directWasm"]["enabled"], true);
+        assert_eq!(metadata["workflow"]["directWasm"]["outcome"], "success");
+        assert_eq!(metadata["workflow"]["directWasm"]["reason"], "none");
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_direct_artifact_provenance() {
+        let result = native_result_with_mode(WorkflowCompilerMode::DirectWasm, "/tmp/build".into());
+        let artifact = direct_artifact_metadata_fixture();
+
+        let metadata =
+            workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", Some(&artifact));
+
+        let direct_artifact = &metadata["workflow"]["directArtifact"];
+        assert_eq!(
+            direct_artifact["schemaVersion"],
+            serde_json::json!(
+                runtara_workflows::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION
+            )
+        );
+        assert_eq!(direct_artifact["directAbiVersion"], 1);
+        assert_eq!(
+            direct_artifact["manifestVersion"],
+            serde_json::json!(runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION)
+        );
+        assert_eq!(direct_artifact["manifestChecksum"], "manifest-sha256");
+        assert_eq!(
+            direct_artifact["sharedComponents"][0]["package"],
+            "runtara:workflow-stdlib"
+        );
+        assert_eq!(
+            direct_artifact["sharedComponents"][0]["wasm"]["sha256"],
+            "stdlib-sha256"
+        );
+        assert_eq!(
+            direct_artifact["agentComponents"][0]["agentId"],
+            "transform"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_artifact_metadata_for_image_reads_only_direct_sidecars() {
+        let build_dir = unique_test_dir("direct-artifact-metadata");
+        std::fs::create_dir_all(&build_dir).expect("create build dir");
+        let artifact = direct_artifact_metadata_fixture();
+        std::fs::write(
+            build_dir.join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME),
+            serde_json::to_vec(&artifact).expect("serialize artifact metadata"),
+        )
+        .expect("write artifact metadata");
+
+        let direct_result =
+            native_result_with_mode(WorkflowCompilerMode::DirectWasm, build_dir.clone());
+        let loaded = direct_artifact_metadata_for_image(&direct_result)
+            .await
+            .expect("direct artifact metadata should load");
+        assert_eq!(loaded, artifact);
+
+        let _ = std::fs::remove_dir_all(build_dir);
+    }
+
+    fn native_result_with_mode(
+        compiler_mode: WorkflowCompilerMode,
+        build_dir: std::path::PathBuf,
+    ) -> NativeCompilationResult {
+        NativeCompilationResult {
+            binary_path: build_dir.join("workflow.wasm"),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir,
+            package_size: 99,
+            has_side_effects: false,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({}),
+            compiler_mode,
+        }
+    }
+
+    fn image_summary_with_metadata(metadata: serde_json::Value) -> ImageSummary {
+        ImageSummary {
+            image_id: "image-a".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            name: "workflow-a:7".to_string(),
+            description: None,
+            runner_type: RunnerType::Wasm,
+            created_at: chrono::Utc::now(),
+            metadata: Some(metadata),
+        }
+    }
+
+    fn direct_artifact_metadata_fixture() -> DirectArtifactMetadata {
+        let wasm = |filename: &str, sha256: &str| DirectArtifactFileMetadata {
+            filename: filename.to_string(),
+            sha256: sha256.to_string(),
+            size_bytes: 42,
+        };
+
+        DirectArtifactMetadata {
+            schema_version:
+                runtara_workflows::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
+            artifact_kind: "direct-workflow-component".to_string(),
+            workflow_id: "workflow-a".to_string(),
+            workflow_version: 7,
+            source_checksum: Some("source-sha256".to_string()),
+            direct_abi_version: 1,
+            manifest_version: runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION,
+            template_major_version: runtara_workflows::TEMPLATE_MAJOR_VERSION.to_string(),
+            manifest_checksum: "manifest-sha256".to_string(),
+            support_report_checksum: "support-sha256".to_string(),
+            workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
+            composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            shared_components: vec![DirectComponentDependencyMetadata {
+                kind: "shared".to_string(),
+                agent_id: None,
+                package: "runtara:workflow-stdlib".to_string(),
+                package_with_version: "runtara:workflow-stdlib@0.1.0".to_string(),
+                wasm_filename: "runtara_workflow_stdlib.wasm".to_string(),
+                wasm: Some(wasm("runtara_workflow_stdlib.wasm", "stdlib-sha256")),
+                meta_filename: "runtara_workflow_stdlib.meta.json".to_string(),
+                meta: None,
+            }],
+            agent_components: vec![DirectComponentDependencyMetadata {
+                kind: "agent".to_string(),
+                agent_id: Some("transform".to_string()),
+                package: "runtara:agent-transform".to_string(),
+                package_with_version: "runtara:agent-transform@0.3.0".to_string(),
+                wasm_filename: "runtara_agent_transform.wasm".to_string(),
+                wasm: Some(wasm("runtara_agent_transform.wasm", "agent-sha256")),
+                meta_filename: "runtara_agent_transform.meta.json".to_string(),
+                meta: None,
+            }],
+            child_workflows: vec![],
+        }
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("runtara-{label}-{nanos}"))
     }
 
     // =========================================================================

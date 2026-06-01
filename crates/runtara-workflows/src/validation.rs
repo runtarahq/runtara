@@ -310,6 +310,15 @@ pub enum ValidationError {
         label: Option<String>,
         targets: Vec<String>,
     },
+    /// A step fans out to multiple unconditional (parallel) successors whose
+    /// branches never re-converge at a single merge point. Parallel branches all
+    /// run, so non-converging branches produce more than one independent exit —
+    /// an ambiguous workflow result. Valid parallel fan-out must rejoin (a
+    /// diamond) before terminating.
+    ParallelFanoutNoMerge {
+        from_step: String,
+        targets: Vec<String>,
+    },
     /// Conditional outgoing edge is not a true/false branch.
     InvalidConditionalEdge {
         from_step: String,
@@ -803,6 +812,18 @@ impl std::fmt::Display for ValidationError {
                      At most one default (condition-less) edge is allowed. Targets: {}",
                     from_step,
                     label_str,
+                    targets.join(", ")
+                )
+            }
+            ValidationError::ParallelFanoutNoMerge { from_step, targets } => {
+                write!(
+                    f,
+                    "[E073] Step '{}' fans out to parallel branches that never re-converge: {}. \
+                     Unconditional parallel branches all execute, so non-merging branches \
+                     produce more than one independent exit (an ambiguous result). Re-join the \
+                     branches at a single merge step, or make the edges conditional so exactly \
+                     one runs.",
+                    from_step,
                     targets.join(", ")
                 )
             }
@@ -1551,6 +1572,58 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
 }
 
 /// Compute the set of steps reachable from the entry point.
+/// Whether the unconditional parallel branches starting at `branch_starts` all
+/// re-converge at a shared downstream step (a diamond). Used by the E073
+/// parallel-fan-out-no-merge check. Self-contained (no `codegen` dependency) so
+/// it also compiles for the browser validation WASM target, where `codegen` is
+/// gated out.
+fn parallel_branches_reconverge(graph: &ExecutionGraph, branch_starts: &[String]) -> bool {
+    if branch_starts.len() < 2 {
+        return false;
+    }
+    let reachable_sets: Vec<HashSet<String>> = branch_starts
+        .iter()
+        .map(|start| reachable_over_normal_flow(graph, start))
+        .collect();
+    let Some((first, rest)) = reachable_sets.split_first() else {
+        return false;
+    };
+    // A merge point is any step reachable from EVERY branch start.
+    first
+        .iter()
+        .any(|node| rest.iter().all(|set| set.contains(node)))
+}
+
+/// Steps reachable from `start` following normal-flow edges (everything except
+/// `onError` handlers). Includes `start` itself.
+fn reachable_over_normal_flow(graph: &ExecutionGraph, start: &str) -> HashSet<String> {
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &graph.execution_plan {
+        if edge.label.as_deref() != Some("onError") {
+            adjacency
+                .entry(edge.from_step.as_str())
+                .or_default()
+                .push(edge.to_step.as_str());
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut stack = vec![start.to_string()];
+    while let Some(step_id) = stack.pop() {
+        if !reachable.insert(step_id.clone()) {
+            continue;
+        }
+        if let Some(neighbors) = adjacency.get(step_id.as_str()) {
+            for neighbor in neighbors {
+                if !reachable.contains(*neighbor) {
+                    stack.push((*neighbor).to_string());
+                }
+            }
+        }
+    }
+    reachable
+}
+
 fn compute_reachable_steps(graph: &ExecutionGraph) -> HashSet<String> {
     let mut reachable = HashSet::new();
     let mut queue = vec![graph.entry_point.clone()];
@@ -1633,6 +1706,21 @@ fn finish_output_source_is_missing(value: &MappingValue) -> bool {
     }
 }
 
+/// Variables the runtime injects into a Split iteration scope (see
+/// `runtara_workflow_stdlib::direct_json`), referenceable as `variables.<name>`
+/// inside a Split subgraph.
+const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop", "_loop_indices"];
+
+/// Variables the runtime injects into a While iteration scope, referenceable as
+/// `variables.<name>` inside a While subgraph.
+const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", "_loop_indices"];
+
+/// Step ids the runtime injects implicitly rather than as authored steps —
+/// `steps.__error` is the error context populated inside onError handlers.
+/// Referencing one outside its scope resolves to null at runtime, matching the
+/// other built-in bindings, so it is accepted everywhere.
+const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error"];
+
 /// Validates references in a graph, considering inherited variables from parent scope.
 ///
 /// `inherited_variables` contains variable names that are injected from a parent scope
@@ -1672,17 +1760,23 @@ fn validate_references_with_inherited(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                // config.variables keys become available as variables.<name> in the subgraph
-                let injected_vars: HashSet<String> = split_step
+                // config.variables keys + the runtime's per-iteration vars become
+                // available as variables.<name> in the subgraph.
+                let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                validate_references_with_inherited(&while_step.subgraph, &HashSet::new(), result);
+                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                validate_references_with_inherited(&while_step.subgraph, &injected_vars, result);
             }
             _ => {}
         }
@@ -1778,8 +1872,11 @@ fn validate_reference(
             });
         }
 
-        // Check if referenced step exists
-        if !valid_step_ids.contains(&referenced_step_id) {
+        // Check if referenced step exists (reserved implicit steps like
+        // `__error` are injected by the runtime and always allowed).
+        if !valid_step_ids.contains(&referenced_step_id)
+            && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
+        {
             result.errors.push(ValidationError::InvalidStepReference {
                 step_id: step_id.to_string(),
                 reference_path: ref_path.to_string(),
@@ -3186,6 +3283,24 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
             });
         }
 
+        // Genuine parallel fan-out: an unlabeled step with 2+ unconditional
+        // successors and no conditional edges. All branches execute, so they must
+        // re-converge at a single merge point — otherwise the parallel branches
+        // terminate independently and the workflow has more than one exit (an
+        // ambiguous result). Conditional/Switch branches are exclusive and so are
+        // exempt; a re-joining diamond (e.g. fan-out that rejoins at a Finish) is
+        // allowed.
+        if label.is_none() && conditional_edges.is_empty() && default_edges.len() > 1 {
+            let branch_starts: Vec<String> =
+                default_edges.iter().map(|e| e.to_step.clone()).collect();
+            if !parallel_branches_reconverge(graph, &branch_starts) {
+                result.errors.push(ValidationError::ParallelFanoutNoMerge {
+                    from_step: from_step.clone(),
+                    targets: branch_starts,
+                });
+            }
+        }
+
         // Check for duplicate priorities among conditional edges
         if conditional_edges.len() > 1 {
             let mut priorities_to_targets: HashMap<i32, Vec<String>> = HashMap::new();
@@ -3963,12 +4078,13 @@ fn validate_data_and_variable_references_with_context(
                 // Split subgraphs:
                 // 1. Inherit config.variables as available variables
                 // 2. Have implicit data access (data.* refers to iteration item)
-                let injected_vars: HashSet<String> = split_step
+                let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 validate_data_and_variable_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
@@ -3979,10 +4095,14 @@ fn validate_data_and_variable_references_with_context(
             Step::While(while_step) => {
                 // While subgraphs:
                 // 1. Have implicit data access (data.* refers to iteration item)
-                // 2. While loops don't have config.variables, so pass empty set
+                // 2. No config.variables, but the runtime injects per-iteration vars
+                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
                 validate_data_and_variable_references_with_context(
                     &while_step.subgraph,
-                    &HashSet::new(),
+                    &injected_vars,
                     true, // While subgraphs have implicit data access
                     result,
                 );
@@ -6322,6 +6442,60 @@ mod tests {
             !loop_ref_errors,
             "loop.index should be a valid reference in while conditions"
         );
+    }
+
+    #[test]
+    fn test_implicit_runtime_bindings_do_not_false_positive() {
+        // Runtime-injected bindings the emitter and stdlib provide but that are
+        // not authored steps/variables: the `__error` context in onError
+        // handlers and the per-iteration loop vars inside Split/While scopes.
+        // Validation must not flag references to them. Guards against the
+        // E010/E013/E053 regressions these fixtures used to trip.
+        let cases: &[(&str, &str)] = &[
+            (
+                "split_on_error",
+                include_str!("../tests/fixtures/split_on_error.json"),
+            ),
+            (
+                "while_with_previous_outputs",
+                include_str!("../tests/fixtures/while_with_previous_outputs.json"),
+            ),
+            (
+                "split_nested_split",
+                include_str!("../tests/fixtures/split_nested_split.json"),
+            ),
+            (
+                "while_direct_index_only",
+                include_str!("../tests/fixtures/while_direct_index_only.json"),
+            ),
+        ];
+        let catalog = test_catalog();
+        for (name, json) in cases {
+            let value: serde_json::Value = serde_json::from_str(json).expect("fixture parses");
+            let graph_value = value
+                .get("executionGraph")
+                .cloned()
+                .unwrap_or_else(|| value.clone());
+            let graph: ExecutionGraph =
+                serde_json::from_value(graph_value).expect("fixture is a graph");
+            let result = validate_workflow(&graph, &catalog);
+            let binding_errors: Vec<_> = result
+                .errors
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        ValidationError::InvalidStepReference { .. }
+                            | ValidationError::UnknownVariable { .. }
+                            | ValidationError::UndefinedVariableReference { .. }
+                    )
+                })
+                .collect();
+            assert!(
+                binding_errors.is_empty(),
+                "{name}: implicit runtime bindings flagged as invalid: {binding_errors:#?}"
+            );
+        }
     }
 
     // ============================================================================
@@ -8746,8 +8920,10 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_condition_unlabeled_parallel_edges_pass() {
-        // Multiple unlabeled edges without conditions should pass (parallel execution)
+    fn test_edge_condition_unlabeled_parallel_fanout_to_distinct_finishes_rejected() {
+        // Unconditional parallel fan-out to two distinct Finish steps that never
+        // re-converge is an ambiguous exit: both branches run, so the workflow
+        // would reach two independent terminals. This must be rejected.
         let mut steps = HashMap::new();
         // Use Log steps to avoid capability validation issues
         steps.insert("start".to_string(), create_log_step("start", None));
@@ -8774,17 +8950,20 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
         assert!(
-            !result.has_errors(),
-            "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ParallelFanoutNoMerge { from_step, .. } if from_step == "start"
+            )),
+            "Non-merging parallel fan-out to distinct finishes must be rejected. Errors: {:?}",
             result.errors
         );
     }
 
     #[test]
-    fn test_edge_condition_next_label_parallel_edges_pass() {
-        // Multiple "next"-labeled edges without conditions should pass (parallel execution).
-        // "next" is a reserved label meaning "continue to next step" and is semantically
-        // equivalent to no label — it should not prevent parallel fork patterns.
+    fn test_edge_condition_next_label_parallel_fanout_to_distinct_finishes_rejected() {
+        // "next" is a reserved label meaning "continue to next step" and is
+        // semantically equivalent to no label, so "next"-labeled parallel fan-out
+        // to distinct finishes is the same ambiguous-exit case and is rejected too.
         let mut steps = HashMap::new();
         steps.insert("start".to_string(), create_log_step("start", None));
         steps.insert("branch1".to_string(), create_finish_step("branch1", None));
@@ -8810,8 +8989,64 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
         assert!(
-            !result.has_errors(),
-            "Should pass: multiple 'next'-labeled edges can run in parallel. Errors: {:?}",
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ParallelFanoutNoMerge { from_step, .. } if from_step == "start"
+            )),
+            "'next'-labeled non-merging parallel fan-out must be rejected. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_parallel_fanout_rejoining_at_finish_passes() {
+        // Valid parallel fan-out: both branches run and re-converge at a single
+        // Finish (a diamond). One unambiguous exit — must pass.
+        let mut steps = HashMap::new();
+        steps.insert("start".to_string(), create_log_step("start", None));
+        steps.insert("left".to_string(), create_log_step("left", None));
+        steps.insert("right".to_string(), create_log_step("right", None));
+        steps.insert("join".to_string(), create_finish_step("join", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "left".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "right".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "left".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "right".to_string(),
+                to_step: "join".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ParallelFanoutNoMerge { .. })),
+            "Re-joining parallel fan-out (diamond) must pass. Errors: {:?}",
             result.errors
         );
     }

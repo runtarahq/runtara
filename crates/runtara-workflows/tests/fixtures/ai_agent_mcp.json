@@ -1,0 +1,44 @@
+{
+  "name": "AiAgent MCP",
+  "description": "Direct-emitter fixture: an AiAgent with one MCP toolset edge (mcp.github). The toolset advertises two synthetic tools (github_search, github_invoke) dispatched to the mcp agent's mcp-tool-search / mcp-tool-invoke capabilities.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Agent",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": { "valueType": "immediate", "value": "Use the toolset to answer." },
+        "userPrompt": { "valueType": "reference", "value": "data.q" },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "maxIterations": 6
+      }
+    },
+    "mcp_github": {
+      "stepType": "Agent",
+      "id": "mcp_github",
+      "name": "MCP: github",
+      "agentId": "mcp",
+      "capabilityId": "mcp-tool-search",
+      "connectionId": "mcp-conn",
+      "inputMapping": {}
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    { "fromStep": "ai", "toStep": "mcp_github", "label": "mcp.github" },
+    { "fromStep": "ai", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

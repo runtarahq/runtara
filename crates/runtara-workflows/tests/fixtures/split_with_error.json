@@ -1,0 +1,50 @@
+{
+  "name": "Split with Error subgraph",
+  "description": "Direct-emitter fixture for Split dontStopOnFailed collecting explicit Error step failures.",
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true,
+        "dontStopOnFailed": true
+      },
+      "subgraph": {
+        "name": "Item Error",
+        "entryPoint": "fail",
+        "steps": {
+          "fail": {
+            "stepType": "Error",
+            "id": "fail",
+            "name": "Item Failed",
+            "category": "permanent",
+            "code": "ITEM_FAILED",
+            "message": "Item failed",
+            "severity": "error",
+            "context": {
+              "item": { "valueType": "reference", "value": "data" }
+            }
+          }
+        },
+        "executionPlan": []
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": { "type": "array", "required": true }
+  },
+  "outputSchema": {}
+}

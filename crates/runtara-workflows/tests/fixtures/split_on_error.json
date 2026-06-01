@@ -1,0 +1,55 @@
+{
+  "name": "Split OnError",
+  "description": "Direct-emitter fixture: a fail-fast sequential Split whose item body fails, so the Split step fails and routes to an onError handler.",
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "name": "Process items",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true
+      },
+      "subgraph": {
+        "name": "Item",
+        "entryPoint": "boom",
+        "steps": {
+          "boom": {
+            "stepType": "Error",
+            "id": "boom",
+            "name": "Boom",
+            "category": "permanent",
+            "code": "ITEM_BOOM",
+            "message": "split item failed",
+            "severity": "error"
+          }
+        },
+        "executionPlan": []
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    },
+    "handled": {
+      "stepType": "Finish",
+      "id": "handled",
+      "inputMapping": {
+        "handled": { "valueType": "immediate", "value": true },
+        "code": { "valueType": "reference", "value": "steps.__error.code" },
+        "category": { "valueType": "reference", "value": "steps.__error.category" }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" },
+    { "fromStep": "split", "toStep": "handled", "label": "onError" }
+  ],
+  "variables": {},
+  "inputSchema": { "items": { "type": "array" } },
+  "outputSchema": {}
+}

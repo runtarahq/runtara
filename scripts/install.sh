@@ -469,17 +469,11 @@ $([ -n "$valkey_pass" ] && echo "VALKEY_PASSWORD=${valkey_pass}" || echo "# VALK
 ${auth_lines}
 
 WASMTIME_PATH=${RUNTARA_DIR}/bin/wasmtime
-# Pre-built agent components (one .wasm + .meta.json per agent) staged into
-# the bundle by scripts/build-bundle.sh. The server loads each pair into the
-# runtime AgentCatalog at boot, so the validator and workflow runtime see
-# the same agent set the dispatcher can route to.
+# Pre-built agent components plus direct workflow stdlib/runtime components
+# staged into the bundle by scripts/build-bundle.sh. The server loads each
+# agent pair into the runtime AgentCatalog at boot, and direct workflow
+# composition uses the shared workflow components from the same directory.
 RUNTARA_AGENT_COMPONENTS_DIR=${RUNTARA_DIR}/agents
-# Source mirror for the workflow compile pipeline. cargo-component reads
-# the bundled stdlib/sdk/agent-wit crates from here when materializing the
-# per-workflow logic component. Without this the binary's
-# compile-time-baked CARGO_MANIFEST_DIR (the CI runner's path) is used,
-# which doesn't exist on the install host.
-RUNTARA_COMPILE_SOURCE_DIR=${RUNTARA_DIR}/compile-src
 DATA_DIR=${DATA_DIR}
 RUST_LOG=runtara_server=info,runtara_core=info,runtara_environment=info
 CONFEOF
@@ -517,8 +511,8 @@ install_service() {
 
     step "Installing service"
 
-    # PATH for the service: bundled toolchain first, then system paths
-    local svc_path="${RUNTARA_DIR}/toolchain/bin:${RUNTARA_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
+    # PATH for the service: bundled bin first, then system paths
+    local svc_path="${RUNTARA_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
 
     if [ "$OS" = "linux" ]; then
         install_systemd_service "$svc_path"
@@ -560,8 +554,6 @@ Type=simple
 ${user_lines}
 EnvironmentFile=${CONFIG_DIR}/runtara-server.conf
 Environment="PATH=${svc_path}"
-Environment="LD_LIBRARY_PATH=${RUNTARA_DIR}/toolchain/lib"
-Environment="DYLD_LIBRARY_PATH=${RUNTARA_DIR}/toolchain/lib"
 ExecStart=${RUNTARA_DIR}/bin/runtara-server
 Restart=on-failure
 RestartSec=5
@@ -618,8 +610,6 @@ install_launchd_service() {
         <string>${svc_path}</string>
         <key>RUNTARA_CONFIG</key>
         <string>${CONFIG_DIR}/runtara-server.conf</string>
-        <key>DYLD_LIBRARY_PATH</key>
-        <string>${RUNTARA_DIR}/toolchain/lib</string>
     </dict>
     <key>StandardOutPath</key>
     <string>${log_out}</string>
@@ -668,11 +658,7 @@ print_summary() {
     printf '%s  Runtara v%s installed successfully!%s\n' "${GREEN}${BOLD}" "$version" "$NC"
     echo ""
     echo "  Binary:        ${RUNTARA_DIR}/bin/runtara-server"
-    echo "  Toolchain:     ${RUNTARA_DIR}/toolchain/bin/rustc"
-    echo "  Compile src:   ${RUNTARA_DIR}/compile-src/"
     echo "  Wasmtime:      ${RUNTARA_DIR}/bin/wasmtime"
-    echo "  wac:           ${RUNTARA_DIR}/bin/wac"
-    echo "  cargo-comp.:   ${RUNTARA_DIR}/bin/cargo-component"
     echo "  Agents:        ${RUNTARA_DIR}/agents/"
     echo "  Config:        ${CONFIG_DIR}/runtara-server.conf"
     echo "  Data:          ${DATA_DIR}/"

@@ -1,0 +1,70 @@
+{
+  "durable": false,
+  "name": "Split dontStop with nested Split error",
+  "steps": {
+    "outer": {
+      "stepType": "Split",
+      "id": "outer",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.groups" },
+        "sequential": true,
+        "dontStopOnFailed": true
+      },
+      "subgraph": {
+        "steps": {
+          "inner": {
+            "stepType": "Split",
+            "id": "inner",
+            "config": {
+              "value": { "valueType": "reference", "value": "data.items" },
+              "sequential": true
+            },
+            "subgraph": {
+              "steps": {
+                "fail": {
+                  "stepType": "Error",
+                  "id": "fail",
+                  "category": "permanent",
+                  "code": "INNER_FAILED",
+                  "message": "Inner item failed",
+                  "context": {
+                    "value": { "valueType": "reference", "value": "data.value" }
+                  }
+                }
+              },
+              "entryPoint": "fail",
+              "executionPlan": []
+            }
+          },
+          "finish_outer": {
+            "stepType": "Finish",
+            "id": "finish_outer",
+            "inputMapping": {
+              "inner": { "valueType": "reference", "value": "steps.inner.outputs" }
+            }
+          }
+        },
+        "entryPoint": "inner",
+        "executionPlan": [
+          { "fromStep": "inner", "toStep": "finish_outer" }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "data": { "valueType": "reference", "value": "steps.outer.data" },
+        "stats": { "valueType": "reference", "value": "steps.outer.stats" },
+        "outputs": { "valueType": "reference", "value": "steps.outer.outputs" }
+      }
+    }
+  },
+  "entryPoint": "outer",
+  "executionPlan": [
+    { "fromStep": "outer", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

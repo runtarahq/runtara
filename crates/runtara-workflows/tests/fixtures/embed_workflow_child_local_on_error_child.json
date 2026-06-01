@@ -1,0 +1,80 @@
+{
+  "name": "EmbedWorkflow Child Local OnError Child",
+  "description": "A child workflow that handles its own nested EmbedWorkflow failure",
+  "steps": {
+    "call_grandchild": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_grandchild",
+      "childWorkflowId": "grandchild_workflow",
+      "childVersion": "latest",
+      "maxRetries": 0,
+      "retryDelay": 0,
+      "inputMapping": {
+        "grandchildInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    },
+    "finish_child": {
+      "stepType": "Finish",
+      "id": "finish_child",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_grandchild.outputs.result"
+        }
+      }
+    },
+    "handled_child_error": {
+      "stepType": "Finish",
+      "id": "handled_child_error",
+      "inputMapping": {
+        "handled": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "code": {
+          "valueType": "reference",
+          "value": "steps.__error.code"
+        },
+        "category": {
+          "valueType": "reference",
+          "value": "steps.__error.category"
+        },
+        "childCode": {
+          "valueType": "reference",
+          "value": "steps.__error.childError.code"
+        },
+        "childStep": {
+          "valueType": "reference",
+          "value": "steps.__error.childError.stepId"
+        },
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_grandchild",
+  "executionPlan": [
+    {
+      "fromStep": "call_grandchild",
+      "toStep": "finish_child"
+    },
+    {
+      "fromStep": "call_grandchild",
+      "toStep": "handled_child_error",
+      "label": "onError"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "childInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

@@ -1,0 +1,39 @@
+{
+  "name": "Embed Agent Child Parent",
+  "description": "Direct-emitter fixture: an EmbedWorkflow whose child graph contains a real Agent step (not just trivial control flow). The composed parent must import the child's agent component.",
+  "durable": true,
+  "steps": {
+    "call_child": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_child",
+      "childWorkflowId": "agent-child",
+      "childVersion": "latest",
+      "inputMapping": {
+        "q": {
+          "valueType": "reference",
+          "value": "data.q"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_child.outputs.echoed"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [
+    {
+      "fromStep": "call_child",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

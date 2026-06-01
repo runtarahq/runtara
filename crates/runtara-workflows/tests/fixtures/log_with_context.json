@@ -9,15 +9,15 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "processedValue": "$.value",
-            "timestamp": "$.timestamp"
+            "$.value": "processedValue",
+            "$.timestamp": "timestamp"
           }
         }
       }
@@ -68,8 +68,14 @@
   },
   "entryPoint": "transform",
   "executionPlan": [
-    { "fromStep": "transform", "toStep": "log_with_rich_context" },
-    { "fromStep": "log_with_rich_context", "toStep": "finish" }
+    {
+      "fromStep": "transform",
+      "toStep": "log_with_rich_context"
+    },
+    {
+      "fromStep": "log_with_rich_context",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

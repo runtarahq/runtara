@@ -1,0 +1,31 @@
+{
+  "name": "EmbedWorkflow Transient Error Child",
+  "description": "A terminal transient Error child workflow for EmbedWorkflow retry tests",
+  "steps": {
+    "fail": {
+      "stepType": "Error",
+      "id": "fail",
+      "name": "Transient Child Failure",
+      "category": "transient",
+      "code": "CHILD_TEMPORARY",
+      "message": "Child workflow failed transiently",
+      "severity": "error",
+      "context": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "fail",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "childInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

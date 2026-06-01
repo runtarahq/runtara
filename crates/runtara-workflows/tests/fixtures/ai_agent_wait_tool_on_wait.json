@@ -1,0 +1,91 @@
+{
+  "name": "AiAgent WaitForSignal Tool with onWait",
+  "description": "A WaitForSignal AiAgent tool whose target carries an onWait subgraph. The generated tool arm ignores onWait, so direct accepts it (no fallback) and ignores it too.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Agent",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": {
+          "valueType": "immediate",
+          "value": "Ask the human for approval, then answer."
+        },
+        "userPrompt": {
+          "valueType": "reference",
+          "value": "data.q"
+        },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "maxIterations": 5
+      }
+    },
+    "ask_human": {
+      "stepType": "WaitForSignal",
+      "id": "ask_human",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "responseSchema": {
+        "approved": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "action": {
+        "key": "approval_decision",
+        "correlation": {},
+        "context": {}
+      },
+      "onWait": {
+        "name": "Notify while waiting",
+        "entryPoint": "notify",
+        "steps": {
+          "notify": {
+            "stepType": "Log",
+            "id": "notify",
+            "name": "Notify Wait",
+            "level": "info",
+            "message": "Waiting for approval"
+          },
+          "notify_finish": {
+            "stepType": "Finish",
+            "id": "notify_finish"
+          }
+        },
+        "executionPlan": [
+          {
+            "fromStep": "notify",
+            "toStep": "notify_finish"
+          }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": {
+          "valueType": "reference",
+          "value": "steps.ai.outputs.response"
+        }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    {
+      "fromStep": "ai",
+      "toStep": "ask_human",
+      "label": "get_approval"
+    },
+    {
+      "fromStep": "ai",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

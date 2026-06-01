@@ -1,0 +1,80 @@
+{
+  "name": "Asymmetric Conditional Diamond",
+  "description": "Direct-emitter fixture: a Conditional diamond whose true branch has an extra step before the merge (asymmetric branch lengths) and a nested Conditional inside the true branch, exercising recursive merge handling.",
+  "durable": true,
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.flag" },
+          { "valueType": "immediate", "value": true }
+        ]
+      }
+    },
+    "inner_check": {
+      "stepType": "Conditional",
+      "id": "inner_check",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.urgent" },
+          { "valueType": "immediate", "value": true }
+        ]
+      }
+    },
+    "urgent_log": {
+      "stepType": "Log",
+      "id": "urgent_log",
+      "name": "Urgent",
+      "level": "info",
+      "message": "urgent"
+    },
+    "normal_log": {
+      "stepType": "Log",
+      "id": "normal_log",
+      "name": "Normal",
+      "level": "info",
+      "message": "normal"
+    },
+    "reject": {
+      "stepType": "Log",
+      "id": "reject",
+      "name": "Reject",
+      "level": "info",
+      "message": "rejected"
+    },
+    "decided": {
+      "stepType": "Log",
+      "id": "decided",
+      "name": "Decided",
+      "level": "info",
+      "message": "decided"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "flag": { "valueType": "reference", "value": "data.flag" }
+      }
+    }
+  },
+  "entryPoint": "check",
+  "executionPlan": [
+    { "fromStep": "check", "toStep": "inner_check", "label": "true" },
+    { "fromStep": "check", "toStep": "reject", "label": "false" },
+    { "fromStep": "inner_check", "toStep": "urgent_log", "label": "true" },
+    { "fromStep": "inner_check", "toStep": "normal_log", "label": "false" },
+    { "fromStep": "urgent_log", "toStep": "decided" },
+    { "fromStep": "normal_log", "toStep": "decided" },
+    { "fromStep": "reject", "toStep": "decided" },
+    { "fromStep": "decided", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

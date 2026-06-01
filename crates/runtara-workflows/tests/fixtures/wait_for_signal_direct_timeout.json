@@ -1,0 +1,35 @@
+{
+  "name": "Wait for Signal Direct Timeout",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "timeoutMs": {
+        "valueType": "immediate",
+        "value": 1
+      },
+      "pollIntervalMs": 0
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": {
+          "valueType": "reference",
+          "value": "steps.wait.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    {
+      "fromStep": "wait",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

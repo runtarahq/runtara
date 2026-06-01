@@ -1,0 +1,36 @@
+{
+  "name": "Agent Compensation",
+  "description": "Direct-emitter fixture: an Agent step carrying a compensation (saga) config. Compensation is a no-op end-to-end in both the generated Rust and direct paths, so the field must be inert and execution must match a plain return-input agent.",
+  "durable": true,
+  "steps": {
+    "agent": {
+      "stepType": "Agent",
+      "id": "agent",
+      "name": "Return Input",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "reference", "value": "data.value" }
+      },
+      "compensation": {
+        "compensationStep": "finish",
+        "trigger": "on_downstream_error"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.agent.outputs" }
+      }
+    }
+  },
+  "entryPoint": "agent",
+  "executionPlan": [
+    { "fromStep": "agent", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

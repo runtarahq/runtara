@@ -2,21 +2,33 @@
   "name": "Split with input/output schemas",
   "description": "Each iteration's data must have a 'value' field; the inner Finish must produce a 'processed' field. Both schemas are honored at runtime.",
   "inputSchema": {
-    "items": { "type": "array", "required": true }
+    "items": {
+      "type": "array",
+      "required": true
+    }
   },
   "steps": {
     "split": {
       "stepType": "Split",
       "id": "split",
       "config": {
-        "value": { "valueType": "reference", "value": "data.items" },
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
         "sequential": true
       },
       "inputSchema": {
-        "value": { "type": "string", "required": true }
+        "value": {
+          "type": "string",
+          "required": true
+        }
       },
       "outputSchema": {
-        "processed": { "type": "object", "required": true }
+        "processed": {
+          "type": "object",
+          "required": true
+        }
       },
       "subgraph": {
         "name": "Item Processing",
@@ -27,10 +39,15 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": { "valueType": "reference", "value": "data" },
-              "mapping": {
+              "source_data": {
+                "valueType": "reference",
+                "value": "data"
+              },
+              "mappings": {
                 "valueType": "immediate",
-                "value": { "value": "$.value" }
+                "value": {
+                  "$.value": "value"
+                }
               }
             }
           },
@@ -38,13 +55,19 @@
             "stepType": "Finish",
             "id": "finish",
             "inputMapping": {
-              "processed": { "valueType": "reference", "value": "steps.transform.outputs" }
+              "processed": {
+                "valueType": "reference",
+                "value": "steps.transform.outputs"
+              }
             }
           }
         },
         "entryPoint": "transform",
         "executionPlan": [
-          { "fromStep": "transform", "toStep": "finish" }
+          {
+            "fromStep": "transform",
+            "toStep": "finish"
+          }
         ]
       }
     },
@@ -52,12 +75,18 @@
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+        "results": {
+          "valueType": "reference",
+          "value": "steps.split.outputs"
+        }
       }
     }
   },
   "entryPoint": "split",
   "executionPlan": [
-    { "fromStep": "split", "toStep": "finish" }
+    {
+      "fromStep": "split",
+      "toStep": "finish"
+    }
   ]
 }

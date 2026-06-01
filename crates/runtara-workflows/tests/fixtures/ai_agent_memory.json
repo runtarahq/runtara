@@ -1,0 +1,46 @@
+{
+  "name": "AiAgent Memory",
+  "description": "Direct-emitter fixture: a single-shot AiAgent with conversation memory (object_model provider). Loads prior history before the turn and saves after.",
+  "durable": true,
+  "steps": {
+    "ai": {
+      "stepType": "AiAgent",
+      "id": "ai",
+      "name": "Chat",
+      "connectionId": "openai-conn",
+      "config": {
+        "systemPrompt": { "valueType": "immediate", "value": "You are a helpful assistant." },
+        "userPrompt": { "valueType": "reference", "value": "data.q" },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "memory": {
+          "conversationId": { "valueType": "reference", "value": "data.session" }
+        }
+      }
+    },
+    "mem": {
+      "stepType": "Agent",
+      "id": "mem",
+      "name": "Memory",
+      "agentId": "object_model",
+      "capabilityId": "load-memory",
+      "connectionId": "om-conn",
+      "inputMapping": {}
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" }
+      }
+    }
+  },
+  "entryPoint": "ai",
+  "executionPlan": [
+    { "fromStep": "ai", "toStep": "mem", "label": "memory" },
+    { "fromStep": "ai", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

@@ -1,0 +1,39 @@
+{
+  "name": "Agent Child",
+  "description": "Child workflow embedded by embed_agent_child_parent: runs a real utils/return-input Agent step, then finishes with the echoed value.",
+  "steps": {
+    "echo": {
+      "stepType": "Agent",
+      "id": "echo",
+      "name": "Echo",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "inputMapping": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.q"
+        }
+      }
+    },
+    "child_finish": {
+      "stepType": "Finish",
+      "id": "child_finish",
+      "inputMapping": {
+        "echoed": {
+          "valueType": "reference",
+          "value": "steps.echo.outputs.value"
+        }
+      }
+    }
+  },
+  "entryPoint": "echo",
+  "executionPlan": [
+    {
+      "fromStep": "echo",
+      "toStep": "child_finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

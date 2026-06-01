@@ -4,22 +4,17 @@ Compiles runtara DSL workflows into WASM components that run in wasmtime.
 
 ## What it is
 
-A compilation library and CLI that turns a `runtara-dsl` `Workflow` (JSON) into a `wasm32-wasip2` component which talks to `runtara-core` over the SDK for durability, checkpointing, and signals. The pipeline is: parse DSL, resolve child-workflow and agent dependencies, generate Rust AST via `codegen`, write a source tree, invoke `rustc`, and optionally package the artifact. The target is runtime-selectable via the `RUNTARA_COMPILE_TARGET` env var and defaults to `wasm32-wasip2`; a musl fallback path exists but is vestigial. The crate exposes `compile_workflow`, `translate_workflow`, `validate_workflow`, and the `CompilationInput` / `NativeCompilationResult` types; it has no database dependencies and expects callers to resolve and pass in child workflows.
-
-## Using it standalone
-
-The `runtara-compile` binary compiles a workflow JSON to a `.wasm` artifact. Requires `rustc` with the target installed (`rustup target add wasm32-wasip2`).
-
-```bash
-cargo install --path crates/runtara-workflows
-runtara-compile \
-  --workflow workflow.json \
-  --tenant acme \
-  --workflow order-sync \
-  --output ./order-sync.wasm
-```
-
-Other useful flags: `--validate` (no compilation), `--analyze` (report only), `--emit-source <path>` (dump generated Rust), `--debug`, `--verbose`. Override the target with `RUNTARA_COMPILE_TARGET=...`. Build artifacts live under `$DATA_DIR` (default `.data`).
+A compilation library that turns a `runtara-dsl` `Workflow` (JSON) into a
+`wasm32-wasip2` component which talks to `runtara-core` over the SDK for
+durability, checkpointing, and signals. Compilation runs fully in-process: the
+direct WASM emitter byte-emits the workflow-logic module from the typed DSL and
+composes the final `workflow.wasm` against the shared agent/stdlib/runtime
+components via the `wac-graph` Rust crate — no `rustc`, `cargo-component`, or
+`wac` CLI is shelled out. The target is runtime-selectable via the
+`RUNTARA_COMPILE_TARGET` env var and defaults to `wasm32-wasip2`. The crate
+exposes `compile_workflow`, `translate_workflow`, `validate_workflow`, and the
+`CompilationInput` / `NativeCompilationResult` types; it has no database
+dependencies and expects callers to resolve and pass in child workflows.
 
 ## Inside Runtara
 

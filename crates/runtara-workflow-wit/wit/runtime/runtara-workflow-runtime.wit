@@ -1,0 +1,89 @@
+// Canonical WIT contract for the workflow runtime/SDK component.
+//
+// The runtime component owns lifecycle and persistence-facing behavior:
+// loading persisted input, completing/failing instances, event emission,
+// cancellation, heartbeat, and durable sleep.
+
+package runtara:workflow-runtime@0.1.0;
+
+interface runtime {
+    record signal-info {
+        signal-type: string,
+        payload: list<u8>,
+        checkpoint-id: option<string>,
+    }
+
+    record custom-signal-info {
+        checkpoint-id: string,
+        payload: list<u8>,
+    }
+
+    record checkpoint-result {
+        found: bool,
+        state: list<u8>,
+        pending-signal: option<signal-info>,
+        custom-signal: option<custom-signal-info>,
+    }
+
+    load-input: func() -> result<list<u8>, string>;
+
+    instance-id: func() -> result<string, string>;
+
+    complete: func(output: list<u8>) -> result<_, string>;
+
+    fail: func(error: list<u8>) -> result<_, string>;
+
+    custom-event: func(
+        kind: string,
+        payload: list<u8>,
+    ) -> result<_, string>;
+
+    debug-mode-enabled: func() -> result<bool, string>;
+
+    breakpoint-pause: func() -> result<_, string>;
+
+    heartbeat: func() -> result<_, string>;
+
+    is-cancelled: func() -> result<bool, string>;
+
+    check-signals: func() -> result<bool, string>;
+
+    poll-custom-signal: func(
+        checkpoint-id: string,
+    ) -> result<option<list<u8>>, string>;
+
+    now-ms: func() -> result<u64, string>;
+
+    durable-sleep: func(ms: u64) -> result<_, string>;
+
+    blocking-sleep: func(ms: u64) -> result<_, string>;
+
+    get-checkpoint: func(
+        checkpoint-id: string,
+    ) -> result<option<list<u8>>, string>;
+
+    checkpoint: func(
+        checkpoint-id: string,
+        state: list<u8>,
+    ) -> result<checkpoint-result, string>;
+
+    handle-checkpoint-signal: func(
+        signal-type: string,
+    ) -> result<bool, string>;
+
+    record-retry-attempt: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+        error-message: option<string>,
+    ) -> result<_, string>;
+
+    durable-sleep-checkpoint: func(
+        checkpoint-id: string,
+        state: list<u8>,
+        ms: u64,
+    ) -> result<_, string>;
+}
+
+world workflow-runtime {
+    export runtime;
+}

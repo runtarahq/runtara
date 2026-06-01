@@ -1,0 +1,65 @@
+{
+  "name": "Edge Condition Diamond",
+  "description": "Direct-emitter fixture: a step whose conditioned NORMAL-flow edges (an EdgeRoute, not a Conditional) re-converge at a shared merge step and continue. Exercises EdgeRoute diamond lowering.",
+  "durable": true,
+  "steps": {
+    "classify": {
+      "stepType": "Log",
+      "id": "classify",
+      "name": "Classify",
+      "level": "info",
+      "message": "classify"
+    },
+    "vip_path": {
+      "stepType": "Log",
+      "id": "vip_path",
+      "name": "VIP",
+      "level": "info",
+      "message": "vip"
+    },
+    "normal_path": {
+      "stepType": "Log",
+      "id": "normal_path",
+      "name": "Normal",
+      "level": "info",
+      "message": "normal"
+    },
+    "merge": {
+      "stepType": "Log",
+      "id": "merge",
+      "name": "Merge",
+      "level": "info",
+      "message": "merged"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "tier": { "valueType": "reference", "value": "data.tier" }
+      }
+    }
+  },
+  "entryPoint": "classify",
+  "executionPlan": [
+    {
+      "fromStep": "classify",
+      "toStep": "vip_path",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.tier" },
+          { "valueType": "immediate", "value": "vip" }
+        ]
+      },
+      "priority": 5
+    },
+    { "fromStep": "classify", "toStep": "normal_path" },
+    { "fromStep": "vip_path", "toStep": "merge" },
+    { "fromStep": "normal_path", "toStep": "merge" },
+    { "fromStep": "merge", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

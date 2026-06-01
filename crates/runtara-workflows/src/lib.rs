@@ -1,10 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Runtara Workflows - Workflow Compilation to Native Binaries
+//! Runtara Workflows - Workflow Compilation to WebAssembly Components
 //!
-//! This crate compiles workflow definitions (DSL workflows) into native Linux binaries.
-//! The compiled binaries are standalone executables that communicate with runtara-core
-//! via the SDK for durability, checkpointing, and signal handling.
+//! This crate compiles workflow definitions (DSL workflows) into WebAssembly
+//! component-model modules. The composed `workflow.wasm` communicates with
+//! runtara-core via the SDK for durability, checkpointing, and signal handling.
 //!
 //! # Architecture
 //!
@@ -14,15 +14,15 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!
 //!     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-//!     │    DSL      │      │    Rust     │      │   Native    │
-//!     │  Workflow   │─────▶│    AST      │─────▶│   Binary    │
-//!     │  (JSON)     │      │  (codegen)  │      │  (rustc)    │
+//!     │    DSL      │      │  workflow-  │      │  workflow   │
+//!     │  Workflow   │─────▶│ logic.wasm  │─────▶│   .wasm     │
+//!     │  (JSON)     │      │ (emitter)   │      │ (wac-graph) │
 //!     └─────────────┘      └─────────────┘      └─────────────┘
 //!           │                                         │
 //!           ▼                                         ▼
 //!     ┌─────────────┐                          ┌─────────────┐
-//!     │ Dependency  │                          │ OCI Image   │
-//!     │  Analysis   │                          │ (optional)  │
+//!     │ Dependency  │                          │  Composed   │
+//!     │  Analysis   │                          │ w/ agents   │
 //!     └─────────────┘                          └─────────────┘
 //! ```
 //!
@@ -30,64 +30,47 @@
 //!
 //! 1. **Parse**: Load the DSL workflow from JSON
 //! 2. **Analyze Dependencies**: Identify child workflows and agent dependencies
-//! 3. **Generate AST**: Convert the execution graph to Rust AST using `codegen`
-//! 4. **Write Source**: Write generated Rust code to temp directory
-//! 5. **Invoke rustc**: Compile with musl target for static linking
-//! 6. **Package**: Optionally create OCI image for containerized execution
+//! 3. **Emit**: Byte-emit the `workflow-logic` component directly from the
+//!    execution graph (the direct WebAssembly emitter — no Rust source)
+//! 4. **Compose**: Statically link the emitted logic with the shared and agent
+//!    components into the final `workflow.wasm` via in-process `wac-graph`
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use runtara_workflows::{compile_workflow, CompilationInput};
+//! use runtara_workflows::{compile_workflow_direct, CompilationInput, DirectWorkflowCompileOptions};
 //!
-//! // Load workflow from JSON
-//! let workflow: Workflow = serde_json::from_str(&json)?;
-//!
-//! // Compile to native binary
-//! let input = CompilationInput {
-//!     workflow: &workflow,
-//!     tenant_id: "tenant-1",
-//!     workflow_id: "workflow-1",
-//!     version: 1,
-//!     output_dir: PathBuf::from("./output"),
-//!     child_workflows: vec![],
-//! };
-//!
-//! let result = compile_workflow(&input).await?;
-//! println!("Binary at: {:?}", result.binary_path);
+//! let result = compile_workflow_direct(input, options)?;
+//! println!("Composed component at: {:?}", result.binary_path);
 //! ```
 //!
 //! # Important Notes
 //!
 //! - This crate has **NO database dependencies**. Child workflows must be loaded
 //!   by the caller and passed to compilation functions.
-//! - Compilation requires `rustc` and `musl-tools` to be installed.
-//! - The generated binary is statically linked for maximum portability.
+//! - Compilation is fully in-process: the direct emitter byte-emits the
+//!   workflow-logic module and composes the final `workflow.wasm` via
+//!   `wac-graph`. No `rustc`, `cargo`, or external toolchain is invoked.
 //!
 //! # Modules
 //!
-//! - [`codegen`]: AST code generation from execution graphs
-//! - [`compile`]: Public compile entry point (routes to components-mode)
-//! - [`components_compile`]: components-mode pipeline (cargo-component + wac compose)
+//! - [`compile`]: Public compile entry point (direct WebAssembly emitter)
+//! - [`direct_wasm`]: Direct WebAssembly emitter
 //! - [`dependency_analysis`]: Dependency resolution for child workflows
 //! - [`paths`]: File path utilities for workflows and data
 
 #![deny(missing_docs)]
 
-/// AST code generation from execution graphs.
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub mod codegen;
-
-/// Compile entry point (routes to components-mode).
+/// Compile entry point (direct WebAssembly emitter).
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub mod compile;
 
-/// Phase 3 components-mode compile pipeline (cargo component + wac compose).
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-pub mod components_compile;
-
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
+
+/// Production direct WebAssembly compiler scaffolding.
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+pub mod direct_wasm;
 
 /// Workflow start input validation.
 pub mod input_validation;
@@ -102,11 +85,15 @@ pub mod schema_fields_validation;
 /// Workflow validation for security and correctness.
 pub mod validation;
 
+/// Workflow feature analysis for direct-emitter planning and gating.
+pub mod workflow_features;
+
 // Re-export main types
 #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
 pub use compile::{
-    ChildDependency, ChildWorkflowInput, CompilationInput, NativeCompilationResult,
-    TEMPLATE_MAJOR_VERSION, compile_workflow, workflow_has_side_effects,
+    ChildDependency, ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions,
+    NativeCompilationResult, TEMPLATE_MAJOR_VERSION, WorkflowCompilerMode, compile_workflow_direct,
+    workflow_has_side_effects,
 };
 pub use dependency_analysis::{DependencyGraph, WorkflowReference};
 pub use input_validation::{
@@ -121,6 +108,9 @@ pub use schema_fields_validation::{
 pub use validation::{
     MissingInputField, ValidationError, ValidationResult, validate_workflow,
     validate_workflow_with_children,
+};
+pub use workflow_features::{
+    ChildWorkflowReference, WorkflowFeature, WorkflowFeatureSummary, analyze_workflow_features,
 };
 
 // Re-export DSL types for convenience

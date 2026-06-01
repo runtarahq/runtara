@@ -1,0 +1,80 @@
+{
+  "durable": false,
+  "name": "While With Nested Split Workflow",
+  "description": "A While step whose body contains a Split step",
+  "steps": {
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Outer While",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "data.count" }
+        ]
+      },
+      "subgraph": {
+        "name": "While Body",
+        "steps": {
+          "inner": {
+            "stepType": "Split",
+            "id": "inner",
+            "config": {
+              "value": { "valueType": "reference", "value": "data.items" },
+              "sequential": true
+            },
+            "subgraph": {
+              "name": "Split Body",
+              "steps": {
+                "finish_inner": {
+                  "stepType": "Finish",
+                  "id": "finish_inner",
+                  "inputMapping": {
+                    "value": { "valueType": "reference", "value": "data.value" },
+                    "splitIndex": { "valueType": "reference", "value": "variables._index" },
+                    "indices": { "valueType": "reference", "value": "variables._loop_indices" }
+                  }
+                }
+              },
+              "entryPoint": "finish_inner",
+              "executionPlan": []
+            }
+          },
+          "finish_body": {
+            "stepType": "Finish",
+            "id": "finish_body",
+            "inputMapping": {
+              "loopIndex": { "valueType": "reference", "value": "variables._index" },
+              "loopIndices": { "valueType": "reference", "value": "variables._loop_indices" },
+              "inner": { "valueType": "reference", "value": "steps.inner.outputs" }
+            }
+          }
+        },
+        "entryPoint": "inner",
+        "executionPlan": [
+          { "fromStep": "inner", "toStep": "finish_body" }
+        ]
+      },
+      "config": {
+        "maxIterations": 5
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "iterations": { "valueType": "reference", "value": "steps.loop.outputs.iterations" },
+        "last": { "valueType": "reference", "value": "steps.loop.outputs.outputs" }
+      }
+    }
+  },
+  "entryPoint": "loop",
+  "executionPlan": [
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

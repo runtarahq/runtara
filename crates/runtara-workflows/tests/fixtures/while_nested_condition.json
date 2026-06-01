@@ -9,17 +9,17 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "counter": "$.counter",
-            "minValue": "$.minValue",
-            "maxValue": "$.maxValue",
-            "enabled": "$.enabled"
+            "$.counter": "counter",
+            "$.minValue": "minValue",
+            "$.maxValue": "maxValue",
+            "$.enabled": "enabled"
           }
         }
       }
@@ -36,24 +36,42 @@
             "type": "operation",
             "op": "GTE",
             "arguments": [
-              { "valueType": "reference", "value": "steps.init.outputs.counter" },
-              { "valueType": "reference", "value": "steps.init.outputs.minValue" }
+              {
+                "valueType": "reference",
+                "value": "steps.init.outputs.counter"
+              },
+              {
+                "valueType": "reference",
+                "value": "steps.init.outputs.minValue"
+              }
             ]
           },
           {
             "type": "operation",
             "op": "LT",
             "arguments": [
-              { "valueType": "reference", "value": "steps.init.outputs.counter" },
-              { "valueType": "reference", "value": "steps.init.outputs.maxValue" }
+              {
+                "valueType": "reference",
+                "value": "steps.init.outputs.counter"
+              },
+              {
+                "valueType": "reference",
+                "value": "steps.init.outputs.maxValue"
+              }
             ]
           },
           {
             "type": "operation",
             "op": "EQ",
             "arguments": [
-              { "valueType": "reference", "value": "steps.init.outputs.enabled" },
-              { "valueType": "immediate", "value": true }
+              {
+                "valueType": "reference",
+                "value": "steps.init.outputs.enabled"
+              },
+              {
+                "valueType": "immediate",
+                "value": true
+              }
             ]
           }
         ]
@@ -67,14 +85,14 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "data"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "processed": "$.counter"
+                  "$.counter": "processed"
                 }
               }
             }
@@ -92,7 +110,10 @@
         },
         "entryPoint": "process",
         "executionPlan": [
-          { "fromStep": "process", "toStep": "finish" }
+          {
+            "fromStep": "process",
+            "toStep": "finish"
+          }
         ]
       },
       "config": {
@@ -112,8 +133,14 @@
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "loop" },
-    { "fromStep": "loop", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "loop"
+    },
+    {
+      "fromStep": "loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

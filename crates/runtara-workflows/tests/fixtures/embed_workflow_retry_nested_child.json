@@ -1,0 +1,45 @@
+{
+  "name": "EmbedWorkflow Retry Nested Child",
+  "description": "A child workflow that calls a transiently failing grandchild without retrying locally",
+  "steps": {
+    "call_grandchild": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_grandchild",
+      "childWorkflowId": "grandchild_workflow",
+      "childVersion": "latest",
+      "maxRetries": 0,
+      "retryDelay": 0,
+      "inputMapping": {
+        "grandchildInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    },
+    "finish_child": {
+      "stepType": "Finish",
+      "id": "finish_child",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_grandchild.outputs.result"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_grandchild",
+  "executionPlan": [
+    {
+      "fromStep": "call_grandchild",
+      "toStep": "finish_child"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "childInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

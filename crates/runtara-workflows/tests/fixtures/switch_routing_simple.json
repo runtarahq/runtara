@@ -1,0 +1,141 @@
+{
+  "name": "Simple Routing Switch Workflow",
+  "description": "A workflow that dispatches a routing Switch to separate Finish leaves",
+  "steps": {
+    "switch": {
+      "stepType": "Switch",
+      "id": "switch",
+      "name": "Route Status",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.status"
+        },
+        "cases": [
+          {
+            "matchType": "EQ",
+            "match": "active",
+            "output": {
+              "bucket": {
+                "valueType": "immediate",
+                "value": "ready"
+              },
+              "echo": {
+                "valueType": "reference",
+                "value": "data.status"
+              }
+            },
+            "route": "active"
+          },
+          {
+            "matchType": "EQ",
+            "match": ["queued", "retry"],
+            "output": {
+              "bucket": "pending"
+            },
+            "route": "pending"
+          }
+        ],
+        "default": {
+          "bucket": "other"
+        }
+      }
+    },
+    "finish_active": {
+      "stepType": "Finish",
+      "id": "finish_active",
+      "inputMapping": {
+        "path": {
+          "valueType": "immediate",
+          "value": "active"
+        },
+        "bucket": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.bucket"
+        },
+        "echo": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.echo"
+        },
+        "route": {
+          "valueType": "reference",
+          "value": "steps.switch.route"
+        }
+      }
+    },
+    "finish_pending": {
+      "stepType": "Finish",
+      "id": "finish_pending",
+      "inputMapping": {
+        "path": {
+          "valueType": "immediate",
+          "value": "pending"
+        },
+        "bucket": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.bucket"
+        },
+        "route": {
+          "valueType": "reference",
+          "value": "steps.switch.route"
+        }
+      }
+    },
+    "finish_default": {
+      "stepType": "Finish",
+      "id": "finish_default",
+      "inputMapping": {
+        "path": {
+          "valueType": "immediate",
+          "value": "default"
+        },
+        "bucket": {
+          "valueType": "reference",
+          "value": "steps.switch.outputs.bucket"
+        },
+        "route": {
+          "valueType": "reference",
+          "value": "steps.switch.route"
+        }
+      }
+    }
+  },
+  "entryPoint": "switch",
+  "executionPlan": [
+    {
+      "fromStep": "switch",
+      "toStep": "finish_active",
+      "label": "active"
+    },
+    {
+      "fromStep": "switch",
+      "toStep": "finish_pending",
+      "label": "pending"
+    },
+    {
+      "fromStep": "switch",
+      "toStep": "finish_default",
+      "label": "default"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "status": {
+      "type": "string"
+    }
+  },
+  "outputSchema": {
+    "path": {
+      "type": "string"
+    },
+    "bucket": {
+      "type": "string"
+    },
+    "echo": {
+      "type": "string"
+    },
+    "route": {
+      "type": "string"
+    }
+  }
+}

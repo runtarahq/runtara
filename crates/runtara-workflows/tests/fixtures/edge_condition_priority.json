@@ -1,0 +1,76 @@
+{
+  "name": "Edge Condition Priority",
+  "description": "Direct-emitter fixture for normal edge condition priority and default fallback",
+  "steps": {
+    "classify": {
+      "stepType": "Log",
+      "id": "classify",
+      "name": "Classify Input",
+      "level": "info",
+      "message": "Classifying input"
+    },
+    "finish_vip": {
+      "stepType": "Finish",
+      "id": "finish_vip",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "vip" },
+        "status": { "valueType": "reference", "value": "data.status" }
+      }
+    },
+    "finish_active": {
+      "stepType": "Finish",
+      "id": "finish_active",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "active" },
+        "status": { "valueType": "reference", "value": "data.status" }
+      }
+    },
+    "finish_default": {
+      "stepType": "Finish",
+      "id": "finish_default",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "default" },
+        "status": { "valueType": "reference", "value": "data.status" }
+      }
+    }
+  },
+  "entryPoint": "classify",
+  "executionPlan": [
+    {
+      "fromStep": "classify",
+      "toStep": "finish_active",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.status" },
+          { "valueType": "immediate", "value": "active" }
+        ]
+      },
+      "priority": 5
+    },
+    {
+      "fromStep": "classify",
+      "toStep": "finish_vip",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.tier" },
+          { "valueType": "immediate", "value": "vip" }
+        ]
+      },
+      "priority": 10
+    },
+    {
+      "fromStep": "classify",
+      "toStep": "finish_default"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "status": { "type": "string", "required": true },
+    "tier": { "type": "string", "required": false }
+  },
+  "outputSchema": {}
+}

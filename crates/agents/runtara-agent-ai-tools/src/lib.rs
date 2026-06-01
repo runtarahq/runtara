@@ -632,6 +632,631 @@ fn text_completion_bedrock_structured(
 }
 
 // ============================================================================
+// Capability: Chat Completion (Ai Agent loop primitive)
+// ============================================================================
+//
+// One LLM chat completion turn, the building block of the Ai Agent orchestration
+// loop. Unlike `text-completion` (which builds provider JSON directly and
+// returns plain text), this capability uses `runtara_ai::run_completion` — the
+// exact logic the generated `__ai_llm_durable` runs inline — and returns the
+// raw assistant `choice` (which may contain tool calls). This lets the
+// direct-WASM emitter run the Ai Agent loop without linking `runtara-ai` into
+// every workflow.wasm, while staying byte-identical with the generated path.
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Chat Completion Input")]
+pub struct ChatCompletionInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Provider",
+        description = "LLM provider integration id (e.g. \"openai\" or \"bedrock\"); selects the provider explicitly rather than inferring it from the connection"
+    )]
+    #[serde(default)]
+    pub provider: String,
+
+    #[field(
+        display_name = "System Prompt",
+        description = "System instructions / preamble for the model"
+    )]
+    #[serde(default)]
+    pub system_prompt: String,
+
+    #[field(
+        display_name = "User Prompt",
+        description = "The user message for this turn (empty after the first iteration)"
+    )]
+    #[serde(default)]
+    pub user_prompt: String,
+
+    #[field(
+        display_name = "Model",
+        description = "Model identifier (auto-selected by provider when absent)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Temperature",
+        description = "Sampling temperature (default 0.7)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    #[field(
+        display_name = "Max Tokens",
+        description = "Maximum tokens to generate"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+
+    #[field(
+        display_name = "Chat History",
+        description = "Prior conversation messages (rig Message JSON)"
+    )]
+    #[serde(default)]
+    pub chat_history: Vec<Value>,
+
+    #[field(
+        display_name = "Tools",
+        description = "Tool definitions advertised to the model"
+    )]
+    #[serde(default)]
+    pub tools: Vec<Value>,
+
+    #[field(
+        display_name = "Output Schema",
+        description = "Optional JSON Schema for structured output"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Chat Completion Output")]
+pub struct ChatCompletionOutput {
+    #[field(
+        display_name = "Choice",
+        description = "The assistant response content (serialized OneOrMany<AssistantContent>); may contain tool calls"
+    )]
+    pub choice: Value,
+
+    #[field(
+        display_name = "Usage",
+        description = "Token usage statistics, when reported"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+
+    #[field(
+        display_name = "Structured Output",
+        description = "Parsed JSON response when an output schema was requested and the model returned valid JSON"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
+}
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Chat Completion",
+    description = "Run one LLM chat-completion turn and return the raw assistant choice (with tool calls). Primitive used by the Ai Agent loop.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm,internal",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
+    let connection = require_connection(input._connection.as_ref())?;
+
+    let chat_history = serde_json::from_value::<Vec<runtara_ai::Message>>(Value::Array(
+        input.chat_history.clone(),
+    ))
+    .map_err(|e| {
+        AgentError::permanent("AI_CHAT_BAD_HISTORY", format!("invalid chatHistory: {e}"))
+    })?;
+    let tools = serde_json::from_value::<Vec<runtara_ai::types::ToolDefinition>>(Value::Array(
+        input.tools.clone(),
+    ))
+    .map_err(|e| AgentError::permanent("AI_CHAT_BAD_TOOLS", format!("invalid tools: {e}")))?;
+
+    // The provider comes from the AiAgent config (mirroring the generated loop,
+    // which passes `config.provider` as the integration id) rather than from the
+    // connection's integration id — the direct emitter passes an empty
+    // integration id in the connection-info and relies on the proxy to resolve
+    // credentials from the connection id. Fall back to the connection's
+    // integration id when the caller did not specify a provider.
+    let integration_id = if input.provider.is_empty() {
+        connection.integration_id.clone()
+    } else {
+        input.provider.clone()
+    };
+    let req = runtara_ai::CompletionInvokeRequest {
+        integration_id,
+        conn_params: connection.parameters.clone(),
+        connection_id: connection.connection_id.clone(),
+        model_id: input.model.clone(),
+        system_prompt: input.system_prompt.clone(),
+        user_prompt: input.user_prompt.clone(),
+        chat_history,
+        tools,
+        temperature: input.temperature.unwrap_or(0.7),
+        max_tokens: input.max_tokens.map(|v| v.max(0) as u64),
+        output_schema_json: input
+            .output_schema
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+    };
+
+    let response = runtara_ai::run_completion(req)
+        .map_err(|e| AgentError::transient("AI_CHAT_COMPLETION_FAILED", e))?;
+
+    let choice = serde_json::to_value(&response.choice).map_err(|e| {
+        AgentError::permanent(
+            "AI_CHAT_BAD_CHOICE",
+            format!("choice serialization failed: {e}"),
+        )
+    })?;
+    let usage = response
+        .usage
+        .as_ref()
+        .and_then(|u| serde_json::to_value(u).ok());
+
+    // When an output schema was requested, parse the final assistant text as
+    // JSON — mirroring the generated loop's `serde_json::from_str(&text)` with a
+    // string fallback. We surface it as `structured_output` so `ai-agent-output`
+    // can use it as the response value.
+    let structured_output = if input.output_schema.is_some() {
+        let final_text = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        serde_json::from_str::<Value>(&final_text).ok()
+    } else {
+        None
+    };
+
+    Ok(ChatCompletionOutput {
+        choice,
+        usage,
+        structured_output,
+    })
+}
+
+// ============================================================================
+// Capability: Ai Agent Turn (tool-loop primitive)
+// ============================================================================
+//
+// One turn of the Ai Agent tool loop. It appends the previous turn's tool
+// results to the conversation, runs the LLM, and decides whether the agent is
+// done (`complete`) or wants to call tools (`tools`). All conversation state
+// management lives here (in Rust) so the direct-WASM emitter's core loop only
+// has to: invoke this, dispatch returned tool calls back through the workflow's
+// agent invokes, and pass the results into the next turn. Mirrors the generated
+// agentic loop body.
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "AI Agent Turn Input")]
+pub struct ChatTurnInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Provider", description = "LLM provider integration id")]
+    #[serde(default)]
+    pub provider: String,
+    #[field(display_name = "Model", description = "Model identifier")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[field(display_name = "Temperature", description = "Sampling temperature")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[field(
+        display_name = "Max Tokens",
+        description = "Maximum tokens to generate"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+    #[field(
+        display_name = "Output Schema",
+        description = "Optional JSON Schema for structured output"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+
+    #[field(display_name = "System Prompt", description = "System instructions")]
+    #[serde(default)]
+    pub system_prompt: String,
+    #[field(
+        display_name = "System Prompt Suffix",
+        description = "Text appended to the system prompt (e.g. the MCP toolset usage guide)"
+    )]
+    #[serde(default)]
+    pub system_prompt_suffix: String,
+    #[field(
+        display_name = "User Prompt",
+        description = "Original user prompt (sent on the first turn only)"
+    )]
+    #[serde(default)]
+    pub user_prompt: String,
+    #[field(
+        display_name = "Tools",
+        description = "Tool definitions advertised to the model"
+    )]
+    #[serde(default)]
+    pub tools: Vec<Value>,
+
+    #[field(
+        display_name = "Chat History",
+        description = "Accumulated conversation (rig Message JSON)"
+    )]
+    #[serde(default)]
+    pub chat_history: Vec<Value>,
+    #[field(display_name = "Iterations", description = "Turns completed so far")]
+    #[serde(default)]
+    pub iterations: u32,
+    #[field(
+        display_name = "Tool Call Log",
+        description = "Accumulated tool-call log entries"
+    )]
+    #[serde(default)]
+    pub tool_call_log: Vec<Value>,
+    #[field(
+        display_name = "Pending Tool Results",
+        description = "Results of tools dispatched after the previous turn: [{tool_call_id, content}]"
+    )]
+    #[serde(default)]
+    pub pending_tool_results: Vec<Value>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Agent Turn Output")]
+pub struct ChatTurnOutput {
+    #[field(
+        display_name = "Action",
+        description = "`tools` to dispatch tool calls, or `complete`"
+    )]
+    pub action: String,
+    #[field(display_name = "Chat History", description = "Updated conversation")]
+    pub chat_history: Vec<Value>,
+    #[field(
+        display_name = "Iterations",
+        description = "Turns completed including this one"
+    )]
+    pub iterations: u32,
+    #[field(display_name = "Tool Call Log", description = "Updated tool-call log")]
+    pub tool_call_log: Vec<Value>,
+    #[field(
+        display_name = "Tool Calls",
+        description = "Tool calls to dispatch when action is `tools`: [{tool_call_id, name, arguments}]"
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<Value>,
+    #[field(
+        display_name = "Response",
+        description = "Final response when action is `complete` (parsed object for structured output, else string)"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<Value>,
+}
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Ai Agent Turn",
+    description = "Run one turn of the Ai Agent tool loop: append prior tool results, call the LLM, and return either a `complete` response or `tools` to dispatch. Used by the direct emitter's tool loop.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm,internal",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
+    use runtara_ai::OneOrMany;
+    use runtara_ai::message::{AssistantContent, Message, ToolResultContent, UserContent};
+
+    let connection = require_connection(input._connection.as_ref())?;
+
+    let mut history =
+        serde_json::from_value::<Vec<Message>>(Value::Array(input.chat_history.clone())).map_err(
+            |e| AgentError::permanent("AI_TURN_BAD_HISTORY", format!("invalid chatHistory: {e}")),
+        )?;
+    let tools = serde_json::from_value::<Vec<runtara_ai::types::ToolDefinition>>(Value::Array(
+        input.tools.clone(),
+    ))
+    .map_err(|e| AgentError::permanent("AI_TURN_BAD_TOOLS", format!("invalid tools: {e}")))?;
+    // Tool names captured before `tools` is moved into the completion request,
+    // so we can resolve each tool call's name to its index.
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+
+    // Append the previous turn's tool results to the conversation.
+    for pending in &input.pending_tool_results {
+        let id = pending
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let content = pending
+            .get("content")
+            .map(|c| match c {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        history.push(Message::User {
+            content: OneOrMany::one(UserContent::tool_result(
+                id,
+                OneOrMany::one(ToolResultContent::text(content)),
+            )),
+        });
+    }
+
+    let iterations = input.iterations + 1;
+    let is_first = iterations == 1;
+
+    let integration_id = if input.provider.is_empty() {
+        connection.integration_id.clone()
+    } else {
+        input.provider.clone()
+    };
+    let req = runtara_ai::CompletionInvokeRequest {
+        integration_id: integration_id.clone(),
+        conn_params: connection.parameters.clone(),
+        connection_id: connection.connection_id.clone(),
+        model_id: input.model.clone(),
+        // The MCP toolset usage guide (if any) is appended to the system prompt,
+        // mirroring the generated loop's `system_prompt + mcp_prompt_addition`.
+        system_prompt: if input.system_prompt_suffix.is_empty() {
+            input.system_prompt.clone()
+        } else {
+            format!("{}{}", input.system_prompt, input.system_prompt_suffix)
+        },
+        user_prompt: if is_first {
+            input.user_prompt.clone()
+        } else {
+            String::new()
+        },
+        chat_history: history.clone(),
+        tools,
+        temperature: input.temperature.unwrap_or(0.7),
+        max_tokens: input.max_tokens.map(|v| v.max(0) as u64),
+        output_schema_json: input
+            .output_schema
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+    };
+    let response = runtara_ai::run_completion(req)
+        .map_err(|e| AgentError::transient("AI_TURN_COMPLETION_FAILED", e))?;
+
+    // Record the user message (first turn only) then the assistant message.
+    if is_first {
+        history.push(Message::user(&input.user_prompt));
+    }
+
+    let mut tool_call_log = input.tool_call_log.clone();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut assistant_contents: Vec<AssistantContent> = Vec::new();
+    let mut final_text: Option<String> = None;
+    for content in response.choice.iter() {
+        match content {
+            AssistantContent::ToolCall(tc) => {
+                assistant_contents.push(AssistantContent::ToolCall(tc.clone()));
+                // Resolve the tool name to its index in the advertised tools so
+                // the direct loop can dispatch by index (out of range when the
+                // model names an unknown tool).
+                let tool_index = tool_names
+                    .iter()
+                    .position(|name| name == &tc.function.name)
+                    .unwrap_or(tool_names.len()) as u32;
+                tool_calls.push(serde_json::json!({
+                    "tool_call_id": tc.id,
+                    "name": tc.function.name,
+                    "tool_index": tool_index,
+                    "arguments": tc.function.arguments,
+                }));
+                tool_call_log.push(serde_json::json!({
+                    "tool_name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }));
+            }
+            AssistantContent::Text(text) => {
+                final_text = Some(text.text.clone());
+                assistant_contents.push(AssistantContent::Text(text.clone()));
+            }
+        }
+    }
+    if let Ok(contents) = OneOrMany::many(assistant_contents) {
+        history.push(Message::Assistant { content: contents });
+    }
+
+    let chat_history = history
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+
+    if tool_calls.is_empty() {
+        // Complete: derive the response value (parsed JSON for structured output).
+        let text = final_text.unwrap_or_default();
+        let response_value = if input.output_schema.is_some() {
+            serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))
+        } else {
+            Value::String(text)
+        };
+        Ok(ChatTurnOutput {
+            action: "complete".to_string(),
+            chat_history,
+            iterations,
+            tool_call_log,
+            tool_calls: Vec::new(),
+            response: Some(response_value),
+        })
+    } else {
+        Ok(ChatTurnOutput {
+            action: "tools".to_string(),
+            chat_history,
+            iterations,
+            tool_call_log,
+            tool_calls,
+            response: None,
+        })
+    }
+}
+
+// ============================================================================
+// Capability: Summarize Memory (compaction primitive)
+// ============================================================================
+//
+// Summarize-strategy compaction for AiAgent conversation memory. Given the loop
+// state (`chat_history` + bookkeeping) and a `max_messages` threshold, it
+// summarizes the oldest excess messages via one LLM call and replaces them with
+// a single `[Previous conversation summary]: …` user message — mirroring the
+// generated path. The conditional ("only when over the threshold") lives here in
+// Rust so the direct-WASM loop just invokes it unconditionally before saving.
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Summarize Memory Input")]
+pub struct SummarizeMemoryInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(display_name = "Provider", description = "LLM provider integration id")]
+    #[serde(default)]
+    pub provider: String,
+    #[field(display_name = "Model", description = "Model identifier")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[field(
+        display_name = "Max Messages",
+        description = "Compaction threshold; messages beyond this are summarized"
+    )]
+    #[serde(default)]
+    pub max_messages: u32,
+    #[field(
+        display_name = "State",
+        description = "AiAgent loop state ({chat_history, iterations, tool_call_log})"
+    )]
+    #[serde(default)]
+    pub state: Value,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Summarize Memory Output")]
+pub struct SummarizeMemoryOutput {
+    #[field(
+        display_name = "State",
+        description = "The loop state with the conversation compacted (unchanged below the threshold)"
+    )]
+    pub state: Value,
+}
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Summarize Memory",
+    description = "Summarize-strategy memory compaction: replace the oldest messages beyond max_messages with a single LLM-generated summary. Used by the direct emitter's AiAgent memory path.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    tags = "ai,llm,internal",
+    module_display_name = "AI Tools",
+    module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOutput, AgentError> {
+    use runtara_ai::message::Message;
+
+    let connection = require_connection(input._connection.as_ref())?;
+
+    let mut state = input.state.clone();
+    let history = state
+        .get("chat_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let max = input.max_messages as usize;
+    // Below the threshold: nothing to compact (and no LLM call), exactly as the
+    // generated path skips the summarization branch.
+    if history.len() <= max {
+        return Ok(SummarizeMemoryOutput { state });
+    }
+
+    let excess = history.len() - max;
+    let old_json = serde_json::to_string(&history[..excess]).unwrap_or_default();
+    let summary_prompt = format!(
+        "Summarize the following conversation history concisely, preserving key \
+         facts, decisions, and context:\n{old_json}"
+    );
+
+    let integration_id = if input.provider.is_empty() {
+        connection.integration_id.clone()
+    } else {
+        input.provider.clone()
+    };
+    let req = runtara_ai::CompletionInvokeRequest {
+        integration_id,
+        conn_params: connection.parameters.clone(),
+        connection_id: connection.connection_id.clone(),
+        model_id: input.model.clone(),
+        system_prompt: "You are a conversation summarizer. Produce a concise \
+                        summary preserving key facts."
+            .to_string(),
+        user_prompt: summary_prompt,
+        chat_history: Vec::new(),
+        tools: Vec::new(),
+        temperature: 0.3,
+        max_tokens: None,
+        output_schema_json: None,
+    };
+
+    // A summarization failure degrades like the generated path: keep the most
+    // recent messages (sliding window) without an inserted summary.
+    let summary_text = match runtara_ai::run_completion(req) {
+        Ok(response) => response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "[Summary unavailable]".to_string()),
+        Err(_) => "[Summary unavailable]".to_string(),
+    };
+
+    // Drop the summarized messages and prepend the summary as a user message,
+    // serialized in the same rig Message form chat-turn uses for chat_history.
+    let summary_message = serde_json::to_value(Message::user(format!(
+        "[Previous conversation summary]: {summary_text}"
+    )))
+    .unwrap_or(Value::Null);
+    let mut compacted: Vec<Value> = Vec::with_capacity(max + 1);
+    compacted.push(summary_message);
+    compacted.extend_from_slice(&history[excess..]);
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("chat_history".to_string(), Value::Array(compacted));
+    }
+
+    Ok(SummarizeMemoryOutput { state })
+}
+
+// ============================================================================
 // Capability 2: Image Generation
 // ============================================================================
 
@@ -1735,6 +2360,9 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
     let caps: &[&'static CapabilityMeta] = &[
         &__CAPABILITY_META_TEXT_COMPLETION,
+        &__CAPABILITY_META_CHAT_COMPLETION,
+        &__CAPABILITY_META_CHAT_TURN,
+        &__CAPABILITY_META_SUMMARIZE_MEMORY,
         &__CAPABILITY_META_IMAGE_GENERATION,
         &__CAPABILITY_META_VISION_TO_TEXT,
         &__CAPABILITY_META_VISION_TO_IMAGE,
@@ -1745,6 +2373,9 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "TextCompletionInput",
             &__INPUT_META_TextCompletionInput as &InputTypeMeta,
         ),
+        ("ChatCompletionInput", &__INPUT_META_ChatCompletionInput),
+        ("ChatTurnInput", &__INPUT_META_ChatTurnInput),
+        ("SummarizeMemoryInput", &__INPUT_META_SummarizeMemoryInput),
         ("ImageGenerationInput", &__INPUT_META_ImageGenerationInput),
         ("VisionToTextInput", &__INPUT_META_VisionToTextInput),
         ("VisionToImageInput", &__INPUT_META_VisionToImageInput),
@@ -1756,6 +2387,12 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "TextCompletionOutput",
             &__OUTPUT_META_TextCompletionOutput as &OutputTypeMeta,
+        ),
+        ("ChatCompletionOutput", &__OUTPUT_META_ChatCompletionOutput),
+        ("ChatTurnOutput", &__OUTPUT_META_ChatTurnOutput),
+        (
+            "SummarizeMemoryOutput",
+            &__OUTPUT_META_SummarizeMemoryOutput,
         ),
         (
             "ImageGenerationOutput",
@@ -1837,6 +2474,9 @@ impl Guest for Component {
 
         let executor_result = match capability_id.as_str() {
             "text-completion" => __executor_text_completion(value),
+            "chat-completion" => __executor_chat_completion(value),
+            "chat-turn" => __executor_chat_turn(value),
+            "summarize-memory" => __executor_summarize_memory(value),
             "image-generation" => __executor_image_generation(value),
             "vision-to-text" => __executor_vision_to_text(value),
             "vision-to-image" => __executor_vision_to_image(value),

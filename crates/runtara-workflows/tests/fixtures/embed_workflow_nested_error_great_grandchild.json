@@ -1,0 +1,31 @@
+{
+  "name": "EmbedWorkflow Nested Error Great Grandchild",
+  "description": "A failing great-grandchild workflow for deep nested EmbedWorkflow failure tests",
+  "steps": {
+    "fail_great_grandchild": {
+      "stepType": "Error",
+      "id": "fail_great_grandchild",
+      "name": "Great Grandchild Failure",
+      "category": "permanent",
+      "code": "GREAT_GRANDCHILD_FAILED",
+      "message": "Great grandchild workflow failed",
+      "severity": "critical",
+      "context": {
+        "greatGrandchildInput": {
+          "valueType": "reference",
+          "value": "data.greatGrandchildInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "fail_great_grandchild",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "greatGrandchildInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

@@ -1,0 +1,26 @@
+{
+  "name": "EmbedWorkflow Nested Great Grandchild",
+  "description": "A great-grandchild workflow for deep nested EmbedWorkflow direct A/B tests",
+  "steps": {
+    "finish_great_grandchild": {
+      "stepType": "Finish",
+      "id": "finish_great_grandchild",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "data.greatGrandchildInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "finish_great_grandchild",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "greatGrandchildInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

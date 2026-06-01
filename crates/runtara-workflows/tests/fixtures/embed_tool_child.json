@@ -1,0 +1,25 @@
+{
+  "name": "Weather Child",
+  "description": "Child workflow run as an AiAgent EmbedWorkflow tool: echoes the requested city with a canned forecast.",
+  "steps": {
+    "child_finish": {
+      "stepType": "Finish",
+      "id": "child_finish",
+      "inputMapping": {
+        "forecast": {
+          "valueType": "immediate",
+          "value": "sunny"
+        },
+        "echo": {
+          "valueType": "reference",
+          "value": "data.value"
+        }
+      }
+    }
+  },
+  "entryPoint": "child_finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

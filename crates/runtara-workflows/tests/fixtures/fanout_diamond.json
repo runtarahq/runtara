@@ -1,0 +1,59 @@
+{
+  "name": "Fan-out Diamond",
+  "description": "Direct-emitter fixture: a step fans out to two unconditional successors that rejoin at a single Finish. The direct emitter linearizes the diamond topologically (start, left, right, join) so each step runs once and the join sees both branches' outputs — matching the generated path's topological execution.",
+  "durable": true,
+  "steps": {
+    "start": {
+      "stepType": "Agent",
+      "id": "start",
+      "name": "Start",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "reference", "value": "data.q" }
+      }
+    },
+    "left": {
+      "stepType": "Agent",
+      "id": "left",
+      "name": "Left",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "immediate", "value": "left-value" }
+      }
+    },
+    "right": {
+      "stepType": "Agent",
+      "id": "right",
+      "name": "Right",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": { "valueType": "immediate", "value": "right-value" }
+      }
+    },
+    "join": {
+      "stepType": "Finish",
+      "id": "join",
+      "inputMapping": {
+        "fromStart": { "valueType": "reference", "value": "steps.start.outputs" },
+        "fromLeft": { "valueType": "reference", "value": "steps.left.outputs" },
+        "fromRight": { "valueType": "reference", "value": "steps.right.outputs" }
+      }
+    }
+  },
+  "entryPoint": "start",
+  "executionPlan": [
+    { "fromStep": "start", "toStep": "left" },
+    { "fromStep": "start", "toStep": "right" },
+    { "fromStep": "left", "toStep": "join" },
+    { "fromStep": "right", "toStep": "join" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

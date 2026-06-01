@@ -6,11 +6,22 @@
       "stepType": "Agent",
       "id": "init",
       "name": "Initialize",
-      "agentId": "transform",
-      "capabilityId": "passthrough",
+      "agentId": "utils",
+      "capabilityId": "return-input",
       "inputMapping": {
-        "counter": { "valueType": "immediate", "value": 0 },
-        "maxRetries": { "valueType": "reference", "value": "data.maxRetries" }
+        "value": {
+          "valueType": "composite",
+          "value": {
+            "counter": {
+              "valueType": "immediate",
+              "value": 0
+            },
+            "maxRetries": {
+              "valueType": "reference",
+              "value": "data.maxRetries"
+            }
+          }
+        }
       }
     },
     "loop": {
@@ -21,8 +32,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "_previousOutputs.counter" },
-          { "valueType": "reference", "value": "steps.init.outputs.maxRetries" }
+          {
+            "valueType": "reference",
+            "value": "_previousOutputs.counter"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.maxRetries"
+          }
         ]
       },
       "config": {
@@ -39,8 +56,14 @@
               "type": "operation",
               "op": "EQ",
               "arguments": [
-                { "valueType": "reference", "value": "_previousOutputs.counter" },
-                { "valueType": "immediate", "value": -1 }
+                {
+                  "valueType": "reference",
+                  "value": "_previousOutputs.counter"
+                },
+                {
+                  "valueType": "immediate",
+                  "value": -1
+                }
               ]
             }
           },
@@ -53,21 +76,38 @@
             "message": "Maximum retry attempts reached",
             "severity": "error",
             "context": {
-              "attempt": { "valueType": "reference", "value": "_previousOutputs.counter" }
+              "attempt": {
+                "valueType": "reference",
+                "value": "_previousOutputs.counter"
+              }
             }
           },
           "finish": {
             "stepType": "Finish",
             "id": "finish",
             "inputMapping": {
-              "counter": { "valueType": "reference", "value": "_previousOutputs.counter" },
-              "success": { "valueType": "immediate", "value": true }
+              "counter": {
+                "valueType": "reference",
+                "value": "_previousOutputs.counter"
+              },
+              "success": {
+                "valueType": "immediate",
+                "value": true
+              }
             }
           }
         },
         "executionPlan": [
-          { "fromStep": "check_success", "toStep": "finish", "label": "true" },
-          { "fromStep": "check_success", "toStep": "error_retry_exhausted", "label": "false" }
+          {
+            "fromStep": "check_success",
+            "toStep": "finish",
+            "label": "true"
+          },
+          {
+            "fromStep": "check_success",
+            "toStep": "error_retry_exhausted",
+            "label": "false"
+          }
         ]
       }
     },
@@ -75,18 +115,30 @@
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "result": { "valueType": "reference", "value": "steps.loop.outputs" }
+        "result": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs"
+        }
       }
     }
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "loop" },
-    { "fromStep": "loop", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "loop"
+    },
+    {
+      "fromStep": "loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {
-    "maxRetries": { "type": "number", "required": true }
+    "maxRetries": {
+      "type": "number",
+      "required": true
+    }
   },
   "outputSchema": {}
 }

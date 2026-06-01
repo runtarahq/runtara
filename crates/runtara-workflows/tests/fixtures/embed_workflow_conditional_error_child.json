@@ -1,0 +1,70 @@
+{
+  "name": "EmbedWorkflow Conditional Error Child",
+  "description": "A child workflow that can finish or fail through Conditional control flow",
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.childInput"
+          },
+          {
+            "valueType": "immediate",
+            "value": "ok"
+          }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    },
+    "fail": {
+      "stepType": "Error",
+      "id": "fail",
+      "name": "Conditional Child Failure",
+      "category": "permanent",
+      "code": "CONDITIONAL_CHILD_FAILED",
+      "message": "Conditional child workflow failed",
+      "severity": "critical",
+      "context": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.childInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "check",
+  "executionPlan": [
+    {
+      "fromStep": "check",
+      "toStep": "finish",
+      "label": "true"
+    },
+    {
+      "fromStep": "check",
+      "toStep": "fail",
+      "label": "false"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "childInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

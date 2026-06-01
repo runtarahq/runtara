@@ -19,8 +19,8 @@ pub(crate) use tracing::{debug, error, info, warn};
 
 #[cfg(not(feature = "tracing"))]
 mod stubs {
-    // No-op shim that swallows its arguments and expands to a unit expression
-    // (`()`). Expanding to `()` lets the macro be used in both statement and
+    // No-op shim that swallows its arguments and expands to a unit block. The
+    // block lets the macro be used in both statement and
     // expression positions — e.g. `match x { Err(_) => warn!("..."), Ok(_) => {} }` —
     // exactly like the real `tracing::warn!` would.
     //
@@ -30,7 +30,7 @@ mod stubs {
     // workflow build where this code is silenced; native consumers (default
     // features) get the real tracing macros and the variables are used.
     macro_rules! _noop {
-        ($($tt:tt)*) => {{ () }};
+        ($($tt:tt)*) => {{}};
     }
     pub(crate) use _noop as debug;
     pub(crate) use _noop as error;

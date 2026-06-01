@@ -23,10 +23,8 @@ echo ""
 
 # Build binaries if needed
 echo "Checking binaries..."
-if [ ! -f "${PROJECT_ROOT}/target/release/runtara-compile" ] || \
-   [ ! -f "${PROJECT_ROOT}/target/release/runtara-ctl" ]; then
+if [ ! -f "${PROJECT_ROOT}/target/release/runtara-ctl" ]; then
     echo "Building required binaries..."
-    cargo build -p runtara-workflows --bin runtara-compile --release
     cargo build -p runtara-management-sdk --bin runtara-ctl --release
 fi
 echo ""
@@ -58,10 +56,13 @@ run_test() {
 }
 
 # Run tests
-run_test "Basic Workflow" "${SCRIPT_DIR}/test_basic_workflow.sh"
-run_test "Delay Workflow" "${SCRIPT_DIR}/test_delay_workflow.sh"
+#
+# Workflow compile→register→run coverage moved to the in-process cargo suites
+# (runtara-workflows `direct_wasm_execute` and `validation_integration_test`,
+# both CI-gated) when the standalone runtara-compile CLI was removed. These
+# remaining e2e scripts drive a full runtara-server over HTTP for object-model /
+# SQL features.
 run_test "SMO Trigram Similarity (Tier 1)" "${SCRIPT_DIR}/test_smo_trigram_similarity.sh"
-run_test "SMO Categorization Workflow (Tier 1)" "${SCRIPT_DIR}/test_smo_categorization_workflow.sh"
 run_test "SMO FTS Match + TS_RANK (Tier 2)" "${SCRIPT_DIR}/test_smo_fts_match.sh"
 run_test "SMO pgvector + Levenshtein (Tier 3)" "${SCRIPT_DIR}/test_smo_vector_search.sh"
 

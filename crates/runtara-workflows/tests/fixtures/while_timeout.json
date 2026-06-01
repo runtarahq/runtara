@@ -1,0 +1,59 @@
+{
+  "name": "While Timeout",
+  "description": "Direct-emitter fixture: a While loop whose per-iteration body delay drives the loop past its configured wall-clock timeout, so the step fails with WHILE_TIMEOUT. Generated Rust parses the timeout but does not enforce it; direct mode is the first to honor the documented behavior.",
+  "steps": {
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Slow Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "immediate", "value": 10 }
+        ]
+      },
+      "subgraph": {
+        "name": "Slow Body",
+        "entryPoint": "tick",
+        "steps": {
+          "tick": {
+            "stepType": "Delay",
+            "id": "tick",
+            "name": "Slow step",
+            "durationMs": { "valueType": "immediate", "value": 50 }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "index": { "valueType": "reference", "value": "variables._index" }
+            }
+          }
+        },
+        "executionPlan": [
+          { "fromStep": "tick", "toStep": "finish" }
+        ]
+      },
+      "config": { "maxIterations": 10, "timeout": 10 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "iterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        }
+      }
+    }
+  },
+  "entryPoint": "loop",
+  "executionPlan": [
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

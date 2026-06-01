@@ -1,0 +1,490 @@
+// Canonical WIT contract for the shared workflow stdlib component.
+//
+// The stdlib owns reusable JSON-heavy workflow semantics. Direct-emitted
+// workflow logic should call these functions instead of embedding serde,
+// mapping, condition, filter, group-by, or switch implementations in every
+// workflow artifact.
+
+package runtara:workflow-stdlib@0.1.0;
+
+interface json {
+    record agent-retry-error {
+        payload: list<u8>,
+        retryable: bool,
+        rate-limited: bool,
+    }
+
+    init-manifest: func(manifest: list<u8>) -> result<_, string>;
+
+    build-source: func(
+        data: list<u8>,
+        variables: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    apply-mapping: func(
+        mapping-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    eval-condition: func(
+        condition-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    process-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    value-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-items: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-item-count: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<u32, string>;
+
+    split-item: func(
+        split-id: u32,
+        source: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-iteration-variables: func(
+        split-id: u32,
+        source: list<u8>,
+        item: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-validate-input: func(
+        split-id: u32,
+        item: list<u8>,
+        index: u32,
+    ) -> result<_, string>;
+
+    split-validate-output: func(
+        split-id: u32,
+        output: list<u8>,
+        index: u32,
+    ) -> result<_, string>;
+
+    split-initial-results: func(
+        split-id: u32,
+    ) -> result<list<u8>, string>;
+
+    split-append-output: func(
+        split-id: u32,
+        results: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-append-error: func(
+        split-id: u32,
+        results: list<u8>,
+        error: string,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-output: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-cache-key: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-result: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-output-from-result: func(
+        split-id: u32,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-max-iterations: func(
+        while-id: u32,
+    ) -> result<u32, string>;
+
+    while-initial-state: func(
+        while-id: u32,
+    ) -> result<list<u8>, string>;
+
+    while-condition-source: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-condition: func(
+        while-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    while-iteration-variables: func(
+        while-id: u32,
+        variables: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-advance-state: func(
+        while-id: u32,
+        state: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-output: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    filter: func(
+        filter-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    log-event: func(
+        log-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    log: func(
+        log-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error-event: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error-steps: func(
+        step-id: string,
+        error: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    group-by: func(
+        group-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    delay-duration-ms: func(
+        delay-id: u32,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
+    delay: func(
+        delay-id: u32,
+        source: list<u8>,
+        duration-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    breakpoint-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    breakpoint-event: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    wait-timeout-ms: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<option<u64>, string>;
+
+    wait-timeout-error: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    wait-on-wait-variables: func(
+        step-id: string,
+        instance-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-on-wait-error: func(
+        step-id: string,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-poll-interval-ms: func(
+        step-id: string,
+    ) -> result<u64, string>;
+
+    wait-event: func(
+        step-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-debug-start: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: option<u64>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-output: func(
+        step-id: string,
+        signal-id: string,
+        signal-payload: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Build the per-call signal id for a WaitForSignal step used as an AiAgent
+    // tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
+    // the generated `emit_wait_for_signal_tool_arm`.
+    ai-wait-tool-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    // Wrap a received WaitForSignal-tool signal payload as the tool result the
+    // model sees: `{ "status": "received", "human_response": <payload> }`,
+    // matching the generated tool arm.
+    ai-wait-tool-result: func(
+        signal-payload: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-cache-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-variables: func(
+        step-id: string,
+        source: list<u8>,
+        child-input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-result: func(
+        step-id: string,
+        source: list<u8>,
+        child-output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-output-from-result: func(
+        step-id: string,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-error: func(
+        step-id: string,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
+    workflow-error-retryable: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-rate-limited: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-retry-after-ms: func(
+        error: list<u8>,
+    ) -> result<option<u64>, string>;
+
+    agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Build an Ai Agent step output context from a `chat-completion` capability
+    // result. Extracts the final assistant text from the choice and wraps it in
+    // the generated-code-compatible `{response, iterations, toolCalls}` envelope
+    // under the AiAgent step's id. Single-shot (one iteration, no tool calls).
+    ai-agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Ai Agent tool-loop helpers driving the `chat-turn` capability.
+    // Build the next chat-turn input from the constant base config, the prior
+    // turn output (loop state), and this round's pending tool results.
+    ai-turn-next-input: func(
+        base: list<u8>,
+        turn-out: list<u8>,
+        pending: list<u8>,
+    ) -> result<list<u8>, string>;
+    // True when the turn's action is `complete`.
+    ai-turn-is-complete: func(turn-out: list<u8>) -> result<bool, string>;
+    // Number of tool calls the turn requested.
+    ai-turn-tool-count: func(turn-out: list<u8>) -> result<u32, string>;
+    // The index-th tool call's arguments, as the tool agent input payload.
+    ai-turn-tool-args: func(turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
+    // The resolved tool index for the index-th tool call (u32::MAX = unknown).
+    ai-turn-tool-index: func(turn-out: list<u8>, index: u32) -> result<u32, string>;
+    // Append the index-th tool call's dispatched result to the pending list.
+    ai-turn-add-result: func(
+        pending: list<u8>,
+        turn-out: list<u8>,
+        index: u32,
+        tool-result: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Build the AiAgent step output context from a completed turn.
+    ai-turn-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        turn-out: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Build the initial loop state from a load-memory result (loaded
+    // conversation becomes the starting chat history).
+    ai-memory-initial-state: func(load-output: list<u8>) -> result<list<u8>, string>;
+    // Build the save-memory input `{conversation_id, messages}` from the final
+    // loop state and the resolved conversation object.
+    ai-memory-save-input: func(
+        conversation: list<u8>,
+        final-state: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Sliding-window compaction: drop the oldest messages from the loop state's
+    // chat history so at most max-messages remain (no-op below the threshold).
+    ai-memory-compact-sliding: func(
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
+    // Build the summarize-memory capability input `{provider, model,
+    // max_messages, state}` from the base chat-turn config and the loop state.
+    ai-summarize-input: func(
+        base: list<u8>,
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
+    // Unwrap the loop state from a summarize-memory result (`{state}`).
+    ai-summarize-output: func(summarize-result: list<u8>) -> result<list<u8>, string>;
+
+    agent-validate-input: func(
+        agent-id: u32,
+        input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-connection-input: func(
+        agent-id: u32,
+        input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-cache-key: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    agent-retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
+    agent-error-info: func(
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<list<u8>, string>;
+
+    agent-retry-error-info: func(
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<agent-retry-error, string>;
+
+    agent-error: func(
+        agent-id: u32,
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    ) -> result<list<u8>, string>;
+
+    agent-error-from-info: func(
+        agent-id: u32,
+        error-info: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-debug-error: func(
+        agent-id: u32,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    step-debug-start: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    step-debug-end: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+}
+
+world workflow-stdlib {
+    export json;
+}

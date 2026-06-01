@@ -1,0 +1,31 @@
+{
+  "name": "EmbedWorkflow Transient Error Grandchild",
+  "description": "A terminal transient Error grandchild workflow for nested EmbedWorkflow retry tests",
+  "steps": {
+    "fail_grandchild": {
+      "stepType": "Error",
+      "id": "fail_grandchild",
+      "name": "Transient Grandchild Failure",
+      "category": "transient",
+      "code": "GRANDCHILD_TEMPORARY",
+      "message": "Grandchild workflow failed transiently",
+      "severity": "error",
+      "context": {
+        "grandchildInput": {
+          "valueType": "reference",
+          "value": "data.grandchildInput"
+        }
+      }
+    }
+  },
+  "entryPoint": "fail_grandchild",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {
+    "grandchildInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

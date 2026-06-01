@@ -8,15 +8,15 @@
       "agentId": "transform",
       "capabilityId": "map-fields",
       "inputMapping": {
-        "source": {
+        "source_data": {
           "valueType": "reference",
           "value": "data"
         },
-        "mapping": {
+        "mappings": {
           "valueType": "immediate",
           "value": {
-            "counter": "$.counter",
-            "target": "$.target"
+            "$.counter": "counter",
+            "$.target": "target"
           }
         }
       }
@@ -29,8 +29,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "steps.init.outputs.counter" },
-          { "valueType": "reference", "value": "steps.init.outputs.target" }
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.counter"
+          },
+          {
+            "valueType": "reference",
+            "value": "steps.init.outputs.target"
+          }
         ]
       },
       "subgraph": {
@@ -42,14 +48,14 @@
             "agentId": "transform",
             "capabilityId": "map-fields",
             "inputMapping": {
-              "source": {
+              "source_data": {
                 "valueType": "reference",
                 "value": "data"
               },
-              "mapping": {
+              "mappings": {
                 "valueType": "immediate",
                 "value": {
-                  "counter": "$.counter"
+                  "$.counter": "counter"
                 }
               }
             }
@@ -67,7 +73,10 @@
         },
         "entryPoint": "increment",
         "executionPlan": [
-          { "fromStep": "increment", "toStep": "finish" }
+          {
+            "fromStep": "increment",
+            "toStep": "finish"
+          }
         ]
       },
       "config": {
@@ -87,8 +96,14 @@
   },
   "entryPoint": "init",
   "executionPlan": [
-    { "fromStep": "init", "toStep": "loop" },
-    { "fromStep": "loop", "toStep": "finish" }
+    {
+      "fromStep": "init",
+      "toStep": "loop"
+    },
+    {
+      "fromStep": "loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

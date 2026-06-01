@@ -1,0 +1,43 @@
+{
+  "name": "EmbedWorkflow Nested Grandchild",
+  "description": "A grandchild workflow that calls a great-grandchild workflow",
+  "steps": {
+    "call_greatgrandchild": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_greatgrandchild",
+      "childWorkflowId": "great_grandchild_workflow",
+      "childVersion": "latest",
+      "inputMapping": {
+        "greatGrandchildInput": {
+          "valueType": "reference",
+          "value": "data.grandchildInput"
+        }
+      }
+    },
+    "finish_grandchild": {
+      "stepType": "Finish",
+      "id": "finish_grandchild",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_greatgrandchild.outputs.result"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_greatgrandchild",
+  "executionPlan": [
+    {
+      "fromStep": "call_greatgrandchild",
+      "toStep": "finish_grandchild"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "grandchildInput": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

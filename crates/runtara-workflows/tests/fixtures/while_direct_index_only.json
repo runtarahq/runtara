@@ -1,0 +1,73 @@
+{
+  "name": "Direct While Index Only",
+  "description": "Agentless While loop fixture for direct Wasm execution smoke tests",
+  "steps": {
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Index Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "data.count" }
+        ]
+      },
+      "subgraph": {
+        "name": "Record Index",
+        "steps": {
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "iteration": {
+                "valueType": "reference",
+                "value": "variables._index"
+              },
+              "loopIndex": {
+                "valueType": "reference",
+                "value": "variables._loop.index"
+              },
+              "indices": {
+                "valueType": "reference",
+                "value": "variables._loop_indices"
+              },
+              "previous": {
+                "valueType": "reference",
+                "value": "variables._previousOutputs",
+                "default": null
+              }
+            }
+          }
+        },
+        "entryPoint": "finish",
+        "executionPlan": []
+      },
+      "config": {
+        "maxIterations": 5
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "iterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        },
+        "last": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "loop",
+  "executionPlan": [
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

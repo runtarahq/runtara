@@ -3,29 +3,26 @@
 #
 # The bundle contains:
 #   - runtara-server binary
-#   - A pruned copy of the Rust toolchain (rustc + host std + wasm32-wasip1 + wasm32-wasip2 stds)
 #   - Wasmtime CLI binary
-#   - wac CLI binary (WebAssembly Composition — workflow compile step)
-#   - cargo-component binary (cargo subcommand — workflow compile step)
-#   - 23 pre-built agent components (.wasm + .meta.json each)
-#   - compile-src/: source mirror of the stdlib/sdk/agent-wit crates so
-#     cargo-component can build the per-workflow logic component on hosts
-#     that received only the released tarball (the workflow-logic Cargo.toml
-#     has absolute path = "..." deps into this tree).
-#   - workflow-build-prebuilt/: canonical Cargo.lock + vendored crates.io
-#     deps. Lets the runtime compile workflows in fully air-gapped envs
-#     (no network access at all). Auto-detected by components_compile.rs.
+#   - 24 pre-built agent components (.wasm + .meta.json each) plus the 2 shared
+#     workflow stdlib/runtime components used by direct composition
 #   - License files
 #   - VERSION and MANIFEST.json
+#
+# Workflow compilation is fully in-process (the direct WASM emitter byte-emits
+# the workflow-logic module and composes the final workflow.wasm via wac-graph),
+# so the bundle ships NO Rust toolchain, cargo-component, wac CLI, or source
+# mirror — only the prebuilt components the server reads at runtime.
 #
 # Usage:
 #   ./scripts/build-bundle.sh                   # build for the current host
 #   ./scripts/build-bundle.sh --skip-build      # assemble from existing target/release
 #   ./scripts/build-bundle.sh --output-dir /tmp # write bundle to custom dir
 #
-# Prerequisites:
+# Prerequisites (BUILD-time only — used to build the agent/shared components):
 #   - rustup with the version from rust-toolchain.toml installed
 #   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
+#   - cargo-component (installed by this script) for building components
 #   - curl (for downloading wasmtime if not cached)
 
 set -euo pipefail
@@ -40,12 +37,8 @@ cd "$ROOT_DIR"
 SKIP_BUILD=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
 WASMTIME_VERSION="43.0.0"
-# wac (WebAssembly Composition) CLI: composes the workflow component with
-# its required agent components at workflow-compile time. Upstream ships
-# prebuilt binaries on the releases page.
-WAC_VERSION="0.10.0"
-# cargo-component: subcommand used to build the per-workflow logic
-# component before wac compose. No prebuilt binaries upstream — installed
+# cargo-component: subcommand used to build the agent + shared workflow
+# components at bundle-build time. No prebuilt binaries upstream — installed
 # via `cargo install` into a per-version cache dir during bundle build.
 # Must match scripts/build-agent-components.sh and .github/workflows/ci.yml.
 CARGO_COMPONENT_VERSION="0.21.1"
@@ -124,7 +117,6 @@ resolve_versions() {
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Wasmtime version: ${WASMTIME_VERSION}"
-    info "wac version:     ${WAC_VERSION}"
     info "cargo-component: ${CARGO_COMPONENT_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
 }
@@ -226,38 +218,6 @@ download_wasmtime() {
     WASMTIME_TARBALL="$cached"
 }
 
-# ─── Download wac (WebAssembly Composition CLI) ─────────────────────────────
-
-download_wac() {
-    step "Fetching wac ${WAC_VERSION}"
-
-    mkdir -p "$DOWNLOAD_CACHE"
-
-    # Upstream binary naming uses linux-musl for both glibc and musl Linux —
-    # the binary is statically linked so it runs on either.
-    local wac_asset
-    case "${ARCH}-${OS}" in
-        x86_64-linux)   wac_asset="wac-cli-x86_64-unknown-linux-musl" ;;
-        aarch64-linux)  wac_asset="wac-cli-aarch64-unknown-linux-musl" ;;
-        x86_64-darwin)  wac_asset="wac-cli-x86_64-apple-darwin" ;;
-        aarch64-darwin) wac_asset="wac-cli-aarch64-apple-darwin" ;;
-        *) echo "No upstream wac binary for ${ARCH}-${OS}" >&2; exit 1 ;;
-    esac
-
-    local url="https://github.com/bytecodealliance/wac/releases/download/v${WAC_VERSION}/${wac_asset}"
-    local cached="${DOWNLOAD_CACHE}/${wac_asset}-${WAC_VERSION}"
-
-    if [ -f "$cached" ]; then
-        info "Using cached ${wac_asset}"
-    else
-        info "Downloading ${wac_asset}"
-        curl -fSL -o "$cached" "$url"
-        chmod +x "$cached"
-    fi
-
-    WAC_BINARY="$cached"
-}
-
 # ─── Install cargo-component into a versioned cache ─────────────────────────
 #
 # Upstream doesn't ship prebuilt binaries — `cargo install` is the only
@@ -313,11 +273,17 @@ build_agent_components() {
 ${TARGET_DIR}/wasm32-wasip2/release/runtara_agent_*.wasm" >&2
             exit 1
         fi
+        if ! find "${TARGET_DIR}/wasm32-wasip2/release" -maxdepth 1 \
+                -name 'runtara_workflow_*.wasm' 2>/dev/null | grep -q .; then
+            echo "Error: --skip-build but no built workflow shared components found at \
+${TARGET_DIR}/wasm32-wasip2/release/runtara_workflow_*.wasm" >&2
+            exit 1
+        fi
         info "Skipping agent component build (--skip-build)"
         return
     fi
 
-    step "Building agent WASM components (23 crates)"
+    step "Building agent and direct workflow WASM components"
     PATH="$(dirname "$CARGO_COMPONENT_BINARY"):${PATH}" \
         "$SCRIPT_DIR/build-agent-components.sh"
 }
@@ -329,7 +295,7 @@ assemble_bundle() {
 
     local bundle="${OUTPUT_DIR}/runtara-${RUNTARA_VERSION}-${ARCH}-${OS}"
     rm -rf "$bundle"
-    mkdir -p "$bundle"/{bin,toolchain/bin,toolchain/lib/rustlib,agents,licenses,compile-src/crates/agents}
+    mkdir -p "$bundle"/{bin,agents,licenses}
 
     # ── runtara-server binary ──
     info "Copying runtara-server binary"
@@ -355,22 +321,14 @@ assemble_bundle() {
     cp "$tmp_wt/$wt_dir/wasmtime" "$bundle/bin/"
     rm -rf "$tmp_wt"
 
-    # ── wac (WebAssembly Composition CLI) ──
-    info "Copying wac binary"
-    cp "$WAC_BINARY" "$bundle/bin/wac"
-    chmod +x "$bundle/bin/wac"
-
-    # ── cargo-component ──
-    info "Copying cargo-component binary"
-    cp "$CARGO_COMPONENT_BINARY" "$bundle/bin/cargo-component"
-    chmod +x "$bundle/bin/cargo-component"
-
     # ── Agent components ──
     # Each of the 23 component agents ships as a .wasm + sibling .meta.json
     # pair. At server boot, RUNTARA_AGENT_COMPONENTS_DIR points at this
     # directory; the ComponentDispatcherService loads each pair and exposes
     # the agents to the validator and workflow runtime.
-    info "Copying agent WASM components"
+    # The same directory also carries the direct workflow stdlib/runtime
+    # components used by static direct composition.
+    info "Copying agent and direct workflow WASM components"
     # `wasm32-wasip2/release/` is cargo-component's finalized component output.
     # Same as for workflow-logic: do NOT read from wasm32-wasip1/, which is the
     # intermediate rustc pass cargo-component leaves behind — that file is the
@@ -394,174 +352,23 @@ assemble_bundle() {
     fi
     info "  Agents: ${wasm_count} .wasm + ${meta_count} .meta.json"
 
-    # ── Rust toolchain (pruned) ──
-    info "Copying pruned Rust toolchain"
-    local sysroot
-    sysroot="$(rustc --print sysroot)"
-
-    # bin: rustc, cargo, and wasm-component-ld (required for wasm32-wasip2 linking)
-    cp "$sysroot/bin/rustc" "$bundle/toolchain/bin/"
-    cp "$sysroot/bin/cargo" "$bundle/toolchain/bin/"
-
-    # wasm-component-ld: installed via `cargo install wasm-component-ld`, lives in ~/.cargo/bin
-    local wasm_ld
-    wasm_ld="$(command -v wasm-component-ld 2>/dev/null || true)"
-    if [ -n "$wasm_ld" ]; then
-        cp "$wasm_ld" "$bundle/toolchain/bin/"
-        info "Included wasm-component-ld from ${wasm_ld}"
-    else
-        warn "wasm-component-ld not found — WASM workflow compilation will fail at runtime!"
-        warn "Install it with: cargo install wasm-component-ld"
-    fi
-
-    # lib: rustc shared libraries (mandatory runtime deps of rustc)
-    case "$OS" in
-        darwin)
-            cp "$sysroot"/lib/librustc_driver-*.dylib "$bundle/toolchain/lib/"
-            ;;
-        linux)
-            cp "$sysroot"/lib/librustc_driver-*.so "$bundle/toolchain/lib/"
-            # LLVM shared lib — required by rustc on Linux
-            cp "$sysroot"/lib/libLLVM*.so* "$bundle/toolchain/lib/"
-            ;;
-    esac
-
-    # lib/rustlib: host target (needed for proc-macros to link against)
-    cp -R "$sysroot/lib/rustlib/${HOST_TARGET}" "$bundle/toolchain/lib/rustlib/"
-    # Remove sanitizer runtimes from the host target copy (not needed, saves ~8MB)
-    rm -f "$bundle/toolchain/lib/rustlib/${HOST_TARGET}/lib/"*sanitizer* \
-          "$bundle/toolchain/lib/rustlib/${HOST_TARGET}/lib/"*asan* \
-          "$bundle/toolchain/lib/rustlib/${HOST_TARGET}/lib/"*tsan* \
-          "$bundle/toolchain/lib/rustlib/${HOST_TARGET}/lib/"*lsan* 2>/dev/null || true
-    # Also remove sanitizer runtimes from top-level lib/
-    rm -f "$bundle/toolchain/lib/"*asan* \
-          "$bundle/toolchain/lib/"*tsan* \
-          "$bundle/toolchain/lib/"*lsan* 2>/dev/null || true
-
-    # lib/rustlib: wasm targets needed for workflow compilation.
-    # cargo-component v0.21.1's `--target wasm32-wasip2` is a misnomer: it
-    # invokes rustc with --target wasm32-wasip1 to compile the workflow + all
-    # transitive deps as core wasm, then post-processes the resulting .wasm
-    # into a wasip2 Component via wit-bindgen + the component encoder. Both
-    # sysroots are needed at compile time — wasip1 for rustc, wasip2 for
-    # `cargo build -p runtara-workflow-stdlib --target wasm32-wasip2` (the
-    # build_stdlib step). On a clean install with no system Rust, missing
-    # either sysroot fails the compile with "can't find crate `core` for
-    # `wasm32-wasip<N>`".
-    cp -R "$sysroot/lib/rustlib/wasm32-wasip1" "$bundle/toolchain/lib/rustlib/"
-    cp -R "$sysroot/lib/rustlib/wasm32-wasip2" "$bundle/toolchain/lib/rustlib/"
-
-    # ── Compile-source tree ──
-    # Required by cargo-component at workflow-compile time. Workflows are
-    # built by materializing a `workflow-logic` crate whose generated
-    # Cargo.toml has absolute `path = "..."` deps into the runtara workspace
-    # (runtara-workflow-stdlib, runtara-sdk, runtara-sdk-macros, runtara-http,
-    # runtara-ai + per-agent wit/ dirs). Without this tree the released
-    # tarball can only compile on the CI host that produced it. See
-    # crates/runtara-workflows/src/components_compile.rs::workspace_root() —
-    # the server picks this up via $RUNTARA_COMPILE_SOURCE_DIR (set by
-    # scripts/install.sh).
-    info "Assembling compile-source mirror"
-    local cs="$bundle/compile-src"
-    local ws_version ws_major_minor
-    ws_version="$(grep '^version' "${ROOT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-    # Path deps in cargo need a version constraint compatible with the
-    # underlying crate. The bundled crates inherit version.workspace = true
-    # which expands to ws_version (e.g. "7.0.0"); the workspace dep entry
-    # needs to be ^MAJOR.MINOR (cargo's caret-default) so cargo accepts the
-    # match. Just stripping to MAJOR.MINOR keeps the constraint loose enough
-    # to survive patch bumps but tight enough to reject a stale bundle
-    # paired with a fresh source tree.
-    ws_major_minor="$(printf '%s' "$ws_version" | cut -d. -f1-2)"
-
-    # Synthesized workspace root. Its sole job is resolving the
-    # `version.workspace = true` / `runtara-http = { workspace = true }`
-    # directives in the bundled crates' Cargo.toml files. cargo doesn't
-    # `cargo build` from here — the active workspace is the per-workflow
-    # build dir (which has its own empty [workspace]); this manifest is read
-    # passively during path-dep resolution.
-    cat > "$cs/Cargo.toml" <<COMPILESRCEOF
-# Generated by scripts/build-bundle.sh — DO NOT EDIT.
-# Mirrors the slice of the runtara workspace that the per-workflow
-# Cargo.toml depends on. Lives at \$RUNTARA_COMPILE_SOURCE_DIR.
-[workspace]
-resolver = "2"
-members = [
-    "crates/runtara-http",
-    "crates/runtara-ai",
-    "crates/runtara-sdk",
-    "crates/runtara-sdk-macros",
-    "crates/runtara-workflow-stdlib",
-]
-
-[workspace.package]
-edition = "2024"
-version = "${ws_version}"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/runtarahq/runtara"
-
-[workspace.dependencies]
-# default-features = false so consumers explicitly pick a backend
-# (native / wasi / wasm-js). Matches the source workspace Cargo.toml.
-runtara-http = { path = "crates/runtara-http", version = "${ws_major_minor}", default-features = false }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-base64 = "0.22"
-COMPILESRCEOF
-
-    # Source-bearing crates: copy Cargo.toml + src/. Skip tests/, benches/,
-    # README — they don't affect the build and just add weight.
-    local crate
-    for crate in runtara-workflow-stdlib runtara-sdk runtara-sdk-macros runtara-http runtara-ai; do
-        local dst="$cs/crates/$crate"
-        mkdir -p "$dst"
-        cp "${ROOT_DIR}/crates/$crate/Cargo.toml" "$dst/"
-        cp -R "${ROOT_DIR}/crates/$crate/src" "$dst/src"
+    local workflow_component_count=0
+    local workflow_component_meta_count=0
+    for f in "$agent_src"/runtara_workflow_*.wasm; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        workflow_component_count=$((workflow_component_count + 1))
     done
-
-    # runtara-agent-wit: only the `wit/` subtree is needed (referenced as a
-    # WIT-source path dep, not a cargo crate). Carries the runtara:agent
-    # contract + the 7 wasi:* dep mirrors.
-    mkdir -p "$cs/crates/runtara-agent-wit"
-    cp -R "${ROOT_DIR}/crates/runtara-agent-wit/wit" "$cs/crates/runtara-agent-wit/wit"
-
-    # Per-agent wit/agent.wit files. Each declares the
-    # `runtara:agent-<id>@0.3.0` package the workflow-logic crate imports.
-    local agent_wit_count=0
-    local agent_dir name wit_src
-    for agent_dir in "${ROOT_DIR}"/crates/agents/runtara-agent-*; do
-        [ -d "$agent_dir" ] || continue
-        name="$(basename "$agent_dir")"
-        wit_src="$agent_dir/wit/agent.wit"
-        if [ -f "$wit_src" ]; then
-            mkdir -p "$cs/crates/agents/$name/wit"
-            cp "$wit_src" "$cs/crates/agents/$name/wit/agent.wit"
-            agent_wit_count=$((agent_wit_count + 1))
-        fi
+    for f in "$agent_src"/runtara_workflow_*.meta.json; do
+        [ -f "$f" ] || continue
+        cp "$f" "$bundle/agents/"
+        workflow_component_meta_count=$((workflow_component_meta_count + 1))
     done
-    if [ "$agent_wit_count" -eq 0 ]; then
-        echo "Error: no per-agent wit/agent.wit files found under ${ROOT_DIR}/crates/agents/ — run a host build first so each agent's build.rs emits its wit/agent.wit" >&2
+    if [ "$workflow_component_count" -ne 2 ] || [ "$workflow_component_meta_count" -ne 2 ]; then
+        echo "Error: expected 2 runtara_workflow_*.{wasm,meta.json} shared components in ${agent_src}, found ${workflow_component_count} wasm and ${workflow_component_meta_count} meta files" >&2
         exit 1
     fi
-    info "  Compile-src: 5 crates + ${agent_wit_count} per-agent WIT"
-
-    # ── Workflow-build-prebuilt: vendored crates.io deps + canonical Cargo.lock ──
-    #
-    # Lets the runtime compile workflows in fully air-gapped envs. When
-    # components_compile.rs sees this dir under workspace_root(), it copies
-    # Cargo.lock into each per-workflow build dir, writes a .cargo/config.toml
-    # redirecting crates-io to vendor/, and runs the build with `--frozen` +
-    # `CARGO_NET_OFFLINE=true`. Without this dir, builds fall back to crates.io.
-    info "Generating workflow-build-prebuilt (cargo vendor)"
-    if "${SCRIPT_DIR}/regenerate-workflow-vendor.sh" >/dev/null 2>&1; then
-        cp -R "${ROOT_DIR}/workflow-build-prebuilt" "$bundle/workflow-build-prebuilt"
-        local prebuilt_size
-        prebuilt_size="$(du -sh "$bundle/workflow-build-prebuilt" | cut -f1)"
-        info "  Workflow-build-prebuilt: ${prebuilt_size}"
-    else
-        echo "Warning: regenerate-workflow-vendor.sh failed — bundle will NOT support air-gapped workflow builds" >&2
-    fi
+    info "  Direct workflow shared components: ${workflow_component_count} .wasm + ${workflow_component_meta_count} .meta.json"
 
     # ── Licenses ──
     info "Copying licenses"
@@ -578,10 +385,9 @@ COMPILESRCEOF
   "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
   "wasmtime_version": "${WASMTIME_VERSION}",
-  "wac_version": "${WAC_VERSION}",
   "cargo_component_version": "${CARGO_COMPONENT_VERSION}",
   "agent_component_count": ${wasm_count},
-  "agent_wit_count": ${agent_wit_count},
+  "workflow_shared_component_count": ${workflow_component_count},
   "host_target": "${HOST_TARGET}",
   "os": "${OS}",
   "arch": "${ARCH}",
@@ -635,7 +441,6 @@ main() {
     build_server
     build_stdlib
     download_wasmtime
-    download_wac
     install_cargo_component
     build_agent_components
     assemble_bundle

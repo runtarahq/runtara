@@ -14,6 +14,7 @@ members = [
     "crates/runtara-ai",
     "crates/runtara-http",
     "crates/runtara-workflow-stdlib",
+    "crates/runtara-workflow-runtime",
     "crates/runtara-agent-macro",
     # Shared character-encoding vocabulary + detection/decoding for WASM agents
     "crates/runtara-agent-encoding",
@@ -29,6 +30,7 @@ members = [
     "crates/runtara-report-dsl",
     # WASM Component Model migration — see docs/wasm-components-migration-plan.md
     "crates/runtara-agent-wit",
+    "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
     "crates/agents/runtara-agent-xml",

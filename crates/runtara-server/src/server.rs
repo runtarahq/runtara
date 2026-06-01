@@ -657,6 +657,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Configured for tenant: {}", server_config.tenant_id);
     println!("✓ Object model URL: {}", server_config.object_model_url);
     println!("✓ Agent service URL: {}", server_config.agent_service_url);
+    println!("✓ Direct workflow compiler: direct-only");
     println!(
         "Max concurrent executions: {} (CPU cores: {})",
         server_config.max_concurrent_executions,

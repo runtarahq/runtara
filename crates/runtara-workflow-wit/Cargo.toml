@@ -1,0 +1,15 @@
+[package]
+name = "runtara-workflow-wit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical WIT packages for runtara workflow stdlib/runtime components"
+keywords = ["wasm", "component-model", "wit", "workflow"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+wit-parser = "0.246"
