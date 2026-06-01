@@ -43,4 +43,5 @@ wac-graph = { version = "0.10", optional = true }
 tempfile = "3"
 base64 = { workspace = true }
 wasmparser = "0.247"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "7.2", default-features = false }

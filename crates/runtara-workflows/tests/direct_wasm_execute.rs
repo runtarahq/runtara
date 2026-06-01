@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    compile_direct_workflow_composed,
+    compile_direct_workflow, compile_direct_workflow_composed, compose_direct_workflow,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -830,6 +830,66 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
     .expect("metadata parses");
     assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
     assert!(metadata.composed_wasm.is_some());
+}
+
+#[test]
+fn direct_compile_measures_json_to_ready_bundle_latency() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Time the full direct-emitter path split into its two phases:
+    //   1. emit   — JSON string -> parsed graph -> emitted workflow-logic.wasm
+    //   2. compose — read shared components + in-process wac-graph composition
+    // Set `RUST_LOG=runtara::direct_compile::profile=debug` for the per-substep
+    // breakdown inside compose (dep read / parse / resolve / encode+validate).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "runtara::direct_compile::profile=debug".into()),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let parse_start = Instant::now();
+    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+    let parse_elapsed = parse_start.elapsed();
+
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let emit_start = Instant::now();
+    let mut result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "json-to-bundle-latency".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("direct emit succeeds");
+    let emit_elapsed = emit_start.elapsed();
+
+    let compose_start = Instant::now();
+    compose_direct_workflow(&mut result, &components_dir).expect("direct compose succeeds");
+    let compose_elapsed = compose_start.elapsed();
+
+    let total_elapsed = parse_elapsed + emit_elapsed + compose_elapsed;
+
+    assert!(result.wasm_path.exists(), "composed wasm missing");
+    assert!(result.wasm_size > 0, "composed wasm is empty");
+
+    // Surface the breakdown; `cargo test -- --nocapture` prints it.
+    eprintln!(
+        "direct compile latency (simple_passthrough): parse={:.3}ms emit={:.3}ms compose={:.3}ms total={:.3}ms -> {} bytes",
+        parse_elapsed.as_secs_f64() * 1000.0,
+        emit_elapsed.as_secs_f64() * 1000.0,
+        compose_elapsed.as_secs_f64() * 1000.0,
+        total_elapsed.as_secs_f64() * 1000.0,
+        result.wasm_size,
+    );
 }
 
 #[test]

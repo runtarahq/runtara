@@ -53,6 +53,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
@@ -410,6 +411,7 @@ pub fn compose_direct_workflow(
 ) -> Result<PathBuf, DirectCompileError> {
     let components_dir = components_dir.as_ref();
     let composed_path = result.build_dir.join("workflow.wasm");
+    let resolve_deps_start = Instant::now();
     let shared_components = resolve_shared_component_dependencies(
         components_dir,
         &result.component_artifacts.shared_components,
@@ -418,6 +420,13 @@ pub fn compose_direct_workflow(
         components_dir,
         &result.component_artifacts.agent_components,
     )?;
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = resolve_deps_start.elapsed().as_secs_f64() * 1000.0,
+        shared = shared_components.len(),
+        agents = agent_components.len(),
+        "compose: resolved + read component dependencies from disk",
+    );
 
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
     overrides.insert(
@@ -431,11 +440,18 @@ pub fn compose_direct_workflow(
         overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
 
+    let compose_start = Instant::now();
     let composed_wasm = compose_workflow_component_in_process(
         &result.component_artifacts.wac_source,
         &result.build_dir,
         overrides,
     )?;
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = compose_start.elapsed().as_secs_f64() * 1000.0,
+        composed_bytes = composed_wasm.len(),
+        "compose: in-process wac-graph composition complete",
+    );
     fs::write(&composed_path, &composed_wasm)?;
 
     let composed_wasm_size = composed_wasm.len();
@@ -484,6 +500,7 @@ fn compose_workflow_component_in_process(
     use wac_parser::Document;
     use wac_resolver::{FileSystemPackageResolver, packages};
 
+    let parse_start = Instant::now();
     let document = Document::parse(wac_source).map_err(|err| {
         DirectCompileError::Component(format!(
             "failed to parse direct workflow wac document: {err}"
@@ -494,18 +511,40 @@ fn compose_workflow_component_in_process(
             "failed to collect direct workflow wac packages: {err}"
         ))
     })?;
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = parse_start.elapsed().as_secs_f64() * 1000.0,
+        packages = keys.len(),
+        "compose: parsed wac document + collected packages",
+    );
+
+    let resolve_pkgs_start = Instant::now();
     let resolver = FileSystemPackageResolver::new(deps_dir, overrides, false);
     let resolved = resolver.resolve(&keys).map_err(|err| {
         DirectCompileError::Component(format!(
             "failed to resolve direct workflow wac packages: {err}"
         ))
     })?;
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = resolve_pkgs_start.elapsed().as_secs_f64() * 1000.0,
+        "compose: resolved wac package bytes",
+    );
+
+    let doc_resolve_start = Instant::now();
     let resolution = document.resolve(resolved).map_err(|err| {
         DirectCompileError::Component(format!(
             "failed to resolve direct workflow wac document: {err}"
         ))
     })?;
-    resolution
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = doc_resolve_start.elapsed().as_secs_f64() * 1000.0,
+        "compose: type-checked + resolved wac document graph",
+    );
+
+    let encode_start = Instant::now();
+    let encoded = resolution
         .encode(EncodeOptions {
             define_components: true,
             validate: true,
@@ -515,7 +554,14 @@ fn compose_workflow_component_in_process(
             DirectCompileError::Component(format!(
                 "failed to encode composed direct workflow component: {err}"
             ))
-        })
+        });
+    tracing::debug!(
+        target: "runtara::direct_compile::profile",
+        elapsed_ms = encode_start.elapsed().as_secs_f64() * 1000.0,
+        validate = true,
+        "compose: encoded + validated composed component",
+    );
+    encoded
 }
 
 /// Compile and statically compose a direct workflow into the final
