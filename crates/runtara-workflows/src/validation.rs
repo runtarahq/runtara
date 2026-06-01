@@ -1706,6 +1706,21 @@ fn finish_output_source_is_missing(value: &MappingValue) -> bool {
     }
 }
 
+/// Variables the runtime injects into a Split iteration scope (see
+/// `runtara_workflow_stdlib::direct_json`), referenceable as `variables.<name>`
+/// inside a Split subgraph.
+const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop", "_loop_indices"];
+
+/// Variables the runtime injects into a While iteration scope, referenceable as
+/// `variables.<name>` inside a While subgraph.
+const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", "_loop_indices"];
+
+/// Step ids the runtime injects implicitly rather than as authored steps —
+/// `steps.__error` is the error context populated inside onError handlers.
+/// Referencing one outside its scope resolves to null at runtime, matching the
+/// other built-in bindings, so it is accepted everywhere.
+const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error"];
+
 /// Validates references in a graph, considering inherited variables from parent scope.
 ///
 /// `inherited_variables` contains variable names that are injected from a parent scope
@@ -1745,17 +1760,23 @@ fn validate_references_with_inherited(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                // config.variables keys become available as variables.<name> in the subgraph
-                let injected_vars: HashSet<String> = split_step
+                // config.variables keys + the runtime's per-iteration vars become
+                // available as variables.<name> in the subgraph.
+                let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                validate_references_with_inherited(&while_step.subgraph, &HashSet::new(), result);
+                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                validate_references_with_inherited(&while_step.subgraph, &injected_vars, result);
             }
             _ => {}
         }
@@ -1851,8 +1872,11 @@ fn validate_reference(
             });
         }
 
-        // Check if referenced step exists
-        if !valid_step_ids.contains(&referenced_step_id) {
+        // Check if referenced step exists (reserved implicit steps like
+        // `__error` are injected by the runtime and always allowed).
+        if !valid_step_ids.contains(&referenced_step_id)
+            && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
+        {
             result.errors.push(ValidationError::InvalidStepReference {
                 step_id: step_id.to_string(),
                 reference_path: ref_path.to_string(),
@@ -4054,12 +4078,13 @@ fn validate_data_and_variable_references_with_context(
                 // Split subgraphs:
                 // 1. Inherit config.variables as available variables
                 // 2. Have implicit data access (data.* refers to iteration item)
-                let injected_vars: HashSet<String> = split_step
+                let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 validate_data_and_variable_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
@@ -4070,10 +4095,14 @@ fn validate_data_and_variable_references_with_context(
             Step::While(while_step) => {
                 // While subgraphs:
                 // 1. Have implicit data access (data.* refers to iteration item)
-                // 2. While loops don't have config.variables, so pass empty set
+                // 2. No config.variables, but the runtime injects per-iteration vars
+                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
                 validate_data_and_variable_references_with_context(
                     &while_step.subgraph,
-                    &HashSet::new(),
+                    &injected_vars,
                     true, // While subgraphs have implicit data access
                     result,
                 );
@@ -6413,6 +6442,60 @@ mod tests {
             !loop_ref_errors,
             "loop.index should be a valid reference in while conditions"
         );
+    }
+
+    #[test]
+    fn test_implicit_runtime_bindings_do_not_false_positive() {
+        // Runtime-injected bindings the emitter and stdlib provide but that are
+        // not authored steps/variables: the `__error` context in onError
+        // handlers and the per-iteration loop vars inside Split/While scopes.
+        // Validation must not flag references to them. Guards against the
+        // E010/E013/E053 regressions these fixtures used to trip.
+        let cases: &[(&str, &str)] = &[
+            (
+                "split_on_error",
+                include_str!("../tests/fixtures/split_on_error.json"),
+            ),
+            (
+                "while_with_previous_outputs",
+                include_str!("../tests/fixtures/while_with_previous_outputs.json"),
+            ),
+            (
+                "split_nested_split",
+                include_str!("../tests/fixtures/split_nested_split.json"),
+            ),
+            (
+                "while_direct_index_only",
+                include_str!("../tests/fixtures/while_direct_index_only.json"),
+            ),
+        ];
+        let catalog = test_catalog();
+        for (name, json) in cases {
+            let value: serde_json::Value = serde_json::from_str(json).expect("fixture parses");
+            let graph_value = value
+                .get("executionGraph")
+                .cloned()
+                .unwrap_or_else(|| value.clone());
+            let graph: ExecutionGraph =
+                serde_json::from_value(graph_value).expect("fixture is a graph");
+            let result = validate_workflow(&graph, &catalog);
+            let binding_errors: Vec<_> = result
+                .errors
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        ValidationError::InvalidStepReference { .. }
+                            | ValidationError::UnknownVariable { .. }
+                            | ValidationError::UndefinedVariableReference { .. }
+                    )
+                })
+                .collect();
+            assert!(
+                binding_errors.is_empty(),
+                "{name}: implicit runtime bindings flagged as invalid: {binding_errors:#?}"
+            );
+        }
     }
 
     // ============================================================================
