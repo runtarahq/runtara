@@ -32,8 +32,9 @@ Backwards-compatible with the previous RUNTARA behaviour.
 | `OAUTH2_ISSUER` | yes | Validated against the `iss` claim. |
 | `OAUTH2_AUDIENCE` | no | If set, validated against the `aud` claim on API routes. |
 | `OAUTH2_MCP_AUDIENCE` | no | Same, but for MCP routes. |
+| `RUNTARA_AUTH_REQUIRE_JTI` | no | When `true`, reject any JWT lacking a `jti` claim. Defaults to `false` for backwards compatibility; flip to `true` once the Auth0 Action emits `jti` on every token, since `jti` is the key the revocation denylist relies on. See [`../security/user-management-contracts.md`](../security/user-management-contracts.md). |
 
-The runtime expects every JWT to carry an `org_id` claim equal to `TENANT_ID`; a mismatch returns `403 Forbidden`. `sub` becomes `AuthContext.user_id`.
+The runtime expects every JWT to carry an `org_id` claim equal to `TENANT_ID`; a mismatch returns `403 Forbidden`. `sub` becomes `AuthContext.user_id`. Auth0-namespaced custom claims (e.g. `https://runtara.io/org_id`) are accepted and normalized to their raw names.
 
 ## `AUTH_PROVIDER=trust_proxy`
 

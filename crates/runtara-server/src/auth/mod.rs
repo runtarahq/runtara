@@ -17,6 +17,10 @@ pub struct JwtConfig {
     pub jwks_uri: String,
     pub issuer: String,
     pub audience: Option<String>,
+    /// When true, a JWT without a `jti` claim is rejected. Off during rollout (Stage 0),
+    /// flipped on once the Auth0 Action emits `jti` on every token (Stage 1). Driven by
+    /// `RUNTARA_AUTH_REQUIRE_JTI`. See `docs/security/user-management-contracts.md`.
+    pub require_jti: bool,
 }
 
 /// Authentication context inserted into request extensions after successful auth.

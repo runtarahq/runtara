@@ -85,12 +85,21 @@ impl TestIdp {
 }
 
 async fn build_provider(idp: &TestIdp, tenant_id: &str) -> OidcProvider {
+    build_provider_with_jti(idp, tenant_id, false).await
+}
+
+async fn build_provider_with_jti(
+    idp: &TestIdp,
+    tenant_id: &str,
+    require_jti: bool,
+) -> OidcProvider {
     let jwks_cache = JwksCache::new(idp.jwks_uri()).await;
     OidcProvider::new(
         JwtConfig {
             jwks_uri: idp.jwks_uri(),
             issuer: idp.issuer.clone(),
             audience: None,
+            require_jti,
         },
         jwks_cache,
         tenant_id.to_string(),
@@ -201,4 +210,77 @@ async fn rejects_expired_token() {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken for expired token, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn accepts_token_with_namespaced_claims() {
+    // Auth0 may emit custom claims only under the namespaced key. runtara normalizes them,
+    // so a token carrying `https://runtara.io/org_id` authenticates exactly like a raw one.
+    let idp = TestIdp::start().await;
+    let provider = build_provider(&idp, "org_123").await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "https://runtara.io/org_id": "org_123",
+        "https://runtara.io/jti": "jti-1",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+    assert_eq!(ctx.user_id, "user-1");
+}
+
+#[tokio::test]
+async fn rejects_token_without_jti_when_required() {
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_jti(&idp, "org_123", true).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider.authenticate(&bearer(&token)).await {
+        Err(AuthError::InvalidToken) => {}
+        other => panic!("expected InvalidToken for missing jti, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn accepts_token_with_jti_when_required() {
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_jti(&idp, "org_123", true).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "jti": "jti-1",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+}
+
+#[tokio::test]
+async fn accepts_token_without_jti_when_not_required() {
+    // Stage 0 rollout posture: jti not yet emitted by Auth0, so a token without it must
+    // still authenticate.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_jti(&idp, "org_123", false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
 }
