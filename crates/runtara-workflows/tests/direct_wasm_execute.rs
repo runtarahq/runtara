@@ -91,6 +91,78 @@ const SINGLE_AGENT_NO_FINISH: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// A chain of two Agent steps with no Finish: the first flows into the second
+/// (`next` edge) and the second is terminal. Both agents run; with no Finish the
+/// workflow completes with a `null` output via the implicit finish.
+const AGENT_CHAIN_NO_FINISH: &str = r#"{
+  "steps": {
+    "first": {
+      "stepType": "Agent",
+      "id": "first",
+      "name": "Random Double",
+      "agentId": "utils",
+      "capabilityId": "random-double",
+      "maxRetries": 1,
+      "retryDelay": 1000
+    },
+    "second": {
+      "stepType": "Agent",
+      "id": "second",
+      "name": "Random Double Again",
+      "agentId": "utils",
+      "capabilityId": "random-double",
+      "maxRetries": 1,
+      "retryDelay": 1000
+    }
+  },
+  "entryPoint": "first",
+  "executionPlan": [
+    { "fromStep": "first", "toStep": "second", "label": "next" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+/// Unconditional fan-out that re-converges at a single terminal merge step with
+/// no Finish: `start` fans out to `left` and `right`, both flow into `join`, and
+/// `join` is terminal. All four agents run; the merge completes the workflow with
+/// a `null` output via the implicit finish.
+const FANOUT_DIAMOND_NO_FINISH: &str = r#"{
+  "steps": {
+    "start": {
+      "stepType": "Agent", "id": "start", "name": "Start",
+      "agentId": "utils", "capabilityId": "random-double",
+      "maxRetries": 1, "retryDelay": 1000
+    },
+    "left": {
+      "stepType": "Agent", "id": "left", "name": "Left",
+      "agentId": "utils", "capabilityId": "random-double",
+      "maxRetries": 1, "retryDelay": 1000
+    },
+    "right": {
+      "stepType": "Agent", "id": "right", "name": "Right",
+      "agentId": "utils", "capabilityId": "random-double",
+      "maxRetries": 1, "retryDelay": 1000
+    },
+    "join": {
+      "stepType": "Agent", "id": "join", "name": "Join",
+      "agentId": "utils", "capabilityId": "random-double",
+      "maxRetries": 1, "retryDelay": 1000
+    }
+  },
+  "entryPoint": "start",
+  "executionPlan": [
+    { "fromStep": "start", "toStep": "left" },
+    { "fromStep": "start", "toStep": "right" },
+    { "fromStep": "left", "toStep": "join" },
+    { "fromStep": "right", "toStep": "join" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
@@ -920,6 +992,45 @@ fn direct_wasm_execute_single_agent_without_finish_returns_null() {
         &components_dir,
         "direct-wasm-execute-single-agent-no-finish",
         SINGLE_AGENT_NO_FINISH,
+        br#"{}"#,
+    );
+
+    assert_eq!(output, Value::Null);
+}
+
+#[test]
+fn direct_wasm_execute_agent_chain_without_finish_returns_null() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Both agents run in sequence; with no Finish step the workflow completes
+    // with a null output via the implicit finish, matching the generated
+    // compiler's finish-output fallback.
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-agent-chain-no-finish",
+        AGENT_CHAIN_NO_FINISH,
+        br#"{}"#,
+    );
+
+    assert_eq!(output, Value::Null);
+}
+
+#[test]
+fn direct_wasm_execute_fanout_diamond_without_finish_returns_null() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // The fan-out re-converges at `join`; all four agents run and the merge
+    // completes the workflow with a null output via the implicit finish. Proves
+    // a diamond with no Finish lowers and executes end-to-end (not just that the
+    // support gate accepts it).
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-fanout-diamond-no-finish",
+        FANOUT_DIAMOND_NO_FINISH,
         br#"{}"#,
     );
 

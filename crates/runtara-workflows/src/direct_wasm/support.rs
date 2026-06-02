@@ -362,8 +362,11 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
     // branches RE-CONVERGE at a merge point — a diamond, which the plan lowers as
     // `if/switch { branches up to merge } then merge-once`. A branching step that
     // does NOT re-merge (its branches end in separate terminals) is a backbone
-    // sink and must be last. Two terminal sinks (fan-out to two Finish) cannot
-    // linearize — the second would be unreachable after the first returns.
+    // sink and must be last. Likewise a terminal step — an explicit Finish/Error,
+    // or an implicit-finish step with no normal-flow successor — is a sink and
+    // must be last. Two sinks (fan-out to two Finish steps, or to two terminal
+    // Agents) cannot linearize: the second would be unreachable after the first
+    // returns.
     order[..order.len() - 1].iter().all(|step_id| {
         graph.steps.get(step_id).is_some_and(|step| {
             if matches!(step, Step::Finish(_) | Step::Error(_)) {
@@ -375,7 +378,15 @@ fn backbone_topologically_linearizable(graph: &ExecutionGraph) -> bool {
             // three are lowered as diamonds with a single shared continuation.
             let is_branching =
                 is_branching_step(step) || has_conditioned_normal_flow_edges(step_id, graph);
-            !is_branching || step_branches_remerge(step_id, graph)
+            if is_branching {
+                return step_branches_remerge(step_id, graph);
+            }
+            // A non-branching step mid-order must continue to a topological
+            // successor. One with no normal-flow successor is an implicit-finish
+            // sink (it returns `Ok(Value::Null)`); like an explicit Finish it may
+            // only be the last step. A mid-order implicit-finish means the graph
+            // has more than one unconditional exit point and cannot linearize.
+            !normal_flow_edges(graph, step_id).is_empty()
         })
     })
 }
@@ -936,7 +947,15 @@ fn supports_normal_flow_step(
 ) -> bool {
     let edges = normal_flow_edges(graph, step_id);
     if edges.is_empty() {
-        return false;
+        // Terminal step with no normal-flow successor and no explicit Finish
+        // (e.g. an Agent that is the last step in a chain). The direct plan
+        // lowers this as `DirectRunPlan::ImplicitFinish`, which completes the
+        // workflow with `Ok(Value::Null)` — exactly the generated compiler's
+        // finish-output fallback for a graph that reaches no Finish step. A
+        // missing Finish is not an error (validation flags it with a
+        // `DanglingStep` warning instead), so accept it here rather than
+        // rejecting the whole graph as `execution-plan-routing`.
+        return true;
     };
 
     let conditional_edges = edges
@@ -2298,6 +2317,177 @@ mod tests {
         assert!(report.unsupported.iter().any(|feature| {
             feature.step_id.as_deref() == Some("log") && feature.feature == "execution-plan-routing"
         }));
+    }
+
+    #[test]
+    fn conditional_diamond_without_finish_is_supported() {
+        // A Conditional whose true/false branches re-converge at a shared merge
+        // step that is itself terminal (no Finish after it). The diamond lowers
+        // with the merge as a shared continuation, and the merge completes the
+        // workflow via an implicit finish. Different step types (Conditional +
+        // Log) with no final Finish must be accepted.
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "check": {
+                    "stepType": "Conditional",
+                    "id": "check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.flag" },
+                            { "valueType": "immediate", "value": true }
+                        ]
+                    }
+                },
+                "approve": { "stepType": "Log", "id": "approve", "level": "info", "message": "approved" },
+                "reject": { "stepType": "Log", "id": "reject", "level": "info", "message": "rejected" },
+                "decided": { "stepType": "Log", "id": "decided", "level": "info", "message": "decided" }
+            },
+            "entryPoint": "check",
+            "executionPlan": [
+                { "fromStep": "check", "toStep": "approve", "label": "true" },
+                { "fromStep": "check", "toStep": "reject", "label": "false" },
+                { "fromStep": "approve", "toStep": "decided" },
+                { "fromStep": "reject", "toStep": "decided" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn fanout_diamond_without_finish_is_supported() {
+        // Unconditional fan-out (both successors run) that RE-CONVERGES at a
+        // single terminal merge step with no Finish. The merge is the one exit
+        // point and completes via an implicit finish. This is the supported
+        // counterpart to the two-distinct-terminals rejection below.
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "start": {
+                    "stepType": "Agent", "id": "start", "name": "Start",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "left": {
+                    "stepType": "Agent", "id": "left", "name": "Left",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "right": {
+                    "stepType": "Agent", "id": "right", "name": "Right",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "join": {
+                    "stepType": "Agent", "id": "join", "name": "Join",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                }
+            },
+            "entryPoint": "start",
+            "executionPlan": [
+                { "fromStep": "start", "toStep": "left" },
+                { "fromStep": "start", "toStep": "right" },
+                { "fromStep": "left", "toStep": "join" },
+                { "fromStep": "right", "toStep": "join" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn mixed_step_types_chain_without_finish_is_supported() {
+        // A linear chain of mixed step types (Agent -> Log -> Agent) with no
+        // Finish. The terminal Agent completes via an implicit finish.
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "fetch": {
+                    "stepType": "Agent", "id": "fetch", "name": "Fetch",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "note": { "stepType": "Log", "id": "note", "level": "info", "message": "noted" },
+                "store": {
+                    "stepType": "Agent", "id": "store", "name": "Store",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                }
+            },
+            "entryPoint": "fetch",
+            "executionPlan": [
+                { "fromStep": "fetch", "toStep": "note" },
+                { "fromStep": "note", "toStep": "store" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn parallel_fanout_to_two_implicit_finish_terminals_is_rejected() {
+        // Unconditional fan-out to two distinct terminal Agents (no Finish, no
+        // re-merge) is two unconditional exit points. Accepting terminal steps as
+        // implicit finishes must NOT accept this: the second terminal would be
+        // unreachable once the first returns. The backbone cannot linearize, so
+        // the support gate rejects it (mirrors the two-distinct-Finish case).
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "start": {
+                    "stepType": "Agent", "id": "start", "name": "Start",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "left": {
+                    "stepType": "Agent", "id": "left", "name": "Left",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                },
+                "right": {
+                    "stepType": "Agent", "id": "right", "name": "Right",
+                    "agentId": "utils", "capabilityId": "random-double",
+                    "maxRetries": 1, "retryDelay": 1000
+                }
+            },
+            "entryPoint": "start",
+            "executionPlan": [
+                { "fromStep": "start", "toStep": "left" },
+                { "fromStep": "start", "toStep": "right" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| { feature.feature == "execution-plan-routing" })
+        );
     }
 
     #[test]

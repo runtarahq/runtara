@@ -10029,3 +10029,67 @@ fn direct_compile_supports_single_agent_without_finish() {
         result.support_report.unsupported
     );
 }
+
+#[test]
+fn direct_compile_supports_agent_chain_without_finish() {
+    // A chain of two Agent steps with no Finish: the first agent flows into the
+    // second (`next` edge), and the second is terminal. Unlike the single-agent
+    // case (which slips through because there are no edges to flag), the chain
+    // has an edge — so a too-strict support gate reports it as
+    // `execution-plan-routing`. The terminal Agent must instead lower as an
+    // implicit finish (workflow output `null`), matching the generated compiler.
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "steps": {
+            "first": {
+                "stepType": "Agent",
+                "id": "first",
+                "name": "List Owners",
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "maxRetries": 1,
+                "retryDelay": 1000
+            },
+            "second": {
+                "stepType": "Agent",
+                "id": "second",
+                "name": "List Brands",
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "maxRetries": 1,
+                "retryDelay": 1000
+            }
+        },
+        "entryPoint": "first",
+        "executionPlan": [
+            { "fromStep": "first", "toStep": "second", "label": "next" }
+        ],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "agent-chain-no-finish".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("agent-chain-no-finish should compile direct (implicit finish)");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("implicit-finish artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "agent chain without a Finish must lower directly: {:?}",
+        result.support_report.unsupported
+    );
+}
