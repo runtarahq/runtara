@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::middleware::tenant_auth::OrgId;
+use crate::middleware::tenant_auth::{CallerId, OrgId};
 
 /// API key record (key_hash is never exposed via serde skip)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -26,6 +26,12 @@ pub struct ApiKey {
     #[schema(read_only)]
     pub key_hash: String,
     pub created_by: Option<String>,
+    /// Auth0 `sub` of the user who created the key. The key inherits this user's current
+    /// role from the tenant Valkey at validation time. `None` for legacy rows.
+    pub issuing_user_id: Option<String>,
+    /// Token identity — the `token:revoked:{jti}` revocation-denylist key. `None` for
+    /// legacy rows.
+    pub jti: Option<String>,
     #[schema(value_type = String)]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = Option<String>)]
@@ -72,6 +78,7 @@ fn sha256_hex(input: &str) -> String {
 )]
 pub async fn create_api_key(
     OrgId(tenant_id): OrgId,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -103,7 +110,12 @@ pub async fn create_api_key(
         }
     }
 
-    let created_by = Some("jwt-user".to_string());
+    // The key inherits the creating user's identity: `issuing_user_id` drives the Valkey
+    // role lookup at validation time, and `jti` is its revocation-denylist key. `created_by`
+    // moves off the legacy hard-coded "jwt-user" to the real caller.
+    let issuing_user_id = user_id;
+    let created_by = issuing_user_id.clone();
+    let jti = Uuid::new_v4().to_string();
 
     let random_bytes: [u8; 24] = rand::random();
     let random_hex = hex::encode(random_bytes);
@@ -113,16 +125,18 @@ pub async fn create_api_key(
 
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(&tenant_id)
     .bind(&request.name)
     .bind(key_prefix)
     .bind(&key_hash)
-    .bind(created_by.as_deref())
+    .bind(&created_by)
+    .bind(&issuing_user_id)
+    .bind(&jti)
     .bind(request.expires_at)
     .fetch_one(&pool)
     .await
@@ -160,7 +174,7 @@ pub async fn list_api_keys(
 ) -> (StatusCode, Json<Value>) {
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        SELECT id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         FROM public.api_keys
         WHERE org_id = $1
         ORDER BY created_at DESC
@@ -238,7 +252,7 @@ pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<A
         WHERE key_hash = $1
           AND is_revoked = FALSE
           AND (expires_at IS NULL OR expires_at > NOW())
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(key_hash)

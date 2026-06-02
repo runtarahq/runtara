@@ -56,3 +56,28 @@ impl<S: Send + Sync> FromRequestParts<S> for OrgId {
             })
     }
 }
+
+/// Axum extractor for the authenticated caller's user id (Auth0 `sub`, or the synthetic id
+/// for non-JWT modes). Like [`OrgId`], it reads `AuthContext` from request extensions and
+/// requires the `authenticate` middleware to have run.
+pub struct CallerId(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for CallerId {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|ctx| CallerId(ctx.user_id.clone()))
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "Unauthorized",
+                        "message": "Authentication required"
+                    })),
+                )
+            })
+    }
+}
