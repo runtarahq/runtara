@@ -97,11 +97,11 @@ async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<AuthCon
                 unauthorized("Invalid or expired API key")
             })?;
 
-    Ok(AuthContext {
-        org_id: api_key.org_id,
-        user_id: "api-key".to_string(),
-        auth_method: AuthMethod::ApiKey,
-    })
+    Ok(AuthContext::new(
+        api_key.org_id,
+        "api-key".to_string(),
+        AuthMethod::ApiKey,
+    ))
 }
 
 fn unauthorized(message: &str) -> Response {

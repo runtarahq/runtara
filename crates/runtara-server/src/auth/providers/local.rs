@@ -22,11 +22,11 @@ impl LocalProvider {
 #[async_trait]
 impl AuthProvider for LocalProvider {
     async fn authenticate(&self, _headers: &HeaderMap) -> Result<AuthContext, AuthError> {
-        Ok(AuthContext {
-            org_id: self.tenant_id.clone(),
-            user_id: "local".to_string(),
-            auth_method: AuthMethod::Unauthenticated,
-        })
+        Ok(AuthContext::new(
+            self.tenant_id.clone(),
+            "local".to_string(),
+            AuthMethod::Unauthenticated,
+        ))
     }
 
     fn kind(&self) -> AuthProviderKind {

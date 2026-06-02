@@ -1050,11 +1050,7 @@ mod tests {
     }
 
     fn ctx_with(method: AuthMethod) -> AuthContext {
-        AuthContext {
-            org_id: "tenant-test".to_string(),
-            user_id: "user-test".to_string(),
-            auth_method: method,
-        }
+        AuthContext::new("tenant-test".to_string(), "user-test".to_string(), method)
     }
 
     #[tokio::test]

@@ -36,11 +36,11 @@ impl AuthProvider for TrustProxyProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "proxy".to_string());
 
-        Ok(AuthContext {
-            org_id: self.tenant_id.clone(),
+        Ok(AuthContext::new(
+            self.tenant_id.clone(),
             user_id,
-            auth_method: AuthMethod::Unauthenticated,
-        })
+            AuthMethod::Unauthenticated,
+        ))
     }
 
     fn kind(&self) -> AuthProviderKind {

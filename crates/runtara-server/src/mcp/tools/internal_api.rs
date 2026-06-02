@@ -184,11 +184,11 @@ fn build_request(
         .expect("valid request");
 
     // Inject AuthContext so auth middleware skips validation
-    request.extensions_mut().insert(AuthContext {
-        org_id: tenant_id.to_string(),
-        user_id: "mcp-internal".to_string(),
-        auth_method: AuthMethod::Jwt,
-    });
+    request.extensions_mut().insert(AuthContext::new(
+        tenant_id.to_string(),
+        "mcp-internal".to_string(),
+        AuthMethod::Jwt,
+    ));
 
     request
 }

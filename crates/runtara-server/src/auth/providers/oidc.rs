@@ -69,6 +69,12 @@ impl AuthProvider for OidcProvider {
             org_id,
             user_id: claims.sub.unwrap_or_default(),
             auth_method: AuthMethod::Jwt,
+            // Role is read from the tenant's Valkey, not the JWT — populated in Phase 1.7.
+            role: None,
+            jti: claims.jti,
+            email: claims.email,
+            name: claims.name,
+            tenant_slug: claims.tenant_slug,
         })
     }
 
