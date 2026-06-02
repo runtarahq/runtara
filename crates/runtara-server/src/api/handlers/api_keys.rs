@@ -142,6 +142,14 @@ pub async fn create_api_key(
     .await
     {
         Ok(api_key) => {
+            crate::audit::emit(
+                &pool,
+                &tenant_id,
+                Some(&issuing_user_id),
+                crate::audit::AuditEvent::new("token.create")
+                    .resource("api_key", api_key.id.to_string()),
+            )
+            .await;
             let response = CreateApiKeyResponse {
                 api_key,
                 key: plaintext_key,
@@ -210,6 +218,7 @@ pub async fn list_api_keys(
 )]
 pub async fn revoke_api_key(
     OrgId(tenant_id): OrgId,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
     State(valkey): State<Option<redis::aio::ConnectionManager>>,
     Path(id): Path<Uuid>,
@@ -242,6 +251,13 @@ pub async fn revoke_api_key(
                     tracing::warn!(error = %e, "failed to write token revocation to Valkey");
                 }
             }
+            crate::audit::emit(
+                &pool,
+                &tenant_id,
+                Some(&user_id),
+                crate::audit::AuditEvent::new("token.revoke").resource("api_key", id.to_string()),
+            )
+            .await;
             (StatusCode::NO_CONTENT, Json(json!(null)))
         }
         Err(e) => (

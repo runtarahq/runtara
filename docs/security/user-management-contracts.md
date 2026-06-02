@@ -179,6 +179,18 @@ Access = Allow | Own | Deny
 Ownership enforcement (the `Own` resource check) lands in Phase 2; this contract
 defines the table that Phase 2 enforces.
 
+**Legacy ownership.** Rows created before per-user ownership was captured carry a
+placeholder `created_by` — either `NULL` or the literal `"jwt-user"` (the old
+hard-coded value, now replaced by the real caller on create). These never match a
+caller's `sub`, so under `Own` enforcement they are **managed by Owner/Admin
+only** (via the bypass); a Member cannot act on a legacy resource they originally
+created, because the original creator's identity was never recorded and cannot be
+recovered. This is an accepted, documented limitation — **not** backfilled:
+mapping `"jwt-user"` to the tenant Owner would only relabel rows the Owner can
+already manage, without restoring the real creator. Legacy rows age out as keys
+expire and resources are recreated. A one-off backfill is run only if a specific
+tenant requires it.
+
 ### The map
 
 `own` = allowed only on resources the caller created.
