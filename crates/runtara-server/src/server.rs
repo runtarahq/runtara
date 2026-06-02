@@ -719,14 +719,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ Database connected successfully");
 
-    let auth_state = auth::AuthState {
-        provider: auth_providers.api.clone(),
-        pool: pool.clone(),
-    };
-    let mcp_auth_state = auth::AuthState {
-        provider: auth_providers.mcp.clone(),
-        pool: pool.clone(),
-    };
     let auth_kind = auth_providers.kind;
 
     // Build the single, process-wide Valkey/Redis connection manager. Every
@@ -768,6 +760,25 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             }
             None
         }
+    };
+
+    // Per-tenant Valkey membership enforcement policy (SYN-437). Built here, after the
+    // shared manager, so the policy default can see whether Valkey is actually configured.
+    // The auth middleware consumes both in a later phase; for now they just ride AuthState.
+    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
+    println!("✓ Auth membership policy: {}", membership_policy.as_str());
+
+    let auth_state = auth::AuthState {
+        provider: auth_providers.api.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+    let mcp_auth_state = auth::AuthState {
+        provider: auth_providers.mcp.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
     };
 
     let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {

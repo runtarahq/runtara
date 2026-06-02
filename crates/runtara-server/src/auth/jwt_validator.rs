@@ -2,6 +2,17 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 
 use super::JwtConfig;
 
+/// The Auth0 custom-claim namespace runtara normalizes from (Phase 1.6b).
+///
+/// Auth0 strips non-namespaced custom claims depending on audience config, so the Action may
+/// emit `org_id` only as `https://runtara.io/org_id`. runtara owns normalization and accepts
+/// both shapes; this is the documented prefix the `#[serde(alias = ...)]` attributes on
+/// [`Claims`] use. It MUST match whatever the Auth0 Action emits (coordinated in Phase 4).
+/// serde aliases require string literals, so the prefix is repeated in the attributes below;
+/// the `normalizes_namespaced_claims` test builds its keys from this const to guard against
+/// the two drifting apart.
+pub const CLAIM_NAMESPACE: &str = "https://runtara.io/";
+
 /// JWT claims expected in the token payload.
 ///
 /// Custom claims injected by the Auth0 Post-Login Action may arrive either in raw form
@@ -137,15 +148,18 @@ mod tests {
     #[test]
     fn normalizes_namespaced_claims() {
         // Auth0 may emit custom claims only under the namespaced key. They must land in the
-        // same fields as the raw form.
-        let claims = parse(json!({
-            "sub": "auth0|abc",
-            "https://runtara.io/org_id": "org_abc",
-            "https://runtara.io/jti": "jti-1",
-            "https://runtara.io/email": "user@acme.com",
-            "https://runtara.io/name": "Ada",
-            "https://runtara.io/tenant_slug": "acme",
-        }));
+        // same fields as the raw form. Keys are built from CLAIM_NAMESPACE so this fails if
+        // the const and the `#[serde(alias = ...)]` literals ever diverge.
+        let ns = CLAIM_NAMESPACE;
+        let mut map = serde_json::Map::new();
+        map.insert("sub".into(), json!("auth0|abc"));
+        map.insert(format!("{ns}org_id"), json!("org_abc"));
+        map.insert(format!("{ns}jti"), json!("jti-1"));
+        map.insert(format!("{ns}email"), json!("user@acme.com"));
+        map.insert(format!("{ns}name"), json!("Ada"));
+        map.insert(format!("{ns}tenant_slug"), json!("acme"));
+        let claims: Claims = serde_json::from_value(serde_json::Value::Object(map))
+            .expect("namespaced claims should deserialize");
 
         assert_eq!(claims.org_id.as_deref(), Some("org_abc"));
         assert_eq!(claims.jti.as_deref(), Some("jti-1"));
