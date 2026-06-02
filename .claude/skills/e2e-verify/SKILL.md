@@ -19,7 +19,7 @@ The runtime, compiler, stdlib, and agents only prove they work together when a r
 
 Per the `always-e2e-verify` rule, **finish the loop**: compile → register → execute → assert observable behavior. Don't stop at "the server started".
 
-> **Components-mode**: `runtara-compile` always goes through `cargo component build` + `wac compose`. The stdlib is compiled from source as part of each workflow crate — there is **no** prebuilt-rlib / `native_cache_wasm` step anymore (that was the retired rustc-direct path). What you *do* need is the prebuilt **agent components** (step 2).
+> **Components-mode**: workflow compile always goes through `cargo component build` + `wac compose`. The stdlib is compiled from source as part of each workflow crate — there is **no** prebuilt-rlib / `native_cache_wasm` step anymore (that was the retired rustc-direct path). What you *do* need is the prebuilt **agent components** (step 2). The compile→register→execute loop now runs in-process inside the cargo test suites (step 4); the standalone `runtara-compile` CLI was removed.
 
 ## Prerequisites
 
@@ -33,14 +33,14 @@ Per the `always-e2e-verify` rule, **finish the loop**: compile → register → 
 
 ### 1. Build binaries
 
-`--bin` is a **global** target filter, not scoped to the `-p` it follows. So a single combined command silently drops any package whose bin name isn't listed — in particular `runtara-server` gets excluded and never built. Build the server separately:
+`--bin` is a **global** target filter, not scoped to the `-p` it follows. So a single combined command silently drops any package whose bin name isn't listed — in particular `runtara-server` gets excluded and never built. Build them separately:
 
 ```bash
-cargo build -p runtara-workflows --bin runtara-compile \
-            -p runtara-management-sdk --bin runtara-ctl
-
 cargo build -p runtara-server --bin runtara-server
+cargo build -p runtara-management-sdk --bin runtara-ctl
 ```
+
+There is no standalone `runtara-compile` binary anymore — the compile→register→execute path lives inside the in-process cargo suites (step 4).
 
 ### 2. Build agent components
 

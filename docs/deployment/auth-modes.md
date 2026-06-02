@@ -16,6 +16,8 @@ RUNTARA-issued API keys (`rt_*` / `smo_*` prefixes) continue to work in every mo
 
 Auth answers "who is calling"; **entitlements answer "what they can do"**. Both are env-driven and resolve at startup. See [`entitlements.md`](entitlements.md) for the feature gates, agent allowlist, and tier limits — common questions like "why is the Reports menu hidden" or "why does this workflow fail with `AGENT_NOT_ENABLED`" live there.
 
+For SaaS multi-tenant deployments, per-user **roles and permissions** (Owner / Admin / Member / Viewer) are resolved per request from the tenant's Valkey rather than from the JWT. The cross-service contract — JWT claim shape, Valkey key schema, the static permission map, and the audit-event shape — is specified in [`../security/user-management-contracts.md`](../security/user-management-contracts.md).
+
 The MCP Streamable HTTP endpoint validates the inbound `Host` header before MCP auth and tool dispatch. Local loopback hosts are allowed by default. Public or proxied deployments must set `RUNTARA_MCP_ALLOWED_HOSTS` to the comma-separated public host authorities clients use, for example `runtara.example.com,runtara.example.com:7001`.
 
 MCP session recovery uses Valkey by default (`RUNTARA_MCP_SESSION_STORE=valkey`). Valkey mode requires `VALKEY_HOST` and a working shared Valkey connection at startup; the server exits instead of falling back to process-local sessions. Set `RUNTARA_MCP_SESSION_STORE=local` only for explicit single-process development. `RUNTARA_MCP_SESSION_TTL_SECONDS` controls the persisted recovery-state TTL and defaults to `86400`.
