@@ -376,7 +376,9 @@ test.describe('Workflow Note Regression Tests', () => {
     await page.waitForLoadState('networkidle');
 
     await expect(
-      page.getByRole('heading', { name: /build and iterate automation flows/i })
+      page
+        .getByRole('navigation', { name: 'Breadcrumb' })
+        .getByText('Workflows', { exact: true })
     ).toBeVisible({ timeout: 30000 });
     await page.waitForLoadState('networkidle');
 
