@@ -23,9 +23,9 @@ native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
 
 [dependencies]
-runtara-agents = { path = "../runtara-agents", version = "7.2", default-features = false }
-runtara-dsl = { path = "../runtara-dsl", version = "7.2" }
-runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "7.2", optional = true }
+runtara-agents = { path = "../runtara-agents", version = "8.0", default-features = false }
+runtara-dsl = { path = "../runtara-dsl", version = "8.0" }
+runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "8.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -44,4 +44,4 @@ tempfile = "3"
 base64 = { workspace = true }
 wasmparser = "0.247"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "7.2", default-features = false }
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.0", default-features = false }
