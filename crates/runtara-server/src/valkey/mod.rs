@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod cleanup;
 pub mod client;
 pub mod compilation_progress;
