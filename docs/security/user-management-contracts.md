@@ -190,45 +190,50 @@ defines the table that Phase 2 enforces.
 | `workflow:update` | Allow | Allow | Own | Deny |
 | `workflow:delete` | Allow | Allow | Own | Deny |
 | `workflow:execute` | Allow | Allow | Allow | Deny |
-| `instance:read` | Allow | Allow | Allow | Allow |
-| `instance:cancel` | Allow | Allow | Own | Deny |
+| `invocation_history:read` | Allow | Allow | Allow | Allow |
+| `database:read` | Allow | Allow | Allow | Allow |
+| `database:create` | Allow | Allow | Allow | Deny |
+| `database:update` | Allow | Allow | Own | Deny |
+| `database:delete` | Allow | Allow | Own | Deny |
+| `report:read` | Allow | Allow | Allow | Allow |
+| `report:create` | Allow | Allow | Allow | Deny |
+| `report:update` | Allow | Allow | Own | Deny |
+| `report:delete` | Allow | Allow | Own | Deny |
+| `trigger:read` | Allow | Allow | Allow | Allow |
+| `trigger:create` | Allow | Allow | Allow | Deny |
+| `trigger:update` | Allow | Allow | Own | Deny |
+| `trigger:delete` | Allow | Allow | Own | Deny |
 | `connection:read` | Allow | Allow | Allow | Allow |
 | `connection:create` | Allow | Allow | Allow | Deny |
 | `connection:update` | Allow | Allow | Own | Deny |
 | `connection:delete` | Allow | Allow | Own | Deny |
-| `agent:read` | Allow | Allow | Allow | Allow |
-| `member:read` | Allow | Allow | Allow | Allow |
-| `member:invite` | Allow | Allow | Deny | Deny |
-| `member:remove` | Allow | Allow | Deny | Deny |
-| `member:change_role` | Allow | Allow | Deny | Deny |
-| `token:read` | Allow | Allow | Own | Deny |
-| `token:create` | Allow | Allow | Own | Deny |
-| `token:revoke` | Allow | Allow | Own | Deny |
-| `audit:read` | Allow | Allow | Own | Deny |
-| `tenant:read` | Allow | Allow | Allow | Allow |
-| `tenant:update` | Allow | Allow | Deny | Deny |
-| `tenant:delete` | Allow | Deny | Deny | Deny |
-| `billing:read` | Allow | Allow | Deny | Deny |
-| `billing:manage` | Allow | Deny | Deny | Deny |
+| `analytics:read` | Allow | Allow | Allow | Allow |
 
-Notes resolved from the ticket:
+Notes:
 
-- `billing:read` is open to **Admin** (and Owner); `billing:manage` is
-  **Owner-only**.
-- `tenant:delete` is **Owner-only**.
+- This is a **resource-only** permission vocabulary. Member, billing, and tenant
+  administration are owned by smo-management (Auth0 Organizations + its admin
+  surface), not by runtara's enforced map. Consequently **Owner and Admin grant
+  the same set** in P0 — the distinction has no resource permission to bite on
+  yet. When member/billing/tenant permissions are added, Admin gets a narrower
+  list.
+- Reads (`*:read`, including `invocation_history:read` and `analytics:read`) are
+  open to every role, Viewer included.
+- Create and `workflow:execute` require Member or above.
+- Update/delete are `Own` for Member (own resources only; Owner/Admin bypass the
+  ownership check) and denied for Viewer.
 - `connection:read` is metadata only — connection secrets are never returned by
   read endpoints.
-- `audit:read = Own` for Member means any audit-read endpoint must filter by
-  `actor_user_id = caller.sub` when the caller's role is Member.
 
 ### Identifier shape
 
 The Rust `Permission` enum is the canonical source of truth. On the wire,
 permissions serialize as the **colon-style strings** above (`workflow:read`,
-`member:invite`, …) via a custom serde implementation — not the default serde
-rename. Roles serialize as their lowercase names (`owner`, `admin`, `member`,
-`viewer`), matching the `member:{uid}` value in §3. This keeps the wire form
-identical across the ticket, runtara code, the Valkey value, and the admin UI.
+`invocation_history:read`, …) via a custom serde implementation — not the default
+serde rename, which can't produce the underscore-in-resource segment. Roles
+serialize as their lowercase names (`owner`, `admin`, `member`, `viewer`),
+matching the `member:{uid}` value in §3. This keeps the wire form identical across
+runtara code, the Valkey value, and the admin UI.
 
 ### Distribution
 
@@ -254,9 +259,9 @@ least-privileged:
 
 | Role | Wire / Valkey value | Summary |
 |---|---|---|
-| Owner | `owner` | Full control including `tenant:delete` and `billing:manage`. |
-| Admin | `admin` | Manages members, workflows, connections, tokens, `billing:read`. No `tenant:delete` / `billing:manage`. |
-| Member | `member` | Creates and operates resources; mutates only its **own** resources. |
+| Owner | `owner` | Full access to every resource permission. |
+| Admin | `admin` | Same resource permissions as Owner in P0 (no member/billing/tenant split in the enforced map). |
+| Member | `member` | Read / create / execute on any resource; update & delete only on its **own** resources. |
 | Viewer | `viewer` | Read-only across the tenant. |
 
 Custom roles and granular permissions are out of scope for P0 (deferred to P2).
