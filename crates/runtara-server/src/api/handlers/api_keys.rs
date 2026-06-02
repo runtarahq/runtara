@@ -211,29 +211,38 @@ pub async fn list_api_keys(
 pub async fn revoke_api_key(
     OrgId(tenant_id): OrgId,
     State(pool): State<PgPool>,
+    State(valkey): State<Option<redis::aio::ConnectionManager>>,
     Path(id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
-    match sqlx::query(
+    let revoked = sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>)>(
         r#"
         UPDATE public.api_keys
         SET is_revoked = TRUE
         WHERE id = $1 AND org_id = $2
+        RETURNING jti, expires_at
         "#,
     )
     .bind(id)
     .bind(&tenant_id)
-    .execute(&pool)
-    .await
-    {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "API key not found"})),
-                )
-            } else {
-                (StatusCode::NO_CONTENT, Json(json!(null)))
+    .fetch_optional(&pool)
+    .await;
+
+    match revoked {
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "API key not found"})),
+        ),
+        Ok(Some((jti, expires_at))) => {
+            // Propagate the revocation to the tenant's Valkey denylist so it takes effect
+            // immediately across the contract. The DB `is_revoked` flag is the authoritative
+            // block for `rt_*` keys, so a Valkey failure here is logged, not fatal.
+            if let (Some(jti), Some(manager)) = (jti.as_deref(), valkey.as_ref()) {
+                let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
+                if let Err(e) = crate::valkey::auth::revoke_token(manager, jti, ttl).await {
+                    tracing::warn!(error = %e, "failed to write token revocation to Valkey");
+                }
             }
+            (StatusCode::NO_CONTENT, Json(json!(null)))
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

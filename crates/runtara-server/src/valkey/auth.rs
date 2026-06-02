@@ -91,6 +91,32 @@ pub async fn token_is_revoked(
     Ok(revoked)
 }
 
+/// Write a revocation entry for `jti` to the denylist.
+///
+/// `ttl_seconds` bounds the entry to the token's remaining lifetime so it self-cleans once
+/// the token would have expired anyway. `None` writes a non-expiring entry (the caller has
+/// no expiry to bound it by); `Some(0)` is a no-op — the token has already expired.
+pub async fn revoke_token(
+    manager: &ConnectionManager,
+    jti: &str,
+    ttl_seconds: Option<u64>,
+) -> Result<(), AuthzValkeyError> {
+    let mut conn = manager.clone();
+    let key = revoked_token_key(jti);
+    let value = serde_json::json!({ "revoked_at": chrono::Utc::now().to_rfc3339() }).to_string();
+    match ttl_seconds {
+        Some(0) => Ok(()),
+        Some(ttl) => {
+            let _: () = conn.set_ex(key, value, ttl).await?;
+            Ok(())
+        }
+        None => {
+            let _: () = conn.set(key, value).await?;
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

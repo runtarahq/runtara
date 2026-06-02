@@ -10,7 +10,7 @@
 
 use redis::AsyncCommands;
 use runtara_server::authz::Role;
-use runtara_server::valkey::auth::{get_member_role, token_is_revoked};
+use runtara_server::valkey::auth::{get_member_role, revoke_token, token_is_revoked};
 use runtara_server::valkey::{ValkeyConfig, get_or_create_manager};
 
 /// Skip the test if Valkey is not configured in the environment.
@@ -110,4 +110,30 @@ async fn token_is_revoked_reflects_presence() {
     );
 
     let _: () = conn.del(&key).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn revoke_token_then_seen_as_revoked() {
+    let url = redis_url_or_skip!();
+    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+
+    let jti = unique("jti");
+    assert!(
+        !token_is_revoked(&manager, &jti).await.expect("check"),
+        "not revoked before write"
+    );
+
+    revoke_token(&manager, &jti, Some(60))
+        .await
+        .expect("revoke");
+    assert!(
+        token_is_revoked(&manager, &jti).await.expect("check"),
+        "revoked after write"
+    );
+
+    let mut conn = manager.clone();
+    let _: () = conn
+        .del(format!("token:revoked:{jti}"))
+        .await
+        .expect("cleanup");
 }

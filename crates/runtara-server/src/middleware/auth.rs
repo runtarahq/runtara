@@ -7,6 +7,7 @@ use axum::{
 use serde_json::json;
 use tracing::Instrument;
 
+use crate::api::handlers::api_keys::ApiKey;
 use crate::auth::{AuthContext, AuthMethod, AuthState, MembershipPolicy};
 use crate::authz::Role;
 use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
@@ -35,10 +36,18 @@ pub async fn authenticate(
 
     // Fast path: RUNTARA-issued API key. Works in every provider mode.
     if let Some(token) = api_key_token(request.headers()) {
-        let auth_context = match validate_api_key(token, &auth_state).await {
-            Ok(ctx) => ctx,
+        let api_key = match validate_api_key(token, &auth_state).await {
+            Ok(key) => key,
             Err(response) => return response,
         };
+        let mut auth_context = api_key_context(&api_key);
+        // SYN-437: the key inherits the issuing user's current role from Valkey and is
+        // subject to the same revocation denylist.
+        if let Err(response) =
+            enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
+        {
+            return response;
+        }
         let span = auth_span(&auth_context);
         request.extensions_mut().insert(auth_context);
         return next.run(request).instrument(span).await;
@@ -94,24 +103,94 @@ fn api_key_token(headers: &axum::http::HeaderMap) -> Option<&str> {
     }
 }
 
-/// Validate an API key token via the local database.
-async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<AuthContext, Response> {
+/// Validate an API key token via the local database, returning the key row.
+async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey, Response> {
     use sha2::Digest;
     let key_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
 
-    let api_key =
-        crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash)
-            .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "API key validation failed");
-                unauthorized("Invalid or expired API key")
-            })?;
+    crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "API key validation failed");
+            unauthorized("Invalid or expired API key")
+        })
+}
 
-    Ok(AuthContext::new(
-        api_key.org_id,
-        "api-key".to_string(),
-        AuthMethod::ApiKey,
-    ))
+/// Build the `AuthContext` for an API-key request. The key acts as its issuing user — role
+/// and resource ownership inherit from them — so `user_id` is the issuing user's `sub`.
+/// Legacy rows without an issuing user keep the synthetic `"api-key"` identity.
+fn api_key_context(key: &ApiKey) -> AuthContext {
+    let user_id = key
+        .issuing_user_id
+        .clone()
+        .unwrap_or_else(|| "api-key".to_string());
+    let mut ctx = AuthContext::new(key.org_id.clone(), user_id, AuthMethod::ApiKey);
+    ctx.jti = key.jti.clone();
+    ctx
+}
+
+/// Apply membership + revocation to an API-key request, attaching the inherited role.
+///
+/// Mirrors [`enforce_membership`] for JWTs but sources `jti`/`issuing_user_id` from the key
+/// row. Legacy rows (no `issuing_user_id`) predate the contract and keep their existing
+/// unrestricted behavior until rotated or expired.
+async fn enforce_api_key_membership(
+    auth_state: &AuthState,
+    api_key: &ApiKey,
+    ctx: &mut AuthContext,
+) -> Result<(), Response> {
+    if auth_state.membership_policy == MembershipPolicy::Disabled {
+        return Ok(());
+    }
+    let Some(issuing_user_id) = api_key.issuing_user_id.as_deref() else {
+        return Ok(());
+    };
+
+    match resolve_api_key_membership(auth_state, api_key.jti.as_deref(), issuing_user_id).await {
+        Ok(role) => {
+            ctx.role = role;
+            Ok(())
+        }
+        Err(denial) => {
+            let enforced = auth_state.membership_policy == MembershipPolicy::Required;
+            denial.log(ctx, enforced);
+            if enforced {
+                Err(denial.into_response())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Check the revocation denylist (when the key carries a `jti`) then read the issuing user's
+/// role. Unlike the JWT path, a missing `jti` is not itself a denial — legacy keys may lack
+/// one — but a present-and-revoked `jti` is.
+async fn resolve_api_key_membership(
+    auth_state: &AuthState,
+    jti: Option<&str>,
+    issuing_user_id: &str,
+) -> Result<Option<Role>, MembershipDenial> {
+    let Some(manager) = auth_state.valkey.as_ref() else {
+        return Err(MembershipDenial::ValkeyUnavailable(
+            "Valkey not configured".to_string(),
+        ));
+    };
+
+    if let Some(jti) = jti {
+        match token_is_revoked(manager, jti).await {
+            Ok(true) => return Err(MembershipDenial::TokenRevoked),
+            Ok(false) => {}
+            Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
+        }
+    }
+
+    match get_member_role(manager, issuing_user_id).await {
+        Ok(Some(role)) => Ok(Some(role)),
+        Ok(None) => Err(MembershipDenial::NotAMember),
+        Err(AuthzValkeyError::Parse(detail)) => Err(MembershipDenial::MalformedRecord(detail)),
+        Err(AuthzValkeyError::Redis(e)) => Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
+    }
 }
 
 fn unauthorized(message: &str) -> Response {
@@ -312,6 +391,23 @@ mod tests {
         ctx
     }
 
+    fn api_key_row(issuing_user_id: Option<&str>, jti: Option<&str>) -> ApiKey {
+        ApiKey {
+            id: uuid::Uuid::new_v4(),
+            org_id: "org".to_string(),
+            name: "k".to_string(),
+            key_prefix: "rt_000000000".to_string(),
+            key_hash: "hash".to_string(),
+            created_by: issuing_user_id.map(|s| s.to_string()),
+            issuing_user_id: issuing_user_id.map(|s| s.to_string()),
+            jti: jti.map(|s| s.to_string()),
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+            is_revoked: false,
+        }
+    }
+
     #[test]
     fn denial_mapping_matches_contract() {
         let cases: &[(MembershipDenial, StatusCode, &str)] = &[
@@ -392,6 +488,69 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // --- API-key enforcement (no I/O) ---
+
+    #[tokio::test]
+    async fn api_key_disabled_policy_skips() {
+        let key = api_key_row(Some("auth0|u"), Some("jti-1"));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Disabled, None);
+        assert!(
+            enforce_api_key_membership(&st, &key, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.role, None);
+    }
+
+    #[tokio::test]
+    async fn api_key_legacy_row_is_skipped() {
+        // No issuing_user_id (legacy) → no role to inherit; keep existing behavior even under
+        // Required, and the context identity falls back to "api-key".
+        let key = api_key_row(None, None);
+        let mut ctx = api_key_context(&key);
+        assert_eq!(ctx.user_id, "api-key");
+        let st = state(MembershipPolicy::Required, None);
+        assert!(
+            enforce_api_key_membership(&st, &key, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.role, None);
+    }
+
+    #[tokio::test]
+    async fn api_key_context_inherits_issuing_user() {
+        let key = api_key_row(Some("auth0|owner"), Some("jti-9"));
+        let ctx = api_key_context(&key);
+        assert_eq!(ctx.user_id, "auth0|owner");
+        assert_eq!(ctx.jti.as_deref(), Some("jti-9"));
+        assert_eq!(ctx.auth_method, AuthMethod::ApiKey);
+    }
+
+    #[tokio::test]
+    async fn api_key_logging_never_blocks() {
+        let key = api_key_row(Some("auth0|u"), Some("jti-1"));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Logging, None);
+        assert!(
+            enforce_api_key_membership(&st, &key, &mut ctx)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_required_without_valkey_fails_closed_503() {
+        let key = api_key_row(Some("auth0|u"), Some("jti-1"));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Required, None);
+        let resp = enforce_api_key_membership(&st, &key, &mut ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     // --- Live Valkey round-trips (skip cleanly without VALKEY_HOST) ---
 
     macro_rules! manager_or_skip {
@@ -464,6 +623,71 @@ mod tests {
         let mut ctx = jwt_ctx(&uid, Some(&jti));
         let st = state(MembershipPolicy::Required, Some(manager));
         let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("token:revoked:{jti}"))
+            .await
+            .expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn api_key_required_inherits_role_for_member() {
+        let manager = manager_or_skip!();
+        let uid = unique("auth0|keyuser");
+        let mut conn = manager.clone();
+        let _: () = conn
+            .set(format!("member:{uid}"), r#"{"role":"viewer"}"#)
+            .await
+            .expect("seed member");
+
+        let key = api_key_row(Some(&uid), Some(&unique("jti")));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Required, Some(manager));
+        assert!(
+            enforce_api_key_membership(&st, &key, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.role, Some(Role::Viewer));
+
+        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn api_key_required_denies_when_issuer_not_member_403() {
+        let manager = manager_or_skip!();
+        let key = api_key_row(Some(&unique("auth0|removed")), Some(&unique("jti")));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Required, Some(manager));
+        let resp = enforce_api_key_membership(&st, &key, &mut ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_key_required_denies_revoked_jti_401() {
+        let manager = manager_or_skip!();
+        let uid = unique("auth0|keyuser");
+        let jti = unique("jti");
+        let mut conn = manager.clone();
+        let _: () = conn
+            .set(format!("member:{uid}"), r#"{"role":"member"}"#)
+            .await
+            .expect("seed member");
+        let _: () = conn
+            .set(format!("token:revoked:{jti}"), r#"{"revoked_at":"x"}"#)
+            .await
+            .expect("seed revocation");
+
+        let key = api_key_row(Some(&uid), Some(&jti));
+        let mut ctx = api_key_context(&key);
+        let st = state(MembershipPolicy::Required, Some(manager));
+        let resp = enforce_api_key_membership(&st, &key, &mut ctx)
+            .await
+            .unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
         let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
