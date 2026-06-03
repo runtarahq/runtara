@@ -9,7 +9,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moka::future::Cache;
 use runtara_object_store::{ObjectStore, ObjectStoreError, PoolConfig, StoreConfig};
@@ -44,6 +44,22 @@ fn build_cache(capacity: u64, ttl: Duration) -> Cache<StoreKey, Arc<ObjectStore>
         .max_capacity(capacity)
         .time_to_idle(ttl)
         .build()
+}
+
+/// Aggregate connection-pool statistics across the object-model stores
+/// (the default store plus every cached per-connection store).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ObjectModelPoolStats {
+    /// Number of distinct store pools (default + cached).
+    pub pools: u64,
+    /// Total connections currently established across all pools.
+    pub connections: u64,
+    /// Idle (pooled, ready-to-hand-out) connections.
+    pub idle: u64,
+    /// In-use connections (`connections - idle`).
+    pub active: u64,
+    /// Approximate aggregate capacity (`pools * max_connections`).
+    pub capacity: u64,
 }
 
 // ============================================================================
@@ -124,14 +140,31 @@ impl ObjectStoreManager {
         database_url: String,
     ) -> Result<Arc<ObjectStore>, ObjectStoreError> {
         let pool_config = self.pool_config.clone();
+        // try_get_with is single-flight: this closure runs only on a cache miss —
+        // exactly when we pay a (potentially cross-cloud) cold connect.
+        let log_key = key.clone();
         self.stores
             .try_get_with(key, async move {
+                let start = Instant::now();
                 let config = StoreConfig::builder(&database_url)
                     .soft_delete(crate::config::object_model_soft_delete())
                     .bulk_request_limit(crate::config::object_model_bulk_request_limit())
                     .pool(pool_config)
                     .build();
-                ObjectStore::new(config).await.map(Arc::new)
+                let result = ObjectStore::new(config).await.map(Arc::new);
+                match &result {
+                    Ok(_) => tracing::info!(
+                        key = ?log_key,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "built object-model store pool (cold connect)"
+                    ),
+                    Err(error) => tracing::warn!(
+                        key = ?log_key,
+                        %error,
+                        "failed to build object-model store pool"
+                    ),
+                }
+                result
             })
             .await
             .map_err(|e: Arc<ObjectStoreError>| {
@@ -184,6 +217,27 @@ impl ObjectStoreManager {
         } else {
             Some(&self.database_url)
         }
+    }
+
+    /// Snapshot aggregate connection-pool stats across the default + cached
+    /// stores. Cheap; intended for a periodic monitor.
+    pub fn pool_stats(&self) -> ObjectModelPoolStats {
+        let mut stats = ObjectModelPoolStats::default();
+        if let Some(store) = &self.default_store {
+            let pool = store.pool();
+            stats.pools += 1;
+            stats.connections += pool.size() as u64;
+            stats.idle += pool.num_idle() as u64;
+        }
+        for (_key, store) in self.stores.iter() {
+            let pool = store.pool();
+            stats.pools += 1;
+            stats.connections += pool.size() as u64;
+            stats.idle += pool.num_idle() as u64;
+        }
+        stats.active = stats.connections.saturating_sub(stats.idle);
+        stats.capacity = stats.pools * self.pool_config.max_connections as u64;
+        stats
     }
 }
 
