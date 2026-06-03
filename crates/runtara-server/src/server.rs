@@ -762,9 +762,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Per-tenant Valkey membership enforcement policy (SYN-437). Built here, after the
+    // Per-tenant Valkey membership enforcement policy. Built here, after the
     // shared manager, so the policy default can see whether Valkey is actually configured.
-    // The auth middleware consumes both in a later phase; for now they just ride AuthState.
+    // The auth middleware consumes both; they ride on AuthState.
     let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
     println!("✓ Auth membership policy: {}", membership_policy.as_str());
 

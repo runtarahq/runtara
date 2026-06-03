@@ -2,12 +2,12 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 
 use super::JwtConfig;
 
-/// The Auth0 custom-claim namespace runtara normalizes from (Phase 1.6b).
+/// The Auth0 custom-claim namespace runtara normalizes from.
 ///
 /// Auth0 strips non-namespaced custom claims depending on audience config, so the Action may
 /// emit `org_id` only as `https://runtara.io/org_id`. runtara owns normalization and accepts
 /// both shapes; this is the documented prefix the `#[serde(alias = ...)]` attributes on
-/// [`Claims`] use. It MUST match whatever the Auth0 Action emits (coordinated in Phase 4).
+/// [`Claims`] use. It MUST match whatever the Auth0 Action emits.
 /// serde aliases require string literals, so the prefix is repeated in the attributes below;
 /// the `normalizes_namespaced_claims` test builds its keys from this const to guard against
 /// the two drifting apart.
@@ -20,7 +20,7 @@ pub const CLAIM_NAMESPACE: &str = "https://runtara.io/";
 /// custom claims depending on the audience configuration, so we cannot assume one shape.
 /// runtara owns normalization: each custom claim carries a `#[serde(alias = ...)]` for the
 /// namespaced key so the rest of the code only ever reads the raw field name. The namespace
-/// prefix below MUST match whatever the Auth0 Action emits (coordinated in Phase 4).
+/// prefix below MUST match whatever the Auth0 Action emits.
 ///
 /// Standard registered claims (`sub`, `iss`, `exp`, `aud`) are never namespaced by Auth0
 /// and have no alias. See `docs/security/user-management-contracts.md` for the full

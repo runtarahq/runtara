@@ -1,4 +1,4 @@
--- SYN-437: runtara-local audit log.
+-- runtara-local audit log.
 --
 -- runtara records audit events (workflow/connection/token mutations, permission denials,
 -- ...) into this per-tenant table; smo-management later ingests them into the unified audit

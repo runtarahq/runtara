@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Round-trip tests for the SYN-437 Valkey auth-contract client
+//! Round-trip tests for the Valkey auth-contract client
 //! (`valkey::auth::{get_member_role, token_is_revoked}`).
 //!
 //! These need a live Valkey/Redis. They use `VALKEY_HOST` (and friends) in the same shape

@@ -20,8 +20,8 @@ pub struct JwtConfig {
     pub jwks_uri: String,
     pub issuer: String,
     pub audience: Option<String>,
-    /// When true, a JWT without a `jti` claim is rejected. Off during rollout (Stage 0),
-    /// flipped on once the Auth0 Action emits `jti` on every token (Stage 1). Driven by
+    /// When true, a JWT without a `jti` claim is rejected. Off during rollout before the
+    /// Auth0 Action emits `jti`, flipped on once every token carries it. Driven by
     /// `RUNTARA_AUTH_REQUIRE_JTI`. See `docs/security/user-management-contracts.md`.
     pub require_jti: bool,
 }
@@ -34,7 +34,7 @@ pub struct AuthContext {
     pub auth_method: AuthMethod,
     /// Caller's role in this tenant. `None` outside SaaS enforcement — non-JWT modes,
     /// trusted internal calls, and the rollout transition before the Valkey membership
-    /// lookup (Phase 1.7) populates it. JWTs never carry the role; it is read from the
+    /// lookup populates it. JWTs never carry the role; it is read from the
     /// per-tenant Valkey `member:{sub}` entry.
     pub role: Option<Role>,
     /// Token identity (`jti` claim / API-key token id). Key for the revocation denylist.
@@ -75,21 +75,19 @@ pub enum AuthMethod {
     Unauthenticated,
 }
 
-/// How runtara treats the per-tenant Valkey membership/revocation lookup (SYN-437).
+/// How runtara treats the per-tenant Valkey membership/revocation lookup.
 ///
 /// One env var (`RUNTARA_AUTH_MEMBERSHIP_POLICY=disabled|logging|required`) is the only
-/// switch; the rollout moves it `Disabled` → `Logging` → `Required`. The middleware that
-/// consumes this lands in Phase 1.7; this phase only wires the policy and the Valkey handle
-/// into [`AuthState`].
+/// switch; the rollout moves it `Disabled` → `Logging` → `Required`. The auth middleware
+/// consumes it; [`AuthState`] carries the policy and the Valkey handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MembershipPolicy {
     /// No Valkey lookup at all — `local` mode, or dev with no Valkey configured.
     Disabled,
     /// Look up membership + token revocation and log what would be denied, but never block.
-    /// Stage 0 rollout posture.
+    /// The initial observe-only rollout posture.
     Logging,
     /// Fail closed on missing membership, a revoked token, or an unreachable Valkey.
-    /// Stage 2+.
     Required,
 }
 

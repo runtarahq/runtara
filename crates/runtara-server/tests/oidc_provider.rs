@@ -269,7 +269,7 @@ async fn accepts_token_with_jti_when_required() {
 
 #[tokio::test]
 async fn accepts_token_without_jti_when_not_required() {
-    // Stage 0 rollout posture: jti not yet emitted by Auth0, so a token without it must
+    // Early rollout posture: jti not yet emitted by Auth0, so a token without it must
     // still authenticate.
     let idp = TestIdp::start().await;
     let provider = build_provider_with_jti(&idp, "org_123", false).await;

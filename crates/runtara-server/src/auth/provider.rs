@@ -124,8 +124,8 @@ impl AuthProviders {
         let issuer = std::env::var("OAUTH2_ISSUER").expect("OAUTH2_ISSUER must be set");
         let api_audience = std::env::var("OAUTH2_AUDIENCE").ok();
         let mcp_audience = std::env::var("OAUTH2_MCP_AUDIENCE").ok();
-        // Off during rollout (Stage 0); flipped on once the Auth0 Action emits `jti` on
-        // every token (Stage 1). See docs/security/user-management-contracts.md.
+        // Off during rollout before the Auth0 Action emits `jti`; flipped on once every
+        // token carries it. See docs/security/user-management-contracts.md.
         let require_jti = std::env::var("RUNTARA_AUTH_REQUIRE_JTI")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);

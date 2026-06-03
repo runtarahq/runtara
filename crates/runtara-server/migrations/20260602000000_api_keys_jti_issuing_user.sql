@@ -1,4 +1,4 @@
--- SYN-437: bridge runtara-local (`rt_*`) API keys onto the user-management contract.
+-- Bridge runtara-local (`rt_*`) API keys onto the user-management contract.
 --
 -- `jti` is the token identity used as the revocation-denylist key (`token:revoked:{jti}`
 -- in the tenant Valkey). `issuing_user_id` is the Auth0 `sub` of the user who created the

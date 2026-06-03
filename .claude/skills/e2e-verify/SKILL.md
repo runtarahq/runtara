@@ -64,7 +64,7 @@ cargo component build --release --target wasm32-wasip2 -p runtara-agent-<id>
 cargo run -p runtara-agent-bundle-emit --bin emit-meta -- target/wasm32-wasip2/release
 ```
 
-> The compiled workflow is self-contained (the agent components are composed in), so the **server** does not need the components dir at runtime — only the compiler (step 5) does.
+> The compiled workflow is self-contained (the agent components are composed in), so the **server** does not need the components dir at runtime — only the compiler invoked from the cargo suites (step 4) does, via `RUNTARA_AGENT_COMPONENTS_DIR`.
 
 ### 3. Create separate test DBs
 
@@ -76,7 +76,30 @@ psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_test;"    # core + environment
 psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_server;"  # server tables
 ```
 
-### 4. Start the server (coexisting with a running dev server)
+### 4. Run the in-process e2e suite
+
+The modern compile→register→execute path lives inside two CI-gated cargo test suites in `runtara-workflows`. They drive the same components-mode compiler that the old `runtara-compile` CLI did, then execute the produced WASM in-process. ~35 tests in ~55s, including a 41-case execution smoke.
+
+```bash
+RUNTARA_RUN_DIRECT_WASM_E2E=1 \
+RUNTARA_AGENT_COMPONENTS_DIR=/Users/dmytro/Workspace/runtara/target/wasm32-wasip2/release \
+  cargo test -p runtara-workflows \
+  --test direct_wasm_execute \
+  --test validation_integration_test \
+  -- --nocapture --test-threads=1
+```
+
+Without `RUNTARA_RUN_DIRECT_WASM_E2E=1` the tests are gated out — they show as `ok. 0 passed; 0 ignored` and prove nothing. `RUNTARA_AGENT_COMPONENTS_DIR` must point at the directory step 2 produced.
+
+For agent / capability changes: read the assertions in `crates/runtara-workflows/tests/direct_wasm_execute.rs` (and any new tests you added) to confirm the output reflects the logic you added, not a stale cached binary. If you added a new agent or capability, add a case that exercises it.
+
+## Manual HTTP-driven path (for object-model/SQL features)
+
+The HTTP-server-driven path is still required to verify object-model, trigram, FTS, and pgvector features. [e2e/run_all.sh](../../../e2e/run_all.sh) wraps the SQL/search tests; run it after the in-process suite passes.
+
+To drive a single workflow against a live server manually:
+
+### Start the server (coexisting with a running dev server)
 
 Every port is configurable, and a running dev `runtara-server` already holds the defaults — `RUNTARA_CORE_PORT` (8001), `RUNTARA_ENVIRONMENT_PORT` (8002), `RUNTARA_CORE_HTTP_PORT` (8003), `RUNTARA_ENV_HTTP_PORT` (8004), plus `SERVER_PORT` (control API) and `INTERNAL_PORT`. Shift the e2e server into the 17xxx/18xxx range so the two don't collide. The server **auto-loads `.env`** (`dotenvy`), so override every DB URL and port inline or it will point at the dev DB.
 
@@ -99,22 +122,9 @@ Health, image upload, and `runtara-ctl` all talk to **`RUNTARA_ENV_HTTP_PORT`** 
 
 > **Stopping the e2e server — never kill the dev one.** Target the PID bound to *your* e2e port, e.g. `kill $(lsof -ti tcp:18004)`. Don't `pkill runtara-server` (that takes down the dev server too).
 
-### 5. Compile a workflow
+### Drive a workflow with runtara-ctl
 
-The id flag is `--workflow-id` (the `--workflow` flag is the JSON *path*). There is no `RUNTARA_LTO` knob in components-mode.
-
-```bash
-target/debug/runtara-compile \
-  --workflow e2e/workflows/simple_passthrough.json \
-  --tenant test --workflow-id passthrough \
-  --output /tmp/test_binary.wasm
-```
-
-`--emit-source <path>` writes the generated workflow source (`src/lib.rs`). The full generated crate (incl. `bindings.rs`) also lives at `$DATA_DIR/workflow-builds-components/<tenant>/<workflow-id>/<version>/` — note this is the **compiler's** `DATA_DIR` (default `.data`, *not* the server's `DATA_DIR`).
-
-### 6. Register as a WASM image
-
-`runtara-ctl register` works for small files, but the multipart upload endpoint is the reliable path for any size (it tags wasm via the `\0asm` magic byte):
+The cargo suite (step 4) is the source of truth for compile→execute. To drive a pre-built WASM image against the live server, upload it via the multipart endpoint and use `runtara-ctl` to start and observe:
 
 ```bash
 IMAGE_ID=$(curl -s -X POST "http://127.0.0.1:18004/api/v1/images/upload" \
@@ -124,11 +134,7 @@ IMAGE_ID=$(curl -s -X POST "http://127.0.0.1:18004/api/v1/images/upload" \
   -F "description=test" \
   -F "runner_type=wasm" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['image_id'])")
-```
 
-### 7. Start an instance and wait
-
-```bash
 export RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18004"
 export RUNTARA_SKIP_CERT_VERIFICATION="true"
 
@@ -137,21 +143,14 @@ INSTANCE_ID=$(target/debug/runtara-ctl start \
   --input '{"data":{"input":{"message":"hello"}}}')
 
 target/debug/runtara-ctl wait "$INSTANCE_ID" --poll 200
+target/debug/runtara-ctl status "$INSTANCE_ID" | jq '{status, output}'
 ```
 
 **Critical:** workflow input must be wrapped in a `{"data": {...}}` envelope. The compiled workflow reads `input_json.get("data")`; without the envelope, all `data.*` references resolve to `null`.
 
-### 8. Assert observable behavior
+The command is `status` (there is no `get`); it prints the full instance JSON to stdout with the result under `output` and `status == "completed"` on success.
 
-Don't stop at "instance reached `completed`". Pull the actual output and assert it matches expectation. The command is `status` (there is no `get`); it always prints the full instance JSON to stdout — the result is under the `output` key, with `status == "completed"` on success:
-
-```bash
-target/debug/runtara-ctl status "$INSTANCE_ID" | jq '{status, output}'
-```
-
-For agent / capability changes: confirm the output reflects the logic you added, not a stale cached binary.
-
-## Optional: SIGTERM / graceful shutdown
+### Optional: SIGTERM / graceful shutdown
 
 ```bash
 INSTANCE_ID=$(target/debug/runtara-ctl start \
@@ -173,16 +172,16 @@ Override grace with `RUNTARA_SHUTDOWN_GRACE_MS=5000`.
 
 | Symptom | Fix |
 |---|---|
-| Built `runtara-compile`/`runtara-ctl` but `target/debug/runtara-server` is missing/stale | `--bin` is a global filter — build the server with its own `cargo build -p runtara-server --bin runtara-server` (step 1) |
+| `cargo build` errors `no bin target named runtara-compile` | The standalone CLI was removed — drop it from your build command and run the in-process suite (step 4) |
+| Built `runtara-ctl` but `target/debug/runtara-server` is missing/stale | `--bin` is a global filter — build the server with its own `cargo build -p runtara-server --bin runtara-server` (step 1) |
 | `agent component '<x>' missing — expected at .../runtara_agent_<x>.wasm` | Build components (step 2): `scripts/build-agent-components.sh`, or the single-agent path + `emit-meta` |
-| `--workflow-id is required` | Pass the id with `--workflow-id` — `--workflow` is the JSON path (step 5) |
-| Health/upload hit a server you didn't expect, or `Address already in use` | A dev server holds 8001–8004 / 7001–7002; shift the e2e server to 17xxx/18xxx and target `RUNTARA_ENV_HTTP_PORT` (step 4) |
-| e2e server migrates/writes the dev DB | The server auto-loads `.env`; override all three `*_DATABASE_URL` (and ports) inline (step 4) |
-| `runtara-ctl get: Unknown command` | It's `runtara-ctl status <instance_id>` now (step 8) |
-| `--emit-source` errors `No such file or directory` and the `--output` file is never written | Fixed on main (now reads `src/lib.rs`, non-fatal). On an older build, read `$DATA_DIR/workflow-builds-components/<tenant>/<workflow-id>/<version>/src/lib.rs` directly |
+| Test output shows `ok. 0 passed; 0 ignored` and finishes instantly | `RUNTARA_RUN_DIRECT_WASM_E2E` is unset — the suites are gated out. Set `RUNTARA_RUN_DIRECT_WASM_E2E=1` (step 4) |
+| Health/upload hit a server you didn't expect, or `Address already in use` | A dev server holds 8001–8004 / 7001–7002; shift the e2e server to 17xxx/18xxx and target `RUNTARA_ENV_HTTP_PORT` (manual path) |
+| e2e server migrates/writes the dev DB | The server auto-loads `.env`; override all three `*_DATABASE_URL` (and ports) inline (manual path) |
+| `runtara-ctl get: Unknown command` | It's `runtara-ctl status <instance_id>` now (manual path) |
 | `migration was previously applied but is missing` | Use separate DBs (step 3) |
 | `migration was previously applied but has been modified` | Drop and recreate both DBs |
-| `delay_in_ms: invalid type: null` | Wrap input in `{"data": {...}}` envelope (step 7) |
+| `delay_in_ms: invalid type: null` | Wrap input in `{"data": {...}}` envelope (manual path) |
 | `current package believes it's in a workspace when it's not` | Stale compile cache — `rm -rf $DATA_DIR/workflow-builds-components` and retry |
 
 ## Faster path: install-test script

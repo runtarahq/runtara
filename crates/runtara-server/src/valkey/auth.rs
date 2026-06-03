@@ -1,4 +1,4 @@
-//! Per-tenant Valkey reads for the SYN-437 auth contract.
+//! Per-tenant Valkey reads for the auth contract.
 //!
 //! runtara resolves the caller's role and token-revocation status from the tenant's Valkey
 //! on every authenticated request. This module owns those two reads; the keys and value
@@ -20,7 +20,7 @@ use redis::aio::ConnectionManager;
 use crate::authz::Role;
 
 /// Failure reading the auth contract from Valkey. The auth middleware treats any error as
-/// fail-closed (Phase 1.7); the distinction here is for logging/metrics, not policy.
+/// fail-closed; the distinction here is for logging/metrics, not policy.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthzValkeyError {
     /// The command itself failed — Valkey unreachable, timeout, wrong type, etc.

@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Round-trip tests for the SYN-437 audit emitter (`audit::emit`).
+//! Round-trip tests for the audit emitter (`audit::emit`).
 //!
 //! Need a live Postgres. Skip cleanly when neither `TEST_RUNTARA_SERVER_DATABASE_URL` nor
 //! `RUNTARA_SERVER_DATABASE_URL` is set, mirroring `invocation_cleanup_test.rs`. Run with:

@@ -41,7 +41,7 @@ pub async fn authenticate(
             Err(response) => return response,
         };
         let mut auth_context = api_key_context(&api_key);
-        // SYN-437: the key inherits the issuing user's current role from Valkey and is
+        // The key inherits the issuing user's current role from Valkey and is
         // subject to the same revocation denylist.
         if let Err(response) =
             enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
@@ -59,7 +59,7 @@ pub async fn authenticate(
         Err(e) => return e.into_http_response(),
     };
 
-    // SYN-437: resolve per-tenant membership + token revocation from Valkey, attaching the
+    // Resolve per-tenant membership + token revocation from Valkey, attaching the
     // caller's role. Governed by `membership_policy`; fails the request closed under
     // `Required`.
     if let Err(response) = enforce_membership(&auth_state, &mut auth_context).await {
@@ -75,9 +75,8 @@ pub async fn authenticate(
 /// request future so any downstream `tracing` event inherits `user_id` and
 /// `auth_method` fields. Subscribers that flatten parent-span fields onto
 /// each emitted event (JSON formatter, OTLP exporter) surface these
-/// alongside entitlement-denial warns, satisfying the Phase 6 audit
-/// requirement that denial logs identify the caller without per-line
-/// plumbing through every gate.
+/// alongside entitlement-denial warns, so denial logs identify the caller
+/// without per-line plumbing through every gate.
 fn auth_span(ctx: &AuthContext) -> tracing::Span {
     tracing::info_span!(
         "request_auth",
@@ -300,7 +299,7 @@ impl MembershipDenial {
 ///
 /// - `Disabled`: no Valkey lookup; role stays unset.
 /// - non-JWT auth (local / trust_proxy / api-key): skipped here. API-key role inheritance is
-///   a later phase.
+///   handled separately in [`enforce_api_key_membership`].
 /// - `Required`: any failure rejects the request closed.
 /// - `Logging`: failures are logged (what `Required` *would* do) but never block; a
 ///   successfully resolved role is still attached.

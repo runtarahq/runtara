@@ -3,9 +3,9 @@
 //!
 //! This map is the single source of truth for "which role can do what" (see
 //! `docs/security/user-management-contracts.md` §4). The caller's [`Role`] is read from the
-//! per-tenant Valkey `member:{sub}` entry on every authenticated request (Phase 1.7);
+//! per-tenant Valkey `member:{sub}` entry on every authenticated request;
 //! [`access_for`] then decides the [`Access`] for a given [`Permission`]. The `Own` resource
-//! check that `Access::Own` implies is enforced in Phase 2.
+//! check that `Access::Own` implies is enforced by the handler.
 //!
 //! The map is expressed per role: each [`Role`] owns a constant list of the permissions it
 //! grants and the scope of each (see [`Role::grants`]). A permission absent from a role's
@@ -57,7 +57,7 @@ pub enum Access {
     /// Permitted on any resource in the tenant.
     Allow,
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
-    /// Owner/Admin bypass the ownership check; the check itself is enforced in Phase 2.
+    /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
     Own,
     /// Never permitted.
     Deny,

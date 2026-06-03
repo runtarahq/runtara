@@ -1,4 +1,4 @@
-//! Local audit-event recording (SYN-437 Phase 1.11).
+//! Local audit-event recording.
 //!
 //! runtara writes audit events to its own per-tenant `audit_events` table; smo-management
 //! later ingests them into the unified audit log (transport TBD). The column shape is the
