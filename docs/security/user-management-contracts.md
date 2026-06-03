@@ -205,8 +205,8 @@ tenant requires it.
 | `invocation_history:read` | Allow | Allow | Allow | Allow |
 | `database:read` | Allow | Allow | Allow | Allow |
 | `database:create` | Allow | Allow | Allow | Deny |
-| `database:update` | Allow | Allow | Own | Deny |
-| `database:delete` | Allow | Allow | Own | Deny |
+| `database:update` | Allow | Allow | Allow | Deny |
+| `database:delete` | Allow | Allow | Allow | Deny |
 | `report:read` | Allow | Allow | Allow | Allow |
 | `report:create` | Allow | Allow | Allow | Deny |
 | `report:update` | Allow | Allow | Own | Deny |
@@ -217,8 +217,8 @@ tenant requires it.
 | `trigger:delete` | Allow | Allow | Own | Deny |
 | `connection:read` | Allow | Allow | Allow | Allow |
 | `connection:create` | Allow | Allow | Allow | Deny |
-| `connection:update` | Allow | Allow | Own | Deny |
-| `connection:delete` | Allow | Allow | Own | Deny |
+| `connection:update` | Allow | Allow | Allow | Deny |
+| `connection:delete` | Allow | Allow | Allow | Deny |
 | `analytics:read` | Allow | Allow | Allow | Allow |
 
 Notes:
@@ -233,7 +233,11 @@ Notes:
   open to every role, Viewer included.
 - Create and `workflow:execute` require Member or above.
 - Update/delete are `Own` for Member (own resources only; Owner/Admin bypass the
-  ownership check) and denied for Viewer.
+  ownership check) and denied for Viewer — for **workflow, trigger, and report**
+  only. `database:*` and `connection:*` have no enforceable per-row owner
+  (object-model tracks no `created_by`; connections live in a crate that does not
+  bridge the caller's identity), so their update/delete are full Allow for Member,
+  never `Own`. The complete `Own` set is exactly those six cells.
 - `connection:read` is metadata only — connection secrets are never returned by
   read endpoints.
 

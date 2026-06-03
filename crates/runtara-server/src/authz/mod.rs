@@ -58,6 +58,12 @@ pub enum Access {
     Allow,
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
     /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
+    ///
+    /// Used by exactly six cells — `workflow`, `trigger`, and `report` update/delete for
+    /// Member — the resources whose single static table carries `created_by` and whose writes
+    /// go through a server-crate handler that can capture the caller. Resources without
+    /// enforceable per-row ownership (database, connection) are flat `Allow`, never `Own`.
+    /// The complete set is pinned by `own_is_restricted_to_the_six_ownable_permissions`.
     Own,
     /// Never permitted.
     Deny,
@@ -252,7 +258,9 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (AnalyticsRead, Allow),
 ];
 
-/// Member: read + create + execute on any resource; update/delete only on own resources.
+/// Member: read + create + execute on any resource. Update/delete are `Own` (own resources
+/// only) for workflow, trigger, and report; database and connection have no enforceable
+/// per-row owner, so their update/delete are flat `Allow`.
 const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowRead, Allow),
     (WorkflowCreate, Allow),
@@ -262,8 +270,11 @@ const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (InvocationHistoryRead, Allow),
     (DatabaseRead, Allow),
     (DatabaseCreate, Allow),
-    (DatabaseUpdate, Own),
-    (DatabaseDelete, Own),
+    // Object-model rows carry no per-row owner — we do not track `created_by` for database
+    // objects — so database permissions are never `Own`. Member gets full update/delete on
+    // any object. Guarded by `no_role_has_own_for_database`.
+    (DatabaseUpdate, Allow),
+    (DatabaseDelete, Allow),
     (ReportRead, Allow),
     (ReportCreate, Allow),
     (ReportUpdate, Own),
@@ -274,8 +285,11 @@ const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (TriggerDelete, Own),
     (ConnectionRead, Allow),
     (ConnectionCreate, Allow),
-    (ConnectionUpdate, Own),
-    (ConnectionDelete, Own),
+    // Connections live in another crate that does not bridge the caller's identity, so per-row
+    // ownership is not enforceable. Like database, connection update/delete is flat `Allow` for
+    // Member for now; revisit (flip to `Own`) once the ownership bridge lands.
+    (ConnectionUpdate, Allow),
+    (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
 ];
 
@@ -381,8 +395,8 @@ mod tests {
             ),
             (Permission::DatabaseRead, [Allow, Allow, Allow, Allow]),
             (Permission::DatabaseCreate, [Allow, Allow, Allow, Deny]),
-            (Permission::DatabaseUpdate, [Allow, Allow, Own, Deny]),
-            (Permission::DatabaseDelete, [Allow, Allow, Own, Deny]),
+            (Permission::DatabaseUpdate, [Allow, Allow, Allow, Deny]),
+            (Permission::DatabaseDelete, [Allow, Allow, Allow, Deny]),
             (Permission::ReportRead, [Allow, Allow, Allow, Allow]),
             (Permission::ReportCreate, [Allow, Allow, Allow, Deny]),
             (Permission::ReportUpdate, [Allow, Allow, Own, Deny]),
@@ -393,8 +407,8 @@ mod tests {
             (Permission::TriggerDelete, [Allow, Allow, Own, Deny]),
             (Permission::ConnectionRead, [Allow, Allow, Allow, Allow]),
             (Permission::ConnectionCreate, [Allow, Allow, Allow, Deny]),
-            (Permission::ConnectionUpdate, [Allow, Allow, Own, Deny]),
-            (Permission::ConnectionDelete, [Allow, Allow, Own, Deny]),
+            (Permission::ConnectionUpdate, [Allow, Allow, Allow, Deny]),
+            (Permission::ConnectionDelete, [Allow, Allow, Allow, Deny]),
             (Permission::AnalyticsRead, [Allow, Allow, Allow, Allow]),
         ];
 
@@ -412,6 +426,63 @@ mod tests {
                 assert_eq!(
                     got, want,
                     "access_for({role:?}, {permission}) = {got:?}, contract says {want:?}"
+                );
+            }
+        }
+    }
+
+    /// `Own` is allowed for exactly six cells — workflow/trigger/report update/delete — the
+    /// resources backed by a single static table with `created_by` and a server-crate write
+    /// path. Any other `Own` (a new resource, or connection/database regaining it before the
+    /// storage layer can enforce it) fails here. Pins the whole `Own` set, both directions.
+    #[test]
+    fn own_is_restricted_to_the_six_ownable_permissions() {
+        use std::collections::BTreeSet;
+
+        let allowed: BTreeSet<&str> = [
+            "workflow:update",
+            "workflow:delete",
+            "trigger:update",
+            "trigger:delete",
+            "report:update",
+            "report:delete",
+        ]
+        .into_iter()
+        .collect();
+
+        let mut actual: BTreeSet<&str> = BTreeSet::new();
+        for role in Role::ALL {
+            for permission in Permission::ALL {
+                if access_for(role, permission) == Access::Own {
+                    actual.insert(permission.as_str());
+                }
+            }
+        }
+
+        assert_eq!(
+            actual, allowed,
+            "the set of Own-capable permissions drifted from the six ownable cells"
+        );
+    }
+
+    /// Database (object-model) rows have no per-row owner, so no role may have `Own` access to
+    /// any `Database*` permission — they are flat Allow/Deny across the four static roles.
+    /// Roles are not user-creatable, so this map is the whole story; this test fails loudly if
+    /// a future edit reintroduces object-model ownership the storage layer cannot enforce.
+    #[test]
+    fn no_role_has_own_for_database() {
+        let database_permissions = [
+            Permission::DatabaseRead,
+            Permission::DatabaseCreate,
+            Permission::DatabaseUpdate,
+            Permission::DatabaseDelete,
+        ];
+        for role in Role::ALL {
+            for permission in database_permissions {
+                assert_ne!(
+                    access_for(role, permission),
+                    Access::Own,
+                    "{role:?} must not have Own access to {permission}"
                 );
             }
         }
