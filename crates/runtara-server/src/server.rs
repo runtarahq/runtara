@@ -929,8 +929,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_model_database_url = config::object_model_database_url();
 
     println!("Connecting to object model database...");
+    let object_model_pool_config = config::object_model_pool_config();
     let object_model_pool = PgPoolOptions::new()
-        .max_connections(config::object_model_max_connections())
+        .max_connections(object_model_pool_config.max_connections)
+        .min_connections(object_model_pool_config.min_connections)
+        .acquire_timeout(object_model_pool_config.acquire_timeout)
+        .idle_timeout(object_model_pool_config.idle_timeout)
+        .max_lifetime(object_model_pool_config.max_lifetime)
+        .test_before_acquire(object_model_pool_config.test_before_acquire)
         .connect(&object_model_database_url)
         .await
         .expect("Failed to connect to object model database");
@@ -942,7 +948,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_manager = Arc::new(
         ObjectStoreManager::from_pool(object_model_pool)
             .await
-            .expect("Failed to initialize ObjectStoreManager"),
+            .expect("Failed to initialize ObjectStoreManager")
+            .with_pool_config(object_model_pool_config)
+            .with_cache_config(
+                config::object_model_pool_cache_max(),
+                config::object_model_pool_cache_ttl(),
+            ),
     );
 
     println!("✓ Object model database connected successfully");

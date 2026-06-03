@@ -3,6 +3,7 @@
 //! This module provides the main `ObjectStore` struct that manages dynamic schemas
 //! and their instances in a PostgreSQL database.
 
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
@@ -52,9 +53,25 @@ impl ObjectStore {
     /// superuser/`CREATE EXTENSION` privilege from application roles, so doing
     /// it at runtime fails even when a DBA has already installed them.
     pub async fn new(config: StoreConfig) -> Result<Self> {
-        let pool = PgPool::connect(&config.database_url).await.map_err(|e| {
-            ObjectStoreError::Connection(format!("Database connection failed: {}", e))
-        })?;
+        let connect_options = config
+            .database_url
+            .parse::<PgConnectOptions>()
+            .map_err(|e| ObjectStoreError::Connection(format!("Invalid database_url: {}", e)))?
+            .application_name("runtara-object-model")
+            .statement_cache_capacity(config.pool.statement_cache_capacity);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(config.pool.max_connections)
+            .min_connections(config.pool.min_connections)
+            .acquire_timeout(config.pool.acquire_timeout)
+            .idle_timeout(config.pool.idle_timeout)
+            .max_lifetime(config.pool.max_lifetime)
+            .test_before_acquire(config.pool.test_before_acquire)
+            .connect_with(connect_options)
+            .await
+            .map_err(|e| {
+                ObjectStoreError::Connection(format!("Database connection failed: {}", e))
+            })?;
 
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;

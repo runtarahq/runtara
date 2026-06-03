@@ -1,6 +1,7 @@
 use crate::entitlements::EntitlementSnapshot;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 const RUNTARA_MCP_ALLOWED_HOSTS_ENV: &str = "RUNTARA_MCP_ALLOWED_HOSTS";
@@ -37,6 +38,13 @@ pub struct Config {
     pub object_model_soft_delete: bool,
     /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
     pub object_model_bulk_request_limit: usize,
+    /// Connection-pool tuning for per-connection object-model PostgreSQL pools
+    /// (the cross-cloud path to customer databases) and the default pool.
+    pub object_model_pool: runtara_object_store::PoolConfig,
+    /// Max number of distinct object-model store pools kept warm (LRU cap).
+    pub object_model_pool_cache_max: u64,
+    /// Idle seconds before an unused object-model store pool is evicted.
+    pub object_model_pool_cache_ttl_secs: u64,
     /// Internal HTTP port (used to derive default service URLs).
     pub internal_port: u16,
     /// Name of the stdlib crate compiled into workflows.
@@ -118,6 +126,43 @@ impl Config {
             "OBJECT_MODEL_BULK_REQUEST_LIMIT",
             runtara_object_store::DEFAULT_BULK_REQUEST_LIMIT,
         )?;
+
+        // Per-connection pool tuning. `max_connections` defaults to the existing
+        // `OBJECT_MODEL_MAX_CONNECTIONS` so the two knobs stay consistent; an idle
+        // timeout / max lifetime of 0 disables that timeout.
+        let object_model_pool = runtara_object_store::PoolConfig {
+            max_connections: parse_u32_or(
+                "OBJECT_MODEL_POOL_MAX_CONNECTIONS",
+                object_model_max_connections,
+            )?,
+            min_connections: parse_u32_or(
+                "OBJECT_MODEL_POOL_MIN_CONNECTIONS",
+                runtara_object_store::DEFAULT_POOL_MIN_CONNECTIONS,
+            )?,
+            acquire_timeout: Duration::from_secs(parse_u64_or(
+                "OBJECT_MODEL_POOL_ACQUIRE_TIMEOUT_SECS",
+                runtara_object_store::DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS,
+            )?),
+            idle_timeout: secs_to_opt_duration(parse_u64_or(
+                "OBJECT_MODEL_POOL_IDLE_TIMEOUT_SECS",
+                runtara_object_store::DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+            )?),
+            max_lifetime: secs_to_opt_duration(parse_u64_or(
+                "OBJECT_MODEL_POOL_MAX_LIFETIME_SECS",
+                runtara_object_store::DEFAULT_POOL_MAX_LIFETIME_SECS,
+            )?),
+            test_before_acquire: parse_bool_or(
+                "OBJECT_MODEL_POOL_TEST_BEFORE_ACQUIRE",
+                runtara_object_store::DEFAULT_POOL_TEST_BEFORE_ACQUIRE,
+            )?,
+            statement_cache_capacity: parse_usize_or(
+                "OBJECT_MODEL_POOL_STMT_CACHE",
+                runtara_object_store::DEFAULT_POOL_STATEMENT_CACHE_CAPACITY,
+            )?,
+        };
+        let object_model_pool_cache_max: u64 = parse_u64_or("OBJECT_MODEL_POOL_CACHE_MAX", 256)?;
+        let object_model_pool_cache_ttl_secs: u64 =
+            parse_u64_or("OBJECT_MODEL_POOL_CACHE_TTL_SECS", 900)?;
 
         let internal_port: u16 = std::env::var("INTERNAL_PORT")
             .unwrap_or_else(|_| "7002".to_string())
@@ -209,6 +254,9 @@ impl Config {
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
+            object_model_pool,
+            object_model_pool_cache_max,
+            object_model_pool_cache_ttl_secs,
             internal_port,
             stdlib_name,
             http_proxy_url,
@@ -332,6 +380,15 @@ fn parse_usize_or(name: &'static str, default: usize) -> Result<usize, ConfigErr
             .parse()
             .map_err(|_| ConfigError::Invalid(name, "must be a non-negative integer")),
         Err(_) => Ok(default),
+    }
+}
+
+/// Convert a seconds value into an optional `Duration`, treating `0` as "disabled".
+fn secs_to_opt_duration(secs: u64) -> Option<Duration> {
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
     }
 }
 
@@ -476,6 +533,21 @@ pub fn object_model_database_url() -> String {
 /// Get the maximum number of connections for the object model database pool.
 pub fn object_model_max_connections() -> u32 {
     get().object_model_max_connections
+}
+
+/// Connection-pool tuning for per-connection object-model PostgreSQL pools.
+pub fn object_model_pool_config() -> runtara_object_store::PoolConfig {
+    get().object_model_pool.clone()
+}
+
+/// Maximum number of distinct object-model store pools kept warm (LRU cap).
+pub fn object_model_pool_cache_max() -> u64 {
+    get().object_model_pool_cache_max
+}
+
+/// Idle TTL after which an unused object-model store pool is evicted.
+pub fn object_model_pool_cache_ttl() -> std::time::Duration {
+    std::time::Duration::from_secs(get().object_model_pool_cache_ttl_secs)
 }
 
 /// Whether the object model uses soft delete.
