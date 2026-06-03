@@ -148,6 +148,13 @@ self-evicting, and race-free.
 - **Eviction:** idle-TTL (evict pools unused for ~15 min, closing their `PgPool` when
   the last `Arc` drops) + LRU cap on total cached pools. This bounds file descriptors
   and Azure-side connection slots — the current map never shrinks.
+- **Negative cache (fast-fail a dead DB):** a successful build is cached; a *failed*
+  build (unreachable / down customer DB) is remembered in a separate short-TTL cache
+  (~5s) so subsequent requests fast-fail instead of re-attempting a slow cross-cloud
+  connect on every call. The entry expires automatically, so one request then retries
+  and recovery is hands-off. Only the build/first-connect path is covered; a store that
+  built fine and later breaks stays cached and is bounded per-request by `acquire_timeout`
+  (sqlx keeps the pool rather than rebuilding).
 
 **Implementation choice (see [§12](#12-open-decisions)):** use the `moka` async cache
 (`moka::future::Cache` gives `time_to_idle`, `max_capacity`, and `get_with`

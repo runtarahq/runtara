@@ -46,6 +46,21 @@ fn build_cache(capacity: u64, ttl: Duration) -> Cache<StoreKey, Arc<ObjectStore>
         .build()
 }
 
+/// How long a failed pool build is remembered so repeated requests to a
+/// dead/unreachable database fast-fail instead of re-attempting a (potentially
+/// slow, cross-cloud) connect on every call. After this window one request is
+/// allowed to retry, so recovery is automatic. Kept short on purpose.
+const DEFAULT_STORE_FAILURE_TTL: Duration = Duration::from_secs(5);
+/// Bound on the number of remembered build failures.
+const STORE_FAILURE_CACHE_CAPACITY: u64 = 1024;
+
+fn build_failure_cache() -> Cache<StoreKey, String> {
+    Cache::builder()
+        .max_capacity(STORE_FAILURE_CACHE_CAPACITY)
+        .time_to_live(DEFAULT_STORE_FAILURE_TTL)
+        .build()
+}
+
 /// Aggregate connection-pool statistics across the object-model stores
 /// (the default store plus every cached per-connection store).
 #[derive(Debug, Default, Clone, Copy)]
@@ -82,6 +97,9 @@ pub struct ObjectStoreManager {
     database_url: String,
     /// Pool tuning applied to every store this manager builds.
     pool_config: PoolConfig,
+    /// Short-lived negative cache of failed builds (keyed like `stores`) so a
+    /// dead database fast-fails instead of cold-connecting on every request.
+    failures: Cache<StoreKey, String>,
 }
 
 impl ObjectStoreManager {
@@ -96,6 +114,7 @@ impl ObjectStoreManager {
             default_store: None,
             database_url,
             pool_config: PoolConfig::default(),
+            failures: build_failure_cache(),
         }
     }
 
@@ -130,6 +149,7 @@ impl ObjectStoreManager {
             default_store: Some(Arc::new(store)),
             database_url: String::new(), // Not used in pool mode
             pool_config: PoolConfig::default(),
+            failures: build_failure_cache(),
         })
     }
 
@@ -139,12 +159,21 @@ impl ObjectStoreManager {
         key: StoreKey,
         database_url: String,
     ) -> Result<Arc<ObjectStore>, ObjectStoreError> {
+        // Fast-fail if a recent build for this store failed (negative cache), so a
+        // dead/unreachable database doesn't trigger a cold connect on every request.
+        // The entry expires after DEFAULT_STORE_FAILURE_TTL, so recovery is automatic.
+        if let Some(cached_error) = self.failures.get(&key).await {
+            tracing::debug!(key = ?key, "object-model store in failure cooldown; fast-failing");
+            return Err(ObjectStoreError::Connection(cached_error));
+        }
+
         let pool_config = self.pool_config.clone();
         // try_get_with is single-flight: this closure runs only on a cache miss —
         // exactly when we pay a (potentially cross-cloud) cold connect.
         let log_key = key.clone();
-        self.stores
-            .try_get_with(key, async move {
+        let result = self
+            .stores
+            .try_get_with(key.clone(), async move {
                 let start = Instant::now();
                 let config = StoreConfig::builder(&database_url)
                     .soft_delete(crate::config::object_model_soft_delete())
@@ -166,10 +195,18 @@ impl ObjectStoreManager {
                 }
                 result
             })
-            .await
-            .map_err(|e: Arc<ObjectStoreError>| {
-                ObjectStoreError::Connection(format!("failed to initialize object store: {e}"))
-            })
+            .await;
+
+        match result {
+            Ok(store) => Ok(store),
+            Err(e) => {
+                let message = format!("failed to initialize object store: {e}");
+                // Remember the failure briefly so repeated requests fast-fail
+                // instead of re-attempting a cold connect to a dead database.
+                self.failures.insert(key, message.clone()).await;
+                Err(ObjectStoreError::Connection(message))
+            }
+        }
     }
 
     /// Get or create an ObjectStore for the given tenant
@@ -259,5 +296,27 @@ mod tests {
         let tenant = StoreKey::Tenant("42".to_string());
         let url = StoreKey::Url(hash_url("postgres://localhost/42"));
         assert_ne!(tenant, url);
+    }
+
+    #[tokio::test]
+    async fn negative_cache_fast_fails_a_known_bad_store() {
+        let manager = ObjectStoreManager::new(String::new());
+        let url = "postgres://user:pass@127.0.0.1:1/missing";
+        let key = StoreKey::Url(hash_url(url));
+        // Simulate a recent failed build for this store.
+        manager
+            .failures
+            .insert(key.clone(), "connection refused".to_string())
+            .await;
+        manager.failures.run_pending_tasks().await;
+        // The request fast-fails from the negative cache — no build attempt, so it
+        // does not depend on global config or a reachable database.
+        match manager.get_store_by_url(url).await {
+            Ok(_) => panic!("expected a fast-fail from the negative cache"),
+            Err(e) => assert!(
+                e.to_string().contains("connection refused"),
+                "should return the negative-cached failure, got: {e}"
+            ),
+        }
     }
 }
