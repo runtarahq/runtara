@@ -1679,6 +1679,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // itself is open. Session/JWT users on the same routes are
         // unaffected.
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),
@@ -1700,6 +1705,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 crate::middleware::tenant_auth::inject_connections_tenant_id,
             ))
             .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            // Enforce the per-route role permission map (no-op unless membership is Required).
+            .layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
             .layer(from_fn_with_state(
                 auth_state.clone(),
                 crate::middleware::auth::authenticate,
@@ -1821,6 +1830,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Reject API-key-authenticated requests when `api` is off. Lives
         // between the `database` gate (inner) and auth (outer).
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
         // Apply JWT authentication middleware to object model routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),

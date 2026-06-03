@@ -22,8 +22,8 @@
 //!   `Allow` and `Own` clear the gate here, and only `Deny` is rejected.
 
 use axum::{
-    extract::Request,
-    http::StatusCode,
+    extract::{MatchedPath, Request},
+    http::{Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
@@ -135,6 +135,255 @@ pub fn require(
                 Ok(()) => next.run(req).await,
                 Err(denial) => denial.into_response(),
             }
+        }
+        .boxed()
+    }
+}
+
+/// The permission a request requires, keyed on its HTTP method and the matched route template
+/// (e.g. `/api/runtime/workflows/{id}/delete`, with `{…}` placeholders, not a concrete path).
+///
+/// This is the single place the route → permission map lives. `None` means the route is
+/// intentionally ungated: read-only metadata (specs, step types, agent listings, the
+/// entitlements snapshot), health, and surfaces runtara does not own the authorization for
+/// (API-key management belongs to the control plane). A `None` here lets the request through —
+/// only routes with a permission can be denied.
+///
+/// Mappings worth calling out, because they are choices rather than mechanical:
+///
+/// - **Instance control** (stop/pause/resume/replay, signal/action submission, session event
+///   submit) → `workflow:execute`: driving a run is an execution capability, and Member may
+///   execute any workflow, so it stays consistent with "Member can run, Viewer cannot".
+/// - **Compile** → `workflow:execute` (not `update`): it produces a runnable image, and a
+///   Member who can execute any workflow must be able to compile any workflow to run it.
+/// - **Clone** → `workflow:create`: it produces a new workflow.
+/// - **Graph/mapping validation, preview, render, CSV/SQL read queries** → the resource's
+///   `read`: they touch no state.
+/// - **`object-model/sql/execute`** → `database:delete`: it runs arbitrary SQL, so it is gated
+///   at the most destructive write.
+/// - **Report-driven workflow-action submit** → `report:read`: it is a report-consumption
+///   interaction; the report surface, not the workflow surface, gates it.
+/// - **OAuth authorize** (a `GET`) → `connection:update`: it begins a credential change, so it
+///   must be closed to read-only Viewers despite the verb.
+///
+/// Connection routes are matched on both their full (`/api/runtime/connections/{id}`) and
+/// nest-relative (`/connections/{id}`) templates, so the gate is correct regardless of which
+/// form the nested router surfaces as the matched path.
+pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
+    use Permission::{
+        AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
+        DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
+        ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
+        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
+        WorkflowUpdate,
+    };
+
+    let m = method.as_str();
+    Some(match (m, path) {
+        // ── Workflows: read ──────────────────────────────────────────────
+        ("GET", "/api/runtime/workflows") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/{id}") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/{id}/versions") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/{id}/versions/{version}/compilation-progress") => {
+            WorkflowRead
+        }
+        ("GET", "/api/runtime/workflows/{id}/versions/{version}/schemas") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/{id}/dependencies") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/{id}/dependents") => WorkflowRead,
+        ("GET", "/api/runtime/workflows/folders") => WorkflowRead,
+        ("POST", "/api/runtime/workflows/graph/validate") => WorkflowRead,
+        ("POST", "/api/runtime/workflows/{workflowId}/validate-mappings") => WorkflowRead,
+        ("GET", "/api/runtime/steps") => WorkflowRead,
+        // ── Workflows: create ────────────────────────────────────────────
+        ("POST", "/api/runtime/workflows/create") => WorkflowCreate,
+        ("POST", "/api/runtime/workflows/{id}/clone") => WorkflowCreate,
+        // ── Workflows: update (authoring) ────────────────────────────────
+        ("POST", "/api/runtime/workflows/{id}/update") => WorkflowUpdate,
+        ("PUT", "/api/runtime/workflows/{id}/versions/{version}/graph") => WorkflowUpdate,
+        ("PUT", "/api/runtime/workflows/{id}/versions/{version}/track-events") => WorkflowUpdate,
+        ("POST", "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current") => {
+            WorkflowUpdate
+        }
+        ("PUT", "/api/runtime/workflows/folders/rename") => WorkflowUpdate,
+        ("PUT", "/api/runtime/workflows/{id}/move") => WorkflowUpdate,
+        // ── Workflows: delete ────────────────────────────────────────────
+        ("POST", "/api/runtime/workflows/{id}/delete") => WorkflowDelete,
+        // ── Workflows: execute / run control ─────────────────────────────
+        ("POST", "/api/runtime/workflows/{id}/versions/{version}/compile") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/execute") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/chat") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/chat/start") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/sessions") => WorkflowExecute,
+        ("POST", "/api/runtime/sessions/{sessionId}/events") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/schedule") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/instances/{instanceId}/stop") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/instances/{instanceId}/pause") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/instances/{instanceId}/resume") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/instances/{instanceId}/replay") => WorkflowExecute,
+        (
+            "POST",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
+        ) => WorkflowExecute,
+        ("POST", "/api/runtime/signals/{instanceId}") => WorkflowExecute,
+        // ── Invocation history (runs, steps, events) ─────────────────────
+        ("GET", "/api/runtime/executions") => InvocationHistoryRead,
+        ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
+        ("GET", "/api/runtime/sessions/{sessionId}/pending-input") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{id}/instances") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints") => {
+            InvocationHistoryRead
+        }
+        ("GET", "/api/runtime/workflows/instances/{instanceId}") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances") => {
+            InvocationHistoryRead
+        }
+        ("GET", "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events") => {
+            InvocationHistoryRead
+        }
+        ("GET", "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps") => {
+            InvocationHistoryRead
+        }
+        (
+            "GET",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+        ) => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input") => {
+            InvocationHistoryRead
+        }
+        ("GET", "/api/runtime/workflows/{workflowId}/actions") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions") => {
+            InvocationHistoryRead
+        }
+        // ── Analytics / metrics ──────────────────────────────────────────
+        ("GET", "/api/runtime/metrics/workflows/{workflow_id}") => AnalyticsRead,
+        ("GET", "/api/runtime/metrics/workflows/{workflow_id}/stats") => AnalyticsRead,
+        ("GET", "/api/runtime/metrics/tenant") => AnalyticsRead,
+        ("GET", "/api/runtime/analytics/system") => AnalyticsRead,
+        // ── Triggers ─────────────────────────────────────────────────────
+        ("POST", "/api/runtime/triggers") => TriggerCreate,
+        ("GET", "/api/runtime/triggers") => TriggerRead,
+        ("GET", "/api/runtime/triggers/{id}") => TriggerRead,
+        ("PUT", "/api/runtime/triggers/{id}") => TriggerUpdate,
+        ("DELETE", "/api/runtime/triggers/{id}") => TriggerDelete,
+        // ── Reports ──────────────────────────────────────────────────────
+        ("GET", "/api/runtime/reports") => ReportRead,
+        ("POST", "/api/runtime/reports") => ReportCreate,
+        ("POST", "/api/runtime/reports/validate") => ReportRead,
+        ("POST", "/api/runtime/reports/preview") => ReportRead,
+        ("GET", "/api/runtime/reports/schema") => ReportRead,
+        ("GET", "/api/runtime/reports/{report_id}") => ReportRead,
+        ("PUT", "/api/runtime/reports/{report_id}") => ReportUpdate,
+        ("DELETE", "/api/runtime/reports/{report_id}") => ReportDelete,
+        ("POST", "/api/runtime/reports/{report_id}/render") => ReportRead,
+        ("POST", "/api/runtime/reports/{report_id}/blocks/{block_id}/data") => ReportRead,
+        (
+            "POST",
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
+        ) => ReportRead,
+        ("POST", "/api/runtime/reports/{report_id}/filters/{filter_id}/options") => ReportRead,
+        (
+            "POST",
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
+        ) => ReportRead,
+        ("POST", "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query") => ReportRead,
+        ("POST", "/api/runtime/reports/{report_id}/edit") => ReportUpdate,
+        // ── Object model (database) ──────────────────────────────────────
+        ("POST", "/api/runtime/object-model/schemas") => DatabaseCreate,
+        ("GET", "/api/runtime/object-model/schemas") => DatabaseRead,
+        ("GET", "/api/runtime/object-model/schemas/{id}") => DatabaseRead,
+        ("GET", "/api/runtime/object-model/schemas/name/{name}") => DatabaseRead,
+        ("PUT", "/api/runtime/object-model/schemas/{id}") => DatabaseUpdate,
+        ("DELETE", "/api/runtime/object-model/schemas/{id}") => DatabaseDelete,
+        ("GET", "/api/runtime/object-model/instances/schema/{schema_id}") => DatabaseRead,
+        ("GET", "/api/runtime/object-model/instances/schema/name/{schema_name}") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/instances") => DatabaseCreate,
+        ("POST", "/api/runtime/object-model/instances/schema/{name}/filter") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/instances/schema/{name}/aggregate") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/sql/query") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/sql/query-one") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/sql/query-raw") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/sql/execute") => DatabaseDelete,
+        ("GET", "/api/runtime/object-model/instances/{schema_id}/{instance_id}") => DatabaseRead,
+        ("PUT", "/api/runtime/object-model/instances/{schema_id}/{instance_id}") => DatabaseUpdate,
+        ("DELETE", "/api/runtime/object-model/instances/{schema_id}/{instance_id}") => {
+            DatabaseDelete
+        }
+        ("DELETE", "/api/runtime/object-model/instances/{schema_id}/bulk") => DatabaseDelete,
+        ("POST", "/api/runtime/object-model/instances/{schema_id}/bulk") => DatabaseCreate,
+        ("PATCH", "/api/runtime/object-model/instances/{schema_id}/bulk") => DatabaseUpdate,
+        ("POST", "/api/runtime/object-model/instances/schema/{name}/export-csv") => DatabaseRead,
+        ("POST", "/api/runtime/object-model/instances/schema/{name}/import-csv/preview") => {
+            DatabaseRead
+        }
+        ("POST", "/api/runtime/object-model/instances/schema/{name}/import-csv") => DatabaseCreate,
+        // ── Connections (matched on full and nest-relative templates) ────
+        ("POST", "/api/runtime/connections") | ("POST", "/connections") => ConnectionCreate,
+        ("GET", "/api/runtime/connections") | ("GET", "/connections") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}") | ("GET", "/connections/{id}") => ConnectionRead,
+        ("PUT", "/api/runtime/connections/{id}") | ("PUT", "/connections/{id}") => ConnectionUpdate,
+        ("DELETE", "/api/runtime/connections/{id}") | ("DELETE", "/connections/{id}") => {
+            ConnectionDelete
+        }
+        ("GET", "/api/runtime/connections/operator/{operatorName}")
+        | ("GET", "/connections/operator/{operatorName}") => ConnectionRead,
+        ("GET", "/api/runtime/connections/categories") | ("GET", "/connections/categories") => {
+            ConnectionRead
+        }
+        ("GET", "/api/runtime/connections/auth-types") | ("GET", "/connections/auth-types") => {
+            ConnectionRead
+        }
+        ("GET", "/api/runtime/connections/types") | ("GET", "/connections/types") => ConnectionRead,
+        ("GET", "/api/runtime/connections/types/{integration_id}")
+        | ("GET", "/connections/types/{integration_id}") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}/oauth/authorize")
+        | ("GET", "/connections/{id}/oauth/authorize") => ConnectionUpdate,
+        ("GET", "/api/runtime/rate-limits") | ("GET", "/rate-limits") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}/rate-limit-status")
+        | ("GET", "/connections/{id}/rate-limit-status") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}/rate-limit-history")
+        | ("GET", "/connections/{id}/rate-limit-history") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}/rate-limit-timeline")
+        | ("GET", "/connections/{id}/rate-limit-timeline") => ConnectionRead,
+        // Everything else (specs, metadata, agent listings/testing, the entitlements
+        // snapshot, API-key management, health) is intentionally ungated.
+        _ => return None,
+    })
+}
+
+/// Build a `route_layer`-compatible middleware that gates every request by the permission
+/// [`permission_for`] assigns to its method + matched route. `policy` is captured at wiring
+/// time (process-global, `Copy`).
+///
+/// Reads the matched route template ([`MatchedPath`], populated by routing) and the caller's
+/// role ([`AuthContext`], populated by `authenticate`), both of which are present by the time a
+/// `route_layer` runs. A request whose route has no permission, or whose role
+/// [`require_permission`] permits, passes through; otherwise it short-circuits with
+/// `403 PERMISSION_DENIED`.
+pub fn authorize(
+    policy: MembershipPolicy,
+) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response> {
+    move |req: Request, next: Next| {
+        let role = req.extensions().get::<AuthContext>().and_then(|c| c.role);
+        let matched = req
+            .extensions()
+            .get::<MatchedPath>()
+            .map(|m| m.as_str().to_owned());
+        let method = req.method().clone();
+        async move {
+            if let Some(path) = matched.as_deref()
+                && let Some(permission) = permission_for(&method, path)
+                && let Err(denial) = require_permission(policy, role, permission)
+            {
+                tracing::warn!(
+                    permission = permission.as_str(),
+                    method = method.as_str(),
+                    matched_path = path,
+                    "authorization denied"
+                );
+                return denial.into_response();
+            }
+            next.run(req).await
         }
         .boxed()
     }
@@ -386,6 +635,267 @@ mod tests {
             )));
         let resp = app
             .oneshot(HttpRequest::post("/r").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── permission_for: the route → permission table ────────────────────────
+
+    #[test]
+    fn permission_for_maps_representative_routes() {
+        let cases: &[(Method, &str, Permission)] = &[
+            (
+                Method::GET,
+                "/api/runtime/workflows",
+                Permission::WorkflowRead,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/create",
+                Permission::WorkflowCreate,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/update",
+                Permission::WorkflowUpdate,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/delete",
+                Permission::WorkflowDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/execute",
+                Permission::WorkflowExecute,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/clone",
+                Permission::WorkflowCreate,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/versions/{version}/compile",
+                Permission::WorkflowExecute,
+            ),
+            (
+                Method::GET,
+                "/api/runtime/executions",
+                Permission::InvocationHistoryRead,
+            ),
+            (
+                Method::GET,
+                "/api/runtime/workflows/{id}/instances",
+                Permission::InvocationHistoryRead,
+            ),
+            (
+                Method::GET,
+                "/api/runtime/metrics/tenant",
+                Permission::AnalyticsRead,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/triggers",
+                Permission::TriggerCreate,
+            ),
+            (
+                Method::DELETE,
+                "/api/runtime/triggers/{id}",
+                Permission::TriggerDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/reports",
+                Permission::ReportCreate,
+            ),
+            (
+                Method::DELETE,
+                "/api/runtime/reports/{report_id}",
+                Permission::ReportDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/object-model/schemas",
+                Permission::DatabaseCreate,
+            ),
+            (
+                Method::DELETE,
+                "/api/runtime/object-model/schemas/{id}",
+                Permission::DatabaseDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/object-model/sql/execute",
+                Permission::DatabaseDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/connections",
+                Permission::ConnectionCreate,
+            ),
+            (
+                Method::DELETE,
+                "/api/runtime/connections/{id}",
+                Permission::ConnectionDelete,
+            ),
+        ];
+        for (method, path, want) in cases {
+            assert_eq!(permission_for(method, path), Some(*want), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn permission_for_is_method_sensitive_on_shared_paths() {
+        // Same path, different verb → different permission. This is the property that lets one
+        // table gate combined-method routes that a per-route layer could not.
+        assert_eq!(
+            permission_for(&Method::GET, "/api/runtime/reports"),
+            Some(Permission::ReportRead)
+        );
+        assert_eq!(
+            permission_for(&Method::POST, "/api/runtime/reports"),
+            Some(Permission::ReportCreate)
+        );
+        let schema = "/api/runtime/object-model/schemas/{id}";
+        assert_eq!(
+            permission_for(&Method::GET, schema),
+            Some(Permission::DatabaseRead)
+        );
+        assert_eq!(
+            permission_for(&Method::PUT, schema),
+            Some(Permission::DatabaseUpdate)
+        );
+        assert_eq!(
+            permission_for(&Method::DELETE, schema),
+            Some(Permission::DatabaseDelete)
+        );
+    }
+
+    #[test]
+    fn permission_for_matches_connections_on_both_path_forms() {
+        // The nested connections router may surface either the full or the nest-relative
+        // template as the matched path; both must resolve identically.
+        for path in ["/api/runtime/connections/{id}", "/connections/{id}"] {
+            assert_eq!(
+                permission_for(&Method::GET, path),
+                Some(Permission::ConnectionRead)
+            );
+            assert_eq!(
+                permission_for(&Method::DELETE, path),
+                Some(Permission::ConnectionDelete)
+            );
+        }
+        // OAuth authorize is a GET but mutates credentials → not a read.
+        assert_eq!(
+            permission_for(&Method::GET, "/connections/{id}/oauth/authorize"),
+            Some(Permission::ConnectionUpdate)
+        );
+    }
+
+    #[test]
+    fn permission_for_returns_none_for_ungated_routes() {
+        // Metadata, agent listings, API-key management, health: deliberately ungated.
+        for (method, path) in [
+            (Method::GET, "/api/runtime/agents"),
+            (Method::GET, "/api/runtime/specs/dsl"),
+            (Method::GET, "/api/runtime/entitlements"),
+            (Method::POST, "/api/runtime/api-keys"),
+            (Method::DELETE, "/api/runtime/api-keys/{id}"),
+            (Method::GET, "/health"),
+            (Method::GET, "/api/runtime/nonexistent"),
+        ] {
+            assert_eq!(permission_for(&method, path), None, "{method} {path}");
+        }
+    }
+
+    // ── authorize layer: end-to-end with a real matched path ────────────────
+
+    fn inject(
+        role: Option<Role>,
+    ) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response>
+    {
+        move |mut req: Request, next: Next| {
+            let mut ctx = AuthContext::new("tenant".into(), "auth0|u".into(), AuthMethod::Jwt);
+            ctx.role = role;
+            async move {
+                req.extensions_mut().insert(ctx);
+                next.run(req).await
+            }
+            .boxed()
+        }
+    }
+
+    /// Build an app with two real route templates gated by the `authorize` layer, with an
+    /// injected role standing in for `authenticate`.
+    fn matched_path_app(role: Option<Role>, policy: MembershipPolicy) -> Router {
+        Router::new()
+            .route("/api/runtime/workflows", get(|| async { "ok" }))
+            .route(
+                "/api/runtime/workflows/{id}/delete",
+                post(|| async { "ok" }),
+            )
+            .route_layer(from_fn(authorize(policy)))
+            .route_layer(from_fn(inject(role)))
+    }
+
+    #[tokio::test]
+    async fn authorize_denies_viewer_on_matched_write_route() {
+        let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Required);
+        let resp = app
+            .oneshot(
+                HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["permission"], "workflow:delete");
+    }
+
+    #[tokio::test]
+    async fn authorize_allows_viewer_on_matched_read_route() {
+        let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Required);
+        let resp = app
+            .oneshot(
+                HttpRequest::get("/api/runtime/workflows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authorize_allows_member_write_route_at_route_level() {
+        // workflow:delete is Own for Member → clears the route gate (ownership is checked in
+        // the handler, not here).
+        let app = matched_path_app(Some(Role::Member), MembershipPolicy::Required);
+        let resp = app
+            .oneshot(
+                HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authorize_is_dormant_under_logging() {
+        let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Logging);
+        let resp = app
+            .oneshot(
+                HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
