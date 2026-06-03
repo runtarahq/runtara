@@ -389,6 +389,39 @@ pub fn authorize(
     }
 }
 
+/// The resource-level ownership decision for an `Own`-scoped permission. This is the second
+/// half of enforcement: the route gate ([`authorize`]) lets `Own` through, then the handler
+/// loads the resource's `created_by` and calls this to decide whether the caller may act on
+/// *this specific* resource.
+///
+/// - Non-`Required` policy or `role == None` → `Ok` (enforcement dormant; mirrors
+///   [`require_permission`]).
+/// - `Access::Allow` → `Ok` (Owner/Admin, who bypass ownership entirely).
+/// - `Access::Own` → `Ok` only when `resource_owner == Some(caller_id)`. A different owner or a
+///   `None` owner (unowned legacy row, or a resource that does not exist) denies — such rows are
+///   manageable only by Owner/Admin, by design.
+/// - `Access::Deny` → denies (defense in depth; the route gate already blocks these, but a
+///   handler calling this directly must still fail closed).
+pub fn require_ownership(
+    policy: MembershipPolicy,
+    role: Option<Role>,
+    permission: Permission,
+    resource_owner: Option<&str>,
+    caller_id: &str,
+) -> Result<(), AuthzDenial> {
+    if policy != MembershipPolicy::Required {
+        return Ok(());
+    }
+    let Some(role) = role else {
+        return Ok(());
+    };
+    match access_for(role, permission) {
+        Access::Allow => Ok(()),
+        Access::Own if resource_owner == Some(caller_id) => Ok(()),
+        Access::Own | Access::Deny => Err(AuthzDenial::forbidden(permission)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +932,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── require_ownership: resource-level Own check ──────────────────────────
+
+    const REQ: MembershipPolicy = MembershipPolicy::Required;
+
+    #[test]
+    fn ownership_member_allowed_only_on_own_resource() {
+        // Member's workflow:delete is Own → may delete a workflow they created, not another's.
+        assert!(
+            require_ownership(
+                REQ,
+                Some(Role::Member),
+                Permission::WorkflowDelete,
+                Some("u1"),
+                "u1"
+            )
+            .is_ok()
+        );
+        let err = require_ownership(
+            REQ,
+            Some(Role::Member),
+            Permission::WorkflowDelete,
+            Some("u2"),
+            "u1",
+        )
+        .expect_err("Member cannot delete another user's workflow");
+        assert_eq!(err.permission(), Permission::WorkflowDelete);
+    }
+
+    #[test]
+    fn ownership_member_denied_on_unowned_or_missing_resource() {
+        // NULL owner (legacy row) or a resource that doesn't exist → Member denied; only
+        // Owner/Admin (who get Allow) can manage these.
+        assert!(
+            require_ownership(
+                REQ,
+                Some(Role::Member),
+                Permission::WorkflowUpdate,
+                None,
+                "u1"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ownership_owner_and_admin_bypass_regardless_of_creator() {
+        // Owner/Admin have Allow on update/delete → ownership never consulted.
+        for role in [Role::Owner, Role::Admin] {
+            assert!(
+                require_ownership(
+                    REQ,
+                    Some(role),
+                    Permission::WorkflowDelete,
+                    Some("someone-else"),
+                    "me"
+                )
+                .is_ok()
+            );
+            // even an unowned row:
+            assert!(
+                require_ownership(REQ, Some(role), Permission::WorkflowDelete, None, "me").is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_allow_scoped_permission_skips_owner_check() {
+        // database:delete is flat Allow for Member (no per-row owner) → ownership not consulted,
+        // even against a resource owned by someone else.
+        assert!(
+            require_ownership(
+                REQ,
+                Some(Role::Member),
+                Permission::DatabaseDelete,
+                Some("someone-else"),
+                "me"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ownership_dormant_unless_required() {
+        // Under Logging/Disabled the check never blocks, even a non-owner Member.
+        for policy in [MembershipPolicy::Disabled, MembershipPolicy::Logging] {
+            assert!(
+                require_ownership(
+                    policy,
+                    Some(Role::Member),
+                    Permission::WorkflowDelete,
+                    Some("u2"),
+                    "u1"
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_no_role_passes() {
+        // Legacy API keys / trusted internal callers (role None) are not ownership-checked.
+        assert!(require_ownership(REQ, None, Permission::WorkflowDelete, Some("u2"), "u1").is_ok());
     }
 }

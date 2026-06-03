@@ -44,6 +44,17 @@ impl TriggerRepository {
         Ok(trigger)
     }
 
+    /// The `created_by` (owner) of a trigger, for `Own`-scoped authorization. `None` when the
+    /// trigger does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(&self, id: &str) -> Result<Option<String>, sqlx::Error> {
+        let owner: Option<Option<String>> =
+            sqlx::query_scalar("SELECT created_by FROM invocation_trigger WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(owner.flatten())
+    }
+
     /// List all invocation triggers with optional tenant filtering
     pub async fn list(
         &self,

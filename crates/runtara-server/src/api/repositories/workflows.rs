@@ -150,6 +150,23 @@ impl WorkflowRepository {
         Ok(())
     }
 
+    /// The `created_by` (owner) of a workflow, for `Own`-scoped authorization. `None` when the
+    /// workflow does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let owner: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT created_by FROM workflows WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(owner.flatten())
+    }
+
     /// Get the latest version number for a workflow
     pub async fn get_latest_version(
         &self,

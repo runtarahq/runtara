@@ -91,6 +91,23 @@ impl ReportRepository {
         row_to_report(row)
     }
 
+    /// The `created_by` (owner) of a report, for `Own`-scoped authorization. `None` when the
+    /// report does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let owner: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT created_by FROM report_definitions WHERE tenant_id = $1 AND (id = $2 OR slug = $2)",
+        )
+        .bind(tenant_id)
+        .bind(id_or_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(owner.flatten())
+    }
+
     pub async fn update(
         &self,
         tenant_id: &str,

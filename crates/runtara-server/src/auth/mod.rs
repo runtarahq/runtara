@@ -3,7 +3,7 @@ pub mod jwt_validator;
 pub mod provider;
 pub mod providers;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
@@ -141,6 +141,28 @@ impl MembershipPolicy {
             MembershipPolicy::Required => "required",
         }
     }
+}
+
+/// Process-wide resolved membership policy, set once at startup. Handler-level authorization
+/// (the `Own` ownership check) reads it to know whether enforcement is active, without
+/// threading `AuthState` into every handler. The route-gate layer captures the same value at
+/// wiring time; this is the same policy, exposed for code paths that have no layer handle.
+static MEMBERSHIP_POLICY: OnceLock<MembershipPolicy> = OnceLock::new();
+
+/// Record the resolved membership policy. Called once during server start, before any request
+/// is served. A second call is ignored (the first wins).
+pub fn set_membership_policy(policy: MembershipPolicy) {
+    let _ = MEMBERSHIP_POLICY.set(policy);
+}
+
+/// The resolved membership policy. Defaults to [`MembershipPolicy::Disabled`] when unset (tests
+/// and any context that never called [`set_membership_policy`]), i.e. no enforcement — the safe
+/// default that preserves pre-enforcement behavior.
+pub fn membership_policy() -> MembershipPolicy {
+    MEMBERSHIP_POLICY
+        .get()
+        .copied()
+        .unwrap_or(MembershipPolicy::Disabled)
 }
 
 /// Shared authentication state passed to the middleware. The middleware handles the

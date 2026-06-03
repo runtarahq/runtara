@@ -766,6 +766,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // shared manager, so the policy default can see whether Valkey is actually configured.
     // The auth middleware consumes both; they ride on AuthState.
     let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
+    // Publish to the process-wide accessor so handler-level ownership checks see the same
+    // policy the route gate enforces.
+    auth::set_membership_policy(membership_policy);
     println!("✓ Auth membership policy: {}", membership_policy.as_str());
 
     let auth_state = auth::AuthState {

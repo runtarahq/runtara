@@ -188,8 +188,10 @@ pub async fn create_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -199,6 +201,24 @@ pub async fn update_workflow_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may update only workflows they created. Dormant
+    // unless membership enforcement is Required (Owner/Admin and non-SaaS modes pass).
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
     let service = WorkflowService::new(
         repository.clone(),
         connections.clone(),
@@ -305,8 +325,10 @@ pub async fn update_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -314,6 +336,23 @@ pub async fn patch_version_graph_handler(
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may edit only workflows they created.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     let warnings = match service
@@ -352,9 +391,11 @@ pub async fn patch_version_graph_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_id = %workflow_id, version = %version))]
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(pool, connections, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version = %version))]
 pub async fn toggle_track_events_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -364,6 +405,23 @@ pub async fn toggle_track_events_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may edit only workflows they created.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
@@ -564,6 +622,7 @@ pub async fn list_workflow_versions_handler(
 )]
 pub async fn delete_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -572,6 +631,23 @@ pub async fn delete_workflow_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may delete only workflows they created.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::WorkflowDelete,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
@@ -1949,9 +2025,11 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, agent_catalog), fields(workflow_id = %workflow_id, version_number = %version_number))]
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(pool, connections, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version_number = %version_number))]
 pub async fn set_current_version_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -1960,6 +2038,23 @@ pub async fn set_current_version_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may edit only workflows they created.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
     // Delegate to service
