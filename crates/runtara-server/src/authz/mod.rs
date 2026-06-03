@@ -48,6 +48,17 @@ impl Role {
             Role::Viewer => VIEWER_ACCESS,
         }
     }
+
+    /// The lowercase wire identifier (`owner`/`admin`/`member`/`viewer`), matching the serde
+    /// form and the Valkey `member:{uid}` value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Admin => "admin",
+            Role::Member => "member",
+            Role::Viewer => "viewer",
+        }
+    }
 }
 
 /// The decision the permission map yields for a `(role, permission)` pair.
@@ -59,11 +70,11 @@ pub enum Access {
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
     /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
     ///
-    /// Used by exactly six cells — `workflow`, `trigger`, and `report` update/delete for
-    /// Member — the resources whose single static table carries `created_by` and whose writes
-    /// go through a server-crate handler that can capture the caller. Resources without
+    /// Used by exactly eight cells for Member — `workflow`/`trigger`/`report` update/delete and
+    /// `api_key` read/revoke — the resources whose per-row owner (`created_by` /
+    /// `issuing_user_id`) is recorded and a server-crate handler can check it. Resources without
     /// enforceable per-row ownership (database, connection) are flat `Allow`, never `Own`.
-    /// The complete set is pinned by `own_is_restricted_to_the_six_ownable_permissions`.
+    /// The complete set is pinned by `own_is_restricted_to_the_ownable_permissions`.
     Own,
     /// Never permitted.
     Deny,
@@ -97,11 +108,14 @@ pub enum Permission {
     ConnectionUpdate,
     ConnectionDelete,
     AnalyticsRead,
+    ApiKeyRead,
+    ApiKeyCreate,
+    ApiKeyRevoke,
 }
 
 impl Permission {
     /// Every permission, in table order.
-    pub const ALL: [Permission; 23] = [
+    pub const ALL: [Permission; 26] = [
         WorkflowRead,
         WorkflowCreate,
         WorkflowUpdate,
@@ -125,6 +139,9 @@ impl Permission {
         ConnectionUpdate,
         ConnectionDelete,
         AnalyticsRead,
+        ApiKeyRead,
+        ApiKeyCreate,
+        ApiKeyRevoke,
     ];
 
     /// The colon-style wire identifier. This is the cross-service contract form — it must
@@ -154,6 +171,9 @@ impl Permission {
             Permission::ConnectionUpdate => "connection:update",
             Permission::ConnectionDelete => "connection:delete",
             Permission::AnalyticsRead => "analytics:read",
+            Permission::ApiKeyRead => "api_key:read",
+            Permission::ApiKeyCreate => "api_key:create",
+            Permission::ApiKeyRevoke => "api_key:revoke",
         }
     }
 
@@ -196,11 +216,11 @@ impl<'de> Deserialize<'de> for Permission {
 
 use Access::{Allow, Own};
 use Permission::{
-    AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
-    DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
-    ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-    TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
-    WorkflowUpdate,
+    AnalyticsRead, ApiKeyCreate, ApiKeyRead, ApiKeyRevoke, ConnectionCreate, ConnectionDelete,
+    ConnectionRead, ConnectionUpdate, DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate,
+    InvocationHistoryRead, ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate,
+    TriggerDelete, TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute,
+    WorkflowRead, WorkflowUpdate,
 };
 
 /// Owner: every permission, unconditionally.
@@ -228,6 +248,9 @@ const OWNER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
+    (ApiKeyRead, Allow),
+    (ApiKeyCreate, Allow),
+    (ApiKeyRevoke, Allow),
 ];
 
 /// Admin: same as Owner for now. Kept as a separate list so the two can diverge by editing
@@ -256,11 +279,16 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
+    (ApiKeyRead, Allow),
+    (ApiKeyCreate, Allow),
+    (ApiKeyRevoke, Allow),
 ];
 
 /// Member: read + create + execute on any resource. Update/delete are `Own` (own resources
 /// only) for workflow, trigger, and report; database and connection have no enforceable
-/// per-row owner, so their update/delete are flat `Allow`.
+/// per-row owner, so their update/delete are flat `Allow`. API keys are personal
+/// credentials: a Member reads/revokes only their own (`api_key:read`/`api_key:revoke` = `Own`,
+/// keyed on the key's `issuing_user_id`) and may create their own (`api_key:create` = `Allow`).
 const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowRead, Allow),
     (WorkflowCreate, Allow),
@@ -291,6 +319,11 @@ const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
+    // API keys are per-user: a Member reads/revokes only their own keys (keyed on
+    // `issuing_user_id`); creating a key always produces one owned by the creator.
+    (ApiKeyRead, Own),
+    (ApiKeyCreate, Allow),
+    (ApiKeyRevoke, Own),
 ];
 
 /// Viewer: read-only across the tenant.
@@ -312,6 +345,44 @@ pub fn access_for(role: Role, permission: Permission) -> Access {
         .find(|(p, _)| *p == permission)
         .map(|(_, access)| *access)
         .unwrap_or(Access::Deny)
+}
+
+/// The full role → permission map serialized for distribution. This is the JSON the
+/// `GET /api/runtime/permissions` endpoint returns — the cross-service contract smo-management
+/// and the admin UI consume so they render exactly what runtara enforces (see
+/// `docs/security/user-management-contracts.md`). Shape:
+///
+/// ```json
+/// {
+///   "version": 1,
+///   "roles": ["owner", "admin", "member", "viewer"],
+///   "permissions": {
+///     "workflow:update": { "owner": "allow", "admin": "allow", "member": "own", "viewer": "deny" },
+///     ...
+///   }
+/// }
+/// ```
+pub fn permission_map_json() -> serde_json::Value {
+    let mut permissions = serde_json::Map::new();
+    for permission in Permission::ALL {
+        let mut row = serde_json::Map::new();
+        for role in Role::ALL {
+            row.insert(
+                role.as_str().to_string(),
+                serde_json::to_value(access_for(role, permission))
+                    .expect("Access serializes to a string"),
+            );
+        }
+        permissions.insert(
+            permission.as_str().to_string(),
+            serde_json::Value::Object(row),
+        );
+    }
+    serde_json::json!({
+        "version": 1,
+        "roles": Role::ALL.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+        "permissions": permissions,
+    })
 }
 
 #[cfg(test)]
@@ -410,6 +481,9 @@ mod tests {
             (Permission::ConnectionUpdate, [Allow, Allow, Allow, Deny]),
             (Permission::ConnectionDelete, [Allow, Allow, Allow, Deny]),
             (Permission::AnalyticsRead, [Allow, Allow, Allow, Allow]),
+            (Permission::ApiKeyRead, [Allow, Allow, Own, Deny]),
+            (Permission::ApiKeyCreate, [Allow, Allow, Allow, Deny]),
+            (Permission::ApiKeyRevoke, [Allow, Allow, Own, Deny]),
         ];
 
         // Every permission is covered exactly once — adding a `Permission` variant without a
@@ -431,12 +505,13 @@ mod tests {
         }
     }
 
-    /// `Own` is allowed for exactly six cells — workflow/trigger/report update/delete — the
-    /// resources backed by a single static table with `created_by` and a server-crate write
-    /// path. Any other `Own` (a new resource, or connection/database regaining it before the
-    /// storage layer can enforce it) fails here. Pins the whole `Own` set, both directions.
+    /// `Own` is allowed for exactly eight cells — workflow/trigger/report update/delete plus
+    /// api-key read/revoke — the resources whose per-row owner (`created_by`/`issuing_user_id`)
+    /// is recorded and a server-crate path can check it. Any other `Own` (a new resource, or
+    /// connection/database regaining it before the storage layer can enforce it) fails here.
+    /// Pins the whole `Own` set, both directions.
     #[test]
-    fn own_is_restricted_to_the_six_ownable_permissions() {
+    fn own_is_restricted_to_the_ownable_permissions() {
         use std::collections::BTreeSet;
 
         let allowed: BTreeSet<&str> = [
@@ -446,6 +521,8 @@ mod tests {
             "trigger:delete",
             "report:update",
             "report:delete",
+            "api_key:read",
+            "api_key:revoke",
         ]
         .into_iter()
         .collect();
@@ -461,7 +538,7 @@ mod tests {
 
         assert_eq!(
             actual, allowed,
-            "the set of Own-capable permissions drifted from the six ownable cells"
+            "the set of Own-capable permissions drifted from the ownable cells"
         );
     }
 
@@ -484,6 +561,33 @@ mod tests {
                     Access::Own,
                     "{role:?} must not have Own access to {permission}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn permission_map_json_covers_every_cell() {
+        let map = permission_map_json();
+        assert_eq!(map["version"], 1);
+        assert_eq!(
+            map["roles"],
+            serde_json::json!(["owner", "admin", "member", "viewer"])
+        );
+
+        let perms = map["permissions"].as_object().expect("permissions object");
+        assert_eq!(perms.len(), Permission::ALL.len());
+
+        // Spot-check a representative trio against the map, and confirm the wire forms match.
+        assert_eq!(perms["workflow:update"]["member"], "own");
+        assert_eq!(perms["database:delete"]["member"], "allow");
+        assert_eq!(perms["api_key:revoke"]["viewer"], "deny");
+
+        // Every cell is present and is one of the three access strings.
+        for permission in Permission::ALL {
+            let row = &perms[permission.as_str()];
+            for role in Role::ALL {
+                let cell = row[role.as_str()].as_str().expect("access string");
+                assert!(matches!(cell, "allow" | "own" | "deny"), "{cell}");
             }
         }
     }

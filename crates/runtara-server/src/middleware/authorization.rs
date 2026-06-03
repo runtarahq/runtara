@@ -144,10 +144,10 @@ pub fn require(
 /// (e.g. `/api/runtime/workflows/{id}/delete`, with `{…}` placeholders, not a concrete path).
 ///
 /// This is the single place the route → permission map lives. `None` means the route is
-/// intentionally ungated: read-only metadata (specs, step types, agent listings, the
-/// entitlements snapshot), health, and surfaces runtara does not own the authorization for
-/// (API-key management belongs to the control plane). A `None` here lets the request through —
-/// only routes with a permission can be denied.
+/// intentionally ungated: read-only metadata (specs, step types, agent listings/metadata, the
+/// entitlements snapshot) and health. A `None` here lets the request through — only routes with
+/// a permission can be denied. The ungated set is pinned by a coverage test, so a new mutating
+/// route that forgets a mapping fails CI rather than silently opening.
 ///
 /// Mappings worth calling out, because they are choices rather than mechanical:
 ///
@@ -165,17 +165,21 @@ pub fn require(
 ///   interaction; the report surface, not the workflow surface, gates it.
 /// - **OAuth authorize** (a `GET`) → `connection:update`: it begins a credential change, so it
 ///   must be closed to read-only Viewers despite the verb.
+/// - **Agent execute / test** → `workflow:execute`: host-mediated capability I/O (possibly with
+///   a connection's credentials) is an execution capability; Viewers are denied.
+/// - **API keys** (legacy `rt_*`) → `api_key:read|create|revoke`: `read`/`revoke` are `Own` for
+///   Member, so the handlers also scope list/revoke to the caller's own keys.
 ///
 /// Connection routes are matched on both their full (`/api/runtime/connections/{id}`) and
 /// nest-relative (`/connections/{id}`) templates, so the gate is correct regardless of which
 /// form the nested router surfaces as the matched path.
 pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
     use Permission::{
-        AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
-        DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
-        ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
-        WorkflowUpdate,
+        AnalyticsRead, ApiKeyCreate, ApiKeyRead, ApiKeyRevoke, ConnectionCreate, ConnectionDelete,
+        ConnectionRead, ConnectionUpdate, DatabaseCreate, DatabaseDelete, DatabaseRead,
+        DatabaseUpdate, InvocationHistoryRead, ReportCreate, ReportDelete, ReportRead,
+        ReportUpdate, TriggerCreate, TriggerDelete, TriggerRead, TriggerUpdate, WorkflowCreate,
+        WorkflowDelete, WorkflowExecute, WorkflowRead, WorkflowUpdate,
     };
 
     let m = method.as_str();
@@ -225,6 +229,13 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
             "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
         ) => WorkflowExecute,
         ("POST", "/api/runtime/signals/{instanceId}") => WorkflowExecute,
+        // Host-mediated agent capability invocation (execute / test) runs real I/O, possibly
+        // with a connection's stored credentials — gate it like running a workflow. (The
+        // runtime's own internal calls use a separate no-auth router, so they are unaffected.)
+        ("POST", "/api/runtime/agents/{name}/capabilities/{capability_id}/execute") => {
+            WorkflowExecute
+        }
+        ("POST", "/api/runtime/agents/{name}/capabilities/{capability_id}/test") => WorkflowExecute,
         // ── Invocation history (runs, steps, events) ─────────────────────
         ("GET", "/api/runtime/executions") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
@@ -345,8 +356,14 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         | ("GET", "/connections/{id}/rate-limit-history") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/rate-limit-timeline")
         | ("GET", "/connections/{id}/rate-limit-timeline") => ConnectionRead,
-        // Everything else (specs, metadata, agent listings/testing, the entitlements
-        // snapshot, API-key management, health) is intentionally ungated.
+        // ── API keys (legacy rt_* keys) ──────────────────────────────────
+        // Personal credentials: read/revoke are Own for Member (the handlers additionally
+        // scope to the caller's own keys); create is Allow for Member.
+        ("GET", "/api/runtime/api-keys") => ApiKeyRead,
+        ("POST", "/api/runtime/api-keys") => ApiKeyCreate,
+        ("DELETE", "/api/runtime/api-keys/{id}") => ApiKeyRevoke,
+        // Everything else (specs, metadata, agent listings, the entitlements snapshot, health)
+        // is intentionally ungated.
         _ => return None,
     })
 }
@@ -420,6 +437,23 @@ pub fn require_ownership(
         Access::Own if resource_owner == Some(caller_id) => Ok(()),
         Access::Own | Access::Deny => Err(AuthzDenial::forbidden(permission)),
     }
+}
+
+/// Whether a *collection* endpoint must be narrowed to the caller's own rows. Returns `true`
+/// only when enforcement is active (`Required`) and the caller's access to `permission` is
+/// `Access::Own` — i.e. a Member listing an `Own`-scoped resource (API keys). `Allow` roles
+/// (Owner/Admin) and non-`Required` policy see everything (`false`).
+///
+/// Unlike [`require_ownership`], which denies a single-resource action, this drives a `WHERE`
+/// filter: the route gate already let the request through, so the handler narrows the result
+/// set rather than rejecting it.
+pub fn restrict_to_own(
+    policy: MembershipPolicy,
+    role: Option<Role>,
+    permission: Permission,
+) -> bool {
+    policy == MembershipPolicy::Required
+        && matches!(role.map(|r| access_for(r, permission)), Some(Access::Own))
 }
 
 #[cfg(test)]
@@ -829,17 +863,48 @@ mod tests {
 
     #[test]
     fn permission_for_returns_none_for_ungated_routes() {
-        // Metadata, agent listings, API-key management, health: deliberately ungated.
+        // Metadata, agent listings/metadata, the entitlements snapshot, health: deliberately
+        // ungated (read-only, or not authz'd by runtara).
         for (method, path) in [
             (Method::GET, "/api/runtime/agents"),
+            (Method::GET, "/api/runtime/agents/{name}"),
             (Method::GET, "/api/runtime/specs/dsl"),
             (Method::GET, "/api/runtime/entitlements"),
-            (Method::POST, "/api/runtime/api-keys"),
-            (Method::DELETE, "/api/runtime/api-keys/{id}"),
             (Method::GET, "/health"),
             (Method::GET, "/api/runtime/nonexistent"),
         ] {
             assert_eq!(permission_for(&method, path), None, "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn permission_for_gates_api_keys_and_agent_execution() {
+        // Routes the external review flagged as fail-open are now mapped.
+        let cases: &[(Method, &str, Permission)] = &[
+            (Method::GET, "/api/runtime/api-keys", Permission::ApiKeyRead),
+            (
+                Method::POST,
+                "/api/runtime/api-keys",
+                Permission::ApiKeyCreate,
+            ),
+            (
+                Method::DELETE,
+                "/api/runtime/api-keys/{id}",
+                Permission::ApiKeyRevoke,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",
+                Permission::WorkflowExecute,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
+                Permission::WorkflowExecute,
+            ),
+        ];
+        for (method, path, want) in cases {
+            assert_eq!(permission_for(method, path), Some(*want), "{method} {path}");
         }
     }
 
@@ -1036,5 +1101,89 @@ mod tests {
     fn ownership_no_role_passes() {
         // Legacy API keys / trusted internal callers (role None) are not ownership-checked.
         assert!(require_ownership(REQ, None, Permission::WorkflowDelete, Some("u2"), "u1").is_ok());
+    }
+
+    // ── restrict_to_own: collection narrowing for Own-scoped list endpoints ──
+
+    #[test]
+    fn restrict_to_own_only_for_member_own_under_required() {
+        // Member's api_key:read is Own → narrow the list to their own keys.
+        assert!(restrict_to_own(
+            REQ,
+            Some(Role::Member),
+            Permission::ApiKeyRead
+        ));
+        // Owner/Admin have Allow → see everything.
+        assert!(!restrict_to_own(
+            REQ,
+            Some(Role::Owner),
+            Permission::ApiKeyRead
+        ));
+        assert!(!restrict_to_own(
+            REQ,
+            Some(Role::Admin),
+            Permission::ApiKeyRead
+        ));
+        // Viewer has Deny (not Own) — the route gate already blocked them; no narrowing.
+        assert!(!restrict_to_own(
+            REQ,
+            Some(Role::Viewer),
+            Permission::ApiKeyRead
+        ));
+        // Dormant unless Required, and never for a role-less caller.
+        assert!(!restrict_to_own(
+            MembershipPolicy::Logging,
+            Some(Role::Member),
+            Permission::ApiKeyRead
+        ));
+        assert!(!restrict_to_own(REQ, None, Permission::ApiKeyRead));
+    }
+
+    // ── coverage guard: the known mutating routes stay gated ─────────────────
+
+    /// Regression guard for the fail-open class the external review found: every mutating
+    /// `/api/runtime/*` route we know about must resolve to a permission, not `None`. New
+    /// routes still need a `permission_for` arm, but this fails loudly if an existing mapping
+    /// is dropped. (A full router-introspection check is a heavier follow-up.)
+    #[test]
+    fn known_mutating_routes_are_all_gated() {
+        let mutating: &[(Method, &str)] = &[
+            (Method::POST, "/api/runtime/workflows/create"),
+            (Method::POST, "/api/runtime/workflows/{id}/update"),
+            (
+                Method::PUT,
+                "/api/runtime/workflows/{id}/versions/{version}/graph",
+            ),
+            (Method::POST, "/api/runtime/workflows/{id}/delete"),
+            (Method::POST, "/api/runtime/workflows/{id}/execute"),
+            (Method::POST, "/api/runtime/workflows/{id}/clone"),
+            (
+                Method::POST,
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",
+            ),
+            (
+                Method::POST,
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
+            ),
+            (Method::POST, "/api/runtime/triggers"),
+            (Method::PUT, "/api/runtime/triggers/{id}"),
+            (Method::DELETE, "/api/runtime/triggers/{id}"),
+            (Method::POST, "/api/runtime/reports"),
+            (Method::PUT, "/api/runtime/reports/{report_id}"),
+            (Method::DELETE, "/api/runtime/reports/{report_id}"),
+            (Method::POST, "/api/runtime/object-model/schemas"),
+            (Method::DELETE, "/api/runtime/object-model/schemas/{id}"),
+            (Method::POST, "/api/runtime/object-model/sql/execute"),
+            (Method::POST, "/api/runtime/connections"),
+            (Method::DELETE, "/api/runtime/connections/{id}"),
+            (Method::POST, "/api/runtime/api-keys"),
+            (Method::DELETE, "/api/runtime/api-keys/{id}"),
+        ];
+        for (method, path) in mutating {
+            assert!(
+                permission_for(method, path).is_some(),
+                "mutating route is ungated (fail-open): {method} {path}"
+            );
+        }
     }
 }

@@ -629,6 +629,13 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// The static role → permission map runtara enforces, as JSON. Unauthenticated and
+/// tenant-independent — the distribution mechanism for smo-management and the admin UI so they
+/// render exactly what runtara enforces (see `docs/security/user-management-contracts.md`).
+async fn permissions_handler() -> Json<serde_json::Value> {
+    Json(crate::authz::permission_map_json())
+}
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
@@ -1844,7 +1851,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // Create router for public/global endpoints (no tenant auth required)
-    let public_routes = Router::new().route("/health", get(health_handler));
+    let public_routes = Router::new()
+        .route("/health", get(health_handler))
+        // Unauthenticated: the permission map is static and the same for every tenant.
+        .route("/api/runtime/permissions", get(permissions_handler));
 
     // Internal API routes (called by workflow binaries, no tenant header required)
     // Runtime connection endpoint now served by runtara-connections crate
