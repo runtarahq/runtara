@@ -360,6 +360,7 @@ impl ReportService {
         &self,
         tenant_id: &str,
         mut request: CreateReportRequest,
+        created_by: &str,
     ) -> Result<ReportDto, ReportServiceError> {
         self.normalize_definition_connections(tenant_id, &mut request.definition)
             .await;
@@ -388,7 +389,7 @@ impl ReportService {
         };
 
         self.repo
-            .create(tenant_id, &report)
+            .create(tenant_id, &report, Some(created_by))
             .await
             .map_err(Into::into)
     }

@@ -89,6 +89,7 @@ pub async fn get_report(
 
 pub async fn create_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
@@ -97,7 +98,7 @@ pub async fn create_report(
     let request = parse_report_request::<CreateReportRequest>(request)?;
     let service = ReportService::new(pool, manager, connections);
 
-    match service.create_report(&tenant_id, request).await {
+    match service.create_report(&tenant_id, request, &user_id).await {
         Ok(report) => Ok((
             StatusCode::CREATED,
             Json(GetReportResponse {

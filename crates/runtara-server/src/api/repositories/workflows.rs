@@ -70,22 +70,27 @@ impl WorkflowRepository {
         &self,
         tenant_id: &str,
         workflow_id: &str,
+        created_by: Option<&str>,
     ) -> Result<(DateTime<Utc>, DateTime<Utc>), sqlx::Error> {
-        let row = sqlx::query!(
+        // Runtime query (not the `query!` macro) so adding `created_by` needs no offline
+        // sqlx cache regeneration. `created_by` is only set on insert — the ON CONFLICT
+        // branch leaves an existing owner untouched.
+        let row: (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
             r#"
-            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version)
-            VALUES ($1, $2, 0, 0)
+            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version, created_by)
+            VALUES ($1, $2, 0, 0, $3)
             ON CONFLICT (tenant_id, workflow_id) DO UPDATE
             SET updated_at = NOW()
             RETURNING created_at, updated_at
             "#,
-            tenant_id,
-            workflow_id
         )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
 
-        Ok((row.created_at, row.updated_at))
+        Ok((row.0, row.1))
     }
 
     /// Create an initial version (version 1) for a new workflow with an empty graph
@@ -1449,6 +1454,7 @@ impl WorkflowRepository {
         source_workflow_id: &str,
         new_workflow_id: &str,
         new_name: &str,
+        created_by: Option<&str>,
     ) -> Result<i32, sqlx::Error> {
         // Get the current or latest version number
         let version_to_clone = match self
@@ -1492,17 +1498,18 @@ impl WorkflowRepository {
         // Create new workflow metadata WITHOUT current_version first
         // (FK constraint requires versions to exist before setting current_version)
         // Clone starts at version 1
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO workflows (
                 tenant_id, workflow_id,
-                latest_version, version_count, created_at, updated_at
+                latest_version, version_count, created_at, updated_at, created_by
             )
-            VALUES ($1, $2, 1, 1, NOW(), NOW())
+            VALUES ($1, $2, 1, 1, NOW(), NOW(), $3)
             "#,
-            tenant_id,
-            new_workflow_id
         )
+        .bind(tenant_id)
+        .bind(new_workflow_id)
+        .bind(created_by)
         .execute(&mut *tx)
         .await?;
 

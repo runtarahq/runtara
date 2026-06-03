@@ -90,6 +90,7 @@ async fn maybe_unregister_webhook(
 )]
 pub async fn create_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Json(request): Json<CreateInvocationTriggerRequest>,
@@ -97,7 +98,10 @@ pub async fn create_invocation_trigger(
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
     let service = TriggerService::new(repository);
 
-    match service.create_trigger(request, Some(&tenant_id)).await {
+    match service
+        .create_trigger(request, Some(&tenant_id), &user_id)
+        .await
+    {
         Ok(trigger) => {
             maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
 

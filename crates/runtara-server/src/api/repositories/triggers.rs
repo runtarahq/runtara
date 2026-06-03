@@ -19,12 +19,13 @@ impl TriggerRepository {
         &self,
         request: &CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
+        created_by: Option<&str>,
     ) -> Result<InvocationTrigger, sqlx::Error> {
         let trigger = sqlx::query_as::<_, InvocationTrigger>(
             r#"
             INSERT INTO public.invocation_trigger
-                (tenant_id, workflow_id, trigger_type, active, configuration, remote_tenant_id, single_instance)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (tenant_id, workflow_id, trigger_type, active, configuration, remote_tenant_id, single_instance, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                       created_at, last_run, updated_at, remote_tenant_id, single_instance
             "#,
@@ -36,6 +37,7 @@ impl TriggerRepository {
         .bind(&request.configuration)
         .bind(&request.remote_tenant_id)
         .bind(request.single_instance)
+        .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
 

@@ -8,7 +8,6 @@
 -- unowned — only Owner/Admin (who bypass the ownership check) can manage those rows until they
 -- are recreated. ADD COLUMN of a nullable column with no default is metadata-only (no rewrite).
 
--- Workflows are stored as `scenarios` (PK: tenant_id, scenario_id).
-ALTER TABLE scenarios ADD COLUMN IF NOT EXISTS created_by TEXT;
+ALTER TABLE workflows ADD COLUMN IF NOT EXISTS created_by TEXT;
 
 ALTER TABLE invocation_trigger ADD COLUMN IF NOT EXISTS created_by TEXT;

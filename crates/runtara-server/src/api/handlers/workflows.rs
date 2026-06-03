@@ -137,6 +137,7 @@ pub struct CompileWorkflowQuery {
 #[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_name = %request.name))]
 pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -155,6 +156,7 @@ pub async fn create_workflow_handler(
             request.description,
             request.memory_tier,
             request.track_events,
+            &user_id,
         )
         .await
     {
@@ -606,6 +608,7 @@ pub async fn delete_workflow_handler(
 )]
 pub async fn clone_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -619,7 +622,7 @@ pub async fn clone_workflow_handler(
 
     // Delegate to service
     match service
-        .clone_workflow(&tenant_id, &workflow_id, &request.name)
+        .clone_workflow(&tenant_id, &workflow_id, &request.name, &user_id)
         .await
     {
         Ok((new_workflow_id, versions_cloned)) => {
