@@ -5,9 +5,10 @@
 
 use crate::api::dto::object_model::*;
 use crate::api::repositories::object_model::ObjectStoreManager;
+use moka::future::Cache;
 use runtara_connections::ConnectionsFacade;
 use runtara_object_store::ObjectStore;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
 
@@ -15,8 +16,62 @@ const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
 // Connection Resolution Helper
 // ============================================================================
 
+/// Process-wide cache of resolved object-model connection URLs.
+///
+/// Keyed by `(tenant, "c:<connection_id>" | "default:object_model")`; the value
+/// is the resolved `Option<String>` URL (`None` = no connection configured, i.e.
+/// the legacy default store). This collapses the per-request internal-DB lookup
+/// plus credential decrypt to once per TTL. The TTL is *time-to-live* (since
+/// write), so a rotated credential or deleted connection propagates within the
+/// window even for a hot key — default 60s, override with
+/// `OBJECT_MODEL_CONN_META_TTL_SECS`. Only successful resolutions are cached;
+/// errors are never cached, so a misconfiguration self-heals immediately.
+fn metadata_cache() -> &'static Cache<(String, String), Option<String>> {
+    static CACHE: OnceLock<Cache<(String, String), Option<String>>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        // Read directly (graceful default) so resolution never depends on global
+        // config being initialized.
+        let ttl_secs = std::env::var("OBJECT_MODEL_CONN_META_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(60);
+        Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(ttl_secs))
+            .build()
+    })
+}
+
+fn meta_cache_key(tenant_id: &str, connection_id: Option<&str>) -> (String, String) {
+    let conn = match connection_id {
+        Some(c) => format!("c:{c}"),
+        None => "default:object_model".to_string(),
+    };
+    (tenant_id.to_string(), conn)
+}
+
 /// Resolves a connection_id to a database URL, or returns None for default database.
+///
+/// Cached by `(tenant, connection_id)` for a short TTL (see [`metadata_cache`]) so
+/// repeated object-model requests don't re-query and re-decrypt the connection
+/// record every time.
 pub(crate) async fn resolve_database_url(
+    facade: Option<&ConnectionsFacade>,
+    connection_id: Option<&str>,
+    tenant_id: &str,
+) -> Result<Option<String>, ServiceError> {
+    let key = meta_cache_key(tenant_id, connection_id);
+    if let Some(cached) = metadata_cache().get(&key).await {
+        return Ok(cached);
+    }
+    let resolved = resolve_database_url_uncached(facade, connection_id, tenant_id).await?;
+    metadata_cache().insert(key, resolved.clone()).await;
+    Ok(resolved)
+}
+
+/// Uncached resolution: looks up the connection record and extracts its URL.
+async fn resolve_database_url_uncached(
     facade: Option<&ConnectionsFacade>,
     connection_id: Option<&str>,
     tenant_id: &str,
@@ -132,6 +187,30 @@ pub(crate) async fn get_store(
         None => manager.get_store(tenant_id).await.map_err(|e| {
             ServiceError::DatabaseError(format!("Failed to get default store: {}", e))
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meta_cache_key_distinguishes_default_from_connection() {
+        // Default (no connection) and an explicit connection must not collide.
+        assert_ne!(
+            meta_cache_key("tenant_a", None),
+            meta_cache_key("tenant_a", Some("conn_1"))
+        );
+        // Same inputs → same key (so requests hit the cache).
+        assert_eq!(
+            meta_cache_key("tenant_a", Some("c1")),
+            meta_cache_key("tenant_a", Some("c1"))
+        );
+        // Tenant is part of the key (no cross-tenant leakage).
+        assert_ne!(
+            meta_cache_key("tenant_a", Some("c1")),
+            meta_cache_key("tenant_b", Some("c1"))
+        );
     }
 }
 

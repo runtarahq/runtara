@@ -929,8 +929,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_model_database_url = config::object_model_database_url();
 
     println!("Connecting to object model database...");
+    let object_model_pool_config = config::object_model_pool_config();
     let object_model_pool = PgPoolOptions::new()
-        .max_connections(config::object_model_max_connections())
+        .max_connections(object_model_pool_config.max_connections)
+        .min_connections(object_model_pool_config.min_connections)
+        .acquire_timeout(object_model_pool_config.acquire_timeout)
+        .idle_timeout(object_model_pool_config.idle_timeout)
+        .max_lifetime(object_model_pool_config.max_lifetime)
+        .test_before_acquire(object_model_pool_config.test_before_acquire)
         .connect(&object_model_database_url)
         .await
         .expect("Failed to connect to object model database");
@@ -942,10 +948,53 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_manager = Arc::new(
         ObjectStoreManager::from_pool(object_model_pool)
             .await
-            .expect("Failed to initialize ObjectStoreManager"),
+            .expect("Failed to initialize ObjectStoreManager")
+            .with_pool_config(object_model_pool_config)
+            .with_cache_config(
+                config::object_model_pool_cache_max(),
+                config::object_model_pool_cache_ttl(),
+            ),
     );
 
     println!("✓ Object model database connected successfully");
+
+    // Spawn background task to report object-model pool stats / warn on pressure.
+    let object_model_pool_monitor = object_store_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let stats = object_model_pool_monitor.pool_stats();
+            if stats.pools == 0 {
+                continue;
+            }
+            let usage_pct = if stats.capacity > 0 {
+                (stats.active * 100) / stats.capacity
+            } else {
+                0
+            };
+            if usage_pct >= 75 {
+                tracing::warn!(
+                    pools = stats.pools,
+                    connections = stats.connections,
+                    idle = stats.idle,
+                    active = stats.active,
+                    capacity = stats.capacity,
+                    usage_pct,
+                    "Object model pools under pressure"
+                );
+            } else {
+                tracing::debug!(
+                    pools = stats.pools,
+                    connections = stats.connections,
+                    idle = stats.idle,
+                    active = stats.active,
+                    capacity = stats.capacity,
+                    "Object model pool stats"
+                );
+            }
+        }
+    });
 
     match connections_facade
         .ensure_default_connection(
