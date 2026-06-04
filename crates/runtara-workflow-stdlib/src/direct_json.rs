@@ -2237,10 +2237,25 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
     let steps: Value =
         serde_json::from_slice(steps).map_err(|err| format!("failed to parse steps: {err}"))?;
 
+    // onError handlers inject the captured error envelope at `steps.__error`
+    // (alias `steps.error`, see `error_steps`). Mirror it to the source root so
+    // references using the historically-documented bare `__error.*` / `error.*`
+    // form resolve in addition to the canonical `steps.__error.*`. Only present
+    // during onError dispatch; absent (and thus a no-op) for normal steps.
+    let error_alias = steps
+        .as_object()
+        .and_then(|map| map.get("__error"))
+        .cloned();
+
     let mut source = Map::new();
     source.insert("data".to_string(), data.clone());
     source.insert("variables".to_string(), variables.clone());
     source.insert("steps".to_string(), steps);
+
+    if let Some(error) = error_alias {
+        source.insert("__error".to_string(), error.clone());
+        source.insert("error".to_string(), error);
+    }
 
     let mut workflow_inputs = Map::new();
     workflow_inputs.insert("data".to_string(), data);
@@ -2268,21 +2283,57 @@ pub fn error_steps(step_id: &str, error: &[u8], steps: &[u8]) -> Result<Vec<u8>,
         .as_object()
         .cloned()
         .ok_or_else(|| "error steps context must be a JSON object".to_string())?;
-    let error = serde_json::from_slice::<Value>(error).unwrap_or_else(|_| {
-        serde_json::json!({
-            "message": String::from_utf8_lossy(error).to_string(),
-            "stepId": step_id,
-            "code": null,
-            "category": "unknown",
-            "severity": "error"
-        })
-    });
+    let error = parse_error_envelope(error, step_id);
 
     steps.insert("__error".to_string(), error.clone());
     steps.insert("error".to_string(), error);
 
     serde_json::to_vec(&Value::Object(steps))
         .map_err(|err| format!("failed to serialize error steps context: {err}"))
+}
+
+/// Recover a structured error envelope for the `onError` context.
+///
+/// Agent failures reach `error_steps` already wrapped by
+/// [`DirectJsonManifest::agent_error`] as
+/// `Step <id> failed: Agent <agent>::<cap>: {envelope-json}`, so a plain
+/// `from_slice` of the whole string fails and the structured `code` /
+/// `category` / `attributes` fields would be lost (handlers would only see the
+/// wrapped text under `message`). Recover them by parsing the JSON envelope
+/// embedded after the first `{` — mirroring how `why_execution_failed` unwraps
+/// the same shape — so `steps.__error.code` etc. resolve. Falls back to a
+/// synthesized envelope when there is no JSON to recover.
+fn parse_error_envelope(error: &[u8], step_id: &str) -> Value {
+    // Already a structured envelope (non-Agent failures, or a bare envelope).
+    if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(error) {
+        return ensure_step_id(Value::Object(map), step_id);
+    }
+    let text = String::from_utf8_lossy(error);
+    // Agent failures: unwrap the trailing `{...}` envelope. The wrapping prefix
+    // (`Step <id> failed: Agent <agent>::<cap>: `) never contains `{`, so the
+    // first brace is the envelope's opening brace.
+    if let Some(brace) = text.find('{')
+        && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text[brace..].trim())
+    {
+        return ensure_step_id(Value::Object(map), step_id);
+    }
+    serde_json::json!({
+        "message": text.to_string(),
+        "stepId": step_id,
+        "code": null,
+        "category": "unknown",
+        "severity": "error"
+    })
+}
+
+/// Ensure the recovered envelope always exposes `stepId` for onError handlers.
+fn ensure_step_id(mut value: Value, step_id: &str) -> Value {
+    if let Value::Object(map) = &mut value
+        && !map.contains_key("stepId")
+    {
+        map.insert("stepId".to_string(), Value::String(step_id.to_string()));
+    }
+    value
 }
 
 fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
@@ -7265,6 +7316,69 @@ mod tests {
         assert_eq!(steps["__error"]["category"], json!("unknown"));
         assert_eq!(steps["__error"]["severity"], json!("error"));
         assert_eq!(steps["error"], steps["__error"]);
+    }
+
+    #[test]
+    fn error_steps_recovers_structured_envelope_from_wrapped_agent_error() {
+        // Agent failures arrive wrapped by `agent_error` as
+        // `Step <id> failed: Agent <a>::<c>: {envelope}`. The onError context
+        // must expose the structured fields, not just the wrapped text.
+        let wrapped = br#"Step boom failed: Agent text::render-template: {"attributes":{"render_error":"invalid float literal"},"category":"permanent","code":"TEXT_TEMPLATE_RENDER_ERROR","message":"Template render error: invalid float literal","retryable":false,"severity":"error"}"#;
+        let steps = error_steps("boom", wrapped, b"{}").expect("error steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(
+            steps["__error"]["code"],
+            json!("TEXT_TEMPLATE_RENDER_ERROR")
+        );
+        assert_eq!(steps["__error"]["category"], json!("permanent"));
+        assert_eq!(
+            steps["__error"]["message"],
+            json!("Template render error: invalid float literal")
+        );
+        assert_eq!(
+            steps["__error"]["attributes"]["render_error"],
+            json!("invalid float literal")
+        );
+        assert_eq!(steps["__error"]["stepId"], json!("boom"));
+        assert_eq!(steps["error"], steps["__error"]);
+    }
+
+    #[test]
+    fn build_source_mirrors_error_context_to_root_alias() {
+        // onError dispatch injects the envelope at steps.__error / steps.error.
+        let steps = error_steps(
+            "agent",
+            br#"{"code":"BAD","message":"boom","category":"permanent"}"#,
+            b"{}",
+        )
+        .expect("error steps");
+
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        // Canonical path remains intact.
+        assert_eq!(source["steps"]["__error"]["message"], json!("boom"));
+        // Back-compat bare-root aliases mirror the canonical envelope.
+        assert_eq!(source["__error"], source["steps"]["__error"]);
+        assert_eq!(source["error"], source["steps"]["__error"]);
+
+        // A bare `__error.*` reference now resolves instead of falling to default.
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "__error.message", "default": "fallback" }),
+            &source,
+        )
+        .expect("resolve");
+        assert_eq!(resolved, json!("boom"));
+    }
+
+    #[test]
+    fn build_source_omits_error_alias_for_normal_steps() {
+        let source =
+            build_source(b"{}", b"{}", br#"{"prev":{"outputs":{"ok":true}}}"#).expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert!(source.get("__error").is_none());
+        assert!(source.get("error").is_none());
     }
 
     #[test]

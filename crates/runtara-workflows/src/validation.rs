@@ -1024,6 +1024,15 @@ pub enum ValidationWarning {
         reference: String,
         reason: String,
     },
+    /// A reference uses the bare `__error.*` root that older docs advertised.
+    /// The captured onError envelope lives at `steps.__error.*` (alias
+    /// `steps.error.*`); the runtime mirrors it to the bare root for
+    /// back-compat, but the canonical, typo-checked path is `steps.__error.*`.
+    BareErrorReference {
+        step_id: String,
+        reference_path: String,
+        suggested_path: String,
+    },
 }
 
 // ============================================================================
@@ -1203,6 +1212,17 @@ impl std::fmt::Display for ValidationWarning {
                     f,
                     "[W052] Step '{}' template references '{}': {}. This is a warning because Minijinja resolves missing values at runtime.",
                     step_id, reference, reason
+                )
+            }
+            ValidationWarning::BareErrorReference {
+                step_id,
+                reference_path,
+                suggested_path,
+            } => {
+                write!(
+                    f,
+                    "[W053] Step '{}' references the onError error context via '{}'. Use the canonical '{}' instead; the bare root still resolves for back-compat but is not typo-checked.",
+                    step_id, reference_path, suggested_path
                 )
             }
         }
@@ -1860,6 +1880,19 @@ fn validate_reference(
             reason: "empty path segment (consecutive dots)".to_string(),
         });
         return;
+    }
+
+    // The captured onError envelope is exposed at `steps.__error.*` (alias
+    // `steps.error.*`). Older docs advertised a bare `__error.*` root; the
+    // runtime still mirrors it to the source root for back-compat (see
+    // `build_source`), but the bare form bypasses step-id typo checking, so
+    // steer authors to the canonical `steps.__error.*` path.
+    if ref_path == "__error" || ref_path.starts_with("__error.") {
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path: format!("steps.{ref_path}"),
+        });
     }
 
     // Check for step references
@@ -5453,6 +5486,36 @@ mod tests {
         assert_eq!(extract_step_id_from_reference("variables.foo"), None);
         assert_eq!(extract_step_id_from_reference("inputs.data"), None);
         assert_eq!(extract_step_id_from_reference("foo.bar"), None);
+    }
+
+    #[test]
+    fn bare_error_reference_warns_with_canonical_suggestion() {
+        let steps = HashSet::new();
+        let vars = HashSet::new();
+
+        // Bare `__error.*` (the historically-documented form) warns (W053) but
+        // is not an error — the runtime mirrors it to the source root.
+        let mut bare = ValidationResult::default();
+        validate_reference("handler", "__error.message", &steps, &vars, &mut bare);
+        assert!(!bare.has_errors());
+        assert!(matches!(
+            bare.warnings.as_slice(),
+            [ValidationWarning::BareErrorReference { suggested_path, .. }]
+                if suggested_path == "steps.__error.message"
+        ));
+
+        // Canonical `steps.__error.*` does not warn (`__error` is a reserved
+        // implicit step id, so it is also not an InvalidStepReference error).
+        let mut canonical = ValidationResult::default();
+        validate_reference(
+            "handler",
+            "steps.__error.message",
+            &steps,
+            &vars,
+            &mut canonical,
+        );
+        assert!(!canonical.has_errors());
+        assert!(!canonical.has_warnings());
     }
 
     // === ValidationResult Tests ===

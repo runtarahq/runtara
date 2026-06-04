@@ -219,7 +219,9 @@ pub struct ExecutionPlanEdge {
     /// - `data.*` - Input data
     /// - `steps.<stepId>.outputs.*` - Previous step outputs
     /// - `variables.*` - Workflow variables
-    /// - `__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+    /// - `steps.__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+    ///   (alias: `steps.error.*`). The bare `__error.*` root also resolves for
+    ///   back-compat, but `steps.__error.*` is canonical and typo-checked.
     ///
     /// Example for onError routing:
     /// ```json
@@ -228,7 +230,7 @@ pub struct ExecutionPlanEdge {
     ///     "type": "operation",
     ///     "op": "EQ",
     ///     "arguments": [
-    ///       { "valueType": "reference", "value": "__error.category" },
+    ///       { "valueType": "reference", "value": "steps.__error.category" },
     ///       { "valueType": "immediate", "value": "transient" }
     ///     ]
     ///   }
