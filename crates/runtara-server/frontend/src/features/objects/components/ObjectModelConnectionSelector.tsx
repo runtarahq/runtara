@@ -82,7 +82,7 @@ export function ObjectModelConnectionSelector() {
                   selected && 'text-primary'
                 )}
               >
-                <span className="truncate">
+                <span className="truncate" title={connection.title}>
                   {connection.title}
                   {connection.defaultFor?.includes('object_model')
                     ? ' (default)'
