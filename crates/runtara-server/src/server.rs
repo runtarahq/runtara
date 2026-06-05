@@ -636,6 +636,44 @@ async fn permissions_handler() -> Json<serde_json::Value> {
     Json(crate::authz::permission_map_json())
 }
 
+/// The authenticated caller's identity + effective permissions for this tenant.
+///
+/// The role is read from the per-tenant Valkey `member:{sub}` entry (attached to
+/// [`AuthContext`] by the auth middleware) — **never** from the JWT, which doesn't carry it.
+/// `permissions` lists only what the caller may do (its role's non-`Deny` grants), with the
+/// access level (`allow`/`own`) so the SPA can show/hide controls. `role`/`permissions` are
+/// empty when membership enforcement isn't active (e.g. `local`/`trust_proxy` modes).
+/// See Phase 5 and `docs/security/user-management-contracts.md`.
+async fn me_handler(
+    axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
+) -> Json<serde_json::Value> {
+    let permissions = match auth.role {
+        Some(role) => {
+            let mut m = serde_json::Map::new();
+            for (perm, access) in role.grants() {
+                if !matches!(access, crate::authz::Access::Deny) {
+                    m.insert(
+                        perm.as_str().to_string(),
+                        serde_json::to_value(access).expect("Access serializes to a string"),
+                    );
+                }
+            }
+            serde_json::Value::Object(m)
+        }
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    Json(serde_json::json!({
+        "org_id": auth.org_id,
+        "tenant_slug": auth.tenant_slug,
+        "user_id": auth.user_id,
+        "email": auth.email,
+        "name": auth.name,
+        "role": auth.role.map(|r| r.as_str()),
+        "permissions": permissions,
+    }))
+}
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
@@ -2098,11 +2136,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(oidc_cache);
 
+    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
+    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
+    // gate, since every authenticated caller may read their own identity.
+    let me_routes = Router::new()
+        .route("/api/runtime/me", get(me_handler))
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ));
+
     let public_app = Router::new()
         .merge(tenant_routes)
         .nest("/api/runtime", connections_tenant_routes)
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
+        .merge(me_routes)
         .merge(public_routes.clone())
         .merge(event_routes)
         .merge(channel_routes)
