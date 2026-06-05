@@ -37,7 +37,17 @@ export const useAuthStore = create<AuthState>()(
   )
 );
 
-/** True if the caller may perform `permission` (access is "allow" or "own"). */
+/**
+ * True if the caller may perform `permission` (its access is "allow" or "own").
+ *
+ * When no permission set is resolved — non-OIDC modes (`local`/`trust_proxy`),
+ * membership enforcement disabled, or `/me` not yet loaded — this returns `true`
+ * so the UI does not hide controls the server would actually allow. Gating here
+ * is UX only; runtara remains the enforcement point.
+ */
 export function useHasPermission(permission: string): boolean {
-  return useAuthStore((state) => permission in state.permissions);
+  return useAuthStore((state) => {
+    if (Object.keys(state.permissions).length === 0) return true;
+    return permission in state.permissions;
+  });
 }

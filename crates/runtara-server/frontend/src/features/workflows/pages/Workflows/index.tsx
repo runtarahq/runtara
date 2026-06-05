@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router';
 import { PlusIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { Can } from '@/shared/components/Can';
 import {
   Breadcrumb,
   ConsoleToolbar,
@@ -185,12 +186,14 @@ export function Workflows() {
         />
       }
       actions={
-        <Link to="/workflows/create">
-          <Button disabled={isError}>
-            <PlusIcon className="mr-2 h-4 w-4" />
-            New workflow
-          </Button>
-        </Link>
+        <Can permission="workflow:create">
+          <Link to="/workflows/create">
+            <Button disabled={isError}>
+              <PlusIcon className="mr-2 h-4 w-4" />
+              New workflow
+            </Button>
+          </Link>
+        </Can>
       }
     />
   );

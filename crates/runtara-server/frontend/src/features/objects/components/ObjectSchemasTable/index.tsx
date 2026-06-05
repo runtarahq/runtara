@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Loader2, Edit2, Trash2, Database, Plus } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import {
   Table,
   TableBody,
@@ -111,13 +112,15 @@ export function ObjectSchemaDtosTable({
       actions={
         <div className="flex items-center gap-2">
           <ObjectModelConnectionSelector />
-          <Button
-            onClick={() => navigate(`/objects/types/create${connectionQuery}`)}
-            disabled={isError || !connectionId}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Create object type
-          </Button>
+          <Can permission="database:create">
+            <Button
+              onClick={() => navigate(`/objects/types/create${connectionQuery}`)}
+              disabled={isError || !connectionId}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              Create object type
+            </Button>
+          </Can>
         </div>
       }
     />
@@ -240,6 +243,7 @@ export function ObjectSchemaDtosTable({
                     >
                       <Database className="h-4 w-4" />
                     </Button>
+                    <Can permission="database:update">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -249,6 +253,8 @@ export function ObjectSchemaDtosTable({
                     >
                       <Edit2 className="h-4 w-4" />
                     </Button>
+                    </Can>
+                    <Can permission="database:delete">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -263,6 +269,7 @@ export function ObjectSchemaDtosTable({
                         <Trash2 className="h-4 w-4" />
                       )}
                     </Button>
+                    </Can>
                   </div>
                 </TableCell>
               </TableRow>

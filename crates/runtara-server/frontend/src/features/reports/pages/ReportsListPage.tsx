@@ -2,6 +2,7 @@ import { type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { BarChart3, Edit, PlusIcon } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import { Icons } from '@/shared/components/icons';
 import {
   Table,
@@ -31,12 +32,14 @@ export function ReportsListPage() {
     <ConsoleToolbar
       left={<Breadcrumb items={[{ label: 'Reports' }]} />}
       actions={
-        <Link to="/reports/new">
-          <Button>
-            <PlusIcon className="mr-2 h-4 w-4" />
-            New report
-          </Button>
-        </Link>
+        <Can permission="report:create">
+          <Link to="/reports/new">
+            <Button>
+              <PlusIcon className="mr-2 h-4 w-4" />
+              New report
+            </Button>
+          </Link>
+        </Can>
       }
     />
   );
@@ -120,6 +123,7 @@ export function ReportsListPage() {
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
+                  <Can permission="report:update">
                   <Link to={`/reports/${report.id}?edit=1`}>
                     <Button
                       type="button"
@@ -132,6 +136,8 @@ export function ReportsListPage() {
                       <Edit className="h-4 w-4" />
                     </Button>
                   </Link>
+                  </Can>
+                  <Can permission="report:delete">
                   <ReportDeleteButton
                     reportId={report.id}
                     reportName={report.name}
@@ -141,6 +147,7 @@ export function ReportsListPage() {
                     triggerSize="icon"
                     className="h-7 w-7 text-muted-foreground hover:text-destructive"
                   />
+                  </Can>
                 </div>
               </TableCell>
             </TableRow>

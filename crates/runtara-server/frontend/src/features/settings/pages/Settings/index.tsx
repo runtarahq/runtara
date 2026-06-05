@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { PlusIcon, Key, Ban } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import {
   Table,
   TableBody,
@@ -62,10 +63,12 @@ export function Settings() {
     <ConsoleToolbar
       left={<Breadcrumb items={breadcrumbItems} />}
       actions={
-        <Button onClick={() => setCreateOpen(true)} disabled={isError}>
-          <PlusIcon className="mr-2 h-4 w-4" />
-          New API Key
-        </Button>
+        <Can permission="api_key:create">
+          <Button onClick={() => setCreateOpen(true)} disabled={isError}>
+            <PlusIcon className="mr-2 h-4 w-4" />
+            New API Key
+          </Button>
+        </Can>
       }
     />
   );
@@ -154,6 +157,7 @@ export function Settings() {
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
+                  <Can permission="api_key:revoke">
                   <Button
                     variant="ghost"
                     size="icon"
@@ -163,6 +167,7 @@ export function Settings() {
                   >
                     <Ban className="h-4 w-4" />
                   </Button>
+                  </Can>
                 </div>
               </TableCell>
             </TableRow>
