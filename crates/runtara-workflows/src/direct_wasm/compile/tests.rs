@@ -919,6 +919,54 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
 }
 
 #[test]
+fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
+    // Regression for the reported repro: a step inside an onError handler subtree
+    // (`err_persist`) that itself carries an onError edge. The support gate used
+    // to reject this with an execution-plan-routing cascade; the emitter lowers
+    // the handler step normally and ignores its inert onError edge. Confirm the
+    // full emit pipeline produces a VALID Wasm component end-to-end.
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+        r##"{
+          "entryPoint": "a",
+          "executionPlan": [
+            {"fromStep":"a","toStep":"b"},
+            {"fromStep":"b","toStep":"finish_ok"},
+            {"fromStep":"a","label":"onError","toStep":"err_persist"},
+            {"fromStep":"err_persist","toStep":"finish_err"},
+            {"fromStep":"err_persist","label":"onError","toStep":"finish_err"}
+          ],
+          "steps": {
+            "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "b": {"id":"b","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "err_persist": {"id":"err_persist","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+            "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+          }
+        }"##,
+    )
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "repro/dup_to_finish".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("emit should succeed for a handler step that carries an onError edge");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
+}
+
+#[test]
 fn direct_compile_embeds_manifest_and_support_sections() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {

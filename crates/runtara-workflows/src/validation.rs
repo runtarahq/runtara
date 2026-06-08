@@ -1038,6 +1038,15 @@ pub enum ValidationWarning {
     },
     /// A non-Finish step has no outgoing edges (terminal step without explicit Finish).
     DanglingStep { step_id: String, step_type: String },
+    /// A step has both a normal-flow edge and an `onError` edge to the SAME
+    /// target. The pair is redundant (the step continues to the target whether
+    /// it succeeds or fails) — almost always an authoring artifact from adding
+    /// the same target twice during graph editing.
+    DuplicateEdgeToTarget {
+        from_step: String,
+        to_step: String,
+        labels: Vec<String>,
+    },
     /// A step with side effects has no compensation defined in its transaction.
     MissingCompensation {
         step_id: String,
@@ -1200,6 +1209,19 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, step_type
                 )
             }
+            ValidationWarning::DuplicateEdgeToTarget {
+                from_step,
+                to_step,
+                labels,
+            } => {
+                write!(
+                    f,
+                    "[W040] Step '{}' has two edges to '{}' differing only in label ({}). The duplicate is redundant — keep one and remove the other.",
+                    from_step,
+                    to_step,
+                    labels.join(", ")
+                )
+            }
             ValidationWarning::MissingCompensation {
                 step_id,
                 agent_id,
@@ -1292,6 +1314,9 @@ pub fn validate_workflow(
     // Phase 1.1: executionPlan edge endpoints must exist in steps (E014).
     // A dangling edge otherwise only fails at compile, as a confusing cascade.
     validate_edge_endpoints(graph, &mut result);
+
+    // Phase 1.2: redundant normal+onError edges to the same target (W040).
+    validate_duplicate_target_edges(graph, &mut result);
 
     // Phase 1.5: Finish output shape validation
     validate_finish_outputs(graph, &mut result);
@@ -3307,6 +3332,57 @@ fn validate_compensation_recursive(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+}
+
+/// W040: a step has both a normal-flow edge and an `onError` edge to the SAME
+/// target. The pair is redundant (the step continues to the target whether it
+/// succeeds or fails) and is almost always an authoring artifact. Emitted as a
+/// warning, not an error — the compiler accepts it (the inert handler-step
+/// onError is lowered as dead). Recurses into Split / While subgraphs.
+fn validate_duplicate_target_edges(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let mut pairs: std::collections::BTreeMap<(String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for edge in &graph.execution_plan {
+        // Dangling edges are reported by E014; ignore them here.
+        if !graph.steps.contains_key(&edge.from_step) || !graph.steps.contains_key(&edge.to_step) {
+            continue;
+        }
+        let label = match edge.label.as_deref() {
+            None | Some("") | Some("next") => "next".to_string(),
+            Some(other) => other.to_string(),
+        };
+        pairs
+            .entry((edge.from_step.clone(), edge.to_step.clone()))
+            .or_default()
+            .push(label);
+    }
+    for ((from_step, to_step), mut labels) in pairs {
+        let has_normal = labels.iter().any(|l| l == "next");
+        let has_on_error = labels.iter().any(|l| l == "onError");
+        if has_normal && has_on_error {
+            labels.sort();
+            labels.dedup();
+            result
+                .warnings
+                .push(ValidationWarning::DuplicateEdgeToTarget {
+                    from_step,
+                    to_step,
+                    labels,
+                });
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_duplicate_target_edges(&split_step.subgraph, result)
+            }
+            Step::While(while_step) => {
+                validate_duplicate_target_edges(&while_step.subgraph, result)
+            }
+            _ => {}
+        }
+    }
 }
 
 /// E014: every executionPlan edge endpoint (`fromStep` / `toStep`) must name a
@@ -9770,5 +9846,66 @@ mod template_validation_tests {
         let mut result = ValidationResult::default();
         validate_edge_endpoints(&graph, &mut result);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn redundant_normal_and_on_error_edge_to_same_target_warns_w040() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"b"},
+                {"fromStep":"b","toStep":"finish_ok"},
+                {"fromStep":"a","label":"onError","toStep":"err_persist"},
+                {"fromStep":"err_persist","toStep":"finish_err"},
+                {"fromStep":"err_persist","label":"onError","toStep":"finish_err"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "b": {"id":"b","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "err_persist": {"id":"err_persist","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+                "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_duplicate_target_edges(&graph, &mut result);
+        assert!(result.warnings.iter().any(|w| matches!(w,
+            ValidationWarning::DuplicateEdgeToTarget { from_step, to_step, .. }
+            if from_step == "err_persist" && to_step == "finish_err")));
+        let msg = result
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ValidationWarning::DuplicateEdgeToTarget { .. }))
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("[W040]"), "{msg}");
+    }
+
+    #[test]
+    fn normal_and_on_error_to_distinct_targets_does_not_warn_w040() {
+        // The canonical happy/error split — must NOT warn.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"finish_ok"},
+                {"fromStep":"a","label":"onError","toStep":"finish_err"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+                "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_duplicate_target_edges(&graph, &mut result);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 }
