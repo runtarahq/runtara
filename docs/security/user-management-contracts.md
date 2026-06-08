@@ -220,9 +220,6 @@ tenant requires it.
 | `connection:update` | Allow | Allow | Allow | Deny |
 | `connection:delete` | Allow | Allow | Allow | Deny |
 | `analytics:read` | Allow | Allow | Allow | Allow |
-| `api_key:read` | Allow | Allow | Own | Deny |
-| `api_key:create` | Allow | Allow | Allow | Deny |
-| `api_key:revoke` | Allow | Allow | Own | Deny |
 
 Notes:
 
@@ -233,21 +230,21 @@ Notes:
   yet. When member/billing/tenant permissions are added, Admin gets a narrower
   list.
 - Reads (`*:read`, including `invocation_history:read` and `analytics:read`) are
-  open to every role, Viewer included — **except `api_key:read`**, since API keys are
-  personal credentials (see below).
+  open to every role, Viewer included.
 - Create and `workflow:execute` require Member or above.
 - Update/delete are `Own` for Member (own resources only; Owner/Admin bypass the
   ownership check) and denied for Viewer — for **workflow, trigger, and report**
   only. `database:*` and `connection:*` have no enforceable per-row owner
   (object-model tracks no `created_by`; connections live in a crate that does not
   bridge the caller's identity), so their update/delete are full Allow for Member,
-  never `Own`.
-- **API keys** (`api_key:*`, the legacy `rt_*` keys) are per-user credentials, keyed
-  on the key's `issuing_user_id`: a Member reads and revokes only their **own** keys
-  (`api_key:read`/`api_key:revoke` = `Own`) and may create their own (`api_key:create` =
-  `Allow`); Owner/Admin manage all tenant keys; Viewer is denied. So the complete
-  `Own` set is **eight** cells: workflow/trigger/report update/delete + api_key
-  read/revoke.
+  never `Own`. So the complete `Own` set is **six** cells: workflow/trigger/report
+  update/delete.
+- **API keys** (the legacy `rt_*` keys) are deliberately **absent from this role map**.
+  They are personal credentials scoped to their `issuing_user_id`: any role may create,
+  list, and revoke its **own** keys, and only its own. There is no role distinction, so
+  there is no permission to enforce — the handlers enforce ownership directly (list and
+  revoke filter on `issuing_user_id`). A key acts as its issuing user and inherits that
+  user's current role on every request.
 - **Agent capability execution** (`/agents/{name}/capabilities/{id}/execute` and
   `/test`) is gated as `workflow:execute` — it runs host-mediated I/O, possibly with a
   connection's stored credentials, so Viewers are denied.

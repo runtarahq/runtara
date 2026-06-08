@@ -75,11 +75,11 @@ pub enum Access {
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
     /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
     ///
-    /// Used by exactly eight cells for Member — `workflow`/`trigger`/`report` update/delete and
-    /// `api_key` read/revoke — the resources whose per-row owner (`created_by` /
-    /// `issuing_user_id`) is recorded and a server-crate handler can check it. Resources without
-    /// enforceable per-row ownership (database, connection) are flat `Allow`, never `Own`.
-    /// The complete set is pinned by `own_is_restricted_to_the_ownable_permissions`.
+    /// Used by exactly six cells for Member — `workflow`/`trigger`/`report` update/delete — the
+    /// resources whose per-row owner (`created_by`) is recorded and a server-crate handler can
+    /// check it. Resources without enforceable per-row ownership (database, connection) are flat
+    /// `Allow`, never `Own`. The complete set is pinned by
+    /// `own_is_restricted_to_the_ownable_permissions`.
     Own,
     /// Never permitted.
     Deny,
@@ -113,14 +113,11 @@ pub enum Permission {
     ConnectionUpdate,
     ConnectionDelete,
     AnalyticsRead,
-    ApiKeyRead,
-    ApiKeyCreate,
-    ApiKeyRevoke,
 }
 
 impl Permission {
     /// Every permission, in table order.
-    pub const ALL: [Permission; 26] = [
+    pub const ALL: [Permission; 23] = [
         WorkflowRead,
         WorkflowCreate,
         WorkflowUpdate,
@@ -144,9 +141,6 @@ impl Permission {
         ConnectionUpdate,
         ConnectionDelete,
         AnalyticsRead,
-        ApiKeyRead,
-        ApiKeyCreate,
-        ApiKeyRevoke,
     ];
 
     /// The colon-style wire identifier. This is the cross-service contract form — it must
@@ -176,9 +170,6 @@ impl Permission {
             Permission::ConnectionUpdate => "connection:update",
             Permission::ConnectionDelete => "connection:delete",
             Permission::AnalyticsRead => "analytics:read",
-            Permission::ApiKeyRead => "api_key:read",
-            Permission::ApiKeyCreate => "api_key:create",
-            Permission::ApiKeyRevoke => "api_key:revoke",
         }
     }
 
@@ -221,11 +212,11 @@ impl<'de> Deserialize<'de> for Permission {
 
 use Access::{Allow, Own};
 use Permission::{
-    AnalyticsRead, ApiKeyCreate, ApiKeyRead, ApiKeyRevoke, ConnectionCreate, ConnectionDelete,
-    ConnectionRead, ConnectionUpdate, DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate,
-    InvocationHistoryRead, ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate,
-    TriggerDelete, TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute,
-    WorkflowRead, WorkflowUpdate,
+    AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
+    DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
+    ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
+    TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
+    WorkflowUpdate,
 };
 
 /// Owner: every permission, unconditionally.
@@ -253,9 +244,6 @@ const OWNER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
-    (ApiKeyRead, Allow),
-    (ApiKeyCreate, Allow),
-    (ApiKeyRevoke, Allow),
 ];
 
 /// Admin: same as Owner for now. Kept as a separate list so the two can diverge by editing
@@ -284,16 +272,11 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
-    (ApiKeyRead, Allow),
-    (ApiKeyCreate, Allow),
-    (ApiKeyRevoke, Allow),
 ];
 
 /// Member: read + create + execute on any resource. Update/delete are `Own` (own resources
 /// only) for workflow, trigger, and report; database and connection have no enforceable
-/// per-row owner, so their update/delete are flat `Allow`. API keys are personal
-/// credentials: a Member reads/revokes only their own (`api_key:read`/`api_key:revoke` = `Own`,
-/// keyed on the key's `issuing_user_id`) and may create their own (`api_key:create` = `Allow`).
+/// per-row owner, so their update/delete are flat `Allow`.
 const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowRead, Allow),
     (WorkflowCreate, Allow),
@@ -324,11 +307,6 @@ const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
-    // API keys are per-user: a Member reads/revokes only their own keys (keyed on
-    // `issuing_user_id`); creating a key always produces one owned by the creator.
-    (ApiKeyRead, Own),
-    (ApiKeyCreate, Allow),
-    (ApiKeyRevoke, Own),
 ];
 
 /// Viewer: read-only across the tenant.
@@ -486,9 +464,6 @@ mod tests {
             (Permission::ConnectionUpdate, [Allow, Allow, Allow, Deny]),
             (Permission::ConnectionDelete, [Allow, Allow, Allow, Deny]),
             (Permission::AnalyticsRead, [Allow, Allow, Allow, Allow]),
-            (Permission::ApiKeyRead, [Allow, Allow, Own, Deny]),
-            (Permission::ApiKeyCreate, [Allow, Allow, Allow, Deny]),
-            (Permission::ApiKeyRevoke, [Allow, Allow, Own, Deny]),
         ];
 
         // Every permission is covered exactly once — adding a `Permission` variant without a
@@ -510,11 +485,10 @@ mod tests {
         }
     }
 
-    /// `Own` is allowed for exactly eight cells — workflow/trigger/report update/delete plus
-    /// api-key read/revoke — the resources whose per-row owner (`created_by`/`issuing_user_id`)
-    /// is recorded and a server-crate path can check it. Any other `Own` (a new resource, or
-    /// connection/database regaining it before the storage layer can enforce it) fails here.
-    /// Pins the whole `Own` set, both directions.
+    /// `Own` is allowed for exactly six cells — workflow/trigger/report update/delete — the
+    /// resources whose per-row owner (`created_by`) is recorded and a server-crate path can
+    /// check it. Any other `Own` (a new resource, or connection/database regaining it before the
+    /// storage layer can enforce it) fails here. Pins the whole `Own` set, both directions.
     #[test]
     fn own_is_restricted_to_the_ownable_permissions() {
         use std::collections::BTreeSet;
@@ -526,8 +500,6 @@ mod tests {
             "trigger:delete",
             "report:update",
             "report:delete",
-            "api_key:read",
-            "api_key:revoke",
         ]
         .into_iter()
         .collect();
@@ -585,7 +557,7 @@ mod tests {
         // Spot-check a representative trio against the map, and confirm the wire forms match.
         assert_eq!(perms["workflow:update"]["member"], "own");
         assert_eq!(perms["database:delete"]["member"], "allow");
-        assert_eq!(perms["api_key:revoke"]["viewer"], "deny");
+        assert_eq!(perms["workflow:delete"]["viewer"], "deny");
 
         // Every cell is present and is one of the three access strings.
         for permission in Permission::ALL {
