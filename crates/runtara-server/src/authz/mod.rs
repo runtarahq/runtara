@@ -113,11 +113,15 @@ pub enum Permission {
     ConnectionUpdate,
     ConnectionDelete,
     AnalyticsRead,
+    /// UI-only capability: gates the "User Management" link in the runtara SPA that points at
+    /// the smo-management control plane. No runtara route enforces it (see `permission_for`);
+    /// it exists purely so `/me` advertises whether to show the link. Owner/Admin only.
+    UserManagementAccess,
 }
 
 impl Permission {
     /// Every permission, in table order.
-    pub const ALL: [Permission; 23] = [
+    pub const ALL: [Permission; 24] = [
         WorkflowRead,
         WorkflowCreate,
         WorkflowUpdate,
@@ -141,6 +145,7 @@ impl Permission {
         ConnectionUpdate,
         ConnectionDelete,
         AnalyticsRead,
+        UserManagementAccess,
     ];
 
     /// The colon-style wire identifier. This is the cross-service contract form — it must
@@ -170,6 +175,7 @@ impl Permission {
             Permission::ConnectionUpdate => "connection:update",
             Permission::ConnectionDelete => "connection:delete",
             Permission::AnalyticsRead => "analytics:read",
+            Permission::UserManagementAccess => "user_management:access",
         }
     }
 
@@ -215,8 +221,8 @@ use Permission::{
     AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
     DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
     ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-    TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
-    WorkflowUpdate,
+    TriggerRead, TriggerUpdate, UserManagementAccess, WorkflowCreate, WorkflowDelete,
+    WorkflowExecute, WorkflowRead, WorkflowUpdate,
 };
 
 /// Owner: every permission, unconditionally.
@@ -244,6 +250,7 @@ const OWNER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
+    (UserManagementAccess, Allow),
 ];
 
 /// Admin: same as Owner for now. Kept as a separate list so the two can diverge by editing
@@ -272,6 +279,7 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (ConnectionUpdate, Allow),
     (ConnectionDelete, Allow),
     (AnalyticsRead, Allow),
+    (UserManagementAccess, Allow),
 ];
 
 /// Member: read + create + execute on any resource. Update/delete are `Own` (own resources
@@ -464,6 +472,7 @@ mod tests {
             (Permission::ConnectionUpdate, [Allow, Allow, Allow, Deny]),
             (Permission::ConnectionDelete, [Allow, Allow, Allow, Deny]),
             (Permission::AnalyticsRead, [Allow, Allow, Allow, Allow]),
+            (Permission::UserManagementAccess, [Allow, Allow, Deny, Deny]),
         ];
 
         // Every permission is covered exactly once — adding a `Permission` variant without a

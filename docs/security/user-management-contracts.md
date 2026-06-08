@@ -220,15 +220,16 @@ tenant requires it.
 | `connection:update` | Allow | Allow | Allow | Deny |
 | `connection:delete` | Allow | Allow | Allow | Deny |
 | `analytics:read` | Allow | Allow | Allow | Allow |
+| `user_management:access` | Allow | Allow | Deny | Deny |
 
 Notes:
 
-- This is a **resource-only** permission vocabulary. Member, billing, and tenant
-  administration are owned by smo-management (Auth0 Organizations + its admin
-  surface), not by runtara's enforced map. Consequently **Owner and Admin grant
-  the same set** in P0 — the distinction has no resource permission to bite on
-  yet. When member/billing/tenant permissions are added, Admin gets a narrower
-  list.
+- This is an **enforced resource vocabulary** plus one UI-only capability
+  (`user_management:access`, see below). Member, billing, and tenant administration are
+  owned by smo-management (Auth0 Organizations + its admin surface), not by runtara's
+  enforced map. Consequently **Owner and Admin grant the same set** in P0 — the distinction
+  has no resource permission to bite on yet. When member/billing/tenant permissions are
+  added, Admin gets a narrower list.
 - Reads (`*:read`, including `invocation_history:read` and `analytics:read`) are
   open to every role, Viewer included.
 - Create and `workflow:execute` require Member or above.
@@ -245,6 +246,10 @@ Notes:
   there is no permission to enforce — the handlers enforce ownership directly (list and
   revoke filter on `issuing_user_id`). A key acts as its issuing user and inherits that
   user's current role on every request.
+- **`user_management:access`** is a **UI-only** capability (Owner/Admin): it gates the
+  "User Management" link in the runtara SPA that points at the smo-management control plane.
+  No runtara route enforces it — it appears in `GET /api/runtime/me` purely so the SPA knows
+  whether to show the link. The actual user-management actions are enforced by smo-management.
 - **Agent capability execution** (`/agents/{name}/capabilities/{id}/execute` and
   `/test`) is gated as `workflow:execute` — it runs host-mediated I/O, possibly with a
   connection's stored credentials, so Viewers are denied.

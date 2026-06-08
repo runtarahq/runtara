@@ -20,7 +20,7 @@ import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
-import { useAuthStore } from '@/shared/stores/authStore.ts';
+import { useAuthStore, useHasPermission } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
 import { DollarSign, Settings, Users } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -98,6 +98,12 @@ function AppMenu() {
     [userGroups, entitlements]
   );
 
+  // The tenant user-management UI lives in the smo-management SPA (served by the gateway at
+  // /ui/management/ — shared, NOT org-namespaced; the SPA resolves the tenant from the JWT).
+  // Show the link only to roles that may reach it: the `user_management:access` permission is
+  // Owner/Admin. It is a UI-only gate — runtara enforces nothing on it; smo-management does.
+  const canManageUsers = useHasPermission('user_management:access');
+
   const isHomePage = location.pathname === '/';
 
   return (
@@ -114,6 +120,22 @@ function AppMenu() {
             }
           />
         ))}
+        {canManageUsers && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              asChild
+              tooltip="User Management"
+              className="text-muted-foreground"
+            >
+              {/* External link: leaves the runtara SPA for the management SPA. A plain
+                  anchor (not react-router <Link>) so the browser does a full navigation. */}
+              <a href="/ui/management/">
+                <Users size={16} />
+                <span>User Management</span>
+              </a>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
       </SidebarGroup>
     </SidebarMenu>
   );
@@ -121,12 +143,8 @@ function AppMenu() {
 
 function FooterMenu() {
   const navigate = useNavigate();
-  // The tenant admin UI lives in the smo-management SPA (served by the gateway at
-  // /ui/management/{org_id}/). Only Owner/Admin see the link; Member/Viewer don't.
-  // Role comes from /me (Valkey-sourced), not the JWT.
-  const role = useAuthStore((state) => state.role);
-  const orgId = useAuthStore((state) => state.orgId);
-  const canManageTenant = role === 'owner' || role === 'admin';
+  // The "User Management" entry now lives in the main sidebar nav (see AppMenu), gated by the
+  // `user_management:access` permission.
   const versionLabel = formatBuildLabel(
     config.build.version,
     config.build.commit,
@@ -151,20 +169,6 @@ function FooterMenu() {
     <div className="flex min-w-0 flex-col gap-1 px-2 py-2">
       <div className="flex items-center justify-center gap-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
         <AuthSidebar />
-        {canManageTenant && orgId && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="relative h-9 w-9 shrink-0"
-            aria-label="Manage tenant"
-            onClick={() => {
-              window.location.href = `/ui/management/${orgId}/`;
-            }}
-          >
-            <Users className="h-4 w-4" />
-            <span className="sr-only">Manage tenant</span>
-          </Button>
-        )}
         <Button
           variant="ghost"
           size="icon"
