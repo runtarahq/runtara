@@ -2229,8 +2229,17 @@ fn inject_runtime_identity_variables(variables: &mut Value) {
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
 pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u8>, String> {
-    let data: Value =
+    let mut data: Value =
         serde_json::from_slice(data).map_err(|err| format!("failed to parse data: {err}"))?;
+    // The workflow start input arrives in the canonical envelope
+    // `{"data": {...}, "variables": {...}}` (enforced at the API boundary) and is
+    // stored verbatim as the instance input. `data.*` references resolve against
+    // the inner `data` payload, so unwrap it here — mirroring the historical
+    // `input_json.get("data")` behaviour. Inputs with no `data` key (low-level /
+    // direct runtime invocations) are used as-is.
+    if let Some(inner) = data.as_object_mut().and_then(|map| map.remove("data")) {
+        data = inner;
+    }
     let mut variables: Value = serde_json::from_slice(variables)
         .map_err(|err| format!("failed to parse variables: {err}"))?;
     inject_runtime_identity_variables(&mut variables);
@@ -7379,6 +7388,35 @@ mod tests {
         let source: Value = serde_json::from_slice(&source).expect("source json");
         assert!(source.get("__error").is_none());
         assert!(source.get("error").is_none());
+    }
+
+    #[test]
+    fn build_source_unwraps_canonical_input_envelope() {
+        // Regression: workflow inputs arrive as the canonical envelope
+        // `{"data": {...}, "variables": {...}}` and are stored verbatim as the
+        // instance input, so `data.*` references must resolve against the inner
+        // `data` payload. Previously the whole envelope was used as `data`, so a
+        // top-level `data.tpl` reference resolved to null (only the accidental
+        // double-wrapped `data.data.tpl` path worked).
+        let source = build_source(
+            br#"{"data":{"tpl":"hello world"},"variables":{"_workflow_id":"wf1"}}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert_eq!(source["data"], json!({ "tpl": "hello world" }));
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "data.tpl" }),
+            &source,
+        )
+        .expect("resolve data.tpl");
+        assert_eq!(resolved, json!("hello world"));
+
+        // Bare data with no `data` key is used as-is (low-level/direct callers).
+        let bare = build_source(br#"{"tpl":"bare"}"#, b"{}", b"{}").expect("bare source");
+        let bare: Value = serde_json::from_slice(&bare).expect("bare json");
+        assert_eq!(bare["data"], json!({ "tpl": "bare" }));
     }
 
     #[test]
