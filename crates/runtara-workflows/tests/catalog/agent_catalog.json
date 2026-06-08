@@ -946,7 +946,7 @@
     ]
   },
   {
-    "id": "object_model",
+    "id": "object-model",
     "name": "Object Model",
     "description": "CRUD operations over the runtara object-model API (list schemas, create/query/update/delete instances, bulk operations, aggregates, and conversation memory).",
     "hasSideEffects": true,

@@ -2390,6 +2390,14 @@ fn validate_agents(
 
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
+            // Agent ids are canonically kebab (e.g. `object-model`), but a
+            // workflow may author the legacy snake form (`object_model`).
+            // Compare against the canonical id so id-specific rules below fire
+            // regardless of which form the author used — matching how the
+            // catalog lookup and the compile path already fold the two.
+            let agent_id_canonical =
+                runtara_dsl::agent_meta::canonical_agent_id(&agent_step.agent_id);
+
             // Validate agent exists in the runtime catalog
             let Some(agent) = catalog.agent(&agent_step.agent_id) else {
                 result.errors.push(ValidationError::UnknownAgent {
@@ -2403,7 +2411,7 @@ fn validate_agents(
             // Validate capability exists
             let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
 
-            if agent_step.agent_id == "object_model"
+            if agent_id_canonical == "object-model"
                 && let Some(mapping) = &agent_step.input_mapping
                 && let Some(condition) = mapping.get("condition")
             {
@@ -2497,7 +2505,7 @@ fn validate_agents(
                         inputs.iter().map(|f| (f.name.as_str(), f)).collect();
 
                     for (field_name, value) in mapping {
-                        if agent_step.agent_id != "object_model"
+                        if agent_id_canonical != "object-model"
                             && let Some(field_meta) = field_map.get(field_name.as_str())
                             && is_condition_input(
                                 &agent_step.agent_id,
@@ -2580,7 +2588,8 @@ fn is_condition_input(
     type_name: &str,
 ) -> bool {
     type_name.contains("ConditionExpression")
-        || (agent_id == "object_model" && field_name == "condition")
+        || (runtara_dsl::agent_meta::canonical_agent_id(agent_id) == "object-model"
+            && field_name == "condition")
 }
 
 fn validate_condition_input_mapping(
@@ -4619,11 +4628,13 @@ mod tests {
 
     /// Validator unit tests run against a committed snapshot of the real
     /// component `meta.json` for the agents these tests reference
-    /// (transform / http / object_model / utils) — NOT the static agent
+    /// (transform / http / object-model / utils) — NOT the static agent
     /// registry. Regenerate the fixture with `emit-meta` if those agents'
-    /// schemas change. `object_model`'s id is kept snake_case to match the
-    /// validator's snake-keyed special-cases (see e.g. the `== "object_model"`
-    /// checks above). See `tests/fixtures/agent_catalog.json`.
+    /// schemas change. The object-model agent's id is the canonical kebab
+    /// `object-model`, exactly as the production catalog advertises it; the
+    /// validator's id-specific rules and `AgentCatalog` lookups canonicalize
+    /// ids, so tests that author the legacy snake `object_model` still resolve.
+    /// See `tests/catalog/agent_catalog.json`.
     pub(super) fn test_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
         runtara_dsl::agent_meta::AgentCatalog::from_json(include_str!(
             "../tests/catalog/agent_catalog.json"
@@ -7348,7 +7359,11 @@ mod tests {
         assert!(display.contains("GET, POST"));
     }
 
-    fn create_object_model_bulk_update_step(id: &str, condition: serde_json::Value) -> Step {
+    fn create_object_model_bulk_update_step(
+        id: &str,
+        agent_id: &str,
+        condition: serde_json::Value,
+    ) -> Step {
         let mut mapping = InputMapping::new();
         mapping.insert(
             "schema_name".to_string(),
@@ -7370,7 +7385,7 @@ mod tests {
         Step::Agent(AgentStep {
             id: id.to_string(),
             name: None,
-            agent_id: "object_model".to_string(),
+            agent_id: agent_id.to_string(),
             capability_id: "bulk-update-instances".to_string(),
             connection_id: None,
             input_mapping: Some(mapping),
@@ -7396,7 +7411,7 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "bulk".to_string(),
-            create_object_model_bulk_update_step("bulk", condition),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
         );
         let graph = create_basic_graph(steps, "bulk");
 
@@ -7423,7 +7438,7 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "bulk".to_string(),
-            create_object_model_bulk_update_step("bulk", condition),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
         );
         let graph = create_basic_graph(steps, "bulk");
 
@@ -7435,6 +7450,56 @@ mod tests {
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidConditionShape { .. })),
             "{:?}",
+            result.errors
+        );
+    }
+
+    /// Regression: an object-model step authored with the **canonical kebab
+    /// id** (`object-model`, exactly as `GET /api/runtime/agents` advertises
+    /// it) must (a) resolve against the kebab-keyed catalog — no
+    /// `UnknownAgent` — and (b) still trip the object-model-specific
+    /// `condition` validation. Before agent ids were canonicalized at catalog
+    /// lookup and in the validator's special-cases, the kebab catalog returned
+    /// `UnknownAgent` for the snake-keyed `== "object_model"` checks, and a
+    /// kebab-authored step skipped the condition rule entirely — so a
+    /// malformed `condition` slipped through unvalidated.
+    #[test]
+    fn object_model_condition_validation_fires_for_canonical_kebab_id() {
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "immediate", "value": {"valueType": "reference", "value": "category_leaf_id"}},
+                {"valueType": "reference", "value": "data.selected_category"}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", "object-model", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        // (a) The kebab id resolves in the (kebab-keyed) catalog.
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UnknownAgent { .. })),
+            "kebab `object-model` should resolve in the catalog, got: {:?}",
+            result.errors
+        );
+        // (b) The object-model-specific condition rule fires for the kebab id.
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidConditionShape { path, message, .. }
+                    if path == "inputMapping.condition.value.arguments[0]"
+                        && message.contains("deprecated wrapping")
+            )),
+            "object-model condition validation should fire for the kebab id, got: {:?}",
             result.errors
         );
     }
