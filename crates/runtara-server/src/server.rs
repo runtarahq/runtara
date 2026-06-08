@@ -815,10 +815,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     let loaded: Vec<&str> = dispatcher.agent_ids().collect();
                     if loaded.is_empty() {
                         // The runtime dispatches ONLY WASM components, so zero
-                        // agents means the server can't run any workflow. Make
-                        // it impossible to miss rather than silently serving an
-                        // empty agent surface (a `cargo clean` wiping the
-                        // build-output components dir is the usual cause).
+                        // agents means the server can't run any workflow. Fail
+                        // fast rather than silently serving an empty agent
+                        // surface (a `cargo clean` wiping the build-output
+                        // components dir is the usual cause).
                         eprintln!(
                             "❌ Component dispatcher loaded 0 agents from {}.\n\
                              The directory exists but contains no runtara_agent_*.wasm \
@@ -827,14 +827,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                              RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle.",
                             dir.display()
                         );
-                    } else {
-                        println!(
-                            "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                            loaded.len(),
-                            dir.display(),
-                            loaded.join(", ")
-                        );
+                        std::process::exit(1);
                     }
+                    println!(
+                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                        loaded.len(),
+                        dir.display(),
+                        loaded.join(", ")
+                    );
                     Some(Arc::new(dispatcher))
                 }
                 Err(e) => {
@@ -844,31 +844,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                         dir.display(),
                         e
                     );
-                    None
+                    std::process::exit(1);
                 }
             }
         } else {
             eprintln!(
-                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — no agent components \
-                 will be loaded and the server has NO runnable agents.\n\
+                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — the server dispatches \
+                 ONLY WASM agent components and has NO runnable agents without them.\n\
                  Set it to a directory of runtara_agent_*.wasm components."
             );
-            None
+            std::process::exit(1);
         }
     };
 
-    // Snapshot the runtime agent catalog once at boot. Validators in app
-    // state read this instead of the statically-linked agent registry. If
-    // the component dispatcher isn't configured, fall back to the
-    // statically-linked set so the validator surface keeps working.
+    // Snapshot the runtime agent catalog once at boot. Validators in app state
+    // read this — sourced from component `meta.json` via the dispatcher — never
+    // the statically-linked agent registry. The dispatcher is guaranteed
+    // present here: startup hard-fails above when it can't be built or loads
+    // zero agents.
     let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
         .as_ref()
         .map(|d| d.catalog())
-        .unwrap_or_else(|| {
-            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
-                runtara_agents::registry::get_agents(),
-            ))
-        });
+        .expect("component dispatcher present after startup hard-fail");
 
     // Derive the connection-defaults compatibility map from the runtime
     // agent catalog. Encapsulates the `default_for → integration_ids` view
@@ -2053,9 +2050,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Build internal router for MCP in-process calls (no network hop).
     // MCP tools pre-inject AuthContext into extensions, so auth middleware
     // detects it and skips JWT validation.
+    //
+    // The connections routes must be nested under `/api/runtime` here exactly
+    // as they are in `public_app` below — otherwise MCP connection-discovery
+    // tools (list_connections, list_integrations, get_integration) 404 because
+    // their `/api/runtime/connections*` targets exist only on the public app.
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
+        .nest("/api/runtime", connections_tenant_routes.clone())
         .merge(public_routes.clone());
 
     // Build MCP (Model Context Protocol) router with JWT authentication.

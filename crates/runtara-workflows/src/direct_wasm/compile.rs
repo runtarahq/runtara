@@ -585,15 +585,11 @@ pub fn compile_direct_workflow_composed(
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    let fallback_agent_catalog;
-    let agent_catalog = if let Some(agent_catalog) = input.agent_catalog.as_deref() {
-        Some(agent_catalog)
-    } else {
-        fallback_agent_catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(
-            runtara_agents::registry::get_agents(),
-        );
-        Some(&fallback_agent_catalog)
-    };
+    // The agent catalog is supplied by the caller (the server passes the
+    // runtime catalog loaded from component `meta.json`). When absent, the
+    // manifest builder handles `None` directly — there is no static-registry
+    // fallback.
+    let agent_catalog = input.agent_catalog.as_deref();
     let child_manifest_inputs = input
         .child_workflows
         .iter()

@@ -1332,13 +1332,15 @@ pub struct ListAgentsResponse {
 /// This returns metadata about all available agents and their capabilities.
 /// It runs in-process (no OCI container needed) since it only returns metadata.
 pub async fn handle_list_agents(_state: &EnvironmentHandlerState) -> Result<ListAgentsResponse> {
-    use runtara_agents::registry::get_agents;
-
-    let agents = get_agents();
-    let agents_json = serde_json::to_vec(&agents)
-        .map_err(|e| crate::error::Error::Other(format!("Failed to serialize agents: {}", e)))?;
-
-    Ok(ListAgentsResponse { agents_json })
+    // The environment is no longer the agent-metadata authority. The agent
+    // catalog now lives on runtara-server, sourced from the in-process
+    // component dispatcher (component `meta.json`). This legacy endpoint is
+    // deprecated alongside `handle_test_capability`.
+    Err(crate::error::Error::Other(
+        "Environment-side /api/v1/agents was removed. Use runtara-server's \
+         GET /api/runtime/agents instead."
+            .to_string(),
+    ))
 }
 
 /// Request to get capability details.
@@ -1371,26 +1373,15 @@ pub async fn handle_get_capability(
     _state: &EnvironmentHandlerState,
     request: GetCapabilityRequest,
 ) -> Result<GetCapabilityResponse> {
-    use runtara_agents::registry::get_capability_inputs;
-
-    match get_capability_inputs(&request.agent_id, &request.capability_id) {
-        Some(inputs) => {
-            let inputs_json = serde_json::to_vec(&inputs).map_err(|e| {
-                crate::error::Error::Other(format!("Failed to serialize inputs: {}", e))
-            })?;
-
-            Ok(GetCapabilityResponse {
-                found: true,
-                capability_json: vec![], // Could be expanded to include more info
-                inputs_json,
-            })
-        }
-        None => Ok(GetCapabilityResponse {
-            found: false,
-            capability_json: vec![],
-            inputs_json: vec![],
-        }),
-    }
+    // See `handle_list_agents`: agent + capability metadata now lives on
+    // runtara-server (component dispatcher), not the environment's
+    // statically-linked registry.
+    Err(crate::error::Error::Other(
+        "Environment-side /api/v1/agents/{agent}/capabilities/{capability} was \
+         removed. Use runtara-server's \
+         GET /api/runtime/agents/{name}/capabilities/{capability} instead."
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]

@@ -1812,7 +1812,9 @@ mod tests {
 
     #[test]
     fn manifest_serializes_agent_required_inputs_from_catalog() {
-        let catalog = AgentCatalog::from_agents(runtara_agents::registry::get_agents());
+        let catalog =
+            AgentCatalog::from_json(include_str!("../../tests/catalog/agent_catalog.json"))
+                .expect("agent_catalog.json fixture should parse");
         let manifest = build_direct_workflow_manifest_with_agent_catalog(
             &fixture("transform"),
             Some(&catalog),

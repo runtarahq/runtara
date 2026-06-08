@@ -4617,67 +4617,18 @@ mod tests {
         AgentStep, AiAgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
-    // Keep runtara-agents linked so tests use the same static capability registry.
-    #[allow(unused_imports)]
-    use runtara_agents as _;
-
-    /// Test helper: build an `AgentCatalog` from the statically-linked agent
-    /// registry. Production callers pass the runtime-loaded catalog from the
-    /// component dispatcher; tests use this shim so they don't have to stand
-    /// up wasmtime.
+    /// Validator unit tests run against a committed snapshot of the real
+    /// component `meta.json` for the agents these tests reference
+    /// (transform / http / object_model / utils) — NOT the static agent
+    /// registry. Regenerate the fixture with `emit-meta` if those agents'
+    /// schemas change. `object_model`'s id is kept snake_case to match the
+    /// validator's snake-keyed special-cases (see e.g. the `== "object_model"`
+    /// checks above). See `tests/fixtures/agent_catalog.json`.
     pub(super) fn test_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
-        // In production the validator's catalog is sourced from the component
-        // dispatcher (see `server.rs`), which includes `object_model` and the
-        // other agents that now run as WASM components. The static
-        // `runtara_agents::registry` no longer carries those integration
-        // agents (they were deleted in "agents: delete legacy native
-        // integration agents"), so we re-add a minimal `object_model` entry
-        // to mirror the runtime catalog the validator actually sees.
-        let mut agents = runtara_agents::registry::get_agents();
-        if !agents.iter().any(|agent| agent.id == "object_model") {
-            agents.push(object_model_catalog_agent());
-        }
-        runtara_dsl::agent_meta::AgentCatalog::from_agents(agents)
-    }
-
-    /// Minimal `object_model` agent mirroring the component dispatcher's
-    /// catalog entry: connection-backed (`postgres`) with the capabilities the
-    /// validation tests exercise.
-    fn object_model_catalog_agent() -> runtara_dsl::agent_meta::AgentInfo {
-        serde_json::from_value(serde_json::json!({
-            "id": "object_model",
-            "name": "Object Model",
-            "description": "Object Model CRUD capabilities (test mirror of the component agent).",
-            "hasSideEffects": true,
-            "supportsConnections": true,
-            "integrationIds": ["postgres"],
-            "capabilities": [
-                object_model_catalog_capability("query-instances", "Query Instances", false),
-                object_model_catalog_capability(
-                    "bulk-update-instances",
-                    "Bulk Update Instances",
-                    true,
-                ),
-            ],
-        }))
-        .expect("object_model AgentInfo fixture should deserialize")
-    }
-
-    fn object_model_catalog_capability(
-        id: &str,
-        name: &str,
-        has_side_effects: bool,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "name": name,
-            "inputType": "Value",
-            "inputs": [],
-            "output": { "type": "object" },
-            "hasSideEffects": has_side_effects,
-            "isIdempotent": !has_side_effects,
-            "rateLimited": false,
-        })
+        runtara_dsl::agent_meta::AgentCatalog::from_json(include_str!(
+            "../tests/catalog/agent_catalog.json"
+        ))
+        .expect("agent_catalog.json fixture should parse")
     }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
@@ -8487,32 +8438,17 @@ mod tests {
 
     #[test]
     fn test_side_effects_without_compensation_generates_warning() {
-        // http:request has side_effects = true
+        // object_model:create-instance has side_effects = true
         let mut steps = HashMap::new();
         steps.insert(
-            "http_call".to_string(),
+            "om_call".to_string(),
             Step::Agent(AgentStep {
-                id: "http_call".to_string(),
+                id: "om_call".to_string(),
                 name: None,
-                agent_id: "http".to_string(),
-                capability_id: "http-request".to_string(),
+                agent_id: "object_model".to_string(),
+                capability_id: "create-instance".to_string(),
                 connection_id: None,
-                input_mapping: Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "url".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("https://example.com"),
-                        }),
-                    );
-                    m.insert(
-                        "method".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("POST"),
-                        }),
-                    );
-                    m
-                }),
+                input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
@@ -8523,9 +8459,9 @@ mod tests {
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
-        let mut graph = create_basic_graph(steps, "http_call");
+        let mut graph = create_basic_graph(steps, "om_call");
         graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "http_call".to_string(),
+            from_step: "om_call".to_string(),
             to_step: "finish".to_string(),
             label: None,
             condition: None,
@@ -8542,7 +8478,7 @@ mod tests {
             .collect();
         assert!(
             !missing_comp_warnings.is_empty(),
-            "Should have MissingCompensation warning for http:request step"
+            "Should have MissingCompensation warning for object_model:create-instance step"
         );
 
         // Check warning contents
@@ -8553,9 +8489,9 @@ mod tests {
             ..
         }) = missing_comp_warnings.first()
         {
-            assert_eq!(step_id, "http_call");
-            assert_eq!(agent_id, "http");
-            assert_eq!(capability_id, "http-request");
+            assert_eq!(step_id, "om_call");
+            assert_eq!(agent_id, "object_model");
+            assert_eq!(capability_id, "create-instance");
         }
     }
 
