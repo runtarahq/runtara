@@ -12,6 +12,11 @@ use crate::authz::Role;
 /// startup by `bind::enforce_loopback_for_unauthenticated`).
 pub struct LocalProvider {
     tenant_id: String,
+    /// Dev-only caller identity from `RUNTARA_DEV_USER_ID`. Defaults to `"local"`. Lets local
+    /// runs act as different users so ownership-scoped behavior (e.g. a caller seeing/revoking
+    /// only its own API keys) can be exercised by switching this between runs. Inert in
+    /// production, which never uses this provider (it runs `oidc`).
+    user_id: String,
     /// Dev-only role override from `RUNTARA_DEV_ROLE` (owner/admin/member/viewer). Lets local
     /// runs exercise role-based behavior — `/me` reports it and, with
     /// `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`, the authz middleware enforces it. Inert in
@@ -21,11 +26,17 @@ pub struct LocalProvider {
 
 impl LocalProvider {
     pub fn new(tenant_id: String) -> Self {
+        let user_id = std::env::var("RUNTARA_DEV_USER_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "local".to_string());
         let dev_role = std::env::var("RUNTARA_DEV_ROLE")
             .ok()
             .and_then(|s| Role::from_wire(s.trim()));
         Self {
             tenant_id,
+            user_id,
             dev_role,
         }
     }
@@ -36,7 +47,7 @@ impl AuthProvider for LocalProvider {
     async fn authenticate(&self, _headers: &HeaderMap) -> Result<AuthContext, AuthError> {
         let mut ctx = AuthContext::new(
             self.tenant_id.clone(),
-            "local".to_string(),
+            self.user_id.clone(),
             AuthMethod::Unauthenticated,
         );
         ctx.role = self.dev_role;

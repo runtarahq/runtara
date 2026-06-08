@@ -11,10 +11,7 @@ use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::auth::membership_policy;
-use crate::authz::Permission;
-use crate::middleware::authorization::{require_ownership, restrict_to_own};
-use crate::middleware::tenant_auth::{Caller, CallerId, OrgId};
+use crate::middleware::tenant_auth::{CallerId, OrgId};
 
 /// API key record (key_hash is never exposed via serde skip)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -29,9 +26,10 @@ pub struct ApiKey {
     #[schema(read_only)]
     pub key_hash: String,
     pub created_by: Option<String>,
-    /// Auth0 `sub` of the user who created the key. The key inherits this user's current
-    /// role from the tenant Valkey at validation time. `None` for legacy rows.
-    pub issuing_user_id: Option<String>,
+    /// Auth0 `sub` of the user who owns the key. The key acts as this user: it inherits their
+    /// current role from the tenant Valkey at validation time, and only they may read/revoke it.
+    /// Required — every key has an owner (enforced by the NOT NULL column).
+    pub issuing_user_id: String,
     /// Token identity — the `token:revoked:{jti}` revocation-denylist key. `None` for
     /// legacy rows.
     pub jti: Option<String>,
@@ -181,23 +179,20 @@ pub async fn create_api_key(
 )]
 pub async fn list_api_keys(
     OrgId(tenant_id): OrgId,
-    Caller { user_id, role }: Caller,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
 ) -> (StatusCode, Json<Value>) {
-    // `api_key:read` is `Own` for Member: a Member sees only the keys they issued. Owner/Admin
-    // (and non-enforcing modes) see all tenant keys. The `NOT $2` branch makes the filter a
-    // no-op when `own_only` is false.
-    let own_only = restrict_to_own(membership_policy(), role, Permission::ApiKeyRead);
+    // An API key is a personal credential: a caller sees only the keys they issued, regardless
+    // of role. Ownership — not a role permission — is the gate, so this scoping is unconditional.
     match sqlx::query_as::<_, ApiKey>(
         r#"
         SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         FROM public.api_keys
-        WHERE org_id = $1 AND (NOT $2 OR issuing_user_id = $3)
+        WHERE org_id = $1 AND issuing_user_id = $2
         ORDER BY created_at DESC
         "#,
     )
     .bind(&tenant_id)
-    .bind(own_only)
     .bind(&user_id)
     .fetch_all(&pool)
     .await
@@ -228,44 +223,25 @@ pub async fn list_api_keys(
 )]
 pub async fn revoke_api_key(
     OrgId(tenant_id): OrgId,
-    Caller { user_id, role }: Caller,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
     State(valkey): State<Option<redis::aio::ConnectionManager>>,
     Path(id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
-    // `api_key:revoke` is `Own` for Member: a Member may revoke only keys they issued. Load the
-    // key's owner and enforce before mutating (Owner/Admin bypass; non-enforcing modes pass).
-    let owner: Option<String> = match sqlx::query_scalar::<_, Option<String>>(
-        "SELECT issuing_user_id FROM public.api_keys WHERE id = $1 AND org_id = $2",
-    )
-    .bind(id)
-    .bind(&tenant_id)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row.flatten(),
-        Err(_) => None,
-    };
-    if let Err(denial) = require_ownership(
-        membership_policy(),
-        role,
-        Permission::ApiKeyRevoke,
-        owner.as_deref(),
-        &user_id,
-    ) {
-        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
-    }
-
+    // A caller may revoke only a key they issued. Scoping the mutation by `issuing_user_id`
+    // makes ownership the gate atomically: another user's key simply isn't matched, so it reads
+    // as 404 (not found) rather than leaking its existence.
     let revoked = sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>)>(
         r#"
         UPDATE public.api_keys
         SET is_revoked = TRUE
-        WHERE id = $1 AND org_id = $2
+        WHERE id = $1 AND org_id = $2 AND issuing_user_id = $3
         RETURNING jti, expires_at
         "#,
     )
     .bind(id)
     .bind(&tenant_id)
+    .bind(&user_id)
     .fetch_optional(&pool)
     .await;
 

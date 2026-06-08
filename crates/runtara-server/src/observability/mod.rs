@@ -173,11 +173,11 @@ pub struct Metrics {
     pub agent_test_failed: Counter<u64>,
     pub agent_test_duration: Histogram<f64>,
 
-    // Auth / authorization metrics (SYN-437 Phase 6). The plan enumerates six
-    // signals (membership lookup latency / failures / missing-member /
-    // revoked-token / permission denials by permission / Valkey unavailable);
-    // they collapse into three instruments because OTEL attributes carry the
-    // low-cardinality breakdowns the plan lists as separate counters:
+    // Auth / authorization metrics. Six conceptual signals (membership lookup
+    // latency / failures / missing-member / revoked-token / permission denials
+    // by permission / Valkey unavailable) collapse into three instruments
+    // because OTEL attributes carry the low-cardinality breakdowns the others
+    // would be separate counters for:
     //   - lookup latency                  -> auth_membership_lookup_duration
     //   - lookup failures, missing member,
     //     revoked token, Valkey unavailable-> auth_membership_denials_total{code}

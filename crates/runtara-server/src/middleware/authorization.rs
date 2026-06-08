@@ -87,9 +87,9 @@ impl IntoResponse for AuthzDenial {
 ///
 /// - Any policy other than [`MembershipPolicy::Required`] → `Ok` (gate disabled).
 /// - `role == None` under `Required` → `Ok`. This is not a hole: a JWT request that failed to
-///   resolve a role never reaches enforcement (membership fails closed first); the only
-///   role-less callers that get here are legacy API keys with no `issuing_user_id` (which keep
-///   their pre-contract unrestricted behavior until rotated) and trusted in-process calls.
+///   resolve a role never reaches enforcement (membership fails closed first), and an API key
+///   always resolves its issuing user's role; the only role-less callers that get here are
+///   trusted in-process calls.
 /// - `Some(role)` → consult [`access_for`]: [`Access::Allow`] and [`Access::Own`] pass (the
 ///   `Own` ownership comparison is a handler-level check), [`Access::Deny`] rejects.
 pub fn require_permission(
@@ -167,19 +167,20 @@ pub fn require(
 ///   must be closed to read-only Viewers despite the verb.
 /// - **Agent execute / test** → `workflow:execute`: host-mediated capability I/O (possibly with
 ///   a connection's credentials) is an execution capability; Viewers are denied.
-/// - **API keys** (legacy `rt_*`) → `api_key:read|create|revoke`: `read`/`revoke` are `Own` for
-///   Member, so the handlers also scope list/revoke to the caller's own keys.
+/// - **API keys** (legacy `rt_*`) are deliberately absent: they are personal credentials gated by
+///   ownership in the handler (every key has an `issuing_user_id`; a caller manages only its own),
+///   not by role, so no permission is assigned and the route stays ungated here.
 ///
 /// Connection routes are matched on both their full (`/api/runtime/connections/{id}`) and
 /// nest-relative (`/connections/{id}`) templates, so the gate is correct regardless of which
 /// form the nested router surfaces as the matched path.
 pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
     use Permission::{
-        AnalyticsRead, ApiKeyCreate, ApiKeyRead, ApiKeyRevoke, ConnectionCreate, ConnectionDelete,
-        ConnectionRead, ConnectionUpdate, DatabaseCreate, DatabaseDelete, DatabaseRead,
-        DatabaseUpdate, InvocationHistoryRead, ReportCreate, ReportDelete, ReportRead,
-        ReportUpdate, TriggerCreate, TriggerDelete, TriggerRead, TriggerUpdate, WorkflowCreate,
-        WorkflowDelete, WorkflowExecute, WorkflowRead, WorkflowUpdate,
+        AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
+        DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
+        ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
+        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
+        WorkflowUpdate,
     };
 
     let m = method.as_str();
@@ -356,12 +357,11 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         | ("GET", "/connections/{id}/rate-limit-history") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/rate-limit-timeline")
         | ("GET", "/connections/{id}/rate-limit-timeline") => ConnectionRead,
-        // ── API keys (legacy rt_* keys) ──────────────────────────────────
-        // Personal credentials: read/revoke are Own for Member (the handlers additionally
-        // scope to the caller's own keys); create is Allow for Member.
-        ("GET", "/api/runtime/api-keys") => ApiKeyRead,
-        ("POST", "/api/runtime/api-keys") => ApiKeyCreate,
-        ("DELETE", "/api/runtime/api-keys/{id}") => ApiKeyRevoke,
+        // API-key routes (legacy rt_* keys) are intentionally NOT role-gated here. An API key is
+        // a personal credential scoped to its issuing user: any role may manage its own keys, and
+        // the handlers enforce that ownership directly (list/revoke filter on `issuing_user_id`).
+        // Role plays no part, so there is no permission to gate on — see `api/handlers/api_keys`.
+        //
         // Everything else (specs, metadata, agent listings, the entitlements snapshot, health)
         // is intentionally ungated.
         _ => return None,
@@ -381,8 +381,8 @@ pub fn authorize(
     policy: MembershipPolicy,
 ) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response> {
     move |req: Request, next: Next| {
-        // Snapshot the caller identity (Phase 6: denial logs are self-contained rather than
-        // relying on parent-span field flattening). `role` also drives the gate decision.
+        // Snapshot the caller identity so denial logs are self-contained rather than relying on
+        // parent-span field flattening. `role` also drives the gate decision.
         let (tenant_id, user_id, auth_method, role) = req
             .extensions()
             .get::<AuthContext>()
@@ -458,23 +458,6 @@ pub fn require_ownership(
     }
 }
 
-/// Whether a *collection* endpoint must be narrowed to the caller's own rows. Returns `true`
-/// only when enforcement is active (`Required`) and the caller's access to `permission` is
-/// `Access::Own` — i.e. a Member listing an `Own`-scoped resource (API keys). `Allow` roles
-/// (Owner/Admin) and non-`Required` policy see everything (`false`).
-///
-/// Unlike [`require_ownership`], which denies a single-resource action, this drives a `WHERE`
-/// filter: the route gate already let the request through, so the handler narrows the result
-/// set rather than rejecting it.
-pub fn restrict_to_own(
-    policy: MembershipPolicy,
-    role: Option<Role>,
-    permission: Permission,
-) -> bool {
-    policy == MembershipPolicy::Required
-        && matches!(role.map(|r| access_for(r, permission)), Some(Access::Own))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,8 +487,7 @@ mod tests {
 
     #[test]
     fn required_with_no_role_passes() {
-        // Legacy API keys (no issuing_user_id) and trusted in-process calls reach the gate
-        // with role == None and must not be blocked.
+        // Trusted in-process calls reach the gate with role == None and must not be blocked.
         assert!(
             require_permission(MembershipPolicy::Required, None, Permission::WorkflowDelete)
                 .is_ok()
@@ -883,7 +865,8 @@ mod tests {
     #[test]
     fn permission_for_returns_none_for_ungated_routes() {
         // Metadata, agent listings/metadata, the entitlements snapshot, health: deliberately
-        // ungated (read-only, or not authz'd by runtara).
+        // ungated (read-only, or not authz'd by runtara). API-key routes are ungated too — they
+        // are personal credentials gated by ownership in the handler, not by role.
         for (method, path) in [
             (Method::GET, "/api/runtime/agents"),
             (Method::GET, "/api/runtime/agents/{name}"),
@@ -891,26 +874,18 @@ mod tests {
             (Method::GET, "/api/runtime/entitlements"),
             (Method::GET, "/health"),
             (Method::GET, "/api/runtime/nonexistent"),
+            (Method::GET, "/api/runtime/api-keys"),
+            (Method::POST, "/api/runtime/api-keys"),
+            (Method::DELETE, "/api/runtime/api-keys/{id}"),
         ] {
             assert_eq!(permission_for(&method, path), None, "{method} {path}");
         }
     }
 
     #[test]
-    fn permission_for_gates_api_keys_and_agent_execution() {
-        // Routes the external review flagged as fail-open are now mapped.
+    fn permission_for_gates_agent_execution() {
+        // Host-mediated agent capability I/O is gated like running a workflow.
         let cases: &[(Method, &str, Permission)] = &[
-            (Method::GET, "/api/runtime/api-keys", Permission::ApiKeyRead),
-            (
-                Method::POST,
-                "/api/runtime/api-keys",
-                Permission::ApiKeyCreate,
-            ),
-            (
-                Method::DELETE,
-                "/api/runtime/api-keys/{id}",
-                Permission::ApiKeyRevoke,
-            ),
             (
                 Method::POST,
                 "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",
@@ -1118,44 +1093,8 @@ mod tests {
 
     #[test]
     fn ownership_no_role_passes() {
-        // Legacy API keys / trusted internal callers (role None) are not ownership-checked.
+        // Trusted internal callers (role None) are not ownership-checked.
         assert!(require_ownership(REQ, None, Permission::WorkflowDelete, Some("u2"), "u1").is_ok());
-    }
-
-    // ── restrict_to_own: collection narrowing for Own-scoped list endpoints ──
-
-    #[test]
-    fn restrict_to_own_only_for_member_own_under_required() {
-        // Member's api_key:read is Own → narrow the list to their own keys.
-        assert!(restrict_to_own(
-            REQ,
-            Some(Role::Member),
-            Permission::ApiKeyRead
-        ));
-        // Owner/Admin have Allow → see everything.
-        assert!(!restrict_to_own(
-            REQ,
-            Some(Role::Owner),
-            Permission::ApiKeyRead
-        ));
-        assert!(!restrict_to_own(
-            REQ,
-            Some(Role::Admin),
-            Permission::ApiKeyRead
-        ));
-        // Viewer has Deny (not Own) — the route gate already blocked them; no narrowing.
-        assert!(!restrict_to_own(
-            REQ,
-            Some(Role::Viewer),
-            Permission::ApiKeyRead
-        ));
-        // Dormant unless Required, and never for a role-less caller.
-        assert!(!restrict_to_own(
-            MembershipPolicy::Logging,
-            Some(Role::Member),
-            Permission::ApiKeyRead
-        ));
-        assert!(!restrict_to_own(REQ, None, Permission::ApiKeyRead));
     }
 
     // ── coverage guard: the known mutating routes stay gated ─────────────────
@@ -1195,8 +1134,8 @@ mod tests {
             (Method::POST, "/api/runtime/object-model/sql/execute"),
             (Method::POST, "/api/runtime/connections"),
             (Method::DELETE, "/api/runtime/connections/{id}"),
-            (Method::POST, "/api/runtime/api-keys"),
-            (Method::DELETE, "/api/runtime/api-keys/{id}"),
+            // API-key routes are deliberately NOT in this list: they are personal credentials
+            // gated by ownership in the handler (filter on `issuing_user_id`), not by role.
         ];
         for (method, path) in mutating {
             assert!(
