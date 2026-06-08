@@ -381,7 +381,20 @@ pub fn authorize(
     policy: MembershipPolicy,
 ) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response> {
     move |req: Request, next: Next| {
-        let role = req.extensions().get::<AuthContext>().and_then(|c| c.role);
+        // Snapshot the caller identity (Phase 6: denial logs are self-contained rather than
+        // relying on parent-span field flattening). `role` also drives the gate decision.
+        let (tenant_id, user_id, auth_method, role) = req
+            .extensions()
+            .get::<AuthContext>()
+            .map(|c| {
+                (
+                    Some(c.org_id.clone()),
+                    Some(c.user_id.clone()),
+                    Some(c.auth_method.as_str()),
+                    c.role,
+                )
+            })
+            .unwrap_or((None, None, None, None));
         let matched = req
             .extensions()
             .get::<MatchedPath>()
@@ -393,11 +406,17 @@ pub fn authorize(
                 && let Err(denial) = require_permission(policy, role, permission)
             {
                 tracing::warn!(
+                    tenant_id = tenant_id.as_deref(),
+                    user_id = user_id.as_deref(),
+                    auth_method,
+                    role = role.map(|r| r.as_str()),
                     permission = permission.as_str(),
+                    code = AuthzDenial::CODE,
                     method = method.as_str(),
                     matched_path = path,
                     "authorization denied"
                 );
+                crate::observability::record_permission_denial(permission.as_str());
                 return denial.into_response();
             }
             next.run(req).await

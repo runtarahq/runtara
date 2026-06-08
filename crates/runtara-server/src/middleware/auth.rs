@@ -80,9 +80,11 @@ pub async fn authenticate(
 fn auth_span(ctx: &AuthContext) -> tracing::Span {
     tracing::info_span!(
         "request_auth",
+        tenant_id = %ctx.org_id,
         user_id = %ctx.user_id,
-        auth_method = ?ctx.auth_method,
-        role = ?ctx.role,
+        auth_method = ctx.auth_method.as_str(),
+        role = ctx.role.map(|r| r.as_str()),
+        jti = ctx.jti.as_deref(),
     )
 }
 
@@ -145,7 +147,11 @@ async fn enforce_api_key_membership(
         return Ok(());
     };
 
-    match resolve_api_key_membership(auth_state, api_key.jti.as_deref(), issuing_user_id).await {
+    let started = std::time::Instant::now();
+    let outcome =
+        resolve_api_key_membership(auth_state, api_key.jti.as_deref(), issuing_user_id).await;
+    record_lookup_duration(started, ctx.auth_method.as_str(), outcome.is_ok());
+    match outcome {
         Ok(role) => {
             ctx.role = role;
             Ok(())
@@ -160,6 +166,18 @@ async fn enforce_api_key_membership(
             }
         }
     }
+}
+
+/// Record the Valkey membership-lookup latency (Phase 6). `ok` selects the `outcome` attribute
+/// so dashboards can split allow vs. deny latency. Centralized so both the JWT and API-key
+/// paths report identically.
+fn record_lookup_duration(started: std::time::Instant, auth_method: &'static str, ok: bool) {
+    let outcome = if ok { "allow" } else { "deny" };
+    crate::observability::record_membership_lookup(
+        started.elapsed().as_secs_f64(),
+        auth_method,
+        outcome,
+    );
 }
 
 /// Check the revocation denylist (when the key carries a `jti`) then read the issuing user's
@@ -267,31 +285,53 @@ impl MembershipDenial {
         (status, Json(json!({ "error": code, "message": message }))).into_response()
     }
 
-    /// Emit a structured log. Valkey-unavailability is a loud `error!` (operator alert); the
-    /// rest are `warn!`. `enforced` distinguishes a real block from a `Logging`-mode shadow.
+    /// Emit a structured log and bump the denial metric. Valkey-unavailability is a loud
+    /// `error!` (operator alert); the rest are `warn!`. `enforced` distinguishes a real block
+    /// from a `Logging`-mode shadow.
+    ///
+    /// Every line carries the full identity set the Phase 6 plan calls for — `tenant_id`,
+    /// `user_id`, `auth_method`, `role`, `jti`, denial `code` — so denial logs are
+    /// self-contained rather than relying on parent-span field flattening (this runs before
+    /// [`auth_span`] wraps the request).
     fn log(&self, ctx: &AuthContext, enforced: bool) {
+        let auth_method = ctx.auth_method.as_str();
+        let role = ctx.role.map(|r| r.as_str());
+        let jti = ctx.jti.as_deref();
         match self {
             MembershipDenial::ValkeyUnavailable(detail) => tracing::error!(
+                tenant_id = %ctx.org_id,
                 user_id = %ctx.user_id,
+                auth_method,
+                role,
+                jti,
                 code = self.code(),
                 detail = %detail,
                 enforced,
                 "membership lookup failed: Valkey unavailable"
             ),
             MembershipDenial::MalformedRecord(detail) => tracing::warn!(
+                tenant_id = %ctx.org_id,
                 user_id = %ctx.user_id,
+                auth_method,
+                role,
+                jti,
                 code = self.code(),
                 detail = %detail,
                 enforced,
                 "membership check denied"
             ),
             _ => tracing::warn!(
+                tenant_id = %ctx.org_id,
                 user_id = %ctx.user_id,
+                auth_method,
+                role,
+                jti,
                 code = self.code(),
                 enforced,
                 "membership check denied"
             ),
         }
+        crate::observability::record_membership_denial(self.code(), auth_method, enforced);
     }
 }
 
@@ -311,7 +351,10 @@ async fn enforce_membership(auth_state: &AuthState, ctx: &mut AuthContext) -> Re
         return Ok(());
     }
 
-    match resolve_membership(auth_state, ctx).await {
+    let started = std::time::Instant::now();
+    let outcome = resolve_membership(auth_state, ctx).await;
+    record_lookup_duration(started, ctx.auth_method.as_str(), outcome.is_ok());
+    match outcome {
         Ok(role) => {
             ctx.role = role;
             Ok(())

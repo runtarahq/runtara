@@ -65,7 +65,7 @@ impl AuthContext {
 }
 
 /// How the request was authenticated.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum AuthMethod {
     Jwt,
     ApiKey,
@@ -73,6 +73,19 @@ pub enum AuthMethod {
     /// unconditionally (`local`) or trusted because it arrived through a reverse proxy
     /// that terminated auth upstream (`trust_proxy`).
     Unauthenticated,
+}
+
+impl AuthMethod {
+    /// Stable lowercase identifier for structured logs and metric attributes. Kept distinct
+    /// from the `Debug` form so log/metric consumers have a contract that does not move with
+    /// the enum's `derive(Debug)` output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMethod::Jwt => "jwt",
+            AuthMethod::ApiKey => "api_key",
+            AuthMethod::Unauthenticated => "unauthenticated",
+        }
+    }
 }
 
 /// How runtara treats the per-tenant Valkey membership/revocation lookup.
@@ -180,7 +193,16 @@ pub struct AuthState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthProviderKind, MembershipPolicy};
+    use super::{AuthMethod, AuthProviderKind, MembershipPolicy};
+
+    #[test]
+    fn auth_method_as_str_is_stable() {
+        // Structured logs and metric attributes depend on these exact strings; they must not
+        // drift with the enum's derived Debug form.
+        assert_eq!(AuthMethod::Jwt.as_str(), "jwt");
+        assert_eq!(AuthMethod::ApiKey.as_str(), "api_key");
+        assert_eq!(AuthMethod::Unauthenticated.as_str(), "unauthenticated");
+    }
 
     #[test]
     fn parse_explicit_policy() {
