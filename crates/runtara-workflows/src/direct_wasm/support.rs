@@ -209,7 +209,42 @@ fn collect_graph_support_inner(
 ) {
     let graph_durable = graph.durable.unwrap_or(inherited_durable);
     let direct_control = supports_direct_control_graph(graph, child_workflows);
-    if !direct_control {
+
+    // Dangling edges — an endpoint naming no step in `steps` — are the real
+    // cause of a coverage-invariant failure: the edge can never be consumed, or
+    // it routes into a missing step, so `supports_direct_control_graph` returns
+    // false. When present, report them precisely and SUPPRESS the routing
+    // cascade below, so the failure points at the actual defect instead of
+    // spraying `execution-plan-routing` (and re-flagging every Conditional /
+    // Switch / Finish) across the whole graph. Validation rejects these up front
+    // (E014); this keeps the gate's own diagnostics honest for any caller that
+    // reaches it with a malformed graph.
+    let dangling: Vec<_> = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| {
+            !graph.steps.contains_key(&edge.from_step) || !graph.steps.contains_key(&edge.to_step)
+        })
+        .collect();
+    let cascade_suppressed = !dangling.is_empty();
+    for edge in &dangling {
+        let missing = if !graph.steps.contains_key(&edge.from_step) {
+            &edge.from_step
+        } else {
+            &edge.to_step
+        };
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(missing.clone()),
+            step_type: None,
+            feature: "execution-plan-unknown-step".to_string(),
+            reason: format!(
+                "execution plan edge '{}' -> '{}' references step '{}', which does not exist in steps",
+                edge.from_step, edge.to_step, missing
+            ),
+        });
+    }
+
+    if !direct_control && !cascade_suppressed {
         for edge in &graph.execution_plan {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
@@ -232,7 +267,7 @@ fn collect_graph_support_inner(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if finish_steps.len() > 1 && !direct_control {
+    if finish_steps.len() > 1 && !direct_control && !cascade_suppressed {
         for step in finish_steps {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(step.id.clone()),
@@ -244,6 +279,11 @@ fn collect_graph_support_inner(
     }
 
     for edge in &graph.execution_plan {
+        // Dangling edges are reported above; skip their condition/onError shape
+        // checks — the source step does not exist to anchor them.
+        if !graph.steps.contains_key(&edge.from_step) {
+            continue;
+        }
         // An onError edge on an AiAgent is inert (never routed by the generated
         // path); direct accepts it and leaves the handler dead, so it is not an
         // unsupported routing shape.
@@ -290,13 +330,19 @@ fn collect_graph_support_inner(
         }
     }
 
+    // When a dangling edge is the cause, treat the graph as if routing were fine
+    // for the per-step pass too, so the control-flow steps (Conditional / Switch
+    // / Filter / GroupBy / Log / Error) are not re-flagged as unsupported. Steps
+    // that are unsupported independently of routing (e.g. an unlowerable embed
+    // child or AiAgent config) still report.
+    let routing_ok_for_steps = direct_control || cascade_suppressed;
     for step in graph.steps.values() {
         collect_step_support(
             graph,
             graph_durable,
             child_workflows,
             step,
-            direct_control,
+            routing_ok_for_steps,
             unsupported,
         );
     }
@@ -3150,5 +3196,47 @@ mod tests {
         let report = analyze_direct_wasm_support(&fixture("wait_timeout"));
 
         assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn dangling_edge_reports_only_unknown_step_not_routing_cascade() {
+        // A linear graph that would compile, plus one edge from a step that does
+        // not exist (`parse_alias`). The coverage invariant fails, but the report
+        // must name the real cause — not spray `execution-plan-routing` over every
+        // step (the pre-fix cascade behavior).
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [
+                { "fromStep": "now_ts", "toStep": "finish" },
+                { "fromStep": "parse_alias", "toStep": "finish" }
+              ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .all(|f| f.feature != "execution-plan-routing"),
+            "routing cascade was not suppressed: {:?}",
+            report.unsupported
+        );
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|f| f.feature == "execution-plan-unknown-step"
+                    && f.step_id.as_deref() == Some("parse_alias")),
+            "expected the dangling step to be named: {:?}",
+            report.unsupported
+        );
     }
 }

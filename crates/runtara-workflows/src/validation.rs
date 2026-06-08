@@ -157,6 +157,22 @@ pub enum ValidationError {
         reference_path: String,
         reason: String,
     },
+    /// An executionPlan edge references a step id absent from `steps`. Such a
+    /// dangling edge passes the other structural checks but breaks the direct
+    /// compiler's coverage invariant, surfacing only at compile time as a
+    /// confusing `execution-plan-routing` cascade. Flag it here so curators can
+    /// fix the graph before deploy.
+    EdgeReferencesUnknownStep {
+        from_step: String,
+        to_step: String,
+        /// Which endpoint is missing: `"fromStep"` or `"toStep"`.
+        endpoint: String,
+        /// The specific step id that does not exist.
+        missing_step: String,
+        /// Edge label when present (e.g. `"true"` / `"false"` / `"onError"`).
+        label: Option<String>,
+        available_steps: Vec<String>,
+    },
 
     // === Agent/Capability Errors ===
     /// Agent does not exist.
@@ -463,6 +479,28 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E011] Step '{}' has invalid reference path '{}': {}",
                     step_id, reference_path, reason
+                )
+            }
+            ValidationError::EdgeReferencesUnknownStep {
+                from_step,
+                to_step,
+                endpoint,
+                missing_step,
+                label,
+                available_steps,
+            } => {
+                let suggestion = find_similar_name(missing_step, available_steps);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                let label_text = label
+                    .as_deref()
+                    .map(|l| format!(" (label '{}')", l))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E014] Execution plan edge '{}' -> '{}'{} references {} '{}', which does not exist in steps{}",
+                    from_step, to_step, label_text, endpoint, missing_step, suggestion_text
                 )
             }
 
@@ -1250,6 +1288,10 @@ pub fn validate_workflow(
 
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
+
+    // Phase 1.1: executionPlan edge endpoints must exist in steps (E014).
+    // A dangling edge otherwise only fails at compile, as a confusing cascade.
+    validate_edge_endpoints(graph, &mut result);
 
     // Phase 1.5: Finish output shape validation
     validate_finish_outputs(graph, &mut result);
@@ -3265,6 +3307,50 @@ fn validate_compensation_recursive(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+}
+
+/// E014: every executionPlan edge endpoint (`fromStep` / `toStep`) must name a
+/// step present in `steps`. A dangling edge otherwise passes validation and only
+/// fails at compile, where the direct gate's coverage invariant turns it into an
+/// `execution-plan-routing` cascade across every step. Recurses into Split /
+/// While subgraphs (mirrors `validate_edge_conditions_recursive`).
+fn validate_edge_endpoints(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let mut available: Vec<String> = graph.steps.keys().cloned().collect();
+    available.sort();
+    for edge in &graph.execution_plan {
+        if !graph.steps.contains_key(&edge.from_step) {
+            result
+                .errors
+                .push(ValidationError::EdgeReferencesUnknownStep {
+                    from_step: edge.from_step.clone(),
+                    to_step: edge.to_step.clone(),
+                    endpoint: "fromStep".to_string(),
+                    missing_step: edge.from_step.clone(),
+                    label: edge.label.clone(),
+                    available_steps: available.clone(),
+                });
+        }
+        if !graph.steps.contains_key(&edge.to_step) {
+            result
+                .errors
+                .push(ValidationError::EdgeReferencesUnknownStep {
+                    from_step: edge.from_step.clone(),
+                    to_step: edge.to_step.clone(),
+                    endpoint: "toStep".to_string(),
+                    missing_step: edge.to_step.clone(),
+                    label: edge.label.clone(),
+                    available_steps: available.clone(),
+                });
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => validate_edge_endpoints(&split_step.subgraph, result),
+            Step::While(while_step) => validate_edge_endpoints(&while_step.subgraph, result),
+            _ => {}
+        }
+    }
 }
 
 fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
@@ -9630,5 +9716,59 @@ mod template_validation_tests {
             "{:?}",
             result.warnings
         );
+    }
+
+    #[test]
+    fn dangling_execution_plan_edge_is_e014() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [
+                { "fromStep": "now_ts", "toStep": "finish" },
+                { "fromStep": "parse_alias", "toStep": "create_alias" }
+              ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_edge_endpoints(&graph, &mut result);
+
+        // Both endpoints of the dangling edge are absent from `steps`.
+        assert!(result.errors.iter().any(|e| matches!(e,
+            ValidationError::EdgeReferencesUnknownStep { missing_step, .. } if missing_step == "parse_alias")));
+        assert!(result.errors.iter().any(|e| matches!(e,
+            ValidationError::EdgeReferencesUnknownStep { missing_step, .. } if missing_step == "create_alias")));
+
+        let msg = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, ValidationError::EdgeReferencesUnknownStep { .. }))
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("[E014]"), "{msg}");
+    }
+
+    #[test]
+    fn wellformed_graph_has_no_e014() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [ { "fromStep": "now_ts", "toStep": "finish" } ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_edge_endpoints(&graph, &mut result);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
     }
 }

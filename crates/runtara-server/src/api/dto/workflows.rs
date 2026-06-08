@@ -595,6 +595,22 @@ impl ValidationErrorDto {
                 Some(format!("mcp.{}", toolset)),
                 None,
             ),
+            ValidationError::EdgeReferencesUnknownStep {
+                from_step,
+                to_step,
+                endpoint,
+                missing_step,
+                ..
+            } => (
+                "E014".to_string(),
+                format!(
+                    "Execution plan edge '{}' -> '{}' references {} '{}', which does not exist in steps",
+                    from_step, to_step, endpoint, missing_step
+                ),
+                Some(from_step.clone()),
+                Some("executionPlan".to_string()),
+                Some(vec![missing_step.clone()]),
+            ),
         };
 
         Self {
