@@ -9,33 +9,22 @@
 //! reused across all workflow compilations.
 
 // Re-export all agent modules from agents/ subdirectory
+// Only agents that genuinely cannot run as WASM components live here now — the
+// native workers for the C-dependent agents (the WASM shells call back to the
+// host via /api/internal/agents). Every pure/dual-target agent (transform,
+// crypto, csv, datetime, text, xml, utils, http) has been removed; it ships as
+// a standalone WASM component under crates/agents/runtara-agent-*.
 #[cfg(feature = "native")]
 #[path = "agents/compression.rs"]
 pub mod compression;
-#[path = "agents/crypto.rs"]
-pub mod crypto;
-#[path = "agents/csv.rs"]
-pub mod csv;
-#[path = "agents/datetime.rs"]
-pub mod datetime;
 #[path = "agents/extractors/mod.rs"]
 pub mod extractors;
-#[path = "agents/http.rs"]
-pub mod http;
 #[cfg(feature = "native")]
 #[path = "agents/sftp.rs"]
 pub mod sftp;
-#[path = "agents/text.rs"]
-pub mod text;
-#[path = "agents/transform.rs"]
-pub mod transform;
-#[path = "agents/utils.rs"]
-pub mod utils;
 #[cfg(feature = "native")]
 #[path = "agents/xlsx.rs"]
 pub mod xlsx;
-#[path = "agents/xml.rs"]
-pub mod xml;
 
 // Shared types
 pub mod types;

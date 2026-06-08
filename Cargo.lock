@@ -1896,12 +1896,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glob"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
-
-[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4520,33 +4514,18 @@ version = "8.0.2"
 dependencies = [
  "base64",
  "calamine",
- "chrono",
- "chrono-tz",
- "csv",
- "encoding_rs",
- "getrandom 0.2.17",
- "glob",
- "hmac 0.12.1",
- "md-5 0.10.6",
- "minijinja",
  "openssl",
- "rand 0.8.6",
- "regex",
- "roxmltree",
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
  "serial_test",
- "sha1",
- "sha2 0.10.9",
  "ssh2",
  "strum",
  "tempfile",
  "tokio",
  "tracing",
- "urlencoding",
  "wiremock",
  "zip",
 ]

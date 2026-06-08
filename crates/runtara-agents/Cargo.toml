@@ -13,10 +13,6 @@ name = "runtara_agents"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
-[[bin]]
-name = "generate_dsl_spec"
-path = "src/bin/generate_dsl_spec.rs"
-
 [features]
 default = ["native"]
 
@@ -41,35 +37,18 @@ runtara-agent-macro = { path = "../runtara-agent-macro", version = "8.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
-csv = "1.3"
-roxmltree = "0.20"
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 base64 = "0.22"
-encoding_rs = "0.8"
-minijinja = "2.5"
-sha2 = "0.10"
-sha1 = "0.10"
-md-5 = "0.10"
-hmac = "0.12"
-regex = "1"
 strum = { version = "0.26", features = ["derive"] }
-# Native implementations
-rand = "0.8"
+# HTTP abstraction used by the standalone S3 client (s3_client.rs)
 runtara-http = { workspace = true, default-features = false }
-urlencoding = "2.1"
+# Native-only agents — C deps that don't compile to WASM
 ssh2 = { version = "0.9", optional = true }
 # Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)
 openssl = { workspace = true, optional = true }
-# Glob pattern matching for file listing
-glob = "0.3"
-# ZIP archive support (native only — C deps don't compile to WASM)
+# ZIP archive support (compression agent)
 zip = { version = "2.2", optional = true }
-# Spreadsheet parsing (XLSX, XLS, XLSB, ODS) (native only — C deps)
+# Spreadsheet parsing (XLSX, XLS, XLSB, ODS) (xlsx agent)
 calamine = { version = "0.26", optional = true }
-
-[target.'cfg(all(target_family = "wasm", not(target_os = "wasi")))'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 tempfile = "3"
