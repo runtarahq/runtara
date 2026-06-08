@@ -4442,11 +4442,18 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         }
     }
 
+    // Each setup/stdlib call is followed by a fail-on-error guard (`runtime.fail`
+    // inside an `if error` block) so an unhandled error surfaces as a `failed`
+    // SDK event instead of a silent non-zero exit.
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
+        fail_index.expect("fail import"),
         load_input_index.expect("load-input import"),
+        fail_index.expect("fail import"),
         build_source_index.expect("build-source import"),
+        fail_index.expect("fail import"),
         apply_mapping_index.expect("apply-mapping import"),
+        fail_index.expect("fail import"),
         complete_index.expect("complete import"),
     ];
     assert!(
@@ -6467,6 +6474,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     let mut apply_mapping_index = None;
     let mut complete_index = None;
     let mut custom_event_index = None;
+    let mut fail_index = None;
     let mut step_debug_start_index = None;
     let mut step_debug_end_index = None;
     let mut saw_step_debug_start_kind = false;
@@ -6499,6 +6507,9 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             }
                             ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                fail_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
                                 step_debug_start_index = Some(next_function_index)
@@ -6534,15 +6545,27 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
         }
     }
 
+    // Each setup/stdlib call (including the step-debug-start/end and their
+    // custom-event emits) is followed by a fail-on-error guard (`runtime.fail`
+    // inside an `if error` block) so an unhandled error surfaces as a `failed`
+    // SDK event instead of a silent non-zero exit.
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
+        fail_index.expect("fail import"),
         load_input_index.expect("load-input import"),
+        fail_index.expect("fail import"),
         build_source_index.expect("build-source import"),
+        fail_index.expect("fail import"),
         step_debug_start_index.expect("step-debug-start import"),
+        fail_index.expect("fail import"),
         custom_event_index.expect("custom-event import"),
+        fail_index.expect("fail import"),
         apply_mapping_index.expect("apply-mapping import"),
+        fail_index.expect("fail import"),
         step_debug_end_index.expect("step-debug-end import"),
+        fail_index.expect("fail import"),
         custom_event_index.expect("custom-event import"),
+        fail_index.expect("fail import"),
         complete_index.expect("complete import"),
     ];
     assert_eq!(
@@ -9639,8 +9662,10 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
             .iter()
             .filter(|&&index| index == fail_index)
             .count(),
-        1,
-        "Error run should call runtime.fail once"
+        4,
+        "Error run should emit runtime.fail four times: one terminal fail for the \
+         Error step plus the three fail-on-error guards after init-manifest, \
+         load-input, and build-source (each guarded by an `if error` block)"
     );
     assert!(
         run_calls

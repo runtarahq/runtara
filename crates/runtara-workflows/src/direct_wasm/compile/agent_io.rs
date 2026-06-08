@@ -11,7 +11,7 @@
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
-use super::abi::{load_retptr_list, push_retptr_arg, return_if_retptr_error};
+use super::abi::{emit_fail_if_retptr_error_inplace, load_retptr_list, push_retptr_arg};
 use super::{DirectCoreFunctionIndices, DirectCoreStaticData};
 
 pub(super) fn emit_agent_connection_input(
@@ -31,7 +31,7 @@ pub(super) fn emit_agent_connection_input(
     body.instruction(&Instruction::LocalGet(input_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, input_ptr_local, input_len_local);
 }
 
@@ -49,6 +49,6 @@ pub(super) fn emit_agent_cache_key(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, cache_key_ptr_local, cache_key_len_local);
 }

@@ -13,8 +13,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_retptr_list, load_retptr_tag, push_retptr_arg,
-    push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    emit_fail_if_retptr_error_inplace, emit_retptr_error_or_return, load_retptr_list,
+    load_retptr_tag, push_retptr_arg, push_retptr_u8_load, push_segment_args,
 };
 use super::{
     DIRECT_CHECKPOINT_FOUND_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
@@ -50,7 +50,7 @@ pub(super) fn emit_step_debug_event(
     } else {
         indices.stdlib_step_debug_end
     }));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(
@@ -65,7 +65,7 @@ pub(super) fn emit_step_debug_event(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,7 +159,7 @@ pub(super) fn emit_step_breakpoint(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_breakpoint_key));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, route_ptr_local, route_len_local);
 
     body.instruction(&Instruction::LocalGet(route_ptr_local));
@@ -179,7 +179,7 @@ pub(super) fn emit_step_breakpoint(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_breakpoint_event));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, &static_data.breakpoint_hit_kind);
@@ -220,7 +220,7 @@ pub(super) fn emit_agent_debug_error(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_debug_error));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, debug_ptr_local, debug_len_local);
 
     push_segment_args(body, &static_data.step_debug_end_kind);
@@ -228,5 +228,5 @@ pub(super) fn emit_agent_debug_error(
     body.instruction(&Instruction::LocalGet(debug_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    emit_fail_if_retptr_error_inplace(body, indices);
 }
