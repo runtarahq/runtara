@@ -447,6 +447,17 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
+        DirectRunPlan::Fanout {
+            branches,
+            merge_plan,
+        } => {
+            for branch in branches {
+                collect_run_plan_ids(branch, condition_ids, mapping_ids);
+            }
+            if let Some(merge_plan) = merge_plan {
+                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+            }
+        }
         DirectRunPlan::GroupBy { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
@@ -769,6 +780,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::Fanout { .. }
         | DirectRunPlan::AiAgentLoop { .. }
         | DirectRunPlan::Join
         | DirectRunPlan::ImplicitFinish => None,
@@ -959,6 +971,60 @@ fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
         connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("emit should succeed for a handler step that carries an onError edge");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
+}
+
+#[test]
+fn direct_compile_emits_fanout_inside_conditional_branch() {
+    // Regression: a Conditional whose false branch enters a step (`miss_gate`)
+    // that fans out to two parallel normal successors (`b`, `c`) which re-converge
+    // at `join`. The support gate accepted this, but the plan builder used to bail
+    // with "unsupported parallel normal branches" because the fan-out is off the
+    // topological backbone. The Fanout plan node now linearizes it. Confirm the
+    // full emit pipeline produces a valid Wasm component.
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+        r##"{
+          "entryPoint": "cond",
+          "executionPlan": [
+            {"fromStep": "cond", "label": "true",  "toStep": "hit"},
+            {"fromStep": "cond", "label": "false", "toStep": "miss_gate"},
+            {"fromStep": "miss_gate", "toStep": "b"},
+            {"fromStep": "miss_gate", "toStep": "c"},
+            {"fromStep": "b", "toStep": "join"},
+            {"fromStep": "c", "toStep": "join"},
+            {"fromStep": "hit", "toStep": "join"},
+            {"fromStep": "join", "toStep": "finish"}
+          ],
+          "steps": {
+            "cond": {"id": "cond", "stepType": "Conditional", "condition": {"type": "operation", "op": "EQ", "arguments": [{"value": "x", "valueType": "immediate"}, {"value": "y", "valueType": "immediate"}]}},
+            "hit": {"id": "hit", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "miss_gate": {"id": "miss_gate", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "join": {"id": "join", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}}
+          }
+        }"##,
+    )
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "repro/cond_then_fanout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("emit should succeed for fan-out inside a Conditional branch");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
     Validator::new()
