@@ -82,8 +82,6 @@ use runtime_client::RuntimeClient;
         api::handlers::operators::get_agent_connection_schema_handler,
         // Agent testing endpoint
         api::handlers::agent_testing::test_agent_handler,
-        // Agent execution endpoint (host-mediated, for WASM transition)
-        api::handlers::agent_execution::execute_agent_handler,
         // Metadata endpoints
         api::metadata::get_workflow_step_types_handler,
         // Object Model Schema endpoints
@@ -241,9 +239,6 @@ use runtime_client::RuntimeClient;
             api::dto::agent_testing::TestAgentRequest,
             api::dto::agent_testing::TestAgentResponse,
             api::dto::agent_testing::TestAgentErrorResponse,
-            api::dto::agent_execution::ExecuteAgentRequest,
-            api::dto::agent_execution::ExecuteAgentResponse,
-            api::dto::agent_execution::ExecuteAgentErrorResponse,
             api::handlers::chat::ChatRequest,
             api::handlers::chat::ChatStartRequest,
             api::metadata::NotImplementedResponse,
@@ -511,8 +506,6 @@ struct AppState {
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
-    /// Agent execution service for host-mediated agent calls from workflow instances
-    agent_execution: api::services::agent_execution::AgentExecutionService,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
     /// Unified execution engine — single orchestrator for all execution paths
@@ -583,13 +576,6 @@ impl axum::extract::FromRef<AppState>
 impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
     fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
         state.valkey_conn.clone()
-    }
-}
-
-// Implement FromRef to allow extracting agent_execution service from AppState
-impl axum::extract::FromRef<AppState> for api::services::agent_execution::AgentExecutionService {
-    fn from_ref(state: &AppState) -> api::services::agent_execution::AgentExecutionService {
-        state.agent_execution.clone()
     }
 }
 
@@ -1617,11 +1603,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/entitlements",
             get(api::handlers::entitlements::get_entitlements_handler),
         )
-        // Agent execution endpoint (host-mediated, for WASM transition)
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",
-            post(api::handlers::agent_execution::execute_agent_handler),
-        )
         // Agent endpoints (global metadata)
         .route(
             "/api/runtime/agents",
@@ -1699,9 +1680,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
-            agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                connections_facade.clone(),
-            ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
@@ -1996,9 +1974,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
-            agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                connections_facade.clone(),
-            ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),

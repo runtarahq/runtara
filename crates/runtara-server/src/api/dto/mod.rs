@@ -1,7 +1,6 @@
 // Data Transfer Objects - request/response types organized by domain
 // NOTE: Connection and rate limit DTOs are now in the runtara-connections crate.
 
-pub mod agent_execution;
 pub mod agent_testing;
 pub mod analytics;
 pub mod common;

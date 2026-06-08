@@ -2,7 +2,6 @@
 // Services coordinate repositories and implement business rules
 // NOTE: Connection, OAuth, rate limit, and proxy auth services are now in runtara-connections crate.
 
-pub mod agent_execution;
 pub mod agent_testing;
 pub mod compilation;
 pub mod csv_import_export;
