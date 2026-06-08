@@ -764,7 +764,7 @@ impl DirectJsonManifest {
                     .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
                 apply_error(&error.value, &source)?.context
             }
-            "Agent" => {
+            "Agent" | "AiAgent" => {
                 let agent = self
                     .agent_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
@@ -1954,7 +1954,7 @@ impl DirectJsonManifest {
                     Some(delay.duration_ms.clone()),
                 ))
             }
-            "Agent" => {
+            "Agent" | "AiAgent" => {
                 let agent = self
                     .agent_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
@@ -2070,7 +2070,7 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
-            "Agent" => source
+            "Agent" | "AiAgent" => source
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct Agent output for '{}'", step.id)),
@@ -7411,6 +7411,68 @@ mod tests {
         assert_eq!(end["outputs"]["stepId"], json!("agent"));
         assert_eq!(end["outputs"]["stepType"], json!("Agent"));
         assert_eq!(end["outputs"]["outputs"], json!({ "value": "out" }));
+    }
+
+    #[test]
+    fn ai_agent_debug_payloads_supported() {
+        // Regression: a single-shot AiAgent step (`stepType: "AiAgent"`) must
+        // build step-debug-start/end payloads like a regular Agent. These
+        // previously hit the `other =>` arm and returned
+        // `Err("...does not support step type 'AiAgent'")`; with track-events
+        // enabled the emitter's debug-event guard turned that error into a silent
+        // non-zero exit, so the instance was marked "crashed" with no diagnostic.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": { "user_prompt": { "valueType": "reference", "value": "data.value" } }
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-completion",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("agent", &source)
+            .expect("AiAgent debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"], json!({ "user_prompt": "in" }));
+
+        // Stored single-shot output (the chat-completion choice) feeds debug-end.
+        let output = json!({ "choice": [{ "text": "Hello!" }] });
+        let steps = manifest
+            .ai_agent_output(0, &source, &serde_json::to_vec(&output).unwrap())
+            .expect("AiAgent steps context");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("agent", &source)
+            .expect("AiAgent debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
+        assert_eq!(end["outputs"]["outputs"]["response"], json!("Hello!"));
     }
 
     #[test]
