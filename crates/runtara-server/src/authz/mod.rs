@@ -59,6 +59,11 @@ impl Role {
             Role::Viewer => "viewer",
         }
     }
+
+    /// Parse the lowercase wire identifier back into a [`Role`]; `None` for anything else.
+    pub fn from_wire(s: &str) -> Option<Role> {
+        Self::ALL.into_iter().find(|r| r.as_str() == s)
+    }
 }
 
 /// The decision the permission map yields for a `(role, permission)` pair.
