@@ -2231,17 +2231,36 @@ fn inject_runtime_identity_variables(variables: &mut Value) {
 pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u8>, String> {
     let mut data: Value =
         serde_json::from_slice(data).map_err(|err| format!("failed to parse data: {err}"))?;
-    // The workflow start input arrives in the canonical envelope
-    // `{"data": {...}, "variables": {...}}` (enforced at the API boundary) and is
-    // stored verbatim as the instance input. `data.*` references resolve against
-    // the inner `data` payload, so unwrap it here — mirroring the historical
-    // `input_json.get("data")` behaviour. Inputs with no `data` key (low-level /
-    // direct runtime invocations) are used as-is.
-    if let Some(inner) = data.as_object_mut().and_then(|map| map.remove("data")) {
-        data = inner;
-    }
     let mut variables: Value = serde_json::from_slice(variables)
         .map_err(|err| format!("failed to parse variables: {err}"))?;
+    // The workflow start input arrives in the canonical envelope
+    // `{"data": {...}, "variables": {...}}` (enforced at the API boundary) and is
+    // stored verbatim as the instance input. Unwrap it so `data.*` resolves
+    // against the inner payload, and merge the runtime `variables` over the
+    // compile-time declared defaults (runtime wins). The `_`-prefixed identity
+    // variables are never overridable from input. Inputs with no `data` key
+    // (low-level / direct runtime invocations) are used as-is.
+    let inner_data = if let Value::Object(envelope) = &mut data {
+        if envelope.contains_key("data") {
+            if let Some(Value::Object(runtime_vars)) = envelope.remove("variables")
+                && let Value::Object(defaults) = &mut variables
+            {
+                for (key, value) in runtime_vars {
+                    if !key.starts_with('_') {
+                        defaults.insert(key, value);
+                    }
+                }
+            }
+            envelope.remove("data")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(inner) = inner_data {
+        data = inner;
+    }
     inject_runtime_identity_variables(&mut variables);
     let steps: Value =
         serde_json::from_slice(steps).map_err(|err| format!("failed to parse steps: {err}"))?;
@@ -7417,6 +7436,34 @@ mod tests {
         let bare = build_source(br#"{"tpl":"bare"}"#, b"{}", b"{}").expect("bare source");
         let bare: Value = serde_json::from_slice(&bare).expect("bare json");
         assert_eq!(bare["data"], json!({ "tpl": "bare" }));
+    }
+
+    #[test]
+    fn build_source_merges_runtime_variables_over_declared_defaults() {
+        // The `variables` arg is the compile-time declared defaults (already
+        // flattened to values). The canonical envelope's runtime `variables`
+        // override those (runtime wins); declared-only variables keep their
+        // default; `_`-prefixed identity vars are never overridable from input.
+        let envelope =
+            br#"{"data":{"x":1},"variables":{"greeting":"OVERRIDDEN","_workflow_id":"spoof"}}"#;
+        let defaults = br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real"}"#;
+        let source = build_source(envelope, defaults, b"{}").expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        assert_eq!(source["data"], json!({ "x": 1 }));
+        // Runtime override wins over the declared default.
+        assert_eq!(source["variables"]["greeting"], "OVERRIDDEN");
+        // Declared-only variable keeps its default.
+        assert_eq!(source["variables"]["mood"], "happy");
+        // `_`-prefixed identity vars are NOT overridable from runtime input.
+        assert_eq!(source["variables"]["_workflow_id"], "real");
+
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "variables.greeting" }),
+            &source,
+        )
+        .expect("resolve variables.greeting");
+        assert_eq!(resolved, json!("OVERRIDDEN"));
     }
 
     #[test]
