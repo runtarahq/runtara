@@ -356,9 +356,26 @@ fn normalize_condition(value: Value) -> Result<Value, rmcp::ErrorData> {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ListObjectSchemasParams {
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetObjectSchemaParams {
     #[schemars(description = "Schema name")]
     pub name: String,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -374,6 +391,12 @@ pub struct CreateObjectSchemaParams {
     pub columns: Vec<Value>,
     #[schemars(description = "Index definitions as JSON array (optional)")]
     pub indexes: Option<Vec<Value>>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -398,6 +421,12 @@ pub struct UpdateObjectSchemaParams {
                        Omit to leave indexes unchanged."
     )]
     pub indexes: Option<Vec<Value>>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -405,6 +434,12 @@ pub struct UpdateObjectSchemaParams {
 pub struct DeleteObjectSchemaParams {
     #[schemars(description = "Schema name to delete")]
     pub name: String,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -418,6 +453,12 @@ pub struct ListObjectInstancesParams {
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<i64>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -452,6 +493,12 @@ pub struct QueryObjectInstancesParams {
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<i64>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -512,6 +559,12 @@ pub struct QueryAggregateParams {
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<i64>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -575,6 +628,12 @@ pub struct CreateObjectInstanceParams {
     pub schema_name: String,
     #[schemars(description = "Instance properties as JSON object")]
     pub properties: serde_json::Value,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -586,6 +645,12 @@ pub struct UpdateObjectInstanceParams {
     pub instance_id: String,
     #[schemars(description = "Updated properties as JSON object")]
     pub properties: serde_json::Value,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -636,6 +701,12 @@ pub struct BulkCreateInstancesParams {
     )]
     #[serde(rename = "conflictColumns")]
     pub conflict_columns: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -663,6 +734,12 @@ pub struct BulkUpdateInstancesParams {
         description = "byIds: array of {id, properties} entries. Required when mode=byIds."
     )]
     pub updates: Option<Vec<serde_json::Value>>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -673,13 +750,26 @@ pub struct BulkDeleteInstancesParams {
     #[schemars(description = "Instance IDs to delete")]
     #[serde(rename = "instanceIds")]
     pub instance_ids: Vec<String>,
+    #[schemars(
+        description = "Optional connection ID to target a specific Object Model \
+                       connection's database. Omit to use the default object-model database."
+    )]
+    #[serde(rename = "connectionId", alias = "connection_id")]
+    pub connection_id: Option<String>,
 }
 
 // ===== Tool Implementations =====
 
-pub async fn list_object_schemas(server: &SmoMcpServer) -> Result<CallToolResult, rmcp::ErrorData> {
+pub async fn list_object_schemas(
+    server: &SmoMcpServer,
+    params: ListObjectSchemasParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let result = api_get(server, "/api/runtime/object-model/schemas").await?;
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/schemas",
+        params.connection_id.as_deref(),
+    )?;
+    let result = api_get(server, &path).await?;
     json_result(result)
 }
 
@@ -689,11 +779,11 @@ pub async fn get_object_schema(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
     validate_path_param("name", &params.name)?;
-    let result = api_get(
-        server,
+    let path = with_connection_id_query(
         &format!("/api/runtime/object-model/schemas/name/{}", params.name),
-    )
-    .await?;
+        params.connection_id.as_deref(),
+    )?;
+    let result = api_get(server, &path).await?;
     json_result(result)
 }
 
@@ -718,8 +808,12 @@ pub async fn create_object_schema(
         body["indexes"] = Value::Array(indexes);
     }
     ensure_request_payload_reasonable("create_object_schema", &body)?;
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/schemas",
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_post(server, "/api/runtime/object-model/schemas", Some(body)).await,
+        api_post(server, &path, Some(body)).await,
         "create_object_schema",
     )?;
     json_result(result)
@@ -745,13 +839,14 @@ fn to_snake_case(s: &str) -> String {
 async fn resolve_schema_id_by_name(
     server: &SmoMcpServer,
     name: &str,
+    connection_id: Option<&str>,
 ) -> Result<String, rmcp::ErrorData> {
     validate_path_param("name", name)?;
-    let resp = api_get(
-        server,
+    let path = with_connection_id_query(
         &format!("/api/runtime/object-model/schemas/name/{}", name),
-    )
-    .await?;
+        connection_id,
+    )?;
+    let resp = api_get(server, &path).await?;
     resp.get("schema")
         .and_then(|s| s.get("id"))
         .and_then(|id| id.as_str())
@@ -769,7 +864,8 @@ pub async fn update_object_schema(
     params: UpdateObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let id = resolve_schema_id_by_name(server, &params.name).await?;
+    let id =
+        resolve_schema_id_by_name(server, &params.name, params.connection_id.as_deref()).await?;
     let mut body = serde_json::json!({});
     if let Some(n) = params.new_name {
         body["name"] = serde_json::Value::String(n);
@@ -784,13 +880,12 @@ pub async fn update_object_schema(
         body["indexes"] = Value::Array(i);
     }
     ensure_request_payload_reasonable("update_object_schema", &body)?;
+    let path = with_connection_id_query(
+        &format!("/api/runtime/object-model/schemas/{}", id),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_put(
-            server,
-            &format!("/api/runtime/object-model/schemas/{}", id),
-            Some(body),
-        )
-        .await,
+        api_put(server, &path, Some(body)).await,
         "update_object_schema",
     )?;
     json_result(result)
@@ -801,8 +896,13 @@ pub async fn delete_object_schema(
     params: DeleteObjectSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let id = resolve_schema_id_by_name(server, &params.name).await?;
-    let result = api_delete(server, &format!("/api/runtime/object-model/schemas/{}", id)).await?;
+    let id =
+        resolve_schema_id_by_name(server, &params.name, params.connection_id.as_deref()).await?;
+    let path = with_connection_id_query(
+        &format!("/api/runtime/object-model/schemas/{}", id),
+        params.connection_id.as_deref(),
+    )?;
+    let result = api_delete(server, &path).await?;
     json_result(result)
 }
 
@@ -822,6 +922,10 @@ pub async fn list_object_instances(
     }
     if let Some(limit) = params.limit {
         query.push(format!("limit={}", limit));
+    }
+    if let Some(connection_id) = params.connection_id.as_deref() {
+        validate_identifier_param("connection_id", connection_id)?;
+        query.push(format!("connectionId={}", encode_path_param(connection_id)));
     }
     if !query.is_empty() {
         path.push('?');
@@ -847,16 +951,15 @@ pub async fn query_object_instances(
     require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_name", &params.schema_name)?;
     let body = build_query_object_instances_body(&params)?;
+    let path = with_connection_id_query(
+        &format!(
+            "/api/runtime/object-model/instances/schema/{}/filter",
+            params.schema_name
+        ),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_post(
-            server,
-            &format!(
-                "/api/runtime/object-model/instances/schema/{}/filter",
-                params.schema_name
-            ),
-            Some(body),
-        )
-        .await,
+        api_post(server, &path, Some(body)).await,
         "query_object_instances",
     )?;
     let guidance = result_size_guidance(
@@ -915,16 +1018,15 @@ pub async fn query_aggregate(
         body["offset"] = serde_json::json!(offset);
     }
     ensure_request_payload_reasonable("query_aggregate", &body)?;
+    let path = with_connection_id_query(
+        &format!(
+            "/api/runtime/object-model/instances/schema/{}/aggregate",
+            params.schema_name
+        ),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_post(
-            server,
-            &format!(
-                "/api/runtime/object-model/instances/schema/{}/aggregate",
-                params.schema_name
-            ),
-            Some(body),
-        )
-        .await,
+        api_post(server, &path, Some(body)).await,
         "query_aggregate",
     )?;
     let guidance = result_size_guidance(
@@ -1051,8 +1153,12 @@ pub async fn create_object_instance(
         "properties": params.properties,
     });
     ensure_request_payload_reasonable("create_object_instance", &body)?;
+    let path = with_connection_id_query(
+        "/api/runtime/object-model/instances",
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_post(server, "/api/runtime/object-model/instances", Some(body)).await,
+        api_post(server, &path, Some(body)).await,
         "create_object_instance",
     )?;
     json_result(result)
@@ -1069,16 +1175,15 @@ pub async fn update_object_instance(
         "properties": params.properties,
     });
     ensure_request_payload_reasonable("update_object_instance", &body)?;
+    let path = with_connection_id_query(
+        &format!(
+            "/api/runtime/object-model/instances/{}/{}",
+            params.schema_id, params.instance_id
+        ),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_put(
-            server,
-            &format!(
-                "/api/runtime/object-model/instances/{}/{}",
-                params.schema_id, params.instance_id
-            ),
-            Some(body),
-        )
-        .await,
+        api_put(server, &path, Some(body)).await,
         "update_object_instance",
     )?;
     json_result(result)
@@ -1089,7 +1194,9 @@ pub async fn bulk_create_instances(
     params: BulkCreateInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+    let schema_id =
+        resolve_schema_id_by_name(server, &params.schema_name, params.connection_id.as_deref())
+            .await?;
 
     let mut body = serde_json::Map::new();
     if let Some(instances) = params.instances {
@@ -1125,13 +1232,12 @@ pub async fn bulk_create_instances(
 
     let body = serde_json::Value::Object(body);
     ensure_request_payload_reasonable("bulk_create_instances", &body)?;
+    let path = with_connection_id_query(
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_post(
-            server,
-            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-            Some(body),
-        )
-        .await,
+        api_post(server, &path, Some(body)).await,
         "bulk_create_instances",
     )?;
     json_result(result)
@@ -1142,7 +1248,9 @@ pub async fn bulk_update_instances(
     params: BulkUpdateInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+    let schema_id =
+        resolve_schema_id_by_name(server, &params.schema_name, params.connection_id.as_deref())
+            .await?;
 
     let body = match params.mode.as_str() {
         "byCondition" => {
@@ -1183,13 +1291,12 @@ pub async fn bulk_update_instances(
     };
 
     ensure_request_payload_reasonable("bulk_update_instances", &body)?;
+    let path = with_connection_id_query(
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_patch(
-            server,
-            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-            Some(body),
-        )
-        .await,
+        api_patch(server, &path, Some(body)).await,
         "bulk_update_instances",
     )?;
     json_result(result)
@@ -1200,16 +1307,17 @@ pub async fn bulk_delete_instances(
     params: BulkDeleteInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
-    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+    let schema_id =
+        resolve_schema_id_by_name(server, &params.schema_name, params.connection_id.as_deref())
+            .await?;
     let body = serde_json::json!({ "instanceIds": params.instance_ids });
     ensure_request_payload_reasonable("bulk_delete_instances", &body)?;
+    let path = with_connection_id_query(
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+        params.connection_id.as_deref(),
+    )?;
     let result = with_payload_too_large_guidance(
-        api_delete_with_body(
-            server,
-            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-            Some(body),
-        )
-        .await,
+        api_delete_with_body(server, &path, Some(body)).await,
         "bulk_delete_instances",
     )?;
     json_result(result)
@@ -1408,6 +1516,7 @@ mod tests {
             }])),
             limit: Some(25),
             offset: Some(0),
+            connection_id: None,
         };
 
         let body = build_query_object_instances_body(&params).unwrap();
@@ -1442,5 +1551,45 @@ mod tests {
         let body = json!({ "blob": "x".repeat(MCP_REQUEST_PAYLOAD_GUIDANCE_BYTES + 1) });
 
         assert!(ensure_request_payload_reasonable("bulk_create_instances", &body).is_err());
+    }
+
+    #[test]
+    fn with_connection_id_query_appends_connection_id() {
+        // Omitted → default object-model database (path unchanged).
+        assert_eq!(
+            with_connection_id_query("/api/runtime/object-model/schemas", None).unwrap(),
+            "/api/runtime/object-model/schemas"
+        );
+        // Present → routed to the selected connection. A hyphenated UUID must
+        // survive validation and URL-encoding unchanged.
+        assert_eq!(
+            with_connection_id_query(
+                "/api/runtime/object-model/schemas",
+                Some("2df9af9c-ee6e-448b-90fa-0526d9102f52")
+            )
+            .unwrap(),
+            "/api/runtime/object-model/schemas?connectionId=2df9af9c-ee6e-448b-90fa-0526d9102f52"
+        );
+    }
+
+    #[test]
+    fn object_model_params_accept_connection_id_under_both_casings() {
+        let camel: ListObjectSchemasParams =
+            serde_json::from_value(json!({ "connectionId": "conn-1" })).unwrap();
+        assert_eq!(camel.connection_id.as_deref(), Some("conn-1"));
+
+        let snake: ListObjectSchemasParams =
+            serde_json::from_value(json!({ "connection_id": "conn-2" })).unwrap();
+        assert_eq!(snake.connection_id.as_deref(), Some("conn-2"));
+
+        // Absent → None, so list_object_schemas still hits the default database.
+        let empty: ListObjectSchemasParams = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty.connection_id, None);
+
+        // The structured instance tools carry the same selector.
+        let query: QueryObjectInstancesParams =
+            serde_json::from_value(json!({ "schema_name": "Vendor", "connectionId": "conn-3" }))
+                .unwrap();
+        assert_eq!(query.connection_id.as_deref(), Some("conn-3"));
     }
 }

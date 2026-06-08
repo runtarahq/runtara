@@ -337,9 +337,15 @@ impl SmoMcpServer {
 
     // ===== Object Model Tools =====
 
-    #[tool(description = "List all object model schemas.")]
-    async fn list_object_schemas(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::object_model::list_object_schemas(self).await
+    #[tool(
+        description = "List all object model schemas. Pass connectionId to target a \
+                       specific Object Model connection's database; omit for the default."
+    )]
+    async fn list_object_schemas(
+        &self,
+        params: Parameters<tools::object_model::ListObjectSchemasParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::list_object_schemas(self, params.0).await
     }
 
     #[tool(description = "Get an object model schema by name, including columns and indexes.")]
