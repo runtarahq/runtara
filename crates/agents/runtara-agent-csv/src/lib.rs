@@ -48,7 +48,7 @@ pub enum CsvDataInput {
     Bytes(Vec<u8>),
     /// File data with base64 content
     File(FileData),
-    /// Plain base64 string
+    /// Bare string: base64-encoded CSV, or raw CSV text (fallback)
     Base64String(String),
 }
 
@@ -63,12 +63,13 @@ impl CsvDataInput {
                     format!("Failed to decode FileData base64 content: {e}"),
                 )
             }),
-            CsvDataInput::Base64String(s) => BASE64.decode(s).map_err(|e| {
-                err_json(
-                    "CSV_DECODE_ERROR",
-                    format!("Failed to decode base64 CSV content: {e}"),
-                )
-            }),
+            // A bare string may be base64-encoded CSV or raw CSV text. Real CSV
+            // contains commas/newlines (outside the base64 alphabet), so base64
+            // decoding fails on it — fall back to the raw UTF-8 bytes. Honors the
+            // documented "raw CSV ... or base64 encoded string" contract.
+            CsvDataInput::Base64String(s) => {
+                Ok(BASE64.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec()))
+            }
         }
     }
 }
@@ -947,6 +948,55 @@ mod tests {
         let result = from_csv(input).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_from_csv_raw_string_via_untagged() {
+        // Mirrors the production path: a bare JSON string deserializes through
+        // the untagged CsvDataInput enum into the Base64String arm. Raw CSV is
+        // not valid base64, so to_bytes() must fall back to the raw bytes.
+        let data: CsvDataInput =
+            serde_json::from_value(json!("sku,description\nTEST001,pencil\nTEST002,stapler\n"))
+                .unwrap();
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data,
+            encoding: Encoding::default(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["sku"], "TEST001");
+        assert_eq!(result[0]["description"], "pencil");
+        assert_eq!(result[1]["sku"], "TEST002");
+    }
+
+    #[test]
+    fn test_from_csv_base64_string_via_untagged() {
+        // The same untagged path must still decode genuine base64 (Repro B):
+        // the raw fallback only triggers when base64 decoding fails.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"name,age\nAlice,30");
+        let data: CsvDataInput = serde_json::from_value(json!(encoded)).unwrap();
+        let input = FromCsvInput {
+            skip_empty_lines: true,
+            data,
+            encoding: Encoding::default(),
+            delimiter: ',',
+            quote_char: '"',
+            escape_char: None,
+            use_header: true,
+            trim_whitespace: false,
+        };
+
+        let result = from_csv(input).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["name"], "Alice");
+        assert_eq!(result[0]["age"], "30");
     }
 
     #[test]
