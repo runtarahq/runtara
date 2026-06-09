@@ -544,21 +544,20 @@ fn resolve_reference_value(
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let parts: Vec<&str> = ref_path.splitn(4, '.').collect();
+    let parts: Vec<&str> = ref_path.splitn(3, '.').collect();
     match parts.first().copied() {
-        Some("steps") if parts.len() >= 3 => {
+        Some("steps") if parts.len() >= 2 => {
             let source_step_id = parts[1];
-            let field_path = if parts.len() >= 4 {
-                Some(parts[3])
-            } else {
-                None
-            };
+            // A step summary's `outputs` field is the full step *envelope*
+            // (`{ "outputs": <actual>, "stepId", "stepType", ... }`) — exactly the
+            // runtime `steps.<id>` value. Resolve the remainder after the step id
+            // (the leading `outputs` segment included) against that envelope, the
+            // same way the workflow runtime resolves `steps.<id>.<path>`.
             let source = find_step_in_summaries(summaries, source_step_id)?;
-            let outputs = source.get("outputs")?;
-            if let Some(fp) = field_path {
-                resolve_json_path(outputs, fp)
-            } else {
-                Some(outputs.clone())
+            let envelope = source.get("outputs")?;
+            match parts.get(2) {
+                Some(field_path) => resolve_json_path(envelope, field_path),
+                None => Some(envelope.clone()),
             }
         }
         Some("data") if parts.len() >= 2 => {
@@ -835,16 +834,10 @@ fn resolve_input_mappings(
         match value_type {
             "reference" => {
                 if let Some(ref_path) = value.as_str() {
-                    let parts: Vec<&str> = ref_path.splitn(4, '.').collect();
+                    let parts: Vec<&str> = ref_path.splitn(3, '.').collect();
                     match parts.first().copied() {
-                        Some("steps") if parts.len() >= 3 => {
+                        Some("steps") if parts.len() >= 2 => {
                             let source_step_id = parts[1];
-                            // parts[2] should be "outputs"
-                            let field_path = if parts.len() >= 4 {
-                                Some(parts[3])
-                            } else {
-                                None
-                            };
 
                             if let Some(source) = find_step_in_summaries(summaries, source_step_id)
                             {
@@ -852,13 +845,17 @@ fn resolve_input_mappings(
                                 entry["sourceStatus"] =
                                     source.get("status").cloned().unwrap_or(json!("unknown"));
 
-                                if let Some(outputs) = source.get("outputs") {
-                                    if let Some(fp) = field_path {
-                                        entry["resolvedValue"] =
-                                            resolve_json_path(outputs, fp).unwrap_or(json!(null));
-                                    } else {
-                                        entry["resolvedValue"] = outputs.clone();
-                                    }
+                                // A step summary's `outputs` is the full step
+                                // envelope (`{ "outputs": <actual>, "stepId", ... }`),
+                                // matching the runtime `steps.<id>` value. Resolve the
+                                // remainder after the step id (the leading `outputs`
+                                // segment included) against that envelope.
+                                if let Some(envelope) = source.get("outputs") {
+                                    entry["resolvedValue"] = match parts.get(2) {
+                                        Some(field_path) => resolve_json_path(envelope, field_path)
+                                            .unwrap_or(json!(null)),
+                                        None => envelope.clone(),
+                                    };
                                 }
                             } else {
                                 entry["sourceStep"] = json!(source_step_id);
@@ -999,7 +996,7 @@ pub async fn trace_reference(
     validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
-    let parts: Vec<&str> = params.reference.splitn(4, '.').collect();
+    let parts: Vec<&str> = params.reference.splitn(3, '.').collect();
     if parts.is_empty() {
         return Err(rmcp::ErrorData::invalid_params(
             "Reference path must not be empty".to_string(),
@@ -1009,18 +1006,13 @@ pub async fn trace_reference(
 
     match parts[0] {
         "steps" => {
-            if parts.len() < 3 {
+            if parts.len() < 2 {
                 return Err(rmcp::ErrorData::invalid_params(
-                    "Step reference must be 'steps.<stepId>.outputs[.<field>]'".to_string(),
+                    "Step reference must be 'steps.<stepId>[.outputs.<field>]'".to_string(),
                     None,
                 ));
             }
             let step_id = parts[1];
-            let field_path = if parts.len() >= 4 {
-                Some(parts[3])
-            } else {
-                None
-            };
 
             let summaries =
                 fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
@@ -1035,11 +1027,14 @@ pub async fn trace_reference(
                 )
             })?;
 
+            // A step summary's `outputs` is the full step envelope
+            // (`{ "outputs": <actual>, "stepId", "stepType", ... }`) == the runtime
+            // `steps.<id>` value; resolve the remainder (leading `outputs` included)
+            // against it.
             let outputs = step.get("outputs").cloned().unwrap_or(json!(null));
-            let resolved = if let Some(fp) = field_path {
-                resolve_json_path(&outputs, fp).unwrap_or(json!(null))
-            } else {
-                outputs.clone()
+            let resolved = match parts.get(2) {
+                Some(field_path) => resolve_json_path(&outputs, field_path).unwrap_or(json!(null)),
+                None => outputs.clone(),
             };
 
             json_result(json!({
@@ -1247,6 +1242,10 @@ mod tests {
     }
 
     fn summaries() -> serde_json::Value {
+        // A step summary's `outputs` is the full step *envelope* produced by the
+        // runtime — `{ "outputs": <actual>, "stepId", "stepType", ... }` — not the
+        // bare capability output. Reference resolution must walk that envelope the
+        // same way the runtime resolves `steps.<id>.outputs.<path>`.
         json!({
             "data": {
                 "steps": [
@@ -1254,15 +1253,25 @@ mod tests {
                         "stepId": "build",
                         "status": "completed",
                         "outputs": {
-                            "status": "active",
-                            "nested": {"name": "from-step"}
+                            "outputs": {
+                                "status": "active",
+                                "nested": {"name": "from-step"}
+                            },
+                            "stepId": "build",
+                            "stepName": "Build",
+                            "stepType": "Agent"
                         }
                     },
                     {
                         "stepId": "embed",
                         "status": "completed",
                         "outputs": {
-                            "embeddings": [[0.1, 0.2, 0.3]]
+                            "outputs": {
+                                "embeddings": [[0.1, 0.2, 0.3]]
+                            },
+                            "stepId": "embed",
+                            "stepName": "Embed",
+                            "stepType": "Agent"
                         }
                     }
                 ]
@@ -1438,6 +1447,62 @@ mod tests {
             resolved["score_expression"]
                 .get("unresolvedNestedReferences")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reference_resolves_array_index_path_through_output_envelope() {
+        // Regression for the misreported "EmbedWorkflow nested-path" bug. The
+        // diagnostic must resolve `steps.<id>.outputs.<obj>.<idx>.<field>` the same
+        // way the runtime does. A step summary's `outputs` is the *envelope*
+        // (`{ outputs: <actual>, stepId, ... }`); the resolver previously stripped
+        // the literal `outputs` segment and indexed the envelope directly, so any
+        // path through a step output came back `null` — e.g. inspect_step /
+        // why_execution_failed reported every embed input as null even though the
+        // runtime delivered the real value to the child.
+        let summaries = json!({
+            "data": { "steps": [{
+                "stepId": "lookup_file",
+                "status": "completed",
+                "outputs": {
+                    "outputs": { "instances": [{ "customer_id": "53883889550" }] },
+                    "stepId": "lookup_file",
+                    "stepType": "Agent"
+                }
+            }]}
+        });
+        let input_mapping = json!({
+            "customer_id": {
+                "valueType": "reference",
+                "value": "steps.lookup_file.outputs.instances.0.customer_id"
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries, &execution());
+
+        assert_eq!(
+            resolved["customer_id"]["resolvedValue"],
+            json!("53883889550")
+        );
+        assert_eq!(resolved["customer_id"]["sourceStep"], json!("lookup_file"));
+        assert_eq!(resolved["customer_id"]["sourceStatus"], json!("completed"));
+    }
+
+    #[test]
+    fn reference_resolves_bare_step_and_outputs_envelope() {
+        // `steps.<id>` resolves to the runtime envelope and `steps.<id>.outputs` to
+        // the actual output — matching what the workflow runtime exposes.
+        let resolved_bare = resolve_reference_value("steps.build", &summaries(), &execution());
+        assert_eq!(
+            resolved_bare.and_then(|v| v.get("stepType").cloned()),
+            Some(json!("Agent"))
+        );
+
+        let resolved_outputs =
+            resolve_reference_value("steps.build.outputs", &summaries(), &execution());
+        assert_eq!(
+            resolved_outputs,
+            Some(json!({ "status": "active", "nested": { "name": "from-step" } }))
         );
     }
 
