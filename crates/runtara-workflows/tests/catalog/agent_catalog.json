@@ -1,0 +1,2171 @@
+[
+  {
+    "id": "transform",
+    "name": "Transform",
+    "description": "Transform capabilities for data manipulation, filtering, sorting, and JSON operations",
+    "hasSideEffects": false,
+    "supportsConnections": false,
+    "integrationIds": [],
+    "capabilities": [
+      {
+        "id": "extract",
+        "name": "extract",
+        "displayName": "Extract Property",
+        "description": "Extract property values from an array of objects based on a property path",
+        "inputType": "ExtractInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array of objects to extract property values from",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"name\": \"Alice\", \"age\": 30}, {\"name\": \"Bob\", \"age\": 25}]"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to extract from each item (JSONPath syntax)",
+            "type": "string",
+            "required": true,
+            "example": "name"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Extract Output",
+          "fields": [
+            {
+              "name": "values",
+              "displayName": "Values",
+              "description": "Array of extracted property values",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Number of values extracted",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "get-value-by-path",
+        "name": "get_value_by_path",
+        "displayName": "Get Value By Path",
+        "description": "Get a value from an object using a JSONPath-like property path",
+        "inputType": "GetValueByPathInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Value",
+            "description": "The object to extract a property value from",
+            "type": "any",
+            "required": false,
+            "example": "{\"user\": {\"name\": \"Alice\", \"age\": 30}}"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to extract (JSONPath syntax)",
+            "type": "string",
+            "required": false,
+            "example": "user.name"
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "set-value-by-path",
+        "name": "set_value_by_path",
+        "displayName": "Set Value By Path",
+        "description": "Set a value in an object at a specified JSONPath-like property path",
+        "inputType": "SetValueByPathInput",
+        "inputs": [
+          {
+            "name": "target",
+            "displayName": "Target Object",
+            "description": "The object to set a property value in",
+            "type": "any",
+            "required": false,
+            "example": "{\"user\": {\"name\": \"Alice\"}}"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to set (JSONPath syntax, creates nested objects if needed)",
+            "type": "string",
+            "required": false,
+            "example": "user.age"
+          },
+          {
+            "name": "value",
+            "displayName": "Value",
+            "description": "The value to set at the property path",
+            "type": "any",
+            "required": false,
+            "example": "30"
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "filter-non-values",
+        "name": "filter_non_values",
+        "displayName": "Filter Non-Values",
+        "description": "Filter an array removing elements with null, empty, blank, or zero values",
+        "inputType": "FilterNoValueInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array of items to filter",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"x\": 1}, {\"x\": null}, {\"x\": \"\"}]"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to check in each item (if omitted, checks the item itself)",
+            "type": "string",
+            "required": false,
+            "example": "x"
+          },
+          {
+            "name": "filter_empty_strings",
+            "displayName": "Filter Empty Strings",
+            "description": "Remove items where the value is an empty string (\"\")",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "false"
+          },
+          {
+            "name": "filter_null_values",
+            "displayName": "Filter Null Values",
+            "description": "Remove items where the value is null",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "true"
+          },
+          {
+            "name": "filter_blank_strings",
+            "displayName": "Filter Blank Strings",
+            "description": "Remove items where the value is a whitespace-only string",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "false"
+          },
+          {
+            "name": "filter_zero_values",
+            "displayName": "Filter Zero Values",
+            "description": "Remove items where the value is 0 or \"0\"",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "false"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Filter Output",
+          "fields": [
+            {
+              "name": "items",
+              "displayName": "Items",
+              "description": "Array of items that passed the filter",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Number of items that passed the filter",
+              "type": "integer"
+            },
+            {
+              "name": "removed_count",
+              "displayName": "Removed Count",
+              "description": "Number of items removed by the filter",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "select-first",
+        "name": "select_first",
+        "displayName": "Select First",
+        "description": "Select the first truthy value from an array (skips null, empty, zero, false)",
+        "inputType": "SelectFirstInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array to select the first truthy value from (skips null, empty strings, 0, false)",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[null, \"\", 0, \"hello\", \"world\"]"
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "coalesce",
+        "name": "coalesce",
+        "displayName": "Coalesce",
+        "description": "Return the first non-null value from an array of values",
+        "inputType": "CoalesceInput",
+        "inputs": [
+          {
+            "name": "values",
+            "displayName": "Values",
+            "description": "Array of values to check; returns the first non-null/non-undefined value",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[null, 42, \"fallback\"]"
+          },
+          {
+            "name": "treat_empty_string_as_null",
+            "displayName": "Treat Empty String As Null",
+            "description": "If true, empty strings are treated as null and skipped",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "false"
+          },
+          {
+            "name": "treat_zero_as_null",
+            "displayName": "Treat Zero As Null",
+            "description": "If true, zero values (0, 0.0) are treated as null and skipped",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "false"
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "from-json-string",
+        "name": "from_json_string",
+        "displayName": "From JSON String",
+        "description": "Parse a JSON string into a structured value",
+        "inputType": "FromJsonStringInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "JSON String",
+            "description": "The JSON string to parse into a value",
+            "type": "string",
+            "required": false,
+            "example": "\"{\\\"name\\\":\\\"Alice\\\",\\\"age\\\":30}\""
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false,
+        "knownErrors": [
+          {
+            "code": "TRANSFORM_JSON_PARSE_ERROR",
+            "description": "Failed to parse JSON string",
+            "kind": "permanent"
+          }
+        ]
+      },
+      {
+        "id": "to-json-string",
+        "name": "to_json_string",
+        "displayName": "To JSON String",
+        "description": "Convert a value to a JSON string",
+        "inputType": "ToJsonStringInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Value",
+            "description": "The value to serialize to a JSON string",
+            "type": "any",
+            "required": true,
+            "example": "{\"name\": \"Alice\", \"age\": 30}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "JSON String Output",
+          "fields": [
+            {
+              "name": "json",
+              "displayName": "JSON",
+              "description": "The serialized JSON string",
+              "type": "string"
+            },
+            {
+              "name": "length",
+              "displayName": "Length",
+              "description": "Length of the JSON string in characters",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false,
+        "knownErrors": [
+          {
+            "code": "TRANSFORM_JSON_SERIALIZE_ERROR",
+            "description": "Failed to serialize value to JSON",
+            "kind": "permanent"
+          }
+        ]
+      },
+      {
+        "id": "filter",
+        "name": "filter",
+        "displayName": "Filter Array",
+        "description": "Filter an array based on property values matching or excluding specified values",
+        "inputType": "FilterInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array of items to filter",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[{\"status\": \"active\"}, {\"status\": \"inactive\"}]"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to extract from each item (JSONPath syntax). Use \"$\" or \"\" to filter the array values directly.",
+            "type": "string",
+            "required": true,
+            "example": "status"
+          },
+          {
+            "name": "match_values",
+            "displayName": "Match Values",
+            "description": "The value(s) to compare against (single value or array)",
+            "type": "any",
+            "required": true,
+            "example": "[\"active\", \"pending\"]"
+          },
+          {
+            "name": "match_condition",
+            "displayName": "Match Condition",
+            "description": "Whether to include or exclude matching items",
+            "type": "string",
+            "required": true,
+            "example": "INCLUDES",
+            "enum": [
+              "INCLUDES",
+              "EXCLUDES",
+              "STARTS_WITH",
+              "ENDS_WITH",
+              "CONTAINS"
+            ]
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Filter Output",
+          "fields": [
+            {
+              "name": "items",
+              "displayName": "Items",
+              "description": "Array of items that passed the filter",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Number of items that passed the filter",
+              "type": "integer"
+            },
+            {
+              "name": "removed_count",
+              "displayName": "Removed Count",
+              "description": "Number of items removed by the filter",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "sort",
+        "name": "sort",
+        "displayName": "Sort Array",
+        "description": "Sort an array of items, optionally by a property path",
+        "inputType": "SortInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array to sort",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"age\": 35}, {\"age\": 30}, {\"age\": 25}]"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to sort by (if omitted, sorts the items directly)",
+            "type": "string",
+            "required": false,
+            "example": "age"
+          },
+          {
+            "name": "ascending",
+            "displayName": "Ascending Order",
+            "description": "Whether to sort in ascending order (true) or descending order (false)",
+            "type": "boolean",
+            "required": false,
+            "default": true,
+            "example": "true"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Sort Output",
+          "fields": [
+            {
+              "name": "items",
+              "displayName": "Items",
+              "description": "Array of sorted items",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Number of items in the sorted array",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "map-fields",
+        "name": "map_fields",
+        "displayName": "Map Fields",
+        "description": "Map fields from a source object to a target object using field path mappings",
+        "inputType": "MapFieldsInput",
+        "inputs": [
+          {
+            "name": "source_data",
+            "displayName": "Source Data",
+            "description": "The source object containing data to map",
+            "type": "any",
+            "required": true,
+            "example": "{\"firstName\": \"Alice\", \"userAge\": 30, \"email\": \"alice@example.com\"}"
+          },
+          {
+            "name": "mappings",
+            "displayName": "Field Mappings",
+            "description": "Map of source field paths to target field names",
+            "type": "object",
+            "required": true,
+            "example": "{\"firstName\": \"name\", \"userAge\": \"age\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Map Fields Output",
+          "fields": [
+            {
+              "name": "result",
+              "displayName": "Result",
+              "description": "Object with mapped field values",
+              "type": "object"
+            },
+            {
+              "name": "field_count",
+              "displayName": "Field Count",
+              "description": "Number of fields successfully mapped",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "group-by",
+        "name": "group_by",
+        "displayName": "Group By",
+        "description": "Group array items by a property key, returning either a map or array of groups",
+        "inputType": "GroupByInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array of items to group",
+            "type": "any",
+            "required": true,
+            "example": "[{\"name\": \"Alice\", \"status\": \"active\"}, {\"name\": \"Bob\", \"status\": \"inactive\"}]"
+          },
+          {
+            "name": "key",
+            "displayName": "Group Key",
+            "description": "The property path to use as the grouping key (JSONPath syntax)",
+            "type": "string",
+            "required": true,
+            "example": "status"
+          },
+          {
+            "name": "as_map",
+            "displayName": "Return As Map",
+            "description": "Return grouped items as a map (key -> items) instead of an array of arrays",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "example": "true"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Group By Output",
+          "fields": [
+            {
+              "name": "groups",
+              "displayName": "Groups",
+              "description": "Grouped items - either a map (key -> items) or array of arrays",
+              "type": "any"
+            },
+            {
+              "name": "group_count",
+              "displayName": "Group Count",
+              "description": "Number of unique groups created",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false,
+        "knownErrors": [
+          {
+            "code": "TRANSFORM_INVALID_INPUT",
+            "description": "Expected array or collection input",
+            "kind": "permanent"
+          },
+          {
+            "code": "TRANSFORM_KEY_SERIALIZE_ERROR",
+            "description": "Failed to serialize group key to string",
+            "kind": "permanent"
+          }
+        ]
+      },
+      {
+        "id": "append",
+        "name": "append",
+        "displayName": "Append",
+        "description": "Append an item to the end of an array",
+        "inputType": "AppendInput",
+        "inputs": [
+          {
+            "name": "array",
+            "displayName": "Array",
+            "description": "The array to append an item to (can contain objects or primitive values)",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"name\": \"Alice\"}, {\"name\": \"Bob\"}]"
+          },
+          {
+            "name": "item",
+            "displayName": "Item",
+            "description": "The item to append to the array (can be an object or primitive value)",
+            "type": "any",
+            "required": true,
+            "example": "{\"name\": \"Charlie\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Append Output",
+          "fields": [
+            {
+              "name": "array",
+              "displayName": "Array",
+              "description": "Array with the new item appended",
+              "type": "array"
+            },
+            {
+              "name": "length",
+              "displayName": "Length",
+              "description": "New length of the array after appending",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "flat-map",
+        "name": "flat_map",
+        "displayName": "Flat Map",
+        "description": "Extract nested arrays from each item by property path and flatten into a single array",
+        "inputType": "FlatMapInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Input Array",
+            "description": "The array of objects to flat map",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"items\": [1, 2]}, {\"items\": [3, 4]}]"
+          },
+          {
+            "name": "property_path",
+            "displayName": "Property Path",
+            "description": "The property path to the nested array in each item (JSONPath syntax)",
+            "type": "string",
+            "required": true,
+            "example": "items"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Flat Map Output",
+          "fields": [
+            {
+              "name": "items",
+              "displayName": "Items",
+              "description": "Flattened array of all nested items",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Total number of items in the flattened array",
+              "type": "integer"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "array-length",
+        "name": "array_length",
+        "displayName": "Array Length",
+        "description": "Get the length of an array, string, or number of keys in an object",
+        "inputType": "ArrayLengthInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Value",
+            "description": "Array, string, or object to get the length/size of",
+            "type": "any",
+            "required": true,
+            "example": "[1, 2, 3]"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Array Length Output",
+          "fields": [
+            {
+              "name": "length",
+              "displayName": "Length",
+              "description": "Length of array/string, or number of keys in object",
+              "type": "integer"
+            },
+            {
+              "name": "is_array",
+              "displayName": "Is Array",
+              "description": "True if the value was an array",
+              "type": "boolean"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "ensure-array",
+        "name": "ensure_array",
+        "displayName": "Ensure Array",
+        "description": "Ensure a value is an array. Arrays pass through unchanged, null becomes empty array, other values are wrapped in a single-element array.",
+        "inputType": "EnsureArrayInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Value",
+            "description": "Value to wrap in an array if not already an array. Arrays pass through unchanged, null becomes empty array.",
+            "type": "any",
+            "required": true,
+            "example": "{\"name\": \"Alice\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Ensure Array Output",
+          "fields": [
+            {
+              "name": "items",
+              "displayName": "Items",
+              "description": "The input wrapped as an array (or the original array if already an array)",
+              "type": "array"
+            },
+            {
+              "name": "count",
+              "displayName": "Count",
+              "description": "Number of items in the resulting array",
+              "type": "integer"
+            },
+            {
+              "name": "was_array",
+              "displayName": "Was Array",
+              "description": "True if the input was already an array, false if it was wrapped",
+              "type": "boolean"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      }
+    ]
+  },
+  {
+    "id": "http",
+    "name": "HTTP",
+    "description": "Generic HTTP client.",
+    "hasSideEffects": true,
+    "supportsConnections": true,
+    "integrationIds": [],
+    "capabilities": [
+      {
+        "id": "http-request",
+        "name": "http_request",
+        "displayName": "HTTP Request",
+        "description": "Execute an HTTP request with the specified method, URL, headers, and body. When a connection is configured, credentials are injected server-side by the runtara HTTP proxy; otherwise the request is sent directly to the URL.",
+        "inputType": "HttpRequestInput",
+        "inputs": [
+          {
+            "name": "method",
+            "displayName": "Method",
+            "description": "HTTP verb for the request",
+            "type": "string",
+            "required": false,
+            "example": "GET",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE",
+              "PATCH",
+              "HEAD",
+              "OPTIONS"
+            ]
+          },
+          {
+            "name": "url",
+            "displayName": "URL",
+            "description": "Full URL to send the request to",
+            "type": "string",
+            "required": true,
+            "example": "https://api.example.com/v1/users"
+          },
+          {
+            "name": "headers",
+            "displayName": "Headers",
+            "description": "Custom HTTP headers",
+            "type": "object",
+            "required": false,
+            "default": {},
+            "example": "{\"Authorization\": \"Bearer token123\"}"
+          },
+          {
+            "name": "query_parameters",
+            "displayName": "Query Parameters",
+            "description": "URL query parameters",
+            "type": "object",
+            "required": false,
+            "default": {},
+            "example": "{\"page\": \"1\", \"limit\": \"100\"}"
+          },
+          {
+            "name": "body",
+            "displayName": "Body",
+            "description": "Request payload (any JSON value, or string for non-JSON bodies)",
+            "type": "string",
+            "required": false,
+            "default": null,
+            "example": "{\"name\": \"John Doe\", \"email\": \"john@example.com\"}"
+          },
+          {
+            "name": "body_type",
+            "displayName": "Body Type",
+            "description": "How to encode the request body",
+            "type": "string",
+            "required": false,
+            "example": "json",
+            "enum": [
+              "json",
+              "text",
+              "binary",
+              "multipart"
+            ]
+          },
+          {
+            "name": "response_type",
+            "displayName": "Response Type",
+            "description": "Expected response format",
+            "type": "string",
+            "required": false,
+            "example": "json",
+            "enum": [
+              "json",
+              "text",
+              "binary"
+            ]
+          },
+          {
+            "name": "timeout_ms",
+            "displayName": "Timeout (ms)",
+            "description": "Maximum time to wait for response",
+            "type": "integer",
+            "required": false,
+            "default": 30000,
+            "example": "5000"
+          },
+          {
+            "name": "fail_on_error",
+            "displayName": "Fail on Error",
+            "description": "If true (default), non-2xx responses will fail the step. If false, non-2xx responses are returned normally.",
+            "type": "boolean",
+            "required": false,
+            "default": true,
+            "example": "true"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "HTTP Response",
+          "description": "Response from an HTTP request",
+          "fields": [
+            {
+              "name": "status_code",
+              "displayName": "Status Code",
+              "description": "HTTP status code (e.g., 200, 404, 500)",
+              "type": "string",
+              "example": "200"
+            },
+            {
+              "name": "headers",
+              "displayName": "Headers",
+              "description": "Response headers as key-value pairs",
+              "type": "object"
+            },
+            {
+              "name": "body",
+              "displayName": "Body",
+              "description": "Response body (JSON object, text string, or {\"base64\": \"...\"} for binary depending on response_type)",
+              "type": "string"
+            },
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "True if the status code is in the 2xx range",
+              "type": "boolean",
+              "example": "true"
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      }
+    ]
+  },
+  {
+    "id": "object-model",
+    "name": "Object Model",
+    "description": "CRUD operations over the runtara object-model API (list schemas, create/query/update/delete instances, bulk operations, aggregates, and conversation memory).",
+    "hasSideEffects": true,
+    "supportsConnections": true,
+    "integrationIds": [
+      "postgres"
+    ],
+    "capabilities": [
+      {
+        "id": "create-instance",
+        "name": "create_instance",
+        "displayName": "Create Instance",
+        "description": "Create a new instance in an object model schema",
+        "inputType": "CreateInstanceInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema to create an instance in",
+            "type": "string",
+            "required": true,
+            "example": "ImportedFile"
+          },
+          {
+            "name": "data",
+            "displayName": "Data",
+            "description": "The field values to store in the new instance",
+            "type": "any",
+            "required": true,
+            "example": "{\"name\": \"file.txt\", \"source\": \"sftp\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Create Instance Output",
+          "description": "Result of creating an instance in the object model",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "instance_id",
+              "displayName": "Instance ID",
+              "description": "The ID of the created instance",
+              "type": "string",
+              "nullable": true
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "query-instances",
+        "name": "query_instances",
+        "displayName": "Query Instances",
+        "description": "Query instances from an object model schema with optional filters",
+        "inputType": "QueryInstancesInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema to query",
+            "type": "string",
+            "required": true,
+            "example": "ImportedFile"
+          },
+          {
+            "name": "filters",
+            "displayName": "Filters",
+            "description": "Key-value pairs to filter instances by (simple AND logic)",
+            "type": "object",
+            "required": false,
+            "example": "{\"source\": \"sftp\"}"
+          },
+          {
+            "name": "condition",
+            "displayName": "Condition",
+            "description": "Advanced filtering condition with operators like Or, And, Eq, IsDefined. Uses same ConditionExpression as Conditional and Filter steps.",
+            "type": "any",
+            "required": false
+          },
+          {
+            "name": "score_expression",
+            "displayName": "Score Expression",
+            "description": "Optional computed score column passed as an object, not an escaped JSON string. For vector nearest-neighbor search, order by the alias ascending.",
+            "type": "any",
+            "required": false
+          },
+          {
+            "name": "order_by",
+            "displayName": "Order By",
+            "description": "Optional structured ordering. For vector nearest-neighbor search, order by the score expression alias ascending.",
+            "type": "any",
+            "required": false
+          },
+          {
+            "name": "limit",
+            "displayName": "Limit",
+            "description": "Maximum number of instances to return",
+            "type": "integer",
+            "required": false,
+            "example": "100"
+          },
+          {
+            "name": "offset",
+            "displayName": "Offset",
+            "description": "Number of instances to skip",
+            "type": "integer",
+            "required": false,
+            "example": "0"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Query Instances Output",
+          "description": "Result of querying instances from the object model",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "instances",
+              "displayName": "Instances",
+              "description": "The matching instances",
+              "type": "array"
+            },
+            {
+              "name": "total_count",
+              "displayName": "Total Count",
+              "description": "Total count of matching instances",
+              "type": "integer",
+              "example": "42"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "check-instance-exists",
+        "name": "check_instance_exists",
+        "displayName": "Check Instance Exists",
+        "description": "Check if an instance matching the given filters exists",
+        "inputType": "CheckInstanceExistsInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema to check",
+            "type": "string",
+            "required": true,
+            "example": "ImportedFile"
+          },
+          {
+            "name": "filters",
+            "displayName": "Filters",
+            "description": "Key-value pairs to match against existing instances",
+            "type": "object",
+            "required": true,
+            "example": "{\"source\": \"sftp\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Check Instance Exists Output",
+          "description": "Result of checking if an instance exists in the object model",
+          "fields": [
+            {
+              "name": "exists",
+              "displayName": "Exists",
+              "description": "Whether a matching instance exists",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "instance_id",
+              "displayName": "Instance ID",
+              "description": "The ID of the matching instance (if exists)",
+              "type": "string",
+              "nullable": true
+            },
+            {
+              "name": "instance",
+              "displayName": "Instance",
+              "description": "The full instance data (if exists)",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "create-if-not-exists",
+        "name": "create_if_not_exists",
+        "displayName": "Create If Not Exists",
+        "description": "Create an instance only if no matching instance exists (idempotent insert)",
+        "inputType": "CreateIfNotExistsInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "ImportedFile"
+          },
+          {
+            "name": "match_filters",
+            "displayName": "Match Filters",
+            "description": "Conditions to check if record already exists",
+            "type": "object",
+            "required": true,
+            "example": "{\"source\": \"sftp\"}"
+          },
+          {
+            "name": "data",
+            "displayName": "Data",
+            "description": "The field values to store in the new instance (if created)",
+            "type": "any",
+            "required": true,
+            "example": "{\"name\": \"file.txt\"}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Create If Not Exists Output",
+          "description": "Result of create-if-not-exists (upsert) operation",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "created",
+              "displayName": "Created",
+              "description": "Whether a new instance was created",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "already_existed",
+              "displayName": "Already Existed",
+              "description": "Whether the instance already existed",
+              "type": "boolean",
+              "example": "false"
+            },
+            {
+              "name": "instance_id",
+              "displayName": "Instance ID",
+              "description": "The instance ID (whether new or existing)",
+              "type": "string",
+              "nullable": true
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "update-instance",
+        "name": "update_instance",
+        "displayName": "Update Instance",
+        "description": "Update an existing instance in an object model schema",
+        "inputType": "UpdateInstanceInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "Product"
+          },
+          {
+            "name": "instance_id",
+            "displayName": "Instance ID",
+            "description": "The ID of the instance to update",
+            "type": "string",
+            "required": true,
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          {
+            "name": "data",
+            "displayName": "Data",
+            "description": "The field values to update in the instance",
+            "type": "object",
+            "required": true,
+            "example": "{\"quantity\": 100}"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Update Instance Output",
+          "description": "Result of updating an instance in the object model",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean",
+              "example": "true"
+            },
+            {
+              "name": "instance_id",
+              "displayName": "Instance ID",
+              "description": "The ID of the updated instance",
+              "type": "string",
+              "nullable": true
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "delete-instance",
+        "name": "delete_instance",
+        "displayName": "Delete Instance",
+        "description": "Delete a single instance from an object model schema",
+        "inputType": "DeleteInstanceInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "Product"
+          },
+          {
+            "name": "instance_id",
+            "displayName": "Instance ID",
+            "description": "The ID of the instance to delete",
+            "type": "string",
+            "required": true,
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Delete Instance Output",
+          "description": "Result of deleting an instance",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "bulk-create-instances",
+        "name": "bulk_create_instances",
+        "displayName": "Bulk Create Instances",
+        "description": "Insert many instances in a single transaction",
+        "inputType": "BulkCreateInstancesInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "Product"
+          },
+          {
+            "name": "instances",
+            "displayName": "Instances",
+            "description": "Array of property objects, one per record to insert (object form)",
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "required": false,
+            "example": "[{\"sku\": \"A\", \"quantity\": 1}]"
+          },
+          {
+            "name": "columns",
+            "displayName": "Columns",
+            "description": "Column names for columnar form; paired with `rows`",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": false,
+            "example": "[\"sku\", \"quantity\"]"
+          },
+          {
+            "name": "rows",
+            "displayName": "Rows",
+            "description": "Rows in columnar form — each inner array has the same length as `columns`",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[[\"A\", 1], [\"B\", 2]]"
+          },
+          {
+            "name": "constants",
+            "displayName": "Constants",
+            "description": "Column values merged into every columnar row as defaults; row cells override on overlap",
+            "type": "object",
+            "required": false,
+            "example": "{\"snapshot_date\": \"2026-04-18\"}"
+          },
+          {
+            "name": "nullify_empty_strings",
+            "displayName": "Nullify Empty Strings",
+            "description": "When true, \"\" in non-string columns becomes null before type validation",
+            "type": "boolean",
+            "required": false,
+            "example": "false"
+          },
+          {
+            "name": "on_conflict",
+            "displayName": "On Conflict",
+            "description": "Conflict handling mode: 'error' (default) aborts, 'skip' silently skips existing rows, 'upsert' updates them",
+            "type": "string",
+            "required": false,
+            "example": "\"skip\""
+          },
+          {
+            "name": "conflict_columns",
+            "displayName": "Conflict Columns",
+            "description": "Columns that uniquely identify a row for conflict detection. Required with on_conflict=skip|upsert",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": false,
+            "example": "[\"sku\"]"
+          },
+          {
+            "name": "on_error",
+            "displayName": "On Error",
+            "description": "Validation-failure handling: 'stop' (default) aborts on first failure, 'skip' records the row in errors and continues",
+            "type": "string",
+            "required": false,
+            "example": "\"skip\""
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Bulk Create Instances Output",
+          "description": "Result of a bulk insert",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "created_count",
+              "displayName": "Created Count",
+              "description": "Number of rows inserted (or updated, in upsert mode)",
+              "type": "integer"
+            },
+            {
+              "name": "skipped_count",
+              "displayName": "Skipped Count",
+              "description": "Number of rows skipped (validation failure or ON CONFLICT DO NOTHING)",
+              "type": "integer"
+            },
+            {
+              "name": "errors",
+              "displayName": "Errors",
+              "description": "Per-row errors when on_error='skip'",
+              "type": "array"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "bulk-update-instances",
+        "name": "bulk_update_instances",
+        "displayName": "Bulk Update Instances",
+        "description": "Update many instances in one transaction, by condition or by per-row values",
+        "inputType": "BulkUpdateInstancesInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "Product"
+          },
+          {
+            "name": "condition",
+            "displayName": "Condition",
+            "description": "Optional DSL condition; when set, `properties` is applied to every matching row",
+            "type": "any",
+            "required": false
+          },
+          {
+            "name": "properties",
+            "displayName": "Properties",
+            "description": "Property values applied to rows matching `condition`",
+            "type": "object",
+            "required": false,
+            "example": "{\"status\": \"archived\"}"
+          },
+          {
+            "name": "updates",
+            "displayName": "Updates",
+            "description": "Per-row updates: list of {id, properties}",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": false,
+            "example": "[{\"id\": \"...\", \"properties\": {\"quantity\": 5}}]"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Bulk Update Instances Output",
+          "description": "Result of a bulk update",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "updated_count",
+              "displayName": "Updated Count",
+              "description": "Number of rows updated",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "bulk-delete-instances",
+        "name": "bulk_delete_instances",
+        "displayName": "Bulk Delete Instances",
+        "description": "Delete many instances in one transaction, by IDs or by condition",
+        "inputType": "BulkDeleteInstancesInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema",
+            "type": "string",
+            "required": true,
+            "example": "Product"
+          },
+          {
+            "name": "ids",
+            "displayName": "IDs",
+            "description": "List of instance IDs to delete (mutually exclusive with `condition`)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "condition",
+            "displayName": "Condition",
+            "description": "DSL condition to select rows to delete (mutually exclusive with `ids`)",
+            "type": "any",
+            "required": false
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Bulk Delete Instances Output",
+          "description": "Result of a bulk delete",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "deleted_count",
+              "displayName": "Deleted Count",
+              "description": "Number of rows deleted",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false
+      },
+      {
+        "id": "query-aggregate",
+        "name": "query_aggregate",
+        "displayName": "Query Aggregate",
+        "description": "Group and aggregate object model instances (COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE). Returns a columnar {columns, rows, group_count} result.",
+        "inputType": "QueryAggregateInput",
+        "inputs": [
+          {
+            "name": "schema_name",
+            "displayName": "Schema Name",
+            "description": "The name of the object model schema to aggregate over",
+            "type": "string",
+            "required": true,
+            "example": "StockSnapshot"
+          },
+          {
+            "name": "condition",
+            "displayName": "Condition",
+            "description": "Optional filter condition (same DSL as Query Instances). Applied before GROUP BY.",
+            "type": "any",
+            "required": false
+          },
+          {
+            "name": "group_by",
+            "displayName": "Group By",
+            "description": "Columns to group by. Empty list → one row over the whole filtered set.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": false,
+            "example": "[\"sku\"]"
+          },
+          {
+            "name": "aggregates",
+            "displayName": "Aggregates",
+            "description": "Aggregate expressions: [{alias, fn, column?, distinct?, order_by?, expression?}]. fn is one of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE, EXPR.",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true,
+            "example": "[{\"alias\":\"first_qty\",\"fn\":\"FIRST_VALUE\",\"column\":\"qty\",\"order_by\":[{\"column\":\"snapshot_date\",\"direction\":\"ASC\"}]}]"
+          },
+          {
+            "name": "order_by",
+            "displayName": "Order By",
+            "description": "Top-level sort — targets group_by columns or aggregate aliases.",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[{\"column\":\"last_qty\",\"direction\":\"DESC\"}]"
+          },
+          {
+            "name": "limit",
+            "displayName": "Limit",
+            "description": "Max result rows. Server caps at 100000.",
+            "type": "integer",
+            "required": false,
+            "example": "200"
+          },
+          {
+            "name": "offset",
+            "displayName": "Offset",
+            "description": "Pagination offset",
+            "type": "integer",
+            "required": false,
+            "example": "0"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Query Aggregate Output",
+          "description": "Columnar aggregate result: ordered column names, rows aligned to those columns, and the total number of groups matched.",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "columns",
+              "displayName": "Columns",
+              "description": "Output column names — group_by columns first, then aggregate aliases.",
+              "type": "array"
+            },
+            {
+              "name": "rows",
+              "displayName": "Rows",
+              "description": "Result rows, each aligned to the `columns` list.",
+              "type": "array"
+            },
+            {
+              "name": "group_count",
+              "displayName": "Group Count",
+              "description": "Total number of groups matched by the condition (before limit/offset). 1 when there is no group_by.",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "load-memory",
+        "name": "load_memory",
+        "displayName": "Load Memory",
+        "description": "Load conversation memory for an AI agent by conversation ID",
+        "inputType": "LoadMemoryInput",
+        "inputs": [
+          {
+            "name": "conversation_id",
+            "displayName": "Conversation ID",
+            "description": "Unique identifier for the conversation to load",
+            "type": "string",
+            "required": true,
+            "example": "session_abc123"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Load Memory Output",
+          "description": "Previously stored conversation messages",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "messages",
+              "displayName": "Messages",
+              "description": "Array of conversation messages in rig message format",
+              "type": "array"
+            },
+            {
+              "name": "message_count",
+              "displayName": "Message Count",
+              "description": "Number of messages in the conversation",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false,
+        "tags": [
+          "memory:read"
+        ]
+      },
+      {
+        "id": "save-memory",
+        "name": "save_memory",
+        "displayName": "Save Memory",
+        "description": "Save conversation memory for an AI agent, creating or updating by conversation ID",
+        "inputType": "SaveMemoryInput",
+        "inputs": [
+          {
+            "name": "conversation_id",
+            "displayName": "Conversation ID",
+            "description": "Unique identifier for the conversation to save",
+            "type": "string",
+            "required": true,
+            "example": "session_abc123"
+          },
+          {
+            "name": "messages",
+            "displayName": "Messages",
+            "description": "Array of conversation messages in rig message format",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": true
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Save Memory Output",
+          "description": "Result of saving conversation memory",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the operation succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "message_count",
+              "displayName": "Message Count",
+              "description": "Number of messages saved",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the operation failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false,
+        "tags": [
+          "memory:write"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "utils",
+    "name": "Utils",
+    "description": "Utility operations: random numbers, math, dates, country codes, delays.",
+    "hasSideEffects": false,
+    "supportsConnections": false,
+    "integrationIds": [],
+    "capabilities": [
+      {
+        "id": "random-double",
+        "name": "random_double",
+        "displayName": "Random Double",
+        "description": "Generate a random double between 0 and 1",
+        "inputType": "RandomDoubleInput",
+        "inputs": [],
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "random-array",
+        "name": "random_array",
+        "displayName": "Random Array",
+        "description": "Generate an array of random integers",
+        "inputType": "ReturnRandomArrayInput",
+        "inputs": [
+          {
+            "name": "size",
+            "displayName": "Array Size",
+            "description": "The number of random integers to generate",
+            "type": "integer",
+            "required": true,
+            "example": "5"
+          }
+        ],
+        "output": {
+          "type": "array"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "return-input-string",
+        "name": "return_input_string",
+        "displayName": "Return String",
+        "description": "Returns the input string value",
+        "inputType": "ReturnStringInput",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Value",
+            "description": "The string value to return as output",
+            "type": "string",
+            "required": true,
+            "example": "Hello World"
+          }
+        ],
+        "output": {
+          "type": "string"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "return-input",
+        "name": "return_input",
+        "displayName": "Return Input",
+        "description": "Returns the input JSON value",
+        "inputType": "ReturnInputData",
+        "inputs": [
+          {
+            "name": "value",
+            "displayName": "Value",
+            "description": "The JSON value to return as output",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "do-nothing",
+        "name": "do_nothing",
+        "displayName": "Do Nothing",
+        "description": "No-op operation that returns null",
+        "inputType": "DoNothingInput",
+        "inputs": [],
+        "output": {
+          "type": "any"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "delay-in-ms",
+        "name": "delay_in_ms",
+        "displayName": "Delay",
+        "description": "Delays execution for the specified number of milliseconds. For durable delays that survive crashes, use the Delay step type instead.",
+        "inputType": "DelayInMsInput",
+        "inputs": [
+          {
+            "name": "delay_value",
+            "displayName": "Delay (milliseconds)",
+            "description": "The amount of time to pause execution in milliseconds",
+            "type": "integer",
+            "required": true,
+            "example": "1000"
+          }
+        ],
+        "output": {
+          "type": "integer"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "calculate",
+        "name": "calculate",
+        "displayName": "Calculate",
+        "description": "Evaluate a mathematical expression with variables",
+        "inputType": "CalculateInput",
+        "inputs": [
+          {
+            "name": "expression",
+            "displayName": "Expression",
+            "description": "Mathematical expression with variables and operators (+, -, *, /, %, parentheses)",
+            "type": "string",
+            "required": true,
+            "example": "(x + y) * 2"
+          },
+          {
+            "name": "variables",
+            "displayName": "Variables",
+            "description": "Map of variable names to their numeric values (supports numbers and string numbers)",
+            "type": "object",
+            "required": true
+          },
+          {
+            "name": "enable_rounding",
+            "displayName": "Enable Rounding",
+            "description": "Round the result to the specified number of decimal places",
+            "type": "boolean",
+            "required": false,
+            "default": false
+          },
+          {
+            "name": "decimal_places",
+            "displayName": "Decimal Places",
+            "description": "Number of decimal places to round to (maximum 15)",
+            "type": "integer",
+            "required": false,
+            "example": "2"
+          }
+        ],
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "format-date-from-iso",
+        "name": "format_date_from_iso",
+        "displayName": "Format Date",
+        "description": "Format an ISO date to a custom format",
+        "inputType": "FormatDateFromIsoInput",
+        "inputs": [
+          {
+            "name": "iso_date",
+            "displayName": "ISO Date",
+            "description": "The date/time in ISO 8601 format (e.g., 2024-01-15T10:30:00Z)",
+            "type": "string",
+            "required": true,
+            "example": "2024-01-15T10:30:00Z"
+          },
+          {
+            "name": "target_format",
+            "displayName": "Target Format",
+            "description": "Format pattern using yyyy, MM, dd, HH, mm, ss tokens",
+            "type": "string",
+            "required": true,
+            "example": "yyyy-MM-dd HH:mm:ss"
+          }
+        ],
+        "output": {
+          "type": "string"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "iso-to-unix-timestamp",
+        "name": "iso_to_unix_timestamp",
+        "displayName": "ISO to Unix",
+        "description": "Convert ISO date to Unix timestamp",
+        "inputType": "IsoToUnixTimestampInput",
+        "inputs": [
+          {
+            "name": "iso_date",
+            "displayName": "ISO Date",
+            "description": "The date/time in ISO 8601 format to convert to Unix timestamp",
+            "type": "string",
+            "required": true,
+            "example": "2024-01-15T10:30:00Z"
+          }
+        ],
+        "output": {
+          "type": "integer"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "get-current-unix-timestamp",
+        "name": "get_current_unix_timestamp",
+        "displayName": "Current Unix Timestamp",
+        "description": "Get the current Unix timestamp",
+        "inputType": "GetCurrentUnixTimestampInput",
+        "inputs": [],
+        "output": {
+          "type": "integer"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "get-current-iso-datetime",
+        "name": "get_current_iso_datetime",
+        "displayName": "Current ISO Datetime",
+        "description": "Get the current date/time in ISO format",
+        "inputType": "GetCurrentIsoDatetimeInput",
+        "inputs": [],
+        "output": {
+          "type": "string"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "get-current-formatted-datetime",
+        "name": "get_current_formatted_datetime",
+        "displayName": "Current Formatted DateTime",
+        "description": "Get the current date/time in a custom format",
+        "inputType": "GetCurrentFormattedDateTimeInput",
+        "inputs": [
+          {
+            "name": "format",
+            "displayName": "Format",
+            "description": "Format pattern using yyyy, MM, dd, HH, mm, ss tokens",
+            "type": "string",
+            "required": true,
+            "example": "yyyy-MM-dd"
+          }
+        ],
+        "output": {
+          "type": "string"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      },
+      {
+        "id": "country-name-to-iso-code",
+        "name": "country_name_to_iso_code",
+        "displayName": "Country to ISO Code",
+        "description": "Convert country name to ISO code",
+        "inputType": "CountryNameToIsoCodeInput",
+        "inputs": [
+          {
+            "name": "country_name",
+            "displayName": "Country Name",
+            "description": "The full country name or commonly used alternative",
+            "type": "string",
+            "required": true,
+            "example": "United States"
+          },
+          {
+            "name": "code_type",
+            "displayName": "Code Type",
+            "description": "The type of ISO code to return (alpha2 or alpha3)",
+            "type": "string",
+            "required": false,
+            "example": "alpha2"
+          }
+        ],
+        "output": {
+          "type": "string"
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false
+      }
+    ]
+  }
+]

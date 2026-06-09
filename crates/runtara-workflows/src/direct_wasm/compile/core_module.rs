@@ -23,8 +23,8 @@ use wit_parser::{
 };
 
 use super::abi::{
-    load_retptr_list, load_retptr_tag, push_core_type, push_retptr_arg, push_segment_args,
-    return_if_retptr_error, zero_return_function,
+    emit_fail_if_retptr_error, load_retptr_list, load_retptr_tag, push_core_type, push_retptr_arg,
+    push_segment_args, zero_return_function,
 };
 use super::core_imports::{
     DirectCoreFunctionIndices, DirectCoreImportIndices, import_core_function,
@@ -449,11 +449,11 @@ fn direct_run_function(
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
-    return_if_retptr_error(&mut body);
+    emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.runtime_load_input));
-    return_if_retptr_error(&mut body);
+    emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
     load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
 
     body.instruction(&Instruction::I32Const(config.static_data.steps.offset));

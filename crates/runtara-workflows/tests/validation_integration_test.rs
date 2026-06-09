@@ -14,10 +14,12 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Build the catalog the rest of the file's `validate_workflow` calls use.
-/// The integration tests run on the host, so we can pull the agent set out
-/// of the statically-linked registry rather than a runtime dispatcher.
+/// Sourced from a committed snapshot of the real component `meta.json`
+/// (transform / http / object_model / utils) — see
+/// `tests/fixtures/agent_catalog.json` — not the static agent registry.
 fn test_catalog() -> AgentCatalog {
-    AgentCatalog::from_agents(runtara_agents::registry::get_agents())
+    AgentCatalog::from_json(include_str!("catalog/agent_catalog.json"))
+        .expect("agent_catalog.json fixture should parse")
 }
 
 fn examples_dir() -> PathBuf {

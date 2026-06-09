@@ -1466,6 +1466,21 @@ pub fn validate_agent_metadata_or_panic() {
 // AgentCatalog — runtime-loaded snapshot of every agent's metadata.
 // ============================================================================
 
+/// Canonicalize an agent id to its kebab-case form.
+///
+/// Kebab-case is the canonical agent id everywhere it matters at runtime: the
+/// component dispatcher forces each `meta.json` `id` to kebab, `GET
+/// /api/runtime/agents` advertises kebab, and the WASM component packages are
+/// named `runtara:agent-<kebab>`. Workflow JSON authored against an older
+/// snake_case id (`object_model`) — or with stray capitalization — folds to
+/// the same canonical id, so catalog lookups and id-specific validation rules
+/// resolve identically regardless of which form the author used. The compile
+/// path (`direct_wasm`) and the server's agent-discovery service already fold
+/// the same way; this is the shared definition they all agree on.
+pub fn canonical_agent_id(id: &str) -> String {
+    id.to_ascii_lowercase().replace('_', "-")
+}
+
 /// A snapshot of every agent the runtime knows about, indexed by id.
 ///
 /// The catalog is the runtime replacement for `runtara-agents::static_registry`
@@ -1542,14 +1557,25 @@ impl AgentCatalog {
         &self.agents
     }
 
-    /// True if any agent has the given id.
+    /// True if any agent has the given id (matched canonically — `-`/`_` and
+    /// ASCII case are equivalent; see [`canonical_agent_id`]).
     pub fn has_agent(&self, agent_id: &str) -> bool {
-        self.agents.iter().any(|a| a.id == agent_id)
+        let query = canonical_agent_id(agent_id);
+        self.agents
+            .iter()
+            .any(|a| canonical_agent_id(&a.id) == query)
     }
 
     /// Look up an agent by id.
+    ///
+    /// Ids are matched canonically: the kebab `object-model` the catalog is
+    /// keyed on and the snake `object_model` a legacy workflow might author
+    /// both resolve to the same agent (see [`canonical_agent_id`]).
     pub fn agent(&self, agent_id: &str) -> Option<&AgentInfo> {
-        self.agents.iter().find(|a| a.id == agent_id)
+        let query = canonical_agent_id(agent_id);
+        self.agents
+            .iter()
+            .find(|a| canonical_agent_id(&a.id) == query)
     }
 
     /// Look up a capability by `(agent_id, capability_id)`.
@@ -1561,7 +1587,8 @@ impl AgentCatalog {
     }
 
     /// Return the `integration_ids` of the agent matching `agent_id`
-    /// (case-insensitive), or an empty `Vec` if the agent isn't loaded.
+    /// (matched canonically; see [`canonical_agent_id`]), or an empty `Vec`
+    /// if the agent isn't loaded.
     ///
     /// Used by the connections layer to translate user-facing
     /// "show me connections for agent <X>" queries into the
@@ -1569,9 +1596,10 @@ impl AgentCatalog {
     /// each row — so the connection service itself doesn't need to
     /// know what an "agent" is.
     pub fn integration_ids_for(&self, agent_id: &str) -> Vec<String> {
+        let query = canonical_agent_id(agent_id);
         self.agents()
             .iter()
-            .find(|a| a.id.eq_ignore_ascii_case(agent_id))
+            .find(|a| canonical_agent_id(&a.id) == query)
             .map(|a| a.integration_ids.clone())
             .unwrap_or_default()
     }
@@ -1654,6 +1682,26 @@ mod catalog_tests {
         assert!(cat.capability("crypto", "hash").is_some());
         assert!(cat.capability("crypto", "missing").is_none());
         assert!(cat.capability("missing", "hash").is_none());
+    }
+
+    #[test]
+    fn lookup_normalizes_kebab_and_snake() {
+        // The catalog is keyed on the canonical kebab id (as the component
+        // dispatcher forces it), but a workflow may author either form. Both
+        // must resolve to the same agent + capability.
+        let cat = AgentCatalog::from_agents(vec![sample_agent("object-model")]);
+
+        assert!(cat.has_agent("object-model"));
+        assert!(cat.has_agent("object_model"));
+        assert!(cat.has_agent("Object_Model"));
+        assert_eq!(
+            cat.agent("object_model").map(|a| a.id.as_str()),
+            Some("object-model")
+        );
+        assert!(cat.capability("object_model", "hash").is_some());
+        assert!(cat.capability("object-model", "hash").is_some());
+        // Capability ids stay exact — they are always kebab.
+        assert!(cat.capability("object_model", "missing").is_none());
     }
 
     #[test]

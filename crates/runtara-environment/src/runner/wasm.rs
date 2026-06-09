@@ -805,7 +805,28 @@ impl Runner for WasmRunner {
         if let Some(child_arc) = handle.child.clone() {
             let mut guard = child_arc.lock().await;
             if let Some(child) = guard.as_mut() {
-                let _ = child.wait().await;
+                match child.wait().await {
+                    Ok(status) if status.success() => {
+                        debug!(instance_id = %handle.instance_id, "WASM child process exited cleanly");
+                    }
+                    Ok(status) => {
+                        // A non-zero / signalled exit is how a direct workflow
+                        // surfaces a hard crash (e.g. `run` returning `Err`, a
+                        // trap, or an OOM kill). Record the raw code/signal so the
+                        // cause is diagnosable — the workflow component world has
+                        // no `wasi:cli/stderr`, so the guest emits no other trace.
+                        use std::os::unix::process::ExitStatusExt;
+                        warn!(
+                            instance_id = %handle.instance_id,
+                            code = ?status.code(),
+                            signal = ?status.signal(),
+                            "WASM child process exited non-zero"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(instance_id = %handle.instance_id, error = %e, "WASM child wait() failed");
+                    }
+                }
             }
             *guard = None;
             return;

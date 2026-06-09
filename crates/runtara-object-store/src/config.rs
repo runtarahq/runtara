@@ -23,6 +23,67 @@ impl Default for AutoColumns {
     }
 }
 
+/// Default maximum number of connections per object-model PostgreSQL pool.
+pub const DEFAULT_POOL_MAX_CONNECTIONS: u32 = 10;
+/// Default minimum (warm) connections kept open per pool. Keeping at least one
+/// avoids a cold cross-cloud handshake on the hot path.
+pub const DEFAULT_POOL_MIN_CONNECTIONS: u32 = 1;
+/// Default acquire timeout (seconds).
+pub const DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 10;
+/// Default idle timeout (seconds). Recycle below typical Azure/PgBouncer cutoff.
+pub const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Default max connection lifetime (seconds).
+pub const DEFAULT_POOL_MAX_LIFETIME_SECS: u64 = 1800;
+/// Default for the per-acquire liveness ping. Disabled so a small query does not
+/// pay an extra round-trip on a high-latency link; dead connections are bounded
+/// by `idle_timeout`/`max_lifetime` staying under the server's idle cutoff.
+pub const DEFAULT_POOL_TEST_BEFORE_ACQUIRE: bool = false;
+/// Default prepared-statement cache capacity per connection (sqlx default).
+pub const DEFAULT_POOL_STATEMENT_CACHE_CAPACITY: usize = 100;
+
+/// Connection-pool tuning for an object-model PostgreSQL database.
+///
+/// These map directly onto sqlx's `PgPoolOptions`/`PgConnectOptions`. Defaults
+/// are tuned for a cross-cloud link (our cloud → customer Azure): keep a warm
+/// connection ([`DEFAULT_POOL_MIN_CONNECTIONS`]) and skip the per-acquire
+/// liveness ping ([`DEFAULT_POOL_TEST_BEFORE_ACQUIRE`]). A `None`
+/// `idle_timeout`/`max_lifetime` disables that timeout.
+#[derive(Debug, Clone)]
+pub struct PoolConfig {
+    /// Maximum connections in the pool.
+    pub max_connections: u32,
+    /// Minimum (warm) connections the pool maintains.
+    pub min_connections: u32,
+    /// How long to wait for a free connection before erroring.
+    pub acquire_timeout: std::time::Duration,
+    /// Close a connection after it has been idle this long (`None` = never).
+    pub idle_timeout: Option<std::time::Duration>,
+    /// Close a connection after it has lived this long (`None` = never).
+    pub max_lifetime: Option<std::time::Duration>,
+    /// Ping a connection before handing it out. Off by default (see above).
+    pub test_before_acquire: bool,
+    /// Per-connection prepared-statement cache capacity.
+    pub statement_cache_capacity: usize,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_POOL_MAX_CONNECTIONS,
+            min_connections: DEFAULT_POOL_MIN_CONNECTIONS,
+            acquire_timeout: std::time::Duration::from_secs(DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS),
+            idle_timeout: Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+            )),
+            max_lifetime: Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_MAX_LIFETIME_SECS,
+            )),
+            test_before_acquire: DEFAULT_POOL_TEST_BEFORE_ACQUIRE,
+            statement_cache_capacity: DEFAULT_POOL_STATEMENT_CACHE_CAPACITY,
+        }
+    }
+}
+
 /// Configuration for the object store
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
@@ -38,6 +99,9 @@ pub struct StoreConfig {
     /// explicit vector of items (create, upsert, update-by-ids). Condition-based
     /// bulk update/delete are not capped — the condition decides row count.
     pub bulk_request_limit: usize,
+    /// Connection-pool tuning applied when this config builds its own pool
+    /// (`ObjectStore::new`). Ignored by `ObjectStore::from_pool`.
+    pub pool: PoolConfig,
 }
 
 impl StoreConfig {
@@ -63,6 +127,7 @@ pub struct StoreConfigBuilder {
     soft_delete: bool,
     auto_columns: AutoColumns,
     bulk_request_limit: usize,
+    pool: PoolConfig,
 }
 
 impl StoreConfigBuilder {
@@ -74,6 +139,7 @@ impl StoreConfigBuilder {
             soft_delete: true,
             auto_columns: AutoColumns::default(),
             bulk_request_limit: DEFAULT_BULK_REQUEST_LIMIT,
+            pool: PoolConfig::default(),
         }
     }
 
@@ -88,6 +154,12 @@ impl StoreConfigBuilder {
         } else {
             limit
         };
+        self
+    }
+
+    /// Set the connection-pool tuning used when the store builds its own pool.
+    pub fn pool(mut self, pool: PoolConfig) -> Self {
+        self.pool = pool;
         self
     }
 
@@ -157,6 +229,7 @@ impl StoreConfigBuilder {
             soft_delete: self.soft_delete,
             auto_columns: self.auto_columns,
             bulk_request_limit: self.bulk_request_limit,
+            pool: self.pool,
         }
     }
 }
@@ -414,5 +487,54 @@ mod tests {
         assert_eq!(ac1.id, ac2.id);
         assert_eq!(ac1.created_at, ac2.created_at);
         assert_eq!(ac1.updated_at, ac2.updated_at);
+    }
+
+    // =========================================================================
+    // Pool Configuration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_pool_config_defaults() {
+        let pool = PoolConfig::default();
+        assert_eq!(pool.max_connections, DEFAULT_POOL_MAX_CONNECTIONS);
+        assert_eq!(pool.min_connections, DEFAULT_POOL_MIN_CONNECTIONS);
+        // Warm spare kept, per-acquire ping disabled — the cross-cloud tuning.
+        assert!(pool.min_connections >= 1);
+        assert!(!pool.test_before_acquire);
+        assert_eq!(
+            pool.idle_timeout,
+            Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_IDLE_TIMEOUT_SECS
+            ))
+        );
+        assert_eq!(
+            pool.max_lifetime,
+            Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_MAX_LIFETIME_SECS
+            ))
+        );
+    }
+
+    #[test]
+    fn test_store_config_default_pool() {
+        let config = StoreConfig::builder("postgres://localhost/test").build();
+        assert_eq!(config.pool.min_connections, DEFAULT_POOL_MIN_CONNECTIONS);
+        assert!(!config.pool.test_before_acquire);
+    }
+
+    #[test]
+    fn test_store_config_custom_pool() {
+        let custom = PoolConfig {
+            max_connections: 42,
+            min_connections: 7,
+            test_before_acquire: true,
+            ..PoolConfig::default()
+        };
+        let config = StoreConfig::builder("postgres://localhost/test")
+            .pool(custom)
+            .build();
+        assert_eq!(config.pool.max_connections, 42);
+        assert_eq!(config.pool.min_connections, 7);
+        assert!(config.pool.test_before_acquire);
     }
 }

@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,6 +1039,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1509,6 +1529,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-listener-strategy"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
+dependencies = [
+ "event-listener",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1864,12 +1894,6 @@ dependencies = [
  "indexmap 2.14.0",
  "stable_deref_trait",
 ]
-
-[[package]]
-name = "glob"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "group"
@@ -2804,6 +2828,26 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moka"
+version = "0.12.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "957228ad12042ee839f93c8f257b62b4c0ab5eaae1d4fa60de53b27c9d7c5046"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
 ]
 
 [[package]]
@@ -4093,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ai-tools"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4106,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-azure-blob-storage"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4119,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bedrock"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4131,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bundle-emit"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "anyhow",
  "runtara-agent-ai-tools",
@@ -4164,7 +4208,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-compression"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4177,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-crypto"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "hmac 0.12.1",
@@ -4194,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-csv"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "csv",
@@ -4208,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-datetime"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4222,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-encoding"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -4233,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-http"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4249,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4261,7 +4305,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -4271,7 +4315,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mailgun"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4283,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mcp"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4296,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-object-model"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4308,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4320,7 +4364,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-s3-storage"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4333,7 +4377,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sftp"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4345,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sharepoint"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4358,7 +4402,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shopify"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4370,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "runtara-agent-macro",
@@ -4383,7 +4427,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4395,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-text"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "minijinja",
@@ -4412,7 +4456,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-transform"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4424,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-utils"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
@@ -4436,11 +4480,11 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-wit"
-version = "8.0.1"
+version = "8.0.6"
 
 [[package]]
 name = "runtara-agent-xlsx"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4452,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xml"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "roxmltree",
@@ -4466,44 +4510,29 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "calamine",
- "chrono",
- "chrono-tz",
- "csv",
- "encoding_rs",
- "getrandom 0.2.17",
- "glob",
- "hmac 0.12.1",
- "md-5 0.10.6",
- "minijinja",
  "openssl",
- "rand 0.8.6",
- "regex",
- "roxmltree",
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
  "serial_test",
- "sha1",
- "sha2 0.10.9",
  "ssh2",
  "strum",
  "tempfile",
  "tokio",
  "tracing",
- "urlencoding",
  "wiremock",
  "zip",
 ]
 
 [[package]]
 name = "runtara-ai"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-http",
  "serde",
@@ -4514,7 +4543,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-component-host"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "anyhow",
  "http",
@@ -4532,7 +4561,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4564,7 +4593,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4589,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -4600,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4631,7 +4660,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "serde",
@@ -4643,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-management-sdk"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "chrono",
@@ -4658,7 +4687,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "chrono",
  "pgvector",
@@ -4674,7 +4703,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-report-dsl"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "chrono",
  "insta",
@@ -4692,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "async-trait",
  "base64",
@@ -4714,7 +4743,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4723,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4743,6 +4772,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "jsonwebtoken",
+ "moka",
  "num_cpus",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -4793,7 +4823,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-text-parser"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "chrono",
  "regex",
@@ -4803,7 +4833,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-runtime"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-sdk",
  "wit-bindgen-rt 0.44.0",
@@ -4811,7 +4841,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "minijinja",
  "runtara-ai",
@@ -4824,7 +4854,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-validation-wasm"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "runtara-dsl",
  "runtara-workflows",
@@ -4835,14 +4865,14 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-wit"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "wit-parser 0.246.2",
 ]
 
 [[package]]
 name = "runtara-workflows"
-version = "8.0.1"
+version = "8.0.6"
 dependencies = [
  "base64",
  "minijinja",
@@ -5900,6 +5930,12 @@ dependencies = [
  "windows-sys 0.59.0",
  "winx",
 ]
+
+[[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "tap"

@@ -97,8 +97,11 @@ pub mod types;
 
 // Re-export main types for convenience
 pub use config::{
-    AutoColumns, DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, DEFAULT_BULK_REQUEST_LIMIT, StoreConfig,
-    StoreConfigBuilder,
+    AutoColumns, DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, DEFAULT_BULK_REQUEST_LIMIT,
+    DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS, DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+    DEFAULT_POOL_MAX_CONNECTIONS, DEFAULT_POOL_MAX_LIFETIME_SECS, DEFAULT_POOL_MIN_CONNECTIONS,
+    DEFAULT_POOL_STATEMENT_CACHE_CAPACITY, DEFAULT_POOL_TEST_BEFORE_ACQUIRE, PoolConfig,
+    StoreConfig, StoreConfigBuilder,
 };
 pub use error::{ObjectStoreError, Result};
 pub use instance::{

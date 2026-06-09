@@ -69,6 +69,33 @@ const AGENT_CACHED_REPLAY: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// Resolves `data.*` and `variables.*` references in a single Finish step. The
+/// canonical input envelope is `{"data": {...}, "variables": {...}}`; `data.tpl`
+/// must resolve against the inner `data`, declared variables must resolve to
+/// their VALUE (not the `{type, value}` declaration struct), and runtime
+/// `variables` must override the declared default.
+const ENVELOPE_DATA_AND_VARS: &str = r#"{
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "d":          { "valueType": "reference", "value": "data.tpl" },
+        "v_override": { "valueType": "reference", "value": "variables.greeting" },
+        "v_default":  { "valueType": "reference", "value": "variables.mood" }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {
+    "greeting": { "type": "string", "value": "DEFAULT" },
+    "mood":     { "type": "string", "value": "happy" }
+  },
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 /// A single Agent step with no Finish and no edges — the agent is both entry
 /// point and terminal. Compiles via an implicit finish; the workflow output is
 /// `null` (matching the generated compiler).
@@ -1403,6 +1430,52 @@ fn direct_wasm_execute_non_durable_agent_invokes_without_checkpoint() {
     assert!(
         result.sleeps.is_empty(),
         "non-durable successful Agent should not sleep"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_resolves_data_reference_from_canonical_envelope() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    // Regression: the workflow start input is the canonical envelope
+    // `{"data": {...}, "variables": {...}}`, stored verbatim as the instance
+    // input. A `data.*` reference must resolve against the inner `data` payload
+    // and reach the agent. Previously the whole envelope was used as `data`, so
+    // `data.value` resolved to null and the agent received null. (The existing
+    // agent tests pass BARE data, which is why they never caught this.)
+    let graph_json = non_durable_graph_json(AGENT_CACHED_REPLAY);
+    let result = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-envelope-data",
+        &graph_json,
+        br#"{"data":{"value":"enveloped-data"},"variables":{}}"#,
+    );
+    assert_eq!(result, serde_json::json!({ "result": "enveloped-data" }));
+}
+
+#[test]
+fn direct_wasm_execute_resolves_variables_from_envelope_and_defaults() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    // Regression: `variables.*` references must resolve to the declared
+    // variable's VALUE (not the `{type, value}` declaration struct), and the
+    // canonical envelope's runtime `variables` must override declared defaults.
+    // `data.*` from the same envelope is resolved alongside.
+    let result = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-envelope-vars",
+        ENVELOPE_DATA_AND_VARS,
+        br#"{"data":{"tpl":"DATAVAL"},"variables":{"greeting":"OVERRIDDEN"}}"#,
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "d": "DATAVAL",
+            "v_override": "OVERRIDDEN",
+            "v_default": "happy"
+        })
     );
 }
 

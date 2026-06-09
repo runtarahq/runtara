@@ -337,9 +337,15 @@ impl SmoMcpServer {
 
     // ===== Object Model Tools =====
 
-    #[tool(description = "List all object model schemas.")]
-    async fn list_object_schemas(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::object_model::list_object_schemas(self).await
+    #[tool(
+        description = "List all object model schemas. Pass connectionId to target a \
+                       specific Object Model connection's database; omit for the default."
+    )]
+    async fn list_object_schemas(
+        &self,
+        params: Parameters<tools::object_model::ListObjectSchemasParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::list_object_schemas(self, params.0).await
     }
 
     #[tool(description = "Get an object model schema by name, including columns and indexes.")]
@@ -1121,7 +1127,7 @@ impl ServerHandler for SmoMcpServer {
                 **Conditional routing**: Put the predicate in the Conditional step's `condition` field, then connect outgoing edges with labels `\"true\"` and `\"false\"`. Do not put `condition` on edges from a Conditional step, and do not route those edges via `steps.<conditionalId>.outputs.result`; that boolean is for inspection/later mappings only.\n\
                 **Agent steps**: Must have `agentId` and `capabilityId` (not `agent`/`capability`). Use get_agent to discover IDs. capabilityId uses the hyphenated `id` (e.g., 'http-request'), NOT the underscored `name`.\n\
                 **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
-                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `__error.code`, `__error.message`, `__error.category`, `__error.attributes`. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
+                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to the handler's inputMapping and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.attributes`. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
                 ## Execution Graph Shape\n\n\
                 `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), edges go in `executionPlan` (not `edges`).",
             )

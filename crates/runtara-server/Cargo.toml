@@ -85,6 +85,9 @@ regex = "1.11"
 num_cpus = "1.16"
 sysinfo = "0.32"
 dashmap = "6.1"
+# Bounded, self-evicting, single-flight cache for per-connection object-model
+# PgPools (see api/repositories/object_model.rs).
+moka = { version = "0.12", features = ["future"] }
 jsonschema = "0.26"
 croner = "2"
 

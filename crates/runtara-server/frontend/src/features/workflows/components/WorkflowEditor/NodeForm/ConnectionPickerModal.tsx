@@ -142,7 +142,12 @@ export function ConnectionPickerModal({
 
                     {/* Label and platform */}
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium truncate">{option.label}</p>
+                      <p
+                        className="font-medium break-words"
+                        title={option.label}
+                      >
+                        {option.label}
+                      </p>
                       {platformName && (
                         <p className="text-xs text-muted-foreground truncate">
                           {platformName}

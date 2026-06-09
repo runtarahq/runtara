@@ -209,7 +209,42 @@ fn collect_graph_support_inner(
 ) {
     let graph_durable = graph.durable.unwrap_or(inherited_durable);
     let direct_control = supports_direct_control_graph(graph, child_workflows);
-    if !direct_control {
+
+    // Dangling edges — an endpoint naming no step in `steps` — are the real
+    // cause of a coverage-invariant failure: the edge can never be consumed, or
+    // it routes into a missing step, so `supports_direct_control_graph` returns
+    // false. When present, report them precisely and SUPPRESS the routing
+    // cascade below, so the failure points at the actual defect instead of
+    // spraying `execution-plan-routing` (and re-flagging every Conditional /
+    // Switch / Finish) across the whole graph. Validation rejects these up front
+    // (E014); this keeps the gate's own diagnostics honest for any caller that
+    // reaches it with a malformed graph.
+    let dangling: Vec<_> = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| {
+            !graph.steps.contains_key(&edge.from_step) || !graph.steps.contains_key(&edge.to_step)
+        })
+        .collect();
+    let cascade_suppressed = !dangling.is_empty();
+    for edge in &dangling {
+        let missing = if !graph.steps.contains_key(&edge.from_step) {
+            &edge.from_step
+        } else {
+            &edge.to_step
+        };
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(missing.clone()),
+            step_type: None,
+            feature: "execution-plan-unknown-step".to_string(),
+            reason: format!(
+                "execution plan edge '{}' -> '{}' references step '{}', which does not exist in steps",
+                edge.from_step, edge.to_step, missing
+            ),
+        });
+    }
+
+    if !direct_control && !cascade_suppressed {
         for edge in &graph.execution_plan {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(edge.from_step.clone()),
@@ -232,7 +267,7 @@ fn collect_graph_support_inner(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if finish_steps.len() > 1 && !direct_control {
+    if finish_steps.len() > 1 && !direct_control && !cascade_suppressed {
         for step in finish_steps {
             unsupported.push(UnsupportedWorkflowFeature {
                 step_id: Some(step.id.clone()),
@@ -244,6 +279,11 @@ fn collect_graph_support_inner(
     }
 
     for edge in &graph.execution_plan {
+        // Dangling edges are reported above; skip their condition/onError shape
+        // checks — the source step does not exist to anchor them.
+        if !graph.steps.contains_key(&edge.from_step) {
+            continue;
+        }
         // An onError edge on an AiAgent is inert (never routed by the generated
         // path); direct accepts it and leaves the handler dead, so it is not an
         // unsupported routing shape.
@@ -290,13 +330,19 @@ fn collect_graph_support_inner(
         }
     }
 
+    // When a dangling edge is the cause, treat the graph as if routing were fine
+    // for the per-step pass too, so the control-flow steps (Conditional / Switch
+    // / Filter / GroupBy / Log / Error) are not re-flagged as unsupported. Steps
+    // that are unsupported independently of routing (e.g. an unlowerable embed
+    // child or AiAgent config) still report.
+    let routing_ok_for_steps = direct_control || cascade_suppressed;
     for step in graph.steps.values() {
         collect_step_support(
             graph,
             graph_durable,
             child_workflows,
             step,
-            direct_control,
+            routing_ok_for_steps,
             unsupported,
         );
     }
@@ -568,16 +614,16 @@ fn supports_direct_control_step_inner(
                     child_stack,
                     include_on_error,
                 )
-                && (!include_on_error
-                    || supports_on_error_flow_step(
-                        graph,
-                        child_workflows,
-                        step_id,
-                        reachable,
-                        used_edges,
-                        stack,
-                        child_stack,
-                    ))
+                && on_error_supported_or_inert(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                )
         }
         Step::While(step) if supports_while_step_baseline(step) => {
             supports_direct_control_graph_inner(&step.subgraph, child_workflows, child_stack)
@@ -591,16 +637,16 @@ fn supports_direct_control_step_inner(
                     child_stack,
                     include_on_error,
                 )
-                && (!include_on_error
-                    || supports_on_error_flow_step(
-                        graph,
-                        child_workflows,
-                        step_id,
-                        reachable,
-                        used_edges,
-                        stack,
-                        child_stack,
-                    ))
+                && on_error_supported_or_inert(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                )
         }
         Step::Delay(step) if supports_delay_step_baseline(graph, step) => {
             supports_normal_flow_step(
@@ -650,16 +696,16 @@ fn supports_direct_control_step_inner(
                 stack,
                 child_stack,
                 include_on_error,
-            ) && (!include_on_error
-                || supports_on_error_flow_step(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                ))
+            ) && on_error_supported_or_inert(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            )
         }
         Step::Agent(step) => {
             supports_agent_step_baseline(graph, step)
@@ -673,16 +719,16 @@ fn supports_direct_control_step_inner(
                     child_stack,
                     include_on_error,
                 )
-                && (!include_on_error
-                    || supports_on_error_flow_step(
-                        graph,
-                        child_workflows,
-                        step_id,
-                        reachable,
-                        used_edges,
-                        stack,
-                        child_stack,
-                    ))
+                && on_error_supported_or_inert(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                )
         }
         Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step, child_workflows) => {
             // The AiAgent loop consumes its tool edges directly (it dispatches
@@ -748,6 +794,30 @@ fn mark_dead_subgraph_reachable(
                 used_edges.insert(index);
                 queue.push(edge.to_step.clone());
             }
+        }
+    }
+}
+
+/// Mark a step's `onError` edges (and their target subgraphs) as inert when the
+/// step itself sits inside an error-handler subtree (`include_on_error == false`).
+///
+/// The emitter lowers handler subtrees via `step_run_plan_without_on_error`
+/// (`include_on_error = false`), so a handler-internal step's own `onError` edge
+/// is never lowered — a failure there propagates fatally, exactly as in the
+/// generated path. The edge is therefore DEAD. Marking it (and any steps only
+/// reachable through it) used+reachable keeps the graph-wide coverage invariant
+/// honest without falsely rejecting the graph. Mirrors the inert AiAgent-onError
+/// handling. See `on_error_supported_or_inert`.
+fn mark_inert_on_error_edges(
+    graph: &ExecutionGraph,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+) {
+    for (index, edge) in graph.execution_plan.iter().enumerate() {
+        if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
+            used_edges.insert(index);
+            mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
         }
     }
 }
@@ -1129,6 +1199,42 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         <= 1
 }
 
+/// Resolve a step's `onError` flow during the support walk.
+///
+/// On the normal/error-free path (`include_on_error == true`) the handler is
+/// lowered, so its shape must be supported — delegate to
+/// `supports_on_error_flow_step`. Inside a handler subtree
+/// (`include_on_error == false`) the emitter never lowers a nested `onError`
+/// (`step_run_plan_without_on_error`), so the edge is dead: mark it inert to keep
+/// the coverage invariant honest rather than rejecting the graph for an edge that
+/// is never emitted.
+#[allow(clippy::too_many_arguments)]
+fn on_error_supported_or_inert(
+    graph: &ExecutionGraph,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+    step_id: &str,
+    reachable: &mut BTreeSet<String>,
+    used_edges: &mut BTreeSet<usize>,
+    stack: &mut Vec<String>,
+    child_stack: &mut Vec<String>,
+    include_on_error: bool,
+) -> bool {
+    if include_on_error {
+        supports_on_error_flow_step(
+            graph,
+            child_workflows,
+            step_id,
+            reachable,
+            used_edges,
+            stack,
+            child_stack,
+        )
+    } else {
+        mark_inert_on_error_edges(graph, step_id, reachable, used_edges);
+        true
+    }
+}
+
 fn supports_on_error_flow_step(
     graph: &ExecutionGraph,
     child_workflows: &DirectSupportChildWorkflows<'_>,
@@ -1432,8 +1538,10 @@ fn collect_embed_workflow_step_unsupported(
     child_stack.push(step.id.clone());
     if !supports_embed_workflow_child_graph_baseline(child, child_workflows, &mut child_stack) {
         push(
-            "embed-workflow-child-shape",
-            "direct EmbedWorkflow lowering requires the child graph itself to be a directly-lowerable shape",
+            "embed-workflow-child-unsupported",
+            "the embedded child workflow does not compile on its own (it is not directly-lowerable); \
+             compile the child workflow directly to see its specific failure — this is not a problem \
+             with the parent's EmbedWorkflow step",
         );
     }
 }
@@ -3150,5 +3258,221 @@ mod tests {
         let report = analyze_direct_wasm_support(&fixture("wait_timeout"));
 
         assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn dangling_edge_reports_only_unknown_step_not_routing_cascade() {
+        // A linear graph that would compile, plus one edge from a step that does
+        // not exist (`parse_alias`). The coverage invariant fails, but the report
+        // must name the real cause — not spray `execution-plan-routing` over every
+        // step (the pre-fix cascade behavior).
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [
+                { "fromStep": "now_ts", "toStep": "finish" },
+                { "fromStep": "parse_alias", "toStep": "finish" }
+              ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .all(|f| f.feature != "execution-plan-routing"),
+            "routing cascade was not suppressed: {:?}",
+            report.unsupported
+        );
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|f| f.feature == "execution-plan-unknown-step"
+                    && f.step_id.as_deref() == Some("parse_alias")),
+            "expected the dangling step to be named: {:?}",
+            report.unsupported
+        );
+    }
+}
+
+#[cfg(test)]
+mod handler_step_on_error_tests {
+    use super::*;
+
+    fn parse(json: &str) -> ExecutionGraph {
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("parse failed: {e}"))
+    }
+    fn codes(report: &DirectWorkflowSupportReport) -> Vec<String> {
+        let mut v: Vec<String> = report
+            .unsupported
+            .iter()
+            .map(|f| format!("{}:{}", f.step_id.as_deref().unwrap_or("<g>"), f.feature))
+            .collect();
+        v.sort();
+        v
+    }
+    fn agent(id: &str) -> String {
+        format!(
+            r##""{id}": {{ "id": "{id}", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {{}} }}"##
+        )
+    }
+    fn finish(id: &str) -> String {
+        format!(
+            r##""{id}": {{ "id": "{id}", "stepType": "Finish", "inputMapping": {{ "out": {{ "value": "x", "valueType": "immediate" }} }} }}"##
+        )
+    }
+
+    // V1 — the reported repro exactly: handler step err_persist has normal + onError
+    // edges to the same Finish; two Finish steps.
+    fn v1() -> ExecutionGraph {
+        parse(&format!(
+            r##"{{
+          "entryPoint": "a",
+          "executionPlan": [
+            {{"fromStep":"a","toStep":"b"}},
+            {{"fromStep":"b","toStep":"finish_ok"}},
+            {{"fromStep":"a","label":"onError","toStep":"err_persist"}},
+            {{"fromStep":"err_persist","toStep":"finish_err"}},
+            {{"fromStep":"err_persist","label":"onError","toStep":"finish_err"}}
+          ],
+          "steps": {{ {}, {}, {}, {}, {} }}
+        }}"##,
+            agent("a"),
+            agent("b"),
+            agent("err_persist"),
+            finish("finish_ok"),
+            finish("finish_err")
+        ))
+    }
+
+    // V2 — same shape but a SINGLE Finish (tests the ">1 Finish required" claim).
+    fn v2() -> ExecutionGraph {
+        parse(&format!(
+            r##"{{
+          "entryPoint": "a",
+          "executionPlan": [
+            {{"fromStep":"a","toStep":"b"}},
+            {{"fromStep":"b","toStep":"finish"}},
+            {{"fromStep":"a","label":"onError","toStep":"err_persist"}},
+            {{"fromStep":"err_persist","toStep":"finish"}},
+            {{"fromStep":"err_persist","label":"onError","toStep":"finish"}}
+          ],
+          "steps": {{ {}, {}, {}, {} }}
+        }}"##,
+            agent("a"),
+            agent("b"),
+            agent("err_persist"),
+            finish("finish")
+        ))
+    }
+
+    // V3 — handler step has ONLY normal edge (no onError). Control: should compile.
+    fn v3() -> ExecutionGraph {
+        parse(&format!(
+            r##"{{
+          "entryPoint": "a",
+          "executionPlan": [
+            {{"fromStep":"a","toStep":"b"}},
+            {{"fromStep":"b","toStep":"finish_ok"}},
+            {{"fromStep":"a","label":"onError","toStep":"err_persist"}},
+            {{"fromStep":"err_persist","toStep":"finish_err"}}
+          ],
+          "steps": {{ {}, {}, {}, {}, {} }}
+        }}"##,
+            agent("a"),
+            agent("b"),
+            agent("err_persist"),
+            finish("finish_ok"),
+            finish("finish_err")
+        ))
+    }
+
+    // V4 — dup normal+onError to same target on a NORMAL-PATH step (b), 2 Finish.
+    // Tests whether dup-edges per se break it (expected: compiles).
+    fn v4() -> ExecutionGraph {
+        parse(&format!(
+            r##"{{
+          "entryPoint": "a",
+          "executionPlan": [
+            {{"fromStep":"a","toStep":"b"}},
+            {{"fromStep":"b","toStep":"finish_ok"}},
+            {{"fromStep":"b","label":"onError","toStep":"finish_ok"}},
+            {{"fromStep":"a","label":"onError","toStep":"finish_err"}}
+          ],
+          "steps": {{ {}, {}, {}, {} }}
+        }}"##,
+            agent("a"),
+            agent("b"),
+            finish("finish_ok"),
+            finish("finish_err")
+        ))
+    }
+
+    // V5 — handler step has onError to a DIFFERENT target (not duplicate).
+    // Tests whether "duplicate" matters or just "onError on a handler step".
+    fn v5() -> ExecutionGraph {
+        parse(&format!(
+            r##"{{
+          "entryPoint": "a",
+          "executionPlan": [
+            {{"fromStep":"a","toStep":"b"}},
+            {{"fromStep":"b","toStep":"finish_ok"}},
+            {{"fromStep":"a","label":"onError","toStep":"err_persist"}},
+            {{"fromStep":"err_persist","toStep":"finish_err"}},
+            {{"fromStep":"err_persist","label":"onError","toStep":"finish_ok"}}
+          ],
+          "steps": {{ {}, {}, {}, {}, {} }}
+        }}"##,
+            agent("a"),
+            agent("b"),
+            agent("err_persist"),
+            finish("finish_ok"),
+            finish("finish_err")
+        ))
+    }
+
+    // An `onError` edge on a step that sits INSIDE an error-handler subtree is
+    // inert (the emitter lowers handler subtrees via
+    // `step_run_plan_without_on_error`, never lowering a nested onError). The gate
+    // must accept these graphs instead of bailing with a routing cascade. Neither
+    // ">1 Finish" nor a duplicate target is required to trigger the old bug — V2
+    // (single Finish) and V5 (distinct target) both reproduced it.
+
+    #[test]
+    fn handler_step_on_error_to_same_finish_two_finishes_is_supported() {
+        let r = analyze_direct_wasm_support(&v1());
+        assert!(r.supported, "{:?}", codes(&r));
+    }
+
+    #[test]
+    fn handler_step_on_error_single_finish_is_supported() {
+        let r = analyze_direct_wasm_support(&v2());
+        assert!(r.supported, "{:?}", codes(&r));
+    }
+
+    #[test]
+    fn handler_step_normal_only_is_supported() {
+        let r = analyze_direct_wasm_support(&v3());
+        assert!(r.supported, "{:?}", codes(&r));
+    }
+
+    #[test]
+    fn duplicate_edges_on_normal_path_step_is_supported() {
+        let r = analyze_direct_wasm_support(&v4());
+        assert!(r.supported, "{:?}", codes(&r));
+    }
+
+    #[test]
+    fn handler_step_on_error_to_distinct_target_is_supported() {
+        let r = analyze_direct_wasm_support(&v5());
+        assert!(r.supported, "{:?}", codes(&r));
     }
 }

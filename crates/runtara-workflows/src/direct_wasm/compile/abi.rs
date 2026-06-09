@@ -80,6 +80,51 @@ pub(super) fn return_if_retptr_error(function: &mut WasmFunction) {
     function.instruction(&Instruction::End);
 }
 
+/// Like `emit_fail_if_retptr_error` but reads the error list directly from the
+/// retptr (no scratch locals needed) — for call sites that have no free locals.
+pub(super) fn emit_fail_if_retptr_error_inplace(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+    push_retptr_arg(function);
+    function.instruction(&Instruction::Call(indices.runtime_fail));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::Return);
+    function.instruction(&Instruction::End);
+}
+
+/// Like `return_if_retptr_error`, but reports the error via `runtime.fail`
+/// (emitting a `failed` SDK event carrying the error) before returning, instead
+/// of returning `Err` with no payload — which makes wasmtime exit non-zero with
+/// no SDK event and no diagnostic. `err_ptr_local`/`err_len_local` must be free
+/// at the call site (used as scratch to hold the error list).
+pub(super) fn emit_fail_if_retptr_error(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    err_ptr_local: u32,
+    err_len_local: u32,
+) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_list(function, err_ptr_local, err_len_local);
+    super::emit_runtime_fail_return(function, indices, err_ptr_local, err_len_local);
+    function.instruction(&Instruction::End);
+}
+
 pub(super) fn emit_retptr_error_or_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -96,7 +141,17 @@ pub(super) fn emit_retptr_error_or_return(
             error_len_local,
         );
     } else {
-        return_if_retptr_error(function);
+        // No onError handler at this level: report the failure to the runtime
+        // (emit a `failed` event carrying the error) before returning, rather than
+        // returning `Err` from `run` with no payload. The latter makes wasmtime
+        // exit non-zero with no SDK event and no diagnostic — the workflow world
+        // imports no `wasi:cli/stderr`, so the error text is lost and the instance
+        // is marked "crashed" with no reason.
+        load_retptr_tag(function);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        load_retptr_list(function, error_ptr_local, error_len_local);
+        super::emit_runtime_fail_return(function, indices, error_ptr_local, error_len_local);
+        function.instruction(&Instruction::End);
     }
 }
 

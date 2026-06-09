@@ -61,6 +61,17 @@ pub(super) enum DirectRunPlan {
         /// emitted once after the dispatch. `None` when terminal.
         merge_plan: Option<Box<DirectRunPlan>>,
     },
+    /// Unconditional parallel fan-out OFF the topological backbone (e.g. a step
+    /// with multiple normal successors inside a Conditional/Switch branch or
+    /// onError handler). Every branch runs in sequence up to their shared merge
+    /// point, then the merge runs once — the same run-each-once semantics the
+    /// backbone gets for free from `direct_execution_order`. `merge_plan` is
+    /// `None` when the branches re-converge at the enclosing branch's own merge
+    /// (`stop_at`), which the parent emits.
+    Fanout {
+        branches: Vec<DirectRunPlan>,
+        merge_plan: Option<Box<DirectRunPlan>>,
+    },
     GroupBy {
         step_id: String,
         group_id: u32,
@@ -1205,37 +1216,95 @@ fn normal_flow_plan(
     if conditional_edges.is_empty() {
         // Backbone steps continue to their topological successor, which
         // linearizes fan-out (multiple unconditional successors) and joins so
-        // each downstream step is emitted exactly once. Off-backbone steps
-        // (conditional-branch sub-steps) fall back to following their single
-        // unconditional edge.
-        let next_step = if let Some(next) = topo_successor(graph, from_step) {
-            next
-        } else {
-            if edges.is_empty() {
-                // Terminal step with no successor and no explicit Finish (e.g. a
-                // single-Agent workflow). Match the generated compiler, which
-                // returns `Ok(Value::Null)`: complete the workflow with a null
-                // output instead of failing to build the plan.
-                return Ok(DirectRunPlan::ImplicitFinish);
-            }
-            let [edge] = default_edges.as_slice() else {
-                return Err(DirectCompileError::Component(format!(
-                    "direct step '{from_step}' has unsupported parallel normal branches"
-                )));
-            };
-            edge.to_step.clone()
-        };
+        // each downstream step is emitted exactly once.
+        if let Some(next) = topo_successor(graph, from_step) {
+            stack.push(from_step.to_string());
+            let next_plan = step_run_plan_inner(
+                graph,
+                child_workflows,
+                &next,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
+            stack.pop();
+            return Ok(next_plan);
+        }
+
+        // Off the backbone (inside a Conditional/Switch branch or onError
+        // handler) there is no global topological order to lean on.
+        if edges.is_empty() {
+            // Terminal step with no successor and no explicit Finish (e.g. a
+            // single-Agent workflow). Match the generated compiler, which
+            // returns `Ok(Value::Null)`: complete the workflow with a null
+            // output instead of failing to build the plan.
+            return Ok(DirectRunPlan::ImplicitFinish);
+        }
+        if let [edge] = default_edges.as_slice() {
+            // Single unconditional successor: follow it.
+            stack.push(from_step.to_string());
+            let next_plan = step_run_plan_inner(
+                graph,
+                child_workflows,
+                &edge.to_step,
+                stack,
+                include_on_error,
+                stop_at,
+            )?;
+            stack.pop();
+            return Ok(next_plan);
+        }
+
+        // Unconditional parallel fan-out off the backbone: linearize it locally
+        // the way the backbone is linearized globally — run every branch in
+        // sequence up to their shared merge point, then the merge once. When the
+        // branches re-converge at the enclosing branch's own merge (`stop_at`),
+        // `merge` is filtered to `None` and the parent emits that merge.
+        let branch_starts: Vec<Option<String>> = default_edges
+            .iter()
+            .map(|edge| Some(edge.to_step.clone()))
+            .collect();
+        let merge =
+            direct_find_merge_point(graph, &branch_starts).filter(|m| Some(m.as_str()) != stop_at);
+        let branch_stop = merge.as_deref().or(stop_at);
+        if merge.is_none() && branch_stop.is_none() {
+            // No shared merge and no enclosing merge: the branches end in
+            // distinct terminals (an ambiguous multi-exit graph). Validation
+            // rejects this (E073); guard here so we never mis-emit it.
+            return Err(DirectCompileError::Component(format!(
+                "direct step '{from_step}' fans out to parallel branches that never re-converge"
+            )));
+        }
         stack.push(from_step.to_string());
-        let next_plan = step_run_plan_inner(
-            graph,
-            child_workflows,
-            &next_step,
-            stack,
-            include_on_error,
-            stop_at,
-        )?;
+        let branches = default_edges
+            .iter()
+            .map(|edge| {
+                step_run_plan_inner(
+                    graph,
+                    child_workflows,
+                    &edge.to_step,
+                    stack,
+                    include_on_error,
+                    branch_stop,
+                )
+            })
+            .collect::<Result<Vec<_>, DirectCompileError>>()?;
+        let merge_plan = match &merge {
+            Some(merge_step) => Some(Box::new(step_run_plan_inner(
+                graph,
+                child_workflows,
+                merge_step,
+                stack,
+                include_on_error,
+                stop_at,
+            )?)),
+            None => None,
+        };
         stack.pop();
-        return Ok(next_plan);
+        return Ok(DirectRunPlan::Fanout {
+            branches,
+            merge_plan,
+        });
     }
 
     if edges.is_empty() {

@@ -52,11 +52,17 @@ pub(super) fn direct_core_variables_json(
     variables: &serde_json::Value,
     workflow_id: Option<&str>,
 ) -> Result<Vec<u8>, DirectCompileError> {
+    // Declared workflow variables arrive as `{name: {"type": ..., "value": ...}}`
+    // (the DSL `Variable` struct). Workflow logic references them as
+    // `variables.<name>` and expects the resolved *value*, so flatten each
+    // declaration to its `value`. Entries that are not `{type, value}` structs
+    // are already bare values and kept unchanged.
+    let mut variables = flatten_declared_variables(variables);
+
     let Some(workflow_id) = workflow_id else {
-        return serde_json::to_vec(variables).map_err(DirectCompileError::Serialize);
+        return serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize);
     };
 
-    let mut variables = variables.clone();
     match &mut variables {
         serde_json::Value::Object(map) => {
             map.insert(
@@ -76,6 +82,34 @@ pub(super) fn direct_core_variables_json(
     }
 
     serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize)
+}
+
+/// Flatten declared workflow variables (`{name: {"type", "value"}}`, the DSL
+/// `Variable` struct) to `{name: value}` so `variables.<name>` references resolve
+/// to the value rather than the declaration struct. Entries that are not
+/// `{type, value}` structs are already bare values and returned unchanged.
+fn flatten_declared_variables(variables: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = variables else {
+        return variables.clone();
+    };
+    serde_json::Value::Object(
+        map.iter()
+            .map(|(name, decl)| {
+                let value = match decl {
+                    serde_json::Value::Object(fields)
+                        if fields.contains_key("type") && fields.contains_key("value") =>
+                    {
+                        fields
+                            .get("value")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                    }
+                    other => other.clone(),
+                };
+                (name.clone(), value)
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +628,28 @@ mod tests {
             .expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(variables, serde_json::json!({"user": "value"}));
+    }
+
+    #[test]
+    fn variables_json_flattens_declared_variable_structs_to_values() {
+        // Declared variables are `{name: {"type", "value"}}`; the static segment
+        // must expose the value so `variables.<name>` resolves to it (not the
+        // declaration struct). A variable whose value is itself an object with a
+        // `value` field is flattened exactly one level.
+        let declared = serde_json::json!({
+            "greeting": { "type": "string", "value": "hello" },
+            "count": { "type": "integer", "value": 3, "description": "n" },
+            "nested": { "type": "object", "value": { "value": "inner", "k": 1 } }
+        });
+        let bytes = direct_core_variables_json(&declared, Some("wf")).expect("variables");
+        let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(variables["greeting"], "hello");
+        assert_eq!(variables["count"], 3);
+        assert_eq!(
+            variables["nested"],
+            serde_json::json!({ "value": "inner", "k": 1 })
+        );
+        assert_eq!(variables["_workflow_id"], "wf");
     }
 
     fn graph(

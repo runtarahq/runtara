@@ -157,6 +157,22 @@ pub enum ValidationError {
         reference_path: String,
         reason: String,
     },
+    /// An executionPlan edge references a step id absent from `steps`. Such a
+    /// dangling edge passes the other structural checks but breaks the direct
+    /// compiler's coverage invariant, surfacing only at compile time as a
+    /// confusing `execution-plan-routing` cascade. Flag it here so curators can
+    /// fix the graph before deploy.
+    EdgeReferencesUnknownStep {
+        from_step: String,
+        to_step: String,
+        /// Which endpoint is missing: `"fromStep"` or `"toStep"`.
+        endpoint: String,
+        /// The specific step id that does not exist.
+        missing_step: String,
+        /// Edge label when present (e.g. `"true"` / `"false"` / `"onError"`).
+        label: Option<String>,
+        available_steps: Vec<String>,
+    },
 
     // === Agent/Capability Errors ===
     /// Agent does not exist.
@@ -463,6 +479,28 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E011] Step '{}' has invalid reference path '{}': {}",
                     step_id, reference_path, reason
+                )
+            }
+            ValidationError::EdgeReferencesUnknownStep {
+                from_step,
+                to_step,
+                endpoint,
+                missing_step,
+                label,
+                available_steps,
+            } => {
+                let suggestion = find_similar_name(missing_step, available_steps);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                let label_text = label
+                    .as_deref()
+                    .map(|l| format!(" (label '{}')", l))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E014] Execution plan edge '{}' -> '{}'{} references {} '{}', which does not exist in steps{}",
+                    from_step, to_step, label_text, endpoint, missing_step, suggestion_text
                 )
             }
 
@@ -1000,6 +1038,15 @@ pub enum ValidationWarning {
     },
     /// A non-Finish step has no outgoing edges (terminal step without explicit Finish).
     DanglingStep { step_id: String, step_type: String },
+    /// A step has both a normal-flow edge and an `onError` edge to the SAME
+    /// target. The pair is redundant (the step continues to the target whether
+    /// it succeeds or fails) — almost always an authoring artifact from adding
+    /// the same target twice during graph editing.
+    DuplicateEdgeToTarget {
+        from_step: String,
+        to_step: String,
+        labels: Vec<String>,
+    },
     /// A step with side effects has no compensation defined in its transaction.
     MissingCompensation {
         step_id: String,
@@ -1023,6 +1070,15 @@ pub enum ValidationWarning {
         step_id: String,
         reference: String,
         reason: String,
+    },
+    /// A reference uses the bare `__error.*` root that older docs advertised.
+    /// The captured onError envelope lives at `steps.__error.*` (alias
+    /// `steps.error.*`); the runtime mirrors it to the bare root for
+    /// back-compat, but the canonical, typo-checked path is `steps.__error.*`.
+    BareErrorReference {
+        step_id: String,
+        reference_path: String,
+        suggested_path: String,
     },
 }
 
@@ -1153,6 +1209,19 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, step_type
                 )
             }
+            ValidationWarning::DuplicateEdgeToTarget {
+                from_step,
+                to_step,
+                labels,
+            } => {
+                write!(
+                    f,
+                    "[W040] Step '{}' has two edges to '{}' differing only in label ({}). The duplicate is redundant — keep one and remove the other.",
+                    from_step,
+                    to_step,
+                    labels.join(", ")
+                )
+            }
             ValidationWarning::MissingCompensation {
                 step_id,
                 agent_id,
@@ -1205,6 +1274,17 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, reference, reason
                 )
             }
+            ValidationWarning::BareErrorReference {
+                step_id,
+                reference_path,
+                suggested_path,
+            } => {
+                write!(
+                    f,
+                    "[W053] Step '{}' references the onError error context via '{}'. Use the canonical '{}' instead; the bare root still resolves for back-compat but is not typo-checked.",
+                    step_id, reference_path, suggested_path
+                )
+            }
         }
     }
 }
@@ -1230,6 +1310,13 @@ pub fn validate_workflow(
 
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
+
+    // Phase 1.1: executionPlan edge endpoints must exist in steps (E014).
+    // A dangling edge otherwise only fails at compile, as a confusing cascade.
+    validate_edge_endpoints(graph, &mut result);
+
+    // Phase 1.2: redundant normal+onError edges to the same target (W040).
+    validate_duplicate_target_edges(graph, &mut result);
 
     // Phase 1.5: Finish output shape validation
     validate_finish_outputs(graph, &mut result);
@@ -1862,6 +1949,19 @@ fn validate_reference(
         return;
     }
 
+    // The captured onError envelope is exposed at `steps.__error.*` (alias
+    // `steps.error.*`). Older docs advertised a bare `__error.*` root; the
+    // runtime still mirrors it to the source root for back-compat (see
+    // `build_source`), but the bare form bypasses step-id typo checking, so
+    // steer authors to the canonical `steps.__error.*` path.
+    if ref_path == "__error" || ref_path.starts_with("__error.") {
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path: format!("steps.{ref_path}"),
+        });
+    }
+
     // Check for step references
     if let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) {
         // Check if step references itself (warning, not error)
@@ -2357,6 +2457,14 @@ fn validate_agents(
 
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
+            // Agent ids are canonically kebab (e.g. `object-model`), but a
+            // workflow may author the legacy snake form (`object_model`).
+            // Compare against the canonical id so id-specific rules below fire
+            // regardless of which form the author used — matching how the
+            // catalog lookup and the compile path already fold the two.
+            let agent_id_canonical =
+                runtara_dsl::agent_meta::canonical_agent_id(&agent_step.agent_id);
+
             // Validate agent exists in the runtime catalog
             let Some(agent) = catalog.agent(&agent_step.agent_id) else {
                 result.errors.push(ValidationError::UnknownAgent {
@@ -2370,7 +2478,7 @@ fn validate_agents(
             // Validate capability exists
             let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
 
-            if agent_step.agent_id == "object_model"
+            if agent_id_canonical == "object-model"
                 && let Some(mapping) = &agent_step.input_mapping
                 && let Some(condition) = mapping.get("condition")
             {
@@ -2464,7 +2572,7 @@ fn validate_agents(
                         inputs.iter().map(|f| (f.name.as_str(), f)).collect();
 
                     for (field_name, value) in mapping {
-                        if agent_step.agent_id != "object_model"
+                        if agent_id_canonical != "object-model"
                             && let Some(field_meta) = field_map.get(field_name.as_str())
                             && is_condition_input(
                                 &agent_step.agent_id,
@@ -2547,7 +2655,8 @@ fn is_condition_input(
     type_name: &str,
 ) -> bool {
     type_name.contains("ConditionExpression")
-        || (agent_id == "object_model" && field_name == "condition")
+        || (runtara_dsl::agent_meta::canonical_agent_id(agent_id) == "object-model"
+            && field_name == "condition")
 }
 
 fn validate_condition_input_mapping(
@@ -3223,6 +3332,101 @@ fn validate_compensation_recursive(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+}
+
+/// W040: a step has both a normal-flow edge and an `onError` edge to the SAME
+/// target. The pair is redundant (the step continues to the target whether it
+/// succeeds or fails) and is almost always an authoring artifact. Emitted as a
+/// warning, not an error — the compiler accepts it (the inert handler-step
+/// onError is lowered as dead). Recurses into Split / While subgraphs.
+fn validate_duplicate_target_edges(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let mut pairs: std::collections::BTreeMap<(String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for edge in &graph.execution_plan {
+        // Dangling edges are reported by E014; ignore them here.
+        if !graph.steps.contains_key(&edge.from_step) || !graph.steps.contains_key(&edge.to_step) {
+            continue;
+        }
+        let label = match edge.label.as_deref() {
+            None | Some("") | Some("next") => "next".to_string(),
+            Some(other) => other.to_string(),
+        };
+        pairs
+            .entry((edge.from_step.clone(), edge.to_step.clone()))
+            .or_default()
+            .push(label);
+    }
+    for ((from_step, to_step), mut labels) in pairs {
+        let has_normal = labels.iter().any(|l| l == "next");
+        let has_on_error = labels.iter().any(|l| l == "onError");
+        if has_normal && has_on_error {
+            labels.sort();
+            labels.dedup();
+            result
+                .warnings
+                .push(ValidationWarning::DuplicateEdgeToTarget {
+                    from_step,
+                    to_step,
+                    labels,
+                });
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_duplicate_target_edges(&split_step.subgraph, result)
+            }
+            Step::While(while_step) => {
+                validate_duplicate_target_edges(&while_step.subgraph, result)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E014: every executionPlan edge endpoint (`fromStep` / `toStep`) must name a
+/// step present in `steps`. A dangling edge otherwise passes validation and only
+/// fails at compile, where the direct gate's coverage invariant turns it into an
+/// `execution-plan-routing` cascade across every step. Recurses into Split /
+/// While subgraphs (mirrors `validate_edge_conditions_recursive`).
+fn validate_edge_endpoints(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let mut available: Vec<String> = graph.steps.keys().cloned().collect();
+    available.sort();
+    for edge in &graph.execution_plan {
+        if !graph.steps.contains_key(&edge.from_step) {
+            result
+                .errors
+                .push(ValidationError::EdgeReferencesUnknownStep {
+                    from_step: edge.from_step.clone(),
+                    to_step: edge.to_step.clone(),
+                    endpoint: "fromStep".to_string(),
+                    missing_step: edge.from_step.clone(),
+                    label: edge.label.clone(),
+                    available_steps: available.clone(),
+                });
+        }
+        if !graph.steps.contains_key(&edge.to_step) {
+            result
+                .errors
+                .push(ValidationError::EdgeReferencesUnknownStep {
+                    from_step: edge.from_step.clone(),
+                    to_step: edge.to_step.clone(),
+                    endpoint: "toStep".to_string(),
+                    missing_step: edge.to_step.clone(),
+                    label: edge.label.clone(),
+                    available_steps: available.clone(),
+                });
+        }
+    }
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => validate_edge_endpoints(&split_step.subgraph, result),
+            Step::While(while_step) => validate_edge_endpoints(&while_step.subgraph, result),
+            _ => {}
+        }
+    }
 }
 
 fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
@@ -4584,67 +4788,20 @@ mod tests {
         AgentStep, AiAgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
-    // Keep runtara-agents linked so tests use the same static capability registry.
-    #[allow(unused_imports)]
-    use runtara_agents as _;
-
-    /// Test helper: build an `AgentCatalog` from the statically-linked agent
-    /// registry. Production callers pass the runtime-loaded catalog from the
-    /// component dispatcher; tests use this shim so they don't have to stand
-    /// up wasmtime.
+    /// Validator unit tests run against a committed snapshot of the real
+    /// component `meta.json` for the agents these tests reference
+    /// (transform / http / object-model / utils) — NOT the static agent
+    /// registry. Regenerate the fixture with `emit-meta` if those agents'
+    /// schemas change. The object-model agent's id is the canonical kebab
+    /// `object-model`, exactly as the production catalog advertises it; the
+    /// validator's id-specific rules and `AgentCatalog` lookups canonicalize
+    /// ids, so tests that author the legacy snake `object_model` still resolve.
+    /// See `tests/catalog/agent_catalog.json`.
     pub(super) fn test_catalog() -> runtara_dsl::agent_meta::AgentCatalog {
-        // In production the validator's catalog is sourced from the component
-        // dispatcher (see `server.rs`), which includes `object_model` and the
-        // other agents that now run as WASM components. The static
-        // `runtara_agents::registry` no longer carries those integration
-        // agents (they were deleted in "agents: delete legacy native
-        // integration agents"), so we re-add a minimal `object_model` entry
-        // to mirror the runtime catalog the validator actually sees.
-        let mut agents = runtara_agents::registry::get_agents();
-        if !agents.iter().any(|agent| agent.id == "object_model") {
-            agents.push(object_model_catalog_agent());
-        }
-        runtara_dsl::agent_meta::AgentCatalog::from_agents(agents)
-    }
-
-    /// Minimal `object_model` agent mirroring the component dispatcher's
-    /// catalog entry: connection-backed (`postgres`) with the capabilities the
-    /// validation tests exercise.
-    fn object_model_catalog_agent() -> runtara_dsl::agent_meta::AgentInfo {
-        serde_json::from_value(serde_json::json!({
-            "id": "object_model",
-            "name": "Object Model",
-            "description": "Object Model CRUD capabilities (test mirror of the component agent).",
-            "hasSideEffects": true,
-            "supportsConnections": true,
-            "integrationIds": ["postgres"],
-            "capabilities": [
-                object_model_catalog_capability("query-instances", "Query Instances", false),
-                object_model_catalog_capability(
-                    "bulk-update-instances",
-                    "Bulk Update Instances",
-                    true,
-                ),
-            ],
-        }))
-        .expect("object_model AgentInfo fixture should deserialize")
-    }
-
-    fn object_model_catalog_capability(
-        id: &str,
-        name: &str,
-        has_side_effects: bool,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "name": name,
-            "inputType": "Value",
-            "inputs": [],
-            "output": { "type": "object" },
-            "hasSideEffects": has_side_effects,
-            "isIdempotent": !has_side_effects,
-            "rateLimited": false,
-        })
+        runtara_dsl::agent_meta::AgentCatalog::from_json(include_str!(
+            "../tests/catalog/agent_catalog.json"
+        ))
+        .expect("agent_catalog.json fixture should parse")
     }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
@@ -5453,6 +5610,36 @@ mod tests {
         assert_eq!(extract_step_id_from_reference("variables.foo"), None);
         assert_eq!(extract_step_id_from_reference("inputs.data"), None);
         assert_eq!(extract_step_id_from_reference("foo.bar"), None);
+    }
+
+    #[test]
+    fn bare_error_reference_warns_with_canonical_suggestion() {
+        let steps = HashSet::new();
+        let vars = HashSet::new();
+
+        // Bare `__error.*` (the historically-documented form) warns (W053) but
+        // is not an error — the runtime mirrors it to the source root.
+        let mut bare = ValidationResult::default();
+        validate_reference("handler", "__error.message", &steps, &vars, &mut bare);
+        assert!(!bare.has_errors());
+        assert!(matches!(
+            bare.warnings.as_slice(),
+            [ValidationWarning::BareErrorReference { suggested_path, .. }]
+                if suggested_path == "steps.__error.message"
+        ));
+
+        // Canonical `steps.__error.*` does not warn (`__error` is a reserved
+        // implicit step id, so it is also not an InvalidStepReference error).
+        let mut canonical = ValidationResult::default();
+        validate_reference(
+            "handler",
+            "steps.__error.message",
+            &steps,
+            &vars,
+            &mut canonical,
+        );
+        assert!(!canonical.has_errors());
+        assert!(!canonical.has_warnings());
     }
 
     // === ValidationResult Tests ===
@@ -7334,7 +7521,11 @@ mod tests {
         assert!(display.contains("GET, POST"));
     }
 
-    fn create_object_model_bulk_update_step(id: &str, condition: serde_json::Value) -> Step {
+    fn create_object_model_bulk_update_step(
+        id: &str,
+        agent_id: &str,
+        condition: serde_json::Value,
+    ) -> Step {
         let mut mapping = InputMapping::new();
         mapping.insert(
             "schema_name".to_string(),
@@ -7356,7 +7547,7 @@ mod tests {
         Step::Agent(AgentStep {
             id: id.to_string(),
             name: None,
-            agent_id: "object_model".to_string(),
+            agent_id: agent_id.to_string(),
             capability_id: "bulk-update-instances".to_string(),
             connection_id: None,
             input_mapping: Some(mapping),
@@ -7382,7 +7573,7 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "bulk".to_string(),
-            create_object_model_bulk_update_step("bulk", condition),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
         );
         let graph = create_basic_graph(steps, "bulk");
 
@@ -7409,7 +7600,7 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "bulk".to_string(),
-            create_object_model_bulk_update_step("bulk", condition),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
         );
         let graph = create_basic_graph(steps, "bulk");
 
@@ -7421,6 +7612,56 @@ mod tests {
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidConditionShape { .. })),
             "{:?}",
+            result.errors
+        );
+    }
+
+    /// Regression: an object-model step authored with the **canonical kebab
+    /// id** (`object-model`, exactly as `GET /api/runtime/agents` advertises
+    /// it) must (a) resolve against the kebab-keyed catalog — no
+    /// `UnknownAgent` — and (b) still trip the object-model-specific
+    /// `condition` validation. Before agent ids were canonicalized at catalog
+    /// lookup and in the validator's special-cases, the kebab catalog returned
+    /// `UnknownAgent` for the snake-keyed `== "object_model"` checks, and a
+    /// kebab-authored step skipped the condition rule entirely — so a
+    /// malformed `condition` slipped through unvalidated.
+    #[test]
+    fn object_model_condition_validation_fires_for_canonical_kebab_id() {
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "immediate", "value": {"valueType": "reference", "value": "category_leaf_id"}},
+                {"valueType": "reference", "value": "data.selected_category"}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", "object-model", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        // (a) The kebab id resolves in the (kebab-keyed) catalog.
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UnknownAgent { .. })),
+            "kebab `object-model` should resolve in the catalog, got: {:?}",
+            result.errors
+        );
+        // (b) The object-model-specific condition rule fires for the kebab id.
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidConditionShape { path, message, .. }
+                    if path == "inputMapping.condition.value.arguments[0]"
+                        && message.contains("deprecated wrapping")
+            )),
+            "object-model condition validation should fire for the kebab id, got: {:?}",
             result.errors
         );
     }
@@ -8424,32 +8665,17 @@ mod tests {
 
     #[test]
     fn test_side_effects_without_compensation_generates_warning() {
-        // http:request has side_effects = true
+        // object_model:create-instance has side_effects = true
         let mut steps = HashMap::new();
         steps.insert(
-            "http_call".to_string(),
+            "om_call".to_string(),
             Step::Agent(AgentStep {
-                id: "http_call".to_string(),
+                id: "om_call".to_string(),
                 name: None,
-                agent_id: "http".to_string(),
-                capability_id: "http-request".to_string(),
+                agent_id: "object_model".to_string(),
+                capability_id: "create-instance".to_string(),
                 connection_id: None,
-                input_mapping: Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "url".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("https://example.com"),
-                        }),
-                    );
-                    m.insert(
-                        "method".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("POST"),
-                        }),
-                    );
-                    m
-                }),
+                input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
@@ -8460,9 +8686,9 @@ mod tests {
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
-        let mut graph = create_basic_graph(steps, "http_call");
+        let mut graph = create_basic_graph(steps, "om_call");
         graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "http_call".to_string(),
+            from_step: "om_call".to_string(),
             to_step: "finish".to_string(),
             label: None,
             condition: None,
@@ -8479,7 +8705,7 @@ mod tests {
             .collect();
         assert!(
             !missing_comp_warnings.is_empty(),
-            "Should have MissingCompensation warning for http:request step"
+            "Should have MissingCompensation warning for object_model:create-instance step"
         );
 
         // Check warning contents
@@ -8490,9 +8716,9 @@ mod tests {
             ..
         }) = missing_comp_warnings.first()
         {
-            assert_eq!(step_id, "http_call");
-            assert_eq!(agent_id, "http");
-            assert_eq!(capability_id, "http-request");
+            assert_eq!(step_id, "om_call");
+            assert_eq!(agent_id, "object_model");
+            assert_eq!(capability_id, "create-instance");
         }
     }
 
@@ -9566,5 +9792,120 @@ mod template_validation_tests {
             "{:?}",
             result.warnings
         );
+    }
+
+    #[test]
+    fn dangling_execution_plan_edge_is_e014() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [
+                { "fromStep": "now_ts", "toStep": "finish" },
+                { "fromStep": "parse_alias", "toStep": "create_alias" }
+              ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_edge_endpoints(&graph, &mut result);
+
+        // Both endpoints of the dangling edge are absent from `steps`.
+        assert!(result.errors.iter().any(|e| matches!(e,
+            ValidationError::EdgeReferencesUnknownStep { missing_step, .. } if missing_step == "parse_alias")));
+        assert!(result.errors.iter().any(|e| matches!(e,
+            ValidationError::EdgeReferencesUnknownStep { missing_step, .. } if missing_step == "create_alias")));
+
+        let msg = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, ValidationError::EdgeReferencesUnknownStep { .. }))
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("[E014]"), "{msg}");
+    }
+
+    #[test]
+    fn wellformed_graph_has_no_e014() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "now_ts",
+              "executionPlan": [ { "fromStep": "now_ts", "toStep": "finish" } ],
+              "steps": {
+                "now_ts": { "id": "now_ts", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {} },
+                "finish": { "id": "finish", "stepType": "Finish", "inputMapping": { "ts": { "value": "steps.now_ts.outputs", "valueType": "reference" } } }
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_edge_endpoints(&graph, &mut result);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn redundant_normal_and_on_error_edge_to_same_target_warns_w040() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"b"},
+                {"fromStep":"b","toStep":"finish_ok"},
+                {"fromStep":"a","label":"onError","toStep":"err_persist"},
+                {"fromStep":"err_persist","toStep":"finish_err"},
+                {"fromStep":"err_persist","label":"onError","toStep":"finish_err"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "b": {"id":"b","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "err_persist": {"id":"err_persist","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+                "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_duplicate_target_edges(&graph, &mut result);
+        assert!(result.warnings.iter().any(|w| matches!(w,
+            ValidationWarning::DuplicateEdgeToTarget { from_step, to_step, .. }
+            if from_step == "err_persist" && to_step == "finish_err")));
+        let msg = result
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ValidationWarning::DuplicateEdgeToTarget { .. }))
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("[W040]"), "{msg}");
+    }
+
+    #[test]
+    fn normal_and_on_error_to_distinct_targets_does_not_warn_w040() {
+        // The canonical happy/error split — must NOT warn.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"finish_ok"},
+                {"fromStep":"a","label":"onError","toStep":"finish_err"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+                "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let mut result = ValidationResult::default();
+        validate_duplicate_target_edges(&graph, &mut result);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 }

@@ -82,8 +82,6 @@ use runtime_client::RuntimeClient;
         api::handlers::operators::get_agent_connection_schema_handler,
         // Agent testing endpoint
         api::handlers::agent_testing::test_agent_handler,
-        // Agent execution endpoint (host-mediated, for WASM transition)
-        api::handlers::agent_execution::execute_agent_handler,
         // Metadata endpoints
         api::metadata::get_workflow_step_types_handler,
         // Object Model Schema endpoints
@@ -241,9 +239,6 @@ use runtime_client::RuntimeClient;
             api::dto::agent_testing::TestAgentRequest,
             api::dto::agent_testing::TestAgentResponse,
             api::dto::agent_testing::TestAgentErrorResponse,
-            api::dto::agent_execution::ExecuteAgentRequest,
-            api::dto::agent_execution::ExecuteAgentResponse,
-            api::dto::agent_execution::ExecuteAgentErrorResponse,
             api::handlers::chat::ChatRequest,
             api::handlers::chat::ChatStartRequest,
             api::metadata::NotImplementedResponse,
@@ -511,8 +506,6 @@ struct AppState {
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
-    /// Agent execution service for host-mediated agent calls from workflow instances
-    agent_execution: api::services::agent_execution::AgentExecutionService,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
     /// Unified execution engine — single orchestrator for all execution paths
@@ -583,13 +576,6 @@ impl axum::extract::FromRef<AppState>
 impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
     fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
         state.valkey_conn.clone()
-    }
-}
-
-// Implement FromRef to allow extracting agent_execution service from AppState
-impl axum::extract::FromRef<AppState> for api::services::agent_execution::AgentExecutionService {
-    fn from_ref(state: &AppState) -> api::services::agent_execution::AgentExecutionService {
-        state.agent_execution.clone()
     }
 }
 
@@ -874,10 +860,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     let loaded: Vec<&str> = dispatcher.agent_ids().collect();
                     if loaded.is_empty() {
                         // The runtime dispatches ONLY WASM components, so zero
-                        // agents means the server can't run any workflow. Make
-                        // it impossible to miss rather than silently serving an
-                        // empty agent surface (a `cargo clean` wiping the
-                        // build-output components dir is the usual cause).
+                        // agents means the server can't run any workflow. Fail
+                        // fast rather than silently serving an empty agent
+                        // surface (a `cargo clean` wiping the build-output
+                        // components dir is the usual cause).
                         eprintln!(
                             "❌ Component dispatcher loaded 0 agents from {}.\n\
                              The directory exists but contains no runtara_agent_*.wasm \
@@ -886,14 +872,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                              RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle.",
                             dir.display()
                         );
-                    } else {
-                        println!(
-                            "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                            loaded.len(),
-                            dir.display(),
-                            loaded.join(", ")
-                        );
+                        std::process::exit(1);
                     }
+                    println!(
+                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
+                        loaded.len(),
+                        dir.display(),
+                        loaded.join(", ")
+                    );
                     Some(Arc::new(dispatcher))
                 }
                 Err(e) => {
@@ -903,31 +889,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                         dir.display(),
                         e
                     );
-                    None
+                    std::process::exit(1);
                 }
             }
         } else {
             eprintln!(
-                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — no agent components \
-                 will be loaded and the server has NO runnable agents.\n\
+                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — the server dispatches \
+                 ONLY WASM agent components and has NO runnable agents without them.\n\
                  Set it to a directory of runtara_agent_*.wasm components."
             );
-            None
+            std::process::exit(1);
         }
     };
 
-    // Snapshot the runtime agent catalog once at boot. Validators in app
-    // state read this instead of the statically-linked agent registry. If
-    // the component dispatcher isn't configured, fall back to the
-    // statically-linked set so the validator surface keeps working.
+    // Snapshot the runtime agent catalog once at boot. Validators in app state
+    // read this — sourced from component `meta.json` via the dispatcher — never
+    // the statically-linked agent registry. The dispatcher is guaranteed
+    // present here: startup hard-fails above when it can't be built or loads
+    // zero agents.
     let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
         .as_ref()
         .map(|d| d.catalog())
-        .unwrap_or_else(|| {
-            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
-                runtara_agents::registry::get_agents(),
-            ))
-        });
+        .expect("component dispatcher present after startup hard-fail");
 
     // Derive the connection-defaults compatibility map from the runtime
     // agent catalog. Encapsulates the `default_for → integration_ids` view
@@ -988,8 +971,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_model_database_url = config::object_model_database_url();
 
     println!("Connecting to object model database...");
+    let object_model_pool_config = config::object_model_pool_config();
     let object_model_pool = PgPoolOptions::new()
-        .max_connections(config::object_model_max_connections())
+        .max_connections(object_model_pool_config.max_connections)
+        .min_connections(object_model_pool_config.min_connections)
+        .acquire_timeout(object_model_pool_config.acquire_timeout)
+        .idle_timeout(object_model_pool_config.idle_timeout)
+        .max_lifetime(object_model_pool_config.max_lifetime)
+        .test_before_acquire(object_model_pool_config.test_before_acquire)
         .connect(&object_model_database_url)
         .await
         .expect("Failed to connect to object model database");
@@ -1001,10 +990,53 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_manager = Arc::new(
         ObjectStoreManager::from_pool(object_model_pool)
             .await
-            .expect("Failed to initialize ObjectStoreManager"),
+            .expect("Failed to initialize ObjectStoreManager")
+            .with_pool_config(object_model_pool_config)
+            .with_cache_config(
+                config::object_model_pool_cache_max(),
+                config::object_model_pool_cache_ttl(),
+            ),
     );
 
     println!("✓ Object model database connected successfully");
+
+    // Spawn background task to report object-model pool stats / warn on pressure.
+    let object_model_pool_monitor = object_store_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let stats = object_model_pool_monitor.pool_stats();
+            if stats.pools == 0 {
+                continue;
+            }
+            let usage_pct = if stats.capacity > 0 {
+                (stats.active * 100) / stats.capacity
+            } else {
+                0
+            };
+            if usage_pct >= 75 {
+                tracing::warn!(
+                    pools = stats.pools,
+                    connections = stats.connections,
+                    idle = stats.idle,
+                    active = stats.active,
+                    capacity = stats.capacity,
+                    usage_pct,
+                    "Object model pools under pressure"
+                );
+            } else {
+                tracing::debug!(
+                    pools = stats.pools,
+                    connections = stats.connections,
+                    idle = stats.idle,
+                    active = stats.active,
+                    capacity = stats.capacity,
+                    "Object model pool stats"
+                );
+            }
+        }
+    });
 
     match connections_facade
         .ensure_default_connection(
@@ -1630,11 +1662,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/entitlements",
             get(api::handlers::entitlements::get_entitlements_handler),
         )
-        // Agent execution endpoint (host-mediated, for WASM transition)
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",
-            post(api::handlers::agent_execution::execute_agent_handler),
-        )
         // Agent endpoints (global metadata)
         .route(
             "/api/runtime/agents",
@@ -1712,9 +1739,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
-            agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                connections_facade.clone(),
-            ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
@@ -2025,9 +2049,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
-            agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                connections_facade.clone(),
-            ),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
@@ -2079,9 +2100,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Build internal router for MCP in-process calls (no network hop).
     // MCP tools pre-inject AuthContext into extensions, so auth middleware
     // detects it and skips JWT validation.
+    //
+    // The connections routes must be nested under `/api/runtime` here exactly
+    // as they are in `public_app` below — otherwise MCP connection-discovery
+    // tools (list_connections, list_integrations, get_integration) 404 because
+    // their `/api/runtime/connections*` targets exist only on the public app.
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
+        .nest("/api/runtime", connections_tenant_routes.clone())
         .merge(public_routes.clone());
 
     // Build MCP (Model Context Protocol) router with JWT authentication.

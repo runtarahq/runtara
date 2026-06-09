@@ -447,6 +447,17 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
+        DirectRunPlan::Fanout {
+            branches,
+            merge_plan,
+        } => {
+            for branch in branches {
+                collect_run_plan_ids(branch, condition_ids, mapping_ids);
+            }
+            if let Some(merge_plan) = merge_plan {
+                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+            }
+        }
         DirectRunPlan::GroupBy { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
@@ -769,6 +780,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::Fanout { .. }
         | DirectRunPlan::AiAgentLoop { .. }
         | DirectRunPlan::Join
         | DirectRunPlan::ImplicitFinish => None,
@@ -916,6 +928,108 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     );
     assert!(metadata.child_workflows.is_empty());
     assert!(metadata.agent_components.is_empty());
+}
+
+#[test]
+fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
+    // Regression for the reported repro: a step inside an onError handler subtree
+    // (`err_persist`) that itself carries an onError edge. The support gate used
+    // to reject this with an execution-plan-routing cascade; the emitter lowers
+    // the handler step normally and ignores its inert onError edge. Confirm the
+    // full emit pipeline produces a VALID Wasm component end-to-end.
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+        r##"{
+          "entryPoint": "a",
+          "executionPlan": [
+            {"fromStep":"a","toStep":"b"},
+            {"fromStep":"b","toStep":"finish_ok"},
+            {"fromStep":"a","label":"onError","toStep":"err_persist"},
+            {"fromStep":"err_persist","toStep":"finish_err"},
+            {"fromStep":"err_persist","label":"onError","toStep":"finish_err"}
+          ],
+          "steps": {
+            "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "b": {"id":"b","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "err_persist": {"id":"err_persist","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+            "finish_ok": {"id":"finish_ok","stepType":"Finish","inputMapping":{"out":{"value":"ok","valueType":"immediate"}}},
+            "finish_err": {"id":"finish_err","stepType":"Finish","inputMapping":{"out":{"value":"err","valueType":"immediate"}}}
+          }
+        }"##,
+    )
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "repro/dup_to_finish".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("emit should succeed for a handler step that carries an onError edge");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
+}
+
+#[test]
+fn direct_compile_emits_fanout_inside_conditional_branch() {
+    // Regression: a Conditional whose false branch enters a step (`miss_gate`)
+    // that fans out to two parallel normal successors (`b`, `c`) which re-converge
+    // at `join`. The support gate accepted this, but the plan builder used to bail
+    // with "unsupported parallel normal branches" because the fan-out is off the
+    // topological backbone. The Fanout plan node now linearizes it. Confirm the
+    // full emit pipeline produces a valid Wasm component.
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+        r##"{
+          "entryPoint": "cond",
+          "executionPlan": [
+            {"fromStep": "cond", "label": "true",  "toStep": "hit"},
+            {"fromStep": "cond", "label": "false", "toStep": "miss_gate"},
+            {"fromStep": "miss_gate", "toStep": "b"},
+            {"fromStep": "miss_gate", "toStep": "c"},
+            {"fromStep": "b", "toStep": "join"},
+            {"fromStep": "c", "toStep": "join"},
+            {"fromStep": "hit", "toStep": "join"},
+            {"fromStep": "join", "toStep": "finish"}
+          ],
+          "steps": {
+            "cond": {"id": "cond", "stepType": "Conditional", "condition": {"type": "operation", "op": "EQ", "arguments": [{"value": "x", "valueType": "immediate"}, {"value": "y", "valueType": "immediate"}]}},
+            "hit": {"id": "hit", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "miss_gate": {"id": "miss_gate", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "join": {"id": "join", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}}
+          }
+        }"##,
+    )
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "repro/cond_then_fanout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        connection_integration_ids: std::collections::HashMap::new(),
+    })
+    .expect("emit should succeed for fan-out inside a Conditional branch");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
 }
 
 #[test]
@@ -4328,11 +4442,18 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         }
     }
 
+    // Each setup/stdlib call is followed by a fail-on-error guard (`runtime.fail`
+    // inside an `if error` block) so an unhandled error surfaces as a `failed`
+    // SDK event instead of a silent non-zero exit.
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
+        fail_index.expect("fail import"),
         load_input_index.expect("load-input import"),
+        fail_index.expect("fail import"),
         build_source_index.expect("build-source import"),
+        fail_index.expect("fail import"),
         apply_mapping_index.expect("apply-mapping import"),
+        fail_index.expect("fail import"),
         complete_index.expect("complete import"),
     ];
     assert!(
@@ -6353,6 +6474,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     let mut apply_mapping_index = None;
     let mut complete_index = None;
     let mut custom_event_index = None;
+    let mut fail_index = None;
     let mut step_debug_start_index = None;
     let mut step_debug_end_index = None;
     let mut saw_step_debug_start_kind = false;
@@ -6385,6 +6507,9 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             }
                             ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                                fail_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
                                 step_debug_start_index = Some(next_function_index)
@@ -6420,15 +6545,27 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
         }
     }
 
+    // Each setup/stdlib call (including the step-debug-start/end and their
+    // custom-event emits) is followed by a fail-on-error guard (`runtime.fail`
+    // inside an `if error` block) so an unhandled error surfaces as a `failed`
+    // SDK event instead of a silent non-zero exit.
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
+        fail_index.expect("fail import"),
         load_input_index.expect("load-input import"),
+        fail_index.expect("fail import"),
         build_source_index.expect("build-source import"),
+        fail_index.expect("fail import"),
         step_debug_start_index.expect("step-debug-start import"),
+        fail_index.expect("fail import"),
         custom_event_index.expect("custom-event import"),
+        fail_index.expect("fail import"),
         apply_mapping_index.expect("apply-mapping import"),
+        fail_index.expect("fail import"),
         step_debug_end_index.expect("step-debug-end import"),
+        fail_index.expect("fail import"),
         custom_event_index.expect("custom-event import"),
+        fail_index.expect("fail import"),
         complete_index.expect("complete import"),
     ];
     assert_eq!(
@@ -9525,8 +9662,10 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
             .iter()
             .filter(|&&index| index == fail_index)
             .count(),
-        1,
-        "Error run should call runtime.fail once"
+        4,
+        "Error run should emit runtime.fail four times: one terminal fail for the \
+         Error step plus the three fail-on-error guards after init-manifest, \
+         load-input, and build-source (each guarded by an `if error` block)"
     );
     assert!(
         run_calls

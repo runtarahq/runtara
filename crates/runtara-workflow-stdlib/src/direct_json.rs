@@ -764,7 +764,7 @@ impl DirectJsonManifest {
                     .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
                 apply_error(&error.value, &source)?.context
             }
-            "Agent" => {
+            "Agent" | "AiAgent" => {
                 let agent = self
                     .agent_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
@@ -1954,7 +1954,7 @@ impl DirectJsonManifest {
                     Some(delay.duration_ms.clone()),
                 ))
             }
-            "Agent" => {
+            "Agent" | "AiAgent" => {
                 let agent = self
                     .agent_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
@@ -2070,7 +2070,7 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
-            "Agent" => source
+            "Agent" | "AiAgent" => source
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct Agent output for '{}'", step.id)),
@@ -2229,18 +2229,61 @@ fn inject_runtime_identity_variables(variables: &mut Value) {
 
 /// Build the source envelope consumed by direct mapping/condition helpers.
 pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u8>, String> {
-    let data: Value =
+    let mut data: Value =
         serde_json::from_slice(data).map_err(|err| format!("failed to parse data: {err}"))?;
     let mut variables: Value = serde_json::from_slice(variables)
         .map_err(|err| format!("failed to parse variables: {err}"))?;
+    // The workflow start input arrives in the canonical envelope
+    // `{"data": {...}, "variables": {...}}` (enforced at the API boundary) and is
+    // stored verbatim as the instance input. Unwrap it so `data.*` resolves
+    // against the inner payload, and merge the runtime `variables` over the
+    // compile-time declared defaults (runtime wins). The `_`-prefixed identity
+    // variables are never overridable from input. Inputs with no `data` key
+    // (low-level / direct runtime invocations) are used as-is.
+    let inner_data = if let Value::Object(envelope) = &mut data {
+        if envelope.contains_key("data") {
+            if let Some(Value::Object(runtime_vars)) = envelope.remove("variables")
+                && let Value::Object(defaults) = &mut variables
+            {
+                for (key, value) in runtime_vars {
+                    if !key.starts_with('_') {
+                        defaults.insert(key, value);
+                    }
+                }
+            }
+            envelope.remove("data")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(inner) = inner_data {
+        data = inner;
+    }
     inject_runtime_identity_variables(&mut variables);
     let steps: Value =
         serde_json::from_slice(steps).map_err(|err| format!("failed to parse steps: {err}"))?;
+
+    // onError handlers inject the captured error envelope at `steps.__error`
+    // (alias `steps.error`, see `error_steps`). Mirror it to the source root so
+    // references using the historically-documented bare `__error.*` / `error.*`
+    // form resolve in addition to the canonical `steps.__error.*`. Only present
+    // during onError dispatch; absent (and thus a no-op) for normal steps.
+    let error_alias = steps
+        .as_object()
+        .and_then(|map| map.get("__error"))
+        .cloned();
 
     let mut source = Map::new();
     source.insert("data".to_string(), data.clone());
     source.insert("variables".to_string(), variables.clone());
     source.insert("steps".to_string(), steps);
+
+    if let Some(error) = error_alias {
+        source.insert("__error".to_string(), error.clone());
+        source.insert("error".to_string(), error);
+    }
 
     let mut workflow_inputs = Map::new();
     workflow_inputs.insert("data".to_string(), data);
@@ -2268,21 +2311,57 @@ pub fn error_steps(step_id: &str, error: &[u8], steps: &[u8]) -> Result<Vec<u8>,
         .as_object()
         .cloned()
         .ok_or_else(|| "error steps context must be a JSON object".to_string())?;
-    let error = serde_json::from_slice::<Value>(error).unwrap_or_else(|_| {
-        serde_json::json!({
-            "message": String::from_utf8_lossy(error).to_string(),
-            "stepId": step_id,
-            "code": null,
-            "category": "unknown",
-            "severity": "error"
-        })
-    });
+    let error = parse_error_envelope(error, step_id);
 
     steps.insert("__error".to_string(), error.clone());
     steps.insert("error".to_string(), error);
 
     serde_json::to_vec(&Value::Object(steps))
         .map_err(|err| format!("failed to serialize error steps context: {err}"))
+}
+
+/// Recover a structured error envelope for the `onError` context.
+///
+/// Agent failures reach `error_steps` already wrapped by
+/// [`DirectJsonManifest::agent_error`] as
+/// `Step <id> failed: Agent <agent>::<cap>: {envelope-json}`, so a plain
+/// `from_slice` of the whole string fails and the structured `code` /
+/// `category` / `attributes` fields would be lost (handlers would only see the
+/// wrapped text under `message`). Recover them by parsing the JSON envelope
+/// embedded after the first `{` — mirroring how `why_execution_failed` unwraps
+/// the same shape — so `steps.__error.code` etc. resolve. Falls back to a
+/// synthesized envelope when there is no JSON to recover.
+fn parse_error_envelope(error: &[u8], step_id: &str) -> Value {
+    // Already a structured envelope (non-Agent failures, or a bare envelope).
+    if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(error) {
+        return ensure_step_id(Value::Object(map), step_id);
+    }
+    let text = String::from_utf8_lossy(error);
+    // Agent failures: unwrap the trailing `{...}` envelope. The wrapping prefix
+    // (`Step <id> failed: Agent <agent>::<cap>: `) never contains `{`, so the
+    // first brace is the envelope's opening brace.
+    if let Some(brace) = text.find('{')
+        && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text[brace..].trim())
+    {
+        return ensure_step_id(Value::Object(map), step_id);
+    }
+    serde_json::json!({
+        "message": text.to_string(),
+        "stepId": step_id,
+        "code": null,
+        "category": "unknown",
+        "severity": "error"
+    })
+}
+
+/// Ensure the recovered envelope always exposes `stepId` for onError handlers.
+fn ensure_step_id(mut value: Value, step_id: &str) -> Value {
+    if let Value::Object(map) = &mut value
+        && !map.contains_key("stepId")
+    {
+        map.insert("stepId".to_string(), Value::String(step_id.to_string()));
+    }
+    value
 }
 
 fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
@@ -7268,6 +7347,126 @@ mod tests {
     }
 
     #[test]
+    fn error_steps_recovers_structured_envelope_from_wrapped_agent_error() {
+        // Agent failures arrive wrapped by `agent_error` as
+        // `Step <id> failed: Agent <a>::<c>: {envelope}`. The onError context
+        // must expose the structured fields, not just the wrapped text.
+        let wrapped = br#"Step boom failed: Agent text::render-template: {"attributes":{"render_error":"invalid float literal"},"category":"permanent","code":"TEXT_TEMPLATE_RENDER_ERROR","message":"Template render error: invalid float literal","retryable":false,"severity":"error"}"#;
+        let steps = error_steps("boom", wrapped, b"{}").expect("error steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+
+        assert_eq!(
+            steps["__error"]["code"],
+            json!("TEXT_TEMPLATE_RENDER_ERROR")
+        );
+        assert_eq!(steps["__error"]["category"], json!("permanent"));
+        assert_eq!(
+            steps["__error"]["message"],
+            json!("Template render error: invalid float literal")
+        );
+        assert_eq!(
+            steps["__error"]["attributes"]["render_error"],
+            json!("invalid float literal")
+        );
+        assert_eq!(steps["__error"]["stepId"], json!("boom"));
+        assert_eq!(steps["error"], steps["__error"]);
+    }
+
+    #[test]
+    fn build_source_mirrors_error_context_to_root_alias() {
+        // onError dispatch injects the envelope at steps.__error / steps.error.
+        let steps = error_steps(
+            "agent",
+            br#"{"code":"BAD","message":"boom","category":"permanent"}"#,
+            b"{}",
+        )
+        .expect("error steps");
+
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        // Canonical path remains intact.
+        assert_eq!(source["steps"]["__error"]["message"], json!("boom"));
+        // Back-compat bare-root aliases mirror the canonical envelope.
+        assert_eq!(source["__error"], source["steps"]["__error"]);
+        assert_eq!(source["error"], source["steps"]["__error"]);
+
+        // A bare `__error.*` reference now resolves instead of falling to default.
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "__error.message", "default": "fallback" }),
+            &source,
+        )
+        .expect("resolve");
+        assert_eq!(resolved, json!("boom"));
+    }
+
+    #[test]
+    fn build_source_omits_error_alias_for_normal_steps() {
+        let source =
+            build_source(b"{}", b"{}", br#"{"prev":{"outputs":{"ok":true}}}"#).expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert!(source.get("__error").is_none());
+        assert!(source.get("error").is_none());
+    }
+
+    #[test]
+    fn build_source_unwraps_canonical_input_envelope() {
+        // Regression: workflow inputs arrive as the canonical envelope
+        // `{"data": {...}, "variables": {...}}` and are stored verbatim as the
+        // instance input, so `data.*` references must resolve against the inner
+        // `data` payload. Previously the whole envelope was used as `data`, so a
+        // top-level `data.tpl` reference resolved to null (only the accidental
+        // double-wrapped `data.data.tpl` path worked).
+        let source = build_source(
+            br#"{"data":{"tpl":"hello world"},"variables":{"_workflow_id":"wf1"}}"#,
+            b"{}",
+            b"{}",
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert_eq!(source["data"], json!({ "tpl": "hello world" }));
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "data.tpl" }),
+            &source,
+        )
+        .expect("resolve data.tpl");
+        assert_eq!(resolved, json!("hello world"));
+
+        // Bare data with no `data` key is used as-is (low-level/direct callers).
+        let bare = build_source(br#"{"tpl":"bare"}"#, b"{}", b"{}").expect("bare source");
+        let bare: Value = serde_json::from_slice(&bare).expect("bare json");
+        assert_eq!(bare["data"], json!({ "tpl": "bare" }));
+    }
+
+    #[test]
+    fn build_source_merges_runtime_variables_over_declared_defaults() {
+        // The `variables` arg is the compile-time declared defaults (already
+        // flattened to values). The canonical envelope's runtime `variables`
+        // override those (runtime wins); declared-only variables keep their
+        // default; `_`-prefixed identity vars are never overridable from input.
+        let envelope =
+            br#"{"data":{"x":1},"variables":{"greeting":"OVERRIDDEN","_workflow_id":"spoof"}}"#;
+        let defaults = br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real"}"#;
+        let source = build_source(envelope, defaults, b"{}").expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        assert_eq!(source["data"], json!({ "x": 1 }));
+        // Runtime override wins over the declared default.
+        assert_eq!(source["variables"]["greeting"], "OVERRIDDEN");
+        // Declared-only variable keeps its default.
+        assert_eq!(source["variables"]["mood"], "happy");
+        // `_`-prefixed identity vars are NOT overridable from runtime input.
+        assert_eq!(source["variables"]["_workflow_id"], "real");
+
+        let resolved = apply_mapping_value(
+            &json!({ "valueType": "reference", "value": "variables.greeting" }),
+            &source,
+        )
+        .expect("resolve variables.greeting");
+        assert_eq!(resolved, json!("OVERRIDDEN"));
+    }
+
+    #[test]
     fn agent_debug_payloads_use_mapping_and_stored_output() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
             "value": { "valueType": "reference", "value": "data.value" }
@@ -7297,6 +7496,68 @@ mod tests {
         assert_eq!(end["outputs"]["stepId"], json!("agent"));
         assert_eq!(end["outputs"]["stepType"], json!("Agent"));
         assert_eq!(end["outputs"]["outputs"], json!({ "value": "out" }));
+    }
+
+    #[test]
+    fn ai_agent_debug_payloads_supported() {
+        // Regression: a single-shot AiAgent step (`stepType: "AiAgent"`) must
+        // build step-debug-start/end payloads like a regular Agent. These
+        // previously hit the `other =>` arm and returned
+        // `Err("...does not support step type 'AiAgent'")`; with track-events
+        // enabled the emitter's debug-event guard turned that error into a silent
+        // non-zero exit, so the instance was marked "crashed" with no diagnostic.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": { "user_prompt": { "valueType": "reference", "value": "data.value" } }
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-completion",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("agent", &source)
+            .expect("AiAgent debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"], json!({ "user_prompt": "in" }));
+
+        // Stored single-shot output (the chat-completion choice) feeds debug-end.
+        let output = json!({ "choice": [{ "text": "Hello!" }] });
+        let steps = manifest
+            .ai_agent_output(0, &source, &serde_json::to_vec(&output).unwrap())
+            .expect("AiAgent steps context");
+        let source = build_source(br#"{"value":"in"}"#, b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("agent", &source)
+            .expect("AiAgent debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
+        assert_eq!(end["outputs"]["outputs"]["response"], json!("Hello!"));
     }
 
     #[test]

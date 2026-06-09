@@ -2,7 +2,6 @@
 // Handlers extract parameters, call services, map responses to HTTP
 // NOTE: Connection, OAuth, and rate limit handlers are now in runtara-connections crate.
 
-pub mod agent_execution;
 pub mod agent_testing;
 pub mod analytics;
 pub mod api_keys;
