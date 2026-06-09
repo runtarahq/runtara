@@ -10,8 +10,8 @@
 
 use redis::AsyncCommands;
 use runtara_server::authz::Role;
+use runtara_server::valkey::ValkeyConfig;
 use runtara_server::valkey::auth::{get_member_role, revoke_token, token_is_revoked};
-use runtara_server::valkey::{ValkeyConfig, get_or_create_manager};
 
 /// Skip the test if Valkey is not configured in the environment.
 macro_rules! redis_url_or_skip {
@@ -26,6 +26,20 @@ macro_rules! redis_url_or_skip {
     };
 }
 
+/// A FRESH `ConnectionManager` bound to the calling test's runtime.
+///
+/// Do NOT use the process-wide `valkey::get_or_create_manager` cache here: it is a
+/// `OnceCell<ConnectionManager>`, and a `ConnectionManager`'s background driver lives on the
+/// tokio runtime that first created it. Each `#[tokio::test]` runs on its own throwaway runtime,
+/// so a manager cached by an earlier test is driven by a now-dropped runtime and every later op
+/// fails with "broken pipe". A per-test manager is bound to the current runtime and works.
+async fn fresh_manager(url: &str) -> redis::aio::ConnectionManager {
+    let client = redis::Client::open(url).expect("open valkey client");
+    redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("connect valkey")
+}
+
 /// Unique id per test run so concurrent runs / leftover state don't collide.
 fn unique(prefix: &str) -> String {
     format!("{}-{}", prefix, uuid::Uuid::new_v4())
@@ -34,7 +48,7 @@ fn unique(prefix: &str) -> String {
 #[tokio::test]
 async fn get_member_role_reads_each_role() {
     let url = redis_url_or_skip!();
-    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+    let manager = fresh_manager(&url).await;
 
     for (wire, role) in [
         ("owner", Role::Owner),
@@ -58,7 +72,7 @@ async fn get_member_role_reads_each_role() {
 #[tokio::test]
 async fn get_member_role_absent_is_none() {
     let url = redis_url_or_skip!();
-    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+    let manager = fresh_manager(&url).await;
 
     let uid = unique("auth0|missing");
     let got = get_member_role(&manager, &uid).await.expect("read role");
@@ -68,7 +82,7 @@ async fn get_member_role_absent_is_none() {
 #[tokio::test]
 async fn get_member_role_malformed_fails_closed() {
     let url = redis_url_or_skip!();
-    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+    let manager = fresh_manager(&url).await;
 
     let uid = unique("auth0|bad");
     let key = format!("member:{uid}");
@@ -89,7 +103,7 @@ async fn get_member_role_malformed_fails_closed() {
 #[tokio::test]
 async fn token_is_revoked_reflects_presence() {
     let url = redis_url_or_skip!();
-    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+    let manager = fresh_manager(&url).await;
 
     let jti = unique("jti");
     assert!(
@@ -115,7 +129,7 @@ async fn token_is_revoked_reflects_presence() {
 #[tokio::test]
 async fn revoke_token_then_seen_as_revoked() {
     let url = redis_url_or_skip!();
-    let manager = get_or_create_manager(&url).await.expect("connect valkey");
+    let manager = fresh_manager(&url).await;
 
     let jti = unique("jti");
     assert!(

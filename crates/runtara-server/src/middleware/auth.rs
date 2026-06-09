@@ -579,9 +579,21 @@ mod tests {
     macro_rules! manager_or_skip {
         () => {
             match crate::valkey::ValkeyConfig::from_env() {
-                Some(cfg) => crate::valkey::get_or_create_manager(&cfg.connection_url())
-                    .await
-                    .expect("connect valkey"),
+                // Build a FRESH ConnectionManager bound to THIS test's runtime rather than the
+                // process-wide `get_or_create_manager` cache. That cache is a
+                // `OnceCell<ConnectionManager>`, and a `ConnectionManager`'s background driver
+                // lives on the tokio runtime that first created it. Every `#[tokio::test]` runs
+                // on its own throwaway runtime, so a manager cached by an earlier test is driven
+                // by a now-dropped runtime — later ops fail with "broken pipe" (the GET then maps
+                // to AUTH_MEMBERSHIP_UNAVAILABLE/503 instead of the expected status). A per-test
+                // manager is bound to the current runtime and behaves correctly.
+                Some(cfg) => {
+                    let client =
+                        redis::Client::open(cfg.connection_url()).expect("open valkey client");
+                    redis::aio::ConnectionManager::new(client)
+                        .await
+                        .expect("connect valkey")
+                }
                 None => {
                     eprintln!("Skipping test: VALKEY_HOST not set");
                     return;
