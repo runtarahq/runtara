@@ -471,6 +471,7 @@ interface json {
 
     agent-debug-error: func(
         agent-id: u32,
+        source: list<u8>,
         error: list<u8>,
     ) -> result<list<u8>, string>;
 

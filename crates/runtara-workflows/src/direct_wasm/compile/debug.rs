@@ -206,6 +206,8 @@ pub(super) fn emit_agent_debug_error(
     static_data: &DirectCoreStaticData,
     track_events: bool,
     agent_id: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
     error_ptr_local: u32,
     error_len_local: u32,
     debug_ptr_local: u32,
@@ -215,7 +217,12 @@ pub(super) fn emit_agent_debug_error(
         return;
     }
 
+    // Pass the step source so the failed-agent debug-end carries the same
+    // scope_id / loop_indices as its debug-start — otherwise a failed agent
+    // inside a Split/While iteration can't be paired with its start.
     body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
     body.instruction(&Instruction::LocalGet(error_ptr_local));
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
