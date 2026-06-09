@@ -539,6 +539,18 @@ fn find_step_in_summaries<'a>(
         })
 }
 
+/// Resolve a `steps.<id>.<path>`, `data.<path>`, or `variables.<path>` reference
+/// against step summaries / execution input.
+///
+/// This is the single source of truth for reference resolution in the MCP debug
+/// tools — `inspect_step`, `why_execution_failed`, and `trace_reference` all route
+/// step-output resolution through it so the diagnostic can never diverge from how
+/// the workflow runtime resolves the same path. That divergence is exactly what
+/// silently returned `null` for nested step-output references for two months: a
+/// step summary's `outputs` field is the full step *envelope*
+/// (`{ "outputs": <actual>, "stepId", "stepType", ... }`) — the runtime
+/// `steps.<id>` value — so the path after the step id (the leading `outputs`
+/// segment included) is walked against it directly.
 fn resolve_reference_value(
     ref_path: &str,
     summaries: &serde_json::Value,
@@ -845,17 +857,14 @@ fn resolve_input_mappings(
                                 entry["sourceStatus"] =
                                     source.get("status").cloned().unwrap_or(json!("unknown"));
 
-                                // A step summary's `outputs` is the full step
-                                // envelope (`{ "outputs": <actual>, "stepId", ... }`),
-                                // matching the runtime `steps.<id>` value. Resolve the
-                                // remainder after the step id (the leading `outputs`
-                                // segment included) against that envelope.
-                                if let Some(envelope) = source.get("outputs") {
-                                    entry["resolvedValue"] = match parts.get(2) {
-                                        Some(field_path) => resolve_json_path(envelope, field_path)
-                                            .unwrap_or(json!(null)),
-                                        None => envelope.clone(),
-                                    };
+                                // Route the value through the shared resolver so this
+                                // can never diverge from the runtime (see
+                                // resolve_reference_value). Only surface a value once
+                                // the source step actually has an output to resolve.
+                                if source.get("outputs").is_some() {
+                                    entry["resolvedValue"] =
+                                        resolve_reference_value(ref_path, summaries, execution)
+                                            .unwrap_or(json!(null));
                                 }
                             } else {
                                 entry["sourceStep"] = json!(source_step_id);
@@ -1027,15 +1036,13 @@ pub async fn trace_reference(
                 )
             })?;
 
-            // A step summary's `outputs` is the full step envelope
-            // (`{ "outputs": <actual>, "stepId", "stepType", ... }`) == the runtime
-            // `steps.<id>` value; resolve the remainder (leading `outputs` included)
-            // against it.
+            // Resolve through the shared resolver (the single source of truth that
+            // mirrors the runtime); `fullOutputs` still exposes the raw step
+            // envelope for context.
             let outputs = step.get("outputs").cloned().unwrap_or(json!(null));
-            let resolved = match parts.get(2) {
-                Some(field_path) => resolve_json_path(&outputs, field_path).unwrap_or(json!(null)),
-                None => outputs.clone(),
-            };
+            let resolved =
+                resolve_reference_value(&params.reference, &summaries, &serde_json::Value::Null)
+                    .unwrap_or(json!(null));
 
             json_result(json!({
                 "reference": params.reference,
@@ -1504,6 +1511,37 @@ mod tests {
             resolved_outputs,
             Some(json!({ "status": "active", "nested": { "name": "from-step" } }))
         );
+    }
+
+    #[test]
+    fn input_mapping_step_value_matches_shared_resolver() {
+        // Drift guard: resolve_input_mappings (inspect_step / why_execution_failed)
+        // must resolve step-output references to the same value as the shared
+        // resolve_reference_value. If a future change touches one resolver and not
+        // the other, this fails instead of silently returning null like the
+        // original bug.
+        let summaries = summaries();
+        let execution = execution();
+        for path in [
+            "steps.build.outputs.nested.name",
+            "steps.build.outputs.status",
+            "steps.build.outputs",
+            "steps.embed.outputs.embeddings.0",
+            "steps.missing.outputs.x",
+        ] {
+            let mapping = json!({ "field": { "valueType": "reference", "value": path } });
+            let resolved = resolve_input_mappings(&mapping, &summaries, &execution);
+            let via_input_mapping = resolved["field"]
+                .get("resolvedValue")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let via_shared =
+                resolve_reference_value(path, &summaries, &execution).unwrap_or(json!(null));
+            assert_eq!(
+                via_input_mapping, via_shared,
+                "resolve_input_mappings diverged from resolve_reference_value for {path}"
+            );
+        }
     }
 
     #[test]
