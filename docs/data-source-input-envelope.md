@@ -6,6 +6,12 @@
 > xlsx, compression) and the storage producers (s3, azure-blob, sharepoint, http).
 > **Supersedes:** the per-agent `*DataInput` untagged enums and the "try base64,
 > fall back to raw bytes" heuristic currently in `csv` and `xml`.
+>
+> **Decisions (resolved):** (1) the one input behavior change — bare-string-base64
+> now means **text** — is **accepted**; (2) `file` is a **first-class variant**
+> (not a base64 alias), because the UI wants a file picker and to request files
+> from users; (3) the Step Picker macro/metadata enhancement is **committed**, not
+> optional.
 
 ---
 
@@ -110,19 +116,25 @@ pub enum DataSource {
         encoding: Encoding,
     },
 
-    /// Base64 (standard alphabet) bytes, optionally with file provenance.
-    /// `format: "file"` is accepted as an alias of `base64` with metadata.
-    #[serde(alias = "file")]
-    Base64 {
-        data: String,
+    /// A file: base64 content plus provenance. This is the variant the UI's file
+    /// picker produces and "request a file from the user" collects, so `filename`
+    /// is first-class. Legacy `FileData` (`{content, filename?, mime_type?}`)
+    /// normalizes here.
+    File {
+        /// Base64 (standard alphabet) file content.
+        content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
     },
 
+    /// Bare base64 (standard alphabet) bytes — no file framing. For inline blobs
+    /// and binary bodies without a filename.
+    Base64 { data: String },
+
     /// Inline raw bytes (JSON array of u8). For small payloads / round-tripping;
-    /// large binary should use `base64`.
+    /// large binary should use `file`/`base64`.
     Bytes { bytes: Vec<u8> },
 
     // FUTURE (not in this spec): a content-addressed handle for large payloads.
@@ -136,8 +148,9 @@ fields, and is *additively extensible* (a new variant is one enum arm, not a new
 flag on every consumer). It matches the `{format, value, …}` sketch from the
 design discussion.
 
-**Format values:** `text`, `base64` (alias `file`), `bytes`. Unknown `format`
-is a deserialization error (explicit failure).
+**Format values:** `text`, `file`, `base64`, `bytes`. `file` and `base64` both
+carry base64 bytes; `file` adds filename/mime provenance and drives the UI file
+picker (§8). Unknown `format` is a deserialization error (explicit failure).
 
 ### 3.1 Encoding semantics
 
@@ -175,8 +188,10 @@ impl DataSource {
     pub fn into_bytes(self) -> Result<Vec<u8>, DataSourceError> {
         match self {
             DataSource::Bytes { bytes } => Ok(bytes),
-            DataSource::Base64 { data, .. } => BASE64.decode(&data)
-                .map_err(|e| DataSourceError::invalid_base64(e)),
+            DataSource::Base64 { data } => BASE64.decode(&data)
+                .map_err(DataSourceError::invalid_base64),
+            DataSource::File { content, .. } => BASE64.decode(&content)
+                .map_err(DataSourceError::invalid_base64),
             DataSource::Text { text, encoding } => Ok(crate::encode(&text, encoding)),
         }
     }
@@ -251,7 +266,7 @@ Normalization (`From<Wire> for DataSource`):
 | Legacy input | Normalized to | Note |
 |---|---|---|
 | `{"format": …}` | the canonical variant | preferred form |
-| `{"content": b64, filename?, mime_type?}` | `Base64 { data: content, filename, mime_type }` | legacy `FileData` |
+| `{"content": b64, filename?, mime_type?}` | `File { content, filename, mime_type }` | legacy `FileData` → `file` |
 | `[u8, …]` (JSON array) | `Bytes { bytes }` | |
 | `"…"` (bare string) | **`Text { text, encoding: UTF-8 }`** | **default-to-text** |
 
@@ -365,8 +380,9 @@ let data = if input.as_text.unwrap_or(false) {
     let text = runtara_agent_encoding::decode(&body, Encoding::Auto).text;
     DataSource::Text { text, encoding: Encoding::default() }
 } else {
-    DataSource::Base64 {
-        data: BASE64.encode(&body),
+    // a download IS a file: it has a name (the key) and a mime type.
+    DataSource::File {
+        content: BASE64.encode(&body),
         filename: basename(&input.key),
         mime_type: content_type.clone(),
     }
@@ -415,7 +431,7 @@ impl From<HttpResponseBody> for DataSource {
     fn from(b: HttpResponseBody) -> Self {
         match b {
             HttpResponseBody::Text(t)        => DataSource::Text { text: t, encoding: Encoding::default() },
-            HttpResponseBody::Binary { base64 } => DataSource::Base64 { data: base64, filename: None, mime_type: None },
+            HttpResponseBody::Binary { base64 } => DataSource::Base64 { data: base64 },
             HttpResponseBody::Json(v)        => DataSource::Text { text: v.to_string(), encoding: Encoding::default() },
         }
     }
@@ -429,24 +445,47 @@ aligning it means *all* producers speak one vocabulary.
 
 ## 8. Metadata, Step Picker & authoring schema
 
-The capability macro currently renders a `*DataInput` field as `type: "string"`
+The capability macro renders a `*DataInput` field as `type: "string"` today
 (confirmed via `get_capability xml from-xml` → `data` is `"type":"string"`),
-because the untagged enum isn't registered as a nested input type. `DataInput`
-will render the same way unless we improve it.
+because the field's enum type isn't registered as a nested type. We make
+`DataSource` a **first-class, UI-aware type** so the Step Picker can render a
+format selector — and, for `file`, a real **file picker**.
 
-- **Phase-1 (docs-level, low effort):** keep `data` rendering as a string but
-  (a) write the envelope shape into each field `description`, and (b) add a
-  `dataSource` section to `get_workflow_authoring_schema` (the canonical shapes
-  doc MCP/LLM authors already read) with examples for each `format`. Expose the
-  `format` choices via an `EnumVariants`-style helper for future dropdown use.
-- **Phase-2 (macro enhancement, optional):** teach `#[derive(CapabilityInput)]`
-  to emit a nested `InputTypeMeta` for internally-tagged enums, so the Step
-  Picker renders a **format** selector with conditional fields
-  (`text`+encoding / `base64`+filename+mime / `bytes`). This generalizes beyond
-  `DataSource` and is the only part touching `runtara-agent-macro`.
+**Mechanism (committed).** Rather than deriving metadata for arbitrary tagged
+enums, register **one** descriptor for `DataSource` and link fields to it by
+name — mirroring how scalar fields already link to `Encoding` via
+`#[field(enum_type = "Encoding")]` + the `EnumVariants` trait. Concretely:
 
-`regen-frontend-api` must be run after the producer output structs change so the
-generated client picks up the new `data` fields.
+- Add a richer descriptor to `runtara-dsl::agent_meta` — a `VariantTypeMeta`
+  (discriminator `format`; per-variant `{ value, display_name, fields:
+  &[InputFieldMeta], widget }`) alongside the existing `InputTypeMeta`.
+- Provide a hand-written `DataSource` descriptor: its four variants, their
+  fields, and a `widget` hint per variant — `text` → textarea + encoding
+  dropdown, `file` → **file upload**, `base64` → text, `bytes` → advanced/hidden.
+- Extend the macro so `#[field(envelope = "DataSource")]` on a `data: DataInput`
+  field links to that descriptor, and `capability_to_api` surfaces it (instead of
+  collapsing to `string`).
+- This stays small (one descriptor + one link attribute) and **generalizes
+  later** into full tagged-enum derivation if other envelopes appear.
+
+**Frontend.** The generated client gains the `DataSource` variant metadata; the
+Step Picker:
+
+- renders a **format selector**; per-format fields follow the descriptor;
+- for `format: "file"` renders a **file upload** widget that base64-encodes the
+  chosen file into `{ "format": "file", "content": <b64>, "filename", "mime_type" }`;
+- this is also how a workflow **requests a file from the user** at trigger time —
+  a `DataSource` workflow input with the `file` widget becomes a file drop-zone
+  in the run dialog. (The producer→consumer pipe in §7 and this human-upload path
+  produce the *same* `file` envelope, so downstream steps don't care which.)
+
+**Authoring schema (LLM/MCP authors).** Add a `dataSource` section to
+`get_workflow_authoring_schema` with the canonical shapes + one example per
+`format`, so non-UI authors emit valid envelopes (see Appendix B).
+
+`regen-frontend-api` must run after both the producer output structs and the
+`DataSource` descriptor land, so the generated client picks up the new `data`
+fields and the variant metadata.
 
 ---
 
@@ -456,8 +495,9 @@ generated client picks up the new `data` fields.
 |---|---|---|
 | **0** | Add `DataSource`/`DataInput`/`encode`/`Encoding: Serialize` + canonical `FileData` to `runtara-agent-encoding`. Unit tests only. | no |
 | **1** | Migrate `csv`, `xml` consumers to `data: DataInput`. Keep behavior identical to the shipped fallback **except** bare-string→text (the intended change). | input-compatible; one documented behavior change |
-| **2** | Migrate `crypto` (subset, no behavior change). Add the authoring-schema `dataSource` docs (§8 phase-1). | no |
-| **3** | **Producers**: add `data: DataSource` outputs + `source` inputs to s3, azure-blob, sharepoint; add http `From` conversion. Keep legacy `content`. Run `regen-frontend-api`. | additive |
+| **2** | Migrate `crypto` (subset, no behavior change). Add the `DataSource` descriptor (`agent_meta`) + the `dataSource` authoring-schema section (§8). | no |
+| **2b** | Macro `#[field(envelope)]` link + `capability_to_api` surfacing; frontend Step Picker **format selector & file picker**, `DataSource` workflow inputs as file drop-zones (§8). `regen-frontend-api`. | no (additive UI) |
+| **3** | **Producers**: add `data: DataSource` outputs (`file`/`text`) + `source` inputs to s3, azure-blob, sharepoint; add http `From` conversion. Keep legacy `content`. Run `regen-frontend-api`. | additive |
 | **4** | Migrate `xlsx`, `compression` + host native handlers in lockstep (§7.3). | input-compatible |
 | **5** | Delete the 8 duplicate `FileData` defs; everything imports the shared type. | internal only |
 | **6** (later release) | Remove deprecated `content: String` outputs / `is_base64` inputs once dashboards show no workflow references them. | breaking — gated on telemetry |
@@ -505,19 +545,20 @@ Each phase is independently shippable and `e2e-verify`-able.
 - **Output break risk (Phase 3/6).** Adding `data` is additive; *removing*
   `content` is the real break. Gate Phase 6 on reference telemetry
   (`find_references` / instance dashboards), not a fixed date.
-- **The one input behavior change.** Bare-string-base64 → now text (§4). Loud in
-  release notes; the migration is "map `.outputs.data`".
+- **The one input behavior change — accepted.** Bare-string-base64 → now text
+  (§4). Loud in release notes; the migration is "map `.outputs.data`".
 - **`bytes` variant size.** A JSON `[u8]` array is large/inefficient; document
   that big binary uses `base64`. (Motivates the future `ref` variant.)
-- **Macro scope.** Phase-2 (nested metadata for tagged enums) is the only change
-  touching `runtara-agent-macro`; everything else is library + agent edits. It
-  is optional — the design is functional without it (fields render as `string`,
-  shape documented in the authoring schema).
+- **Macro scope — committed.** The `DataSource` descriptor + `#[field(envelope)]`
+  link is the only change touching `runtara-agent-macro` / `runtara-dsl::agent_meta`;
+  everything else is library + agent edits. It drives the Step Picker format +
+  **file** widgets (§8) but is cleanly separable — Phases 0–1 function with `data`
+  rendering as `string` if the UI work slips.
+- **`file` is first-class — decided.** A distinct `file` variant (not a `base64`
+  alias) so the UI renders a file picker and workflows can request files from
+  users (§8). `base64` remains for bare/inline blobs without file framing.
 - **Open:** should `Json` http bodies become `Text(stringified)` or a future
   structured `DataSource::Json(Value)` variant? Deferred; `Text` is safe now.
-- **Open:** keep `format: "file"` as a first-class variant vs. the proposed
-  `base64`+metadata alias. Spec assumes alias (fewer variants); revisit if the
-  Step Picker wants a distinct "file" affordance.
 
 ---
 
@@ -551,9 +592,14 @@ Each phase is independently shippable and `e2e-verify`-able.
 - `crates/agents/runtara-agent-http/src/lib.rs` — `From<HttpResponseBody> for DataSource`.
 
 **Metadata / authoring**
+- `crates/runtara-dsl/src/agent_meta.rs` — add `VariantTypeMeta` (discriminator +
+  per-variant fields + `widget`); the hand-written `DataSource` descriptor; surface
+  it from `capability_to_api`.
+- `crates/runtara-agent-macro/src/lib.rs` — `#[field(envelope = "DataSource")]`
+  link from a `data: DataInput` field to the descriptor.
+- frontend (`regen-frontend-api` + Step Picker) — format selector + **file picker**;
+  `DataSource` workflow inputs become file drop-zones.
 - `get_workflow_authoring_schema` source — add `dataSource` section + examples.
-- `crates/runtara-agent-macro/src/lib.rs` — *(optional, Phase 2)* nested
-  `InputTypeMeta` for tagged enums.
 - Delete 8× `FileData` (Phase 5): the 6 agents above + `runtara-dsl/src/schema_types.rs`
   + `runtara-agents/src/types.rs` (re-export the shared type to preserve paths).
 
@@ -564,15 +610,17 @@ Each phase is independently shippable and `e2e-verify`-able.
 { "format": "text", "text": "<root><name>Alice</name></root>" }
 { "format": "text", "text": "naïve", "encoding": "windows-1252" }
 
-// base64 / file
+// file (UI file picker / "request a file from user" / storage download produce this)
+{ "format": "file", "content": "PHJvb3QvPg==", "filename": "a.xml", "mime_type": "application/xml" }
+
+// bare base64 (no file framing)
 { "format": "base64", "data": "PHJvb3QvPg==" }
-{ "format": "base64", "data": "PHJvb3QvPg==", "filename": "a.xml", "mime_type": "application/xml" }
 
 // inline bytes
 { "format": "bytes", "bytes": [60, 114, 111, 111, 116, 47, 62] }
 
 // legacy shapes still accepted on input (normalized):
 "<root/>"                                  // → text  (NOT base64-guessed)
-{ "content": "PHJvb3QvPg==" }              // → base64 (legacy FileData)
+{ "content": "PHJvb3QvPg==" }              // → file  (legacy FileData)
 [60, 114, 111, 111, 116, 47, 62]           // → bytes
 ```
