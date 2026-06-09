@@ -1993,6 +1993,20 @@ impl DirectJsonManifest {
                 let details = apply_log(&log.value, source)?;
                 Ok((details.context, None))
             }
+            "Split" => {
+                let split = self
+                    .split_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
+                let inputs = split_debug_inputs(split, source)?;
+                Ok((inputs, None))
+            }
+            "While" => {
+                let while_step = self
+                    .while_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
+                let inputs = while_debug_inputs(while_step)?;
+                Ok((inputs, None))
+            }
             other => Err(format!(
                 "direct step-debug-start does not support step type '{other}'"
             )),
@@ -2095,6 +2109,14 @@ impl DirectJsonManifest {
                     "severity": details.severity,
                 }))
             }
+            "Split" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct Split output for '{}'", step.id)),
+            "While" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct While output for '{}'", step.id)),
             other => Err(format!(
                 "direct step-debug-end does not support step type '{other}'"
             )),
@@ -7558,6 +7580,74 @@ mod tests {
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
         assert_eq!(end["outputs"]["outputs"]["response"], json!("Hello!"));
+    }
+
+    #[test]
+    fn split_debug_payloads_supported() {
+        // Regression: a Split step (`stepType: "Split"`) must build
+        // step-debug-start/end payloads like the other step types. These
+        // previously hit the `other =>` arm and returned
+        // `Err("...does not support step type 'Split'")`; with track-events
+        // enabled the emitter's debug-event guard turned that error into a
+        // silent non-zero exit, so the instance failed the moment the Split was
+        // due to start — no `step_debug_start` and no scope events were emitted.
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "immediate", "value": [1, 2, 3] },
+            "parallelism": 4
+        })))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("split", &source)
+            .expect("Split debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"]["value"], json!([1, 2, 3]));
+        assert_eq!(start["inputs"]["parallelism"], json!(4));
+
+        // The Split result is recorded in the steps context before debug-end runs.
+        let steps = manifest
+            .split_output(0, &source, br#"[{"ok":true}]"#)
+            .expect("Split steps context");
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("split", &source)
+            .expect("Split debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("Split"));
+        assert_eq!(end["outputs"]["outputs"], json!([{ "ok": true }]));
+    }
+
+    #[test]
+    fn while_debug_payloads_supported() {
+        // Regression: a While step has the same debug-event gap as Split — its
+        // `step_debug_start`/`step_debug_end` must not fall through to the
+        // `other =>` arm (which would silently crash a track-events run).
+        let manifest = DirectJsonManifest::parse(&while_manifest(
+            json!({ "maxIterations": 5 }),
+            json!({ "valueType": "immediate", "value": false }),
+        ))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("loop", &source)
+            .expect("While debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"]["maxIterations"], json!(5));
+
+        let steps = manifest
+            .while_output(0, &source, br#"{"index":2,"outputs":[{"ok":true}]}"#)
+            .expect("While steps context");
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("loop", &source)
+            .expect("While debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("While"));
+        assert_eq!(end["outputs"]["outputs"]["iterations"], json!(2));
     }
 
     #[test]
