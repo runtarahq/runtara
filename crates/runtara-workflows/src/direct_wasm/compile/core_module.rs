@@ -443,7 +443,9 @@ fn direct_run_function(
         (2, ValType::I64),
         (2, ValType::I32),
         (20, ValType::I32),
-        (3, ValType::I32),
+        // Trailing i32 scratch group. The last index (DIRECT_CONDITION_RESULT_LOCAL
+        // = 107) stashes a Conditional's evaluated bool across its debug-end event.
+        (4, ValType::I32),
     ]);
 
     push_segment_args(&mut body, &config.static_data.manifest);
