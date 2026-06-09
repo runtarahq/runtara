@@ -1,0 +1,71 @@
+name: Build Bundle
+
+# On-demand bundle build for deploying an arbitrary branch to a single tenant.
+# Unlike release.yml (tags/main only, builds + smokes + publishes a GitHub
+# Release), this builds a single linux/x86_64 bundle from whatever ref the
+# dispatch targets and uploads it as a CI artifact — no release is created.
+#
+# Consumed by smo-provisioning's "Deploy Runtara" workflow, which dispatches
+# this on a branch, waits, downloads the artifact, and installs it via
+# `install.sh --bundle`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stamp version (e.g. dev-myfeature-a1b2c3d4e5f6). Written to VERSION / MANIFEST.json / tarball name.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SQLX_OFFLINE: true
+
+jobs:
+  bundle:
+    name: Build Bundle (linux-x86_64)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-bin: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      # build-bundle.sh installs cargo-component and downloads wasmtime into this
+      # directory keyed by version. Cache it so re-runs amortize the install.
+      # Key mirrors release.yml so the two workflows share the cache.
+      - name: Cache bundle build dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/runtara-bundle-build
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wasmtime-43.0.0-locked
+
+      - name: Build bundle
+        run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ inputs.version }}"
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux-x86_64
+          path: |
+            target/bundle/runtara-*.tar.gz
+            target/bundle/runtara-*.tar.gz.sha256
+          if-no-files-found: error
