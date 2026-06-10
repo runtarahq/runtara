@@ -1,10 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Opt-in direct workflow compilation entry point.
+//! Direct workflow compilation entry point — the only compile path.
 //!
 //! Orchestrates the whole DSL-graph -> core-Wasm -> composed-component pipeline.
-//! `compile_direct_workflow` builds the manifest, runs the support gate (bailing
-//! to the caller's fallback on any unsupported feature), then emits the core
+//! `compile_direct_workflow` builds the manifest, runs the support gate
+//! (hard-failing with a per-feature report on any unsupported shape — there is
+//! no fallback compiler), then emits the core
 //! module byte-by-byte and lifts it into a component via `wit_component`,
 //! appending the manifest/support/ABI JSON as custom sections.
 //! `compose_direct_workflow` is the separate second phase that composes that
@@ -582,13 +583,13 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-/// Compile a currently supported workflow through the direct path.
+/// Compile a workflow through the direct path — the only compile path.
 ///
-/// This does not replace [`crate::compile_workflow`]. It is intentionally
-/// opt-in and currently supports only graphs accepted by
-/// [`analyze_direct_wasm_support`]. The emitted component-format artifact is a
-/// stable direct pipeline artifact with a canonical `wasi:cli/run` export,
-/// stdlib JSON calls, and runtime completion calls.
+/// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
+/// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
+/// per-feature report. The emitted component-format artifact is a stable
+/// direct pipeline artifact with a canonical `wasi:cli/run` export, stdlib
+/// JSON calls, and runtime completion calls.
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {

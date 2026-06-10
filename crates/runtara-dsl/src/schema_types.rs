@@ -748,14 +748,21 @@ pub enum LogLevel {
 /// with structured metadata. This is the primary mechanism for business
 /// logic errors that should be distinguishable from technical errors.
 ///
+/// `message` is a verbatim string — no interpolation is performed. Put
+/// dynamic values in `context`, which is a regular input mapping:
+///
 /// Example:
 /// ```json
 /// {
 ///   "stepType": "Error",
 ///   "id": "credit_limit_error",
-///   "category": "business",
+///   "category": "permanent",
 ///   "code": "CREDIT_LIMIT_EXCEEDED",
-///   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
+///   "message": "Order total exceeds credit limit",
+///   "context": {
+///     "total": { "valueType": "reference", "value": "data.total" },
+///     "limit": { "valueType": "reference", "value": "data.limit" }
+///   }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

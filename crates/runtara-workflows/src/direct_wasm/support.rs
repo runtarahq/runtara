@@ -745,13 +745,17 @@ fn supports_direct_control_step_inner(
                     reachable.insert(edge.to_step.clone());
                 }
             }
-            // An onError edge on an AiAgent is INERT — the generated path's
-            // `can_have_on_error` excludes AiAgent, so an AiAgent failure
-            // propagates fatally and the handler is never invoked (compiled but
-            // dead). Direct does not lower the handler either; it marks the dead
-            // handler subgraph reachable + its edges used so the graph-wide
-            // reachable/used invariants hold, without support-checking it (it may
-            // be any shape since it is never lowered).
+            // An onError edge on an AiAgent is treated as inert by this gate:
+            // it marks the handler subgraph reachable + its edges used so the
+            // graph-wide reachable/used invariants hold, without
+            // support-checking its shape. NOTE the plan builder is stricter
+            // than this comment used to claim: for the single-shot
+            // (chat-completion) path it DOES lower the handler live
+            // (plan.rs builds `error_plan` from these edges), so an
+            // unsupported-shaped handler can pass this gate and only fail at
+            // plan build — tracked as GAP-07 in docs/gap-resolution.md. For
+            // the tool-loop path the handler is genuinely dead (tool errors
+            // feed back to the LLM; tracked as GAP-05).
             for (index, edge) in graph.execution_plan.iter().enumerate() {
                 if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
                     used_edges.insert(index);
@@ -834,10 +838,15 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
     true
 }
 
-/// Supports single-shot AiAgent (optionally structured output) and a tool loop
-/// with exactly one Agent-capability tool. Conversation memory, compaction, MCP
-/// synthetic tools, multi-tool loops, and tool-loops-with-onError fall back to
-/// the generated Rust compiler.
+/// AiAgent baseline: single-shot completions (optionally with structured
+/// output), multi-tool loops, conversation memory + compaction (sliding window
+/// and summarize), and MCP synthetic tools are all lowered directly. The
+/// requirements are: `config` must be present; `mcp.*` edges must target Agent
+/// steps with `agent_id == "mcp"`; the `memory` edge must target an Agent step
+/// and agree with `config.memory`; tool edges must target Agent steps,
+/// directly-lowerable EmbedWorkflow steps, or WaitForSignal steps. A graph
+/// failing these requirements is a hard compile error (there is no fallback
+/// compiler).
 fn supports_ai_agent_step_baseline(
     graph: &ExecutionGraph,
     step: &AiAgentStep,
@@ -1466,8 +1475,10 @@ fn collect_step_support(
         Step::AiAgent(_) => unsupported_step(
             step,
             "ai-agent",
-            "AiAgent direct lowering currently supports single-shot completions only \
-             (no tool, memory, structured-output, or MCP edges)",
+            "AiAgent step configuration is not lowerable: config must be present; mcp.* edges \
+             must target Agent steps with agentId \"mcp\"; the memory edge must target an Agent \
+             step and match config.memory; tool edges must target Agent steps, compilable \
+             EmbedWorkflow steps, or WaitForSignal steps",
             unsupported,
         ),
     }
@@ -3474,5 +3485,45 @@ mod handler_step_on_error_tests {
     fn handler_step_on_error_to_distinct_target_is_supported() {
         let r = analyze_direct_wasm_support(&v5());
         assert!(r.supported, "{:?}", codes(&r));
+    }
+    #[test]
+    fn ai_agent_rejection_reason_names_actual_requirements() {
+        // GAP-11 regression pin: the ai-agent rejection text must describe the
+        // real baseline (tools/memory/MCP are supported; the listed shape
+        // requirements are what can fail), not the long-gone
+        // "single-shot completions only" restriction.
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "ai": { "stepType": "AiAgent", "id": "ai" },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        let feature = report
+            .unsupported
+            .iter()
+            .find(|feature| feature.feature == "ai-agent")
+            .expect("missing-config AiAgent must report the ai-agent feature");
+        assert!(
+            feature.reason.contains("config must be present"),
+            "{}",
+            feature.reason
+        );
+        assert!(
+            !feature.reason.contains("single-shot completions only"),
+            "stale pre-tool-loop reason resurfaced: {}",
+            feature.reason
+        );
     }
 }

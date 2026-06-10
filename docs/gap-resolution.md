@@ -25,7 +25,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
-| [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrite messages/comments/doc example | S | Text only; actively misleading today | todo |
+| [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrote messages/comments/doc example + pin test | S | Text only; actively misleading today | done |
 | [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Deleted fn + table + result field (no reader anywhere; catalog metadata too unreliable to fix against) | S | Public crate API removal | done |
 | [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | todo |
 | [GAP-14](#gap-14) | P3 | `onError` sources limited to Agent/EmbedWorkflow/Split/While | Extend to Delay/WaitForSignal if demand appears | M | Gate widening | parked |
@@ -389,7 +389,7 @@ sequential — single-threaded WASM. Users tuning `parallelism: 8` get nothing.
 <a name="gap-11"></a>
 ## GAP-11 (P2) — Stale diagnostics and misleading docs
 
-**Status: todo** *(background-task chip `task_f24a6ce6` already spawned with the full file list)*
+**Status: done** (2026-06-10)
 
 **Problem.** Four text-level lies that mislead users/maintainers today:
 1. `support.rs:1466-1471`: AiAgent rejection reason claims "single-shot completions only (no
@@ -403,15 +403,21 @@ sequential — single-threaded WASM. Users tuning `parallelism: 8` get nothing.
    message is a verbatim string (`direct_json.rs:3395-3399`); no interpolation exists.
 
 **Fix plan.**
-- [ ] 1. Rewrite the AiAgent rejection reason to state actual requirements (config present; mcp.*
-  edges target `mcp` Agent steps; memory edge ↔ config.memory agree; tool edges target
-  Agent / lowerable EmbedWorkflow / WaitForSignal).
-- [ ] 2–3. Correct the three stale comments (no behavior change).
-- [ ] 4. Fix the ErrorStep example: static message + `context` mapping for dynamic values.
+- [x] 1. AiAgent rejection reason now states the actual requirements (config present; mcp.* edges
+  target `mcp` Agent steps; memory edge ↔ config.memory agree; tool edges target Agent /
+  compilable EmbedWorkflow / WaitForSignal); baseline doc comment rewritten to match.
+- [x] 2–3. Corrected the stale fallback-compiler comments in `error.rs` and
+  `direct_wasm/compile.rs` (module header + "opt-in" fn doc), and rewrote the AiAgent
+  inert-onError comment in `support.rs` to state the real gate/plan split (single-shot handler IS
+  lowered live → GAP-07; tool-loop handler dead → GAP-05).
+- [x] 4. ErrorStep doc example fixed: static message + `context` mapping; also fixed the
+  invalid `"category": "business"` in the same example (only `transient`/`permanent` exist).
 
-**Test coverage required.**
-- [ ] Update the support.rs unit test that asserts the `ai-agent` feature reason string.
-- [ ] `cargo doc -p runtara-dsl -p runtara-workflows` clean; no functional tests needed.
+**Test coverage delivered.**
+- [x] New pin test `ai_agent_rejection_reason_names_actual_requirements` — asserts the new reason
+  fires through the real gate and the stale "single-shot completions only" text cannot resurface.
+- [x] `cargo doc`: the one link warning introduced by the rewrite fixed; remaining warnings
+  pre-date this change. Full gate suite (82) green.
 
 ---
 
