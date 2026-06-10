@@ -232,6 +232,20 @@ function isScopeStepType(stepType: string): boolean {
   );
 }
 
+/**
+ * Container detection must be node-data-aware, not just stepType-based:
+ * a WaitForSignal step becomes a container exactly when it carries an
+ * `onWait` scope, which the load path expresses as node.type ===
+ * ContainerNode (children then arrive via parentId like any Split body).
+ * Exported for tests.
+ */
+export function isTimelineContainerNode(node: Node): boolean {
+  return (
+    isScopeStepType(getStepType(node)) ||
+    node.type === NODE_TYPES.ContainerNode
+  );
+}
+
 function getStepDescription(node: Node): string {
   const data = getStepData(node);
 
@@ -1038,6 +1052,12 @@ type TimelineRouteAddAction = {
   sourceHandle?: string;
   icon: LucideIcon;
   request: TimelineAddStepRequest;
+  /**
+   * Turn the step into a container node before adding (WaitForSignal
+   * "Add on-wait flow"): the request inserts the first child into the new
+   * empty scope via the regular empty-scope insertion path.
+   */
+  convertsToContainer?: boolean;
 };
 
 function getOutgoingSourceHandles(item: TimelineItem): Set<string> {
@@ -1141,6 +1161,24 @@ export function getTimelineRouteAddActions(
           inputMapping: defaultTimelineErrorInputMapping,
         },
       },
+    });
+  }
+
+  // WaitForSignal on-wait flow: a nested ExecutionGraph that runs before the
+  // workflow suspends. Offered only while the step is not yet a container —
+  // once converted, children are added through the scope insertion points.
+  if (
+    stepType === 'WaitForSignal' &&
+    !isTimelineContainerNode(node) &&
+    item.children.length === 0
+  ) {
+    actions.push({
+      key: 'on-wait',
+      label: 'on-wait flow',
+      ariaLabel: `Add on-wait flow to ${stepName}`,
+      icon: ListTree,
+      convertsToContainer: true,
+      request: { parentId: sourceNodeId },
     });
   }
 
@@ -1511,7 +1549,14 @@ function TimelineRouteAddControls({
               variant="outline"
               size="sm"
               className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
-              onClick={() => onAddStep(action.request)}
+              onClick={() => {
+                if (action.convertsToContainer) {
+                  useWorkflowStore
+                    .getState()
+                    .convertNodeToContainer(item.node.id);
+                }
+                onAddStep(action.request);
+              }}
               aria-label={action.ariaLabel}
               data-testid="timeline-add-route"
               data-source-node-id={item.node.id}
@@ -2270,7 +2315,7 @@ function WorkflowTimelineItem({
   const StepIcon = getStepIcon(stepType);
   const isSelected = selectedNodeId === node.id;
   const isEditingInline = editingNodeId === node.id;
-  const isContainer = isScopeStepType(stepType) || item.children.length > 0;
+  const isContainer = isTimelineContainerNode(node) || item.children.length > 0;
   const isExpanded = expandedContainers[node.id] ?? true;
   const nestedItemCount = countItems(item.children);
   const executionStatus = useTimelineNodeExecutionStatus(node);

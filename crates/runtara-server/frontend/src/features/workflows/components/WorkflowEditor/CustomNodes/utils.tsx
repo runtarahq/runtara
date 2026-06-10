@@ -385,6 +385,10 @@ function stripEditorOnlyStepFields(steps?: Record<string, any>) {
     if (step.subgraph?.steps) {
       stripEditorOnlyStepFields(step.subgraph.steps);
     }
+    // WaitForSignal nested onWait graph (container-mode steps).
+    if (step.onWait?.steps) {
+      stripEditorOnlyStepFields(step.onWait.steps);
+    }
   }
 }
 
@@ -495,6 +499,12 @@ function addStarts(executionGraph: ExecutionGraphDto) {
     for (const step of Object.values(steps)) {
       if (step.subgraph) {
         findAllStarts(step.subgraph);
+      }
+      // WaitForSignal onWait is a nested ExecutionGraph too — keep its
+      // entryPoint valid as children are added/removed/rewired.
+      const onWait = (step as { onWait?: ExecutionGraphDto }).onWait;
+      if (onWait?.steps) {
+        findAllStarts(onWait);
       }
     }
   }
@@ -1668,6 +1678,18 @@ function cleanNodeData(steps: Record<string, any>) {
     if (restData.stepType === 'WaitForSignal') {
       delete cleaned[id].inputMapping;
 
+      // Container-mode WaitForSignal: composeExecutionGraph rebuilds parented
+      // children into `subgraph` (generic container path); the DSL field is
+      // `onWait`. The rebuilt container is the single source of truth — it
+      // overwrites any raw onWait leftover in restData. A container with no
+      // children produces no subgraph, so the onWait key is removed entirely
+      // (an empty onWait graph has no meaning and the empty-steps graph shape
+      // is never validated/compiled).
+      if (subgraph) {
+        cleaned[id].onWait = data.subgraph;
+        delete cleaned[id].subgraph;
+      }
+
       if (Array.isArray(inputMapping)) {
         // responseSchema: convert SchemaField[] → Record<string, SchemaField>
         const responseSchemaItem = inputMapping.find(
@@ -1797,7 +1819,12 @@ export function executionGraphToReactFlow(
     steps,
     executionPlan || []
   );
-  const nodes = applyStoredNodeVisualState(parsedNodes, graphToProcess.nodes);
+  // Stored visual state may predate a node's containerization (e.g. a
+  // WaitForSignal whose onWait was authored as JSON while it was a basic
+  // node), so re-clamp container sizes to their children afterwards.
+  const nodes = ensureContainersContainChildren(
+    applyStoredNodeVisualState(parsedNodes, graphToProcess.nodes)
+  );
 
   // Convert notes to React Flow nodes
   // New format uses: { text, position: {x, y} }
@@ -1849,16 +1876,42 @@ function normalizeNodesAndEdges(
     const { subgraph, ...data } = step;
     const { inputMapping = {} } = data;
 
+    // WaitForSignal `onWait` is a nested ExecutionGraph (DSL field name
+    // differs from `subgraph`, machinery is identical). A non-empty onWait
+    // explodes into child nodes with parentId — exactly like a Split
+    // subgraph — and its graph-level fields ride the subgraphMeta carrier.
+    // The raw key is removed from node.data so the restData spread on save
+    // can never resurrect it; the rebuilt container is the source of truth.
+    // Empty/malformed onWait graphs stay in node.data (defensive JSON path).
+    let onWaitGraph: ExecutionGraphDto | undefined;
+    if ((step.stepType as string) === 'WaitForSignal') {
+      const rawOnWait = (data as Record<string, unknown>).onWait as
+        | (ExecutionGraphDto & Record<string, unknown>)
+        | undefined;
+      if (
+        rawOnWait &&
+        typeof rawOnWait === 'object' &&
+        !Array.isArray(rawOnWait) &&
+        rawOnWait.steps &&
+        typeof rawOnWait.steps === 'object' &&
+        Object.keys(rawOnWait.steps).length > 0
+      ) {
+        onWaitGraph = rawOnWait;
+        delete (data as Record<string, unknown>).onWait;
+      }
+    }
+
     // Preserve subgraph-level ExecutionGraph fields (variables, schemas,
     // name, description, notes, entryPoint, ...). Child steps/edges become
     // React Flow nodes and the subgraph is rebuilt from them on save, so
     // anything not carried here would be silently dropped by a save.
-    if (subgraph) {
+    const nestedGraph = subgraph ?? onWaitGraph;
+    if (nestedGraph) {
       const {
         steps: _subgraphSteps,
         executionPlan: _subgraphPlan,
         ...subgraphMeta
-      } = subgraph as Record<string, unknown>;
+      } = nestedGraph as Record<string, unknown>;
       void _subgraphSteps;
       void _subgraphPlan;
       if (Object.keys(subgraphMeta).length > 0) {
@@ -1866,9 +1919,14 @@ function normalizeNodesAndEdges(
       }
     }
 
-    const nodeType = step.stepType
-      ? STEP_TYPES[step.stepType] || NODE_TYPES.BasicNode
-      : NODE_TYPES.BasicNode;
+    // WaitForSignal steps with an onWait graph render as containers so the
+    // existing Split/While container machinery (canvas group node, timeline
+    // scope, child drag/drop) applies unchanged.
+    const nodeType = onWaitGraph
+      ? NODE_TYPES.ContainerNode
+      : step.stepType
+        ? STEP_TYPES[step.stepType] || NODE_TYPES.BasicNode
+        : NODE_TYPES.BasicNode;
 
     // Helper function to safely parse potentially double-stringified values
     const safeParseValue = (value: any): any => {
@@ -2662,6 +2720,14 @@ function normalizeNodesAndEdges(
       const { nodes: childNodes, edges: childEdges } = normalizeNodesAndEdges(
         subgraph.steps || {},
         subgraph.executionPlan || [],
+        id
+      );
+      nodes.push(...childNodes);
+      edges.push(...childEdges);
+    } else if (onWaitGraph) {
+      const { nodes: childNodes, edges: childEdges } = normalizeNodesAndEdges(
+        onWaitGraph.steps || {},
+        onWaitGraph.executionPlan || [],
         id
       );
       nodes.push(...childNodes);

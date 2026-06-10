@@ -436,7 +436,7 @@ Complexity/effort: S (DSL fields), M (id rename).
 
 ## Planned Findings: JSON-Only Editing Surfaces (29-33)
 
-Findings 1-28 made every DSL field authorable and lossless, but seven surfaces still edit raw JSON. These are parity-complete, UX-incomplete. Plan prepared 2026-06-10; not yet implemented. Suggested order: 29 → 30 → 31 → 32 → 33 (29 unlocks 30; the rest are independent).
+Findings 1-28 made every DSL field authorable and lossless, but seven surfaces still edited raw JSON. These were parity-complete, UX-incomplete. All five findings below are now Implemented (2026-06-10, one commit each).
 
 ### 29. Shared mapping-object editor for InputMapping-shaped JSON textareas
 
@@ -474,7 +474,9 @@ The CRON "Static inputs (JSON)" textarea (finding 27) should render the selected
 
 ### 33. Visual onWait editing via the container machinery
 
-Status: Planned. Effort: L.
+Status: Implemented. Effort: L.
+
+Resolution (2026-06-10): WaitForSignal steps with a non-empty `onWait` now load as containers (children exploded with `parentId`, graph-level fields on the `subgraphMeta` carrier, the raw key removed from node data so it can't resurrect), and save rebuilds the graph into `step.onWait` with `addStarts`/`stripEditorOnlyStepFields` recursing into it. The timeline detects containers node-data-aware, an "Add on-wait flow" action (timeline + form) converts a plain WaitForSignal into an empty container ready for insertion, and an empty container saves with no `onWait` key (matching the optional DSL field and avoiding the structurally-unvalidated empty-graph case). `variables._signal_id` appears in a "Wait Scope" suggestion group — and one plan assumption was corrected: the validator did NOT accept `_signal_id` in onWait (only the runtime injects it), so `WAIT_ON_WAIT_SCOPE_VARIABLES` was added to both validation arms with tests. Nested onWait-inside-Split round-trips (compiler explicitly supports nested waits). The form shows a read-only "edited visually" note for containers; the JSON editor survives only as a defensive fallback for malformed stored graphs. +16 frontend tests, +2 validator tests. Needs the browser/e2e pass most of all (node-type switching, drag-into-container).
 
 `WaitForSignal.onWait` is a full nested ExecutionGraph edited as a JSON textarea (WaitForSignalStepField.tsx:367). Rather than a modal sub-editor (the editor store and serializer are global), reuse the Split/While container path end-to-end:
 - Load: extend `normalizeNodesAndEdges`'s container keying (utils.tsx:275) so a WaitForSignal step with `onWait` explodes it into child nodes with `parentId`, like a subgraph; graph-level fields ride the existing `subgraphMeta` carrier (finding 20).
@@ -485,9 +487,9 @@ Risks: node-type switching on onWait presence (React Flow node identity), and th
 
 ## Recommended Follow-Up
 
-Findings 1-28 are implemented; findings 29-33 above are the planned JSON-only-surface work. What else remains open, in suggested order:
+Findings 1-33 are implemented. What remains open, in suggested order:
 
-1. Browser/e2e verification pass: all fixes in findings 16-28 are verified by unit/round-trip tests and typecheck only — exercise the new affordances (condition picker custom paths, parallel branch/join/delete-route, AiAgent error routes + memory removal, Switch default controls, CRON inputs, step-id rename) against a running stack.
+1. Browser/e2e verification pass: all fixes in findings 16-33 are verified by unit/round-trip tests and typecheck only — exercise the new affordances (condition picker custom paths, parallel branch/join/delete-route, AiAgent error routes + memory removal, Switch default controls, CRON schema-aware inputs, step-id rename, MappingObjectField editors, the schema advanced dialog, and especially onWait container editing: node-type switching with an open dialog, drag-into-container) against a running stack.
 2. Discovery surfaces still API-only (finding 27): a workflow-actions browser (list/submit open actions) and an embed dependency/dependents viewer.
 3. Timeline: moving an existing configured step across branches or into/out of a Split/While body remains canvas-only (finding 26 residue).
 4. `ConditionExpression::Value` (bare truthy condition) can be neither created nor rendered by the condition builder (finding 17 residue, medium).

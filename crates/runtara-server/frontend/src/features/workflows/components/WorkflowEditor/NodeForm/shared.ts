@@ -50,14 +50,18 @@ export function composePreviousSteps({
     return []; // Return empty array if execution graph is null
   }
 
-  // Special handling for nodes inside container steps (Split, While, RepeatUntil, GroupBy)
+  // Special handling for nodes inside container steps (Split, While,
+  // RepeatUntil, GroupBy — and WaitForSignal, whose nested graph is `onWait`)
   if (parentStepId) {
     // Find the parent container step
     const parentStep = executionGraph.steps?.[parentStepId];
 
-    if (parentStep?.subgraph) {
+    const containerGraph =
+      parentStep?.subgraph ??
+      (parentStep as { onWait?: ExecutionGraph } | undefined)?.onWait;
+    if (containerGraph) {
       // We're inside a container - get previous steps from the container's subgraph
-      const subgraph = parentStep.subgraph;
+      const subgraph = containerGraph;
 
       // If stepId is provided, find steps before it in the subgraph
       // If stepId is not provided (creating new step), get all steps in subgraph

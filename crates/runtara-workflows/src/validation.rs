@@ -1820,6 +1820,12 @@ const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop", "_loop_indi
 /// `variables.<name>` inside a While subgraph.
 const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", "_loop_indices"];
 
+/// Variables the runtime injects into a WaitForSignal `onWait` scope (see
+/// `wait_on_wait_variables` in `runtara_workflow_stdlib::direct_json`),
+/// referenceable as `variables.<name>` inside the onWait subgraph.
+/// `_instance_id` is also injected there but is already a global built-in.
+const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
+
 /// Step ids the runtime injects implicitly rather than as authored steps —
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
@@ -2189,9 +2195,13 @@ fn validate_template_static_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
+                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     validate_template_static_references_with_context(
                         on_wait,
-                        &HashSet::new(),
+                        &injected_vars,
                         false,
                         result,
                     );
@@ -4467,10 +4477,16 @@ fn validate_data_and_variable_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    // WaitForSignal on_wait handlers don't have inherited variables or implicit data
+                    // WaitForSignal on_wait handlers don't inherit parent variables
+                    // or implicit data, but the runtime injects `_signal_id`
+                    // (plus the global built-ins) into the scope.
+                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     validate_data_and_variable_references_with_context(
                         on_wait,
-                        &HashSet::new(),
+                        &injected_vars,
                         false,
                         result,
                     );
@@ -9258,6 +9274,80 @@ mod tests {
                 .any(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. })),
             "{:?}",
             result.warnings
+        );
+    }
+
+    // === WaitForSignal onWait scope variable tests ===
+
+    #[test]
+    fn test_on_wait_signal_id_variable_reference_is_valid() {
+        // The runtime injects `_signal_id` (and `_instance_id`) into the
+        // onWait scope (wait_on_wait_variables in runtara-workflow-stdlib);
+        // the validator must accept `variables._signal_id` references there.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "wait",
+              "executionPlan": [
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"notify","executionPlan":[],
+                    "steps":{"notify":{"id":"notify","stepType":"Finish",
+                      "inputMapping":{
+                        "signalId":{"valueType":"reference","value":"variables._signal_id"},
+                        "instanceId":{"valueType":"reference","value":"variables._instance_id"}
+                      }}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "_signal_id" || variable_name == "_instance_id"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_on_wait_unknown_variable_reference_is_rejected() {
+        // `_signal_id` is scoped to onWait; an unknown variable there must
+        // still be rejected so the injection isn't a blanket allow.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "wait",
+              "executionPlan": [
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"notify","executionPlan":[],
+                    "steps":{"notify":{"id":"notify","stepType":"Finish",
+                      "inputMapping":{
+                        "bogus":{"valueType":"reference","value":"variables._not_a_thing"}
+                      }}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "_not_a_thing"
+            )),
+            "{:?}",
+            result.errors
         );
     }
 

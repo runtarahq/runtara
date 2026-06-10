@@ -9,6 +9,7 @@ import {
   getHiddenNodeIds,
   getTimelineJoinTargets,
   getTimelineRouteAddActions,
+  isTimelineContainerNode,
 } from './TimelineView';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
@@ -378,6 +379,80 @@ describe('timeline route deletion', () => {
     expect(renderedIds).toContain('a');
     expect(renderedIds).toContain('b');
     expect(renderedIds).toContain('c');
+  });
+});
+
+describe('WaitForSignal on-wait flow affordance', () => {
+  function findOnWait(actions: ReturnType<typeof getTimelineRouteAddActions>) {
+    return actions.find((action) => action.key === 'on-wait');
+  }
+
+  it('offers the on-wait flow action on a WaitForSignal step without a container', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('wait', 'WaitForSignal'))
+    );
+    const onWait = findOnWait(actions);
+
+    expect(onWait).toBeDefined();
+    // The request is the regular empty-scope insertion (first child of the
+    // freshly converted container); the conversion happens at click time.
+    expect(onWait!.request).toEqual({ parentId: 'wait' });
+    expect(onWait!.convertsToContainer).toBe(true);
+  });
+
+  it('does not offer the on-wait flow action once the step is a container', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('wait', 'WaitForSignal', NODE_TYPES.ContainerNode))
+    );
+
+    expect(findOnWait(actions)).toBeUndefined();
+  });
+
+  it('does not offer the on-wait flow action when the step already has children', () => {
+    const item = {
+      ...makeItem(makeNode('wait', 'WaitForSignal')),
+      children: [
+        makeItem(
+          makeNode('child', 'Log', NODE_TYPES.BasicNode, { parentId: 'wait' })
+        ),
+      ],
+    };
+
+    expect(findOnWait(getTimelineRouteAddActions(item))).toBeUndefined();
+  });
+
+  it('does not offer the on-wait flow action on other step types', () => {
+    for (const stepType of ['Agent', 'Split', 'Delay', 'Finish']) {
+      const actions = getTimelineRouteAddActions(
+        makeItem(makeNode('step', stepType))
+      );
+      expect(
+        findOnWait(actions),
+        `expected no on-wait action for ${stepType}`
+      ).toBeUndefined();
+    }
+  });
+});
+
+describe('isTimelineContainerNode', () => {
+  it('treats Split/While scope step types as containers regardless of node type', () => {
+    expect(isTimelineContainerNode(makeNode('s', 'Split'))).toBe(true);
+    expect(isTimelineContainerNode(makeNode('w', 'While'))).toBe(true);
+  });
+
+  it('is node-data-aware for WaitForSignal: container exactly when the node type is the container node', () => {
+    expect(isTimelineContainerNode(makeNode('wait', 'WaitForSignal'))).toBe(
+      false
+    );
+    expect(
+      isTimelineContainerNode(
+        makeNode('wait', 'WaitForSignal', NODE_TYPES.ContainerNode)
+      )
+    ).toBe(true);
+  });
+
+  it('does not flag plain steps as containers', () => {
+    expect(isTimelineContainerNode(makeNode('a', 'Agent'))).toBe(false);
   });
 });
 

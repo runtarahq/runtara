@@ -207,6 +207,15 @@ export const NodeFormProvider = ({
     return parentStep?.stepType === 'Split';
   }, [parentNodeId, executionGraph]);
 
+  // Detect if this step is inside a WaitForSignal onWait scope (the runtime
+  // injects variables._signal_id there — see WAIT_ON_WAIT_SCOPE_VARIABLES in
+  // crates/runtara-workflows/src/validation.rs)
+  const isInsideWaitScope = useMemo(() => {
+    if (!parentNodeId || !executionGraph?.steps) return false;
+    const parentStep = executionGraph.steps[parentNodeId];
+    return parentStep?.stepType === 'WaitForSignal';
+  }, [parentNodeId, executionGraph]);
+
   const isLoading =
     agentsQuery.isFetching ||
     stepTypesQuery.isFetching ||
@@ -227,6 +236,7 @@ export const NodeFormProvider = ({
       variables,
       isInsideWhileLoop,
       isInsideSplit,
+      isInsideWaitScope,
     }),
     [
       nodeId,
@@ -242,6 +252,7 @@ export const NodeFormProvider = ({
       variables,
       isInsideWhileLoop,
       isInsideSplit,
+      isInsideWaitScope,
     ]
   );
 

@@ -336,6 +336,12 @@ interface WorkflowState {
     parentId?: string
   ) => string;
   updateNode: (nodeId: string, updates: Partial<ExecutionGraphStepDto>) => void;
+  /**
+   * Switch a node to the container node type (WaitForSignal "Add on-wait
+   * flow"): children added with this node as parentId then form the nested
+   * onWait ExecutionGraph on save. No-op if already a container.
+   */
+  convertNodeToContainer: (nodeId: string) => void;
   removeNode: (nodeId: string) => void;
   /**
    * Atomically rename a step id: renames the node, re-points edges and child
@@ -620,6 +626,36 @@ export const useWorkflowStore = create<WorkflowState>()(
             state.isStructurallyDirty = true;
             state.saveToHistory();
           }
+        }),
+
+      convertNodeToContainer: (nodeId) =>
+        set((state) => {
+          const node = state.nodes.find((n) => n.id === nodeId);
+          if (!node || node.type === NODE_TYPES.ContainerNode) {
+            return;
+          }
+
+          const containerSize = NODE_TYPE_SIZES[NODE_TYPES.ContainerNode];
+          const width = snapToGrid(
+            Math.max(
+              typeof node.width === 'number' ? node.width : 0,
+              containerSize.width
+            )
+          );
+          const height = snapToGrid(
+            Math.max(
+              typeof node.height === 'number' ? node.height : 0,
+              containerSize.height
+            )
+          );
+
+          node.type = NODE_TYPES.ContainerNode;
+          node.width = width;
+          node.height = height;
+          node.style = { ...node.style, width, height };
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
         }),
 
       removeNode: (nodeId) =>

@@ -1647,6 +1647,169 @@ describe('Backend DSL serialization', () => {
   });
 });
 
+describe('WaitForSignal onWait container round-trip', () => {
+  const richOnWait = {
+    entryPoint: 'notify',
+    variables: {
+      greeting: { type: 'string', value: 'hello' },
+    },
+    steps: {
+      notify: {
+        id: 'notify',
+        stepType: 'Log',
+        message: 'about to suspend',
+        level: 'info',
+      },
+      nf: {
+        id: 'nf',
+        stepType: 'Finish',
+        outputs: {},
+      },
+    },
+    executionPlan: [{ fromStep: 'notify', toStep: 'nf', label: 'next' }],
+  };
+
+  function makeWaitGraph(onWait?: unknown) {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      ...(onWait !== undefined ? { onWait } : {}),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  it('loads a non-empty onWait as a container with parented children and no raw onWait in node data', () => {
+    const { nodes } = executionGraphToReactFlow(makeWaitGraph(richOnWait));
+
+    const waitNode = nodes.find((node) => node.id === 'wait')!;
+    expect(waitNode).toBeDefined();
+    expect(waitNode.type).toBe(NODE_TYPES.ContainerNode);
+    // The raw key must not linger in node.data — restData spread or the old
+    // JSON editor would resurrect it next to the container on save.
+    expect(waitNode.data).not.toHaveProperty('onWait');
+    // Graph-level fields ride the subgraphMeta carrier.
+    expect((waitNode.data as any).subgraphMeta).toEqual({
+      entryPoint: 'notify',
+      variables: { greeting: { type: 'string', value: 'hello' } },
+    });
+
+    const notify = nodes.find((node) => node.id === 'notify')!;
+    const nf = nodes.find((node) => node.id === 'nf')!;
+    expect(notify.parentId).toBe('wait');
+    expect(nf.parentId).toBe('wait');
+  });
+
+  it('round-trips onWait steps, edges, entryPoint and graph-level variables byte-identically', () => {
+    const step = roundTripStep(makeWaitGraph(richOnWait));
+
+    expect(step.onWait).toEqual(richOnWait);
+    // The rebuilt graph is written to the DSL field, never to `subgraph`.
+    expect(step).not.toHaveProperty('subgraph');
+    expect(step).not.toHaveProperty('subgraphMeta');
+    expect(step.signal).toBe('approval');
+  });
+
+  it('keeps an empty onWait graph on the JSON path (no container) and round-trips it untouched', () => {
+    const emptyOnWait = { entryPoint: '', steps: {}, executionPlan: [] };
+    const graph = makeWaitGraph(emptyOnWait);
+
+    const { nodes } = executionGraphToReactFlow(graph);
+    const waitNode = nodes.find((node) => node.id === 'wait')!;
+    expect(waitNode.type).toBe(NODE_TYPES.BasicNode);
+    expect((waitNode.data as any).onWait).toEqual(emptyOnWait);
+
+    const step = roundTripStep(graph);
+    expect(step.onWait).toEqual(emptyOnWait);
+  });
+
+  it('drops the onWait key entirely when the container has no children', () => {
+    // A converted container whose children were all deleted (or never added):
+    // an empty onWait graph has no meaning, so the key is removed on save.
+    const containerSize = NODE_TYPE_SIZES[NODE_TYPES.ContainerNode];
+    const waitNode = {
+      id: 'wait',
+      type: NODE_TYPES.ContainerNode,
+      position: { x: 0, y: 0 },
+      data: {
+        id: 'wait',
+        name: 'wait',
+        stepType: 'WaitForSignal',
+        inputMapping: [],
+        subgraphMeta: { entryPoint: 'gone' },
+      },
+      width: containerSize.width,
+      height: containerSize.height,
+    } as unknown as Node;
+    const finishNode = makeLayoutNode('finish');
+    finishNode.data = { id: 'finish', name: 'finish', stepType: 'Finish' };
+
+    const graph = composeExecutionGraph(
+      [waitNode, finishNode],
+      [makeLayoutEdge('wait-finish', 'wait', 'finish')],
+      { name: 'empty-on-wait' }
+    );
+
+    expect(graph).not.toBeNull();
+    const step = (graph!.steps as Record<string, any>).wait;
+    expect(step).not.toHaveProperty('onWait');
+    expect(step).not.toHaveProperty('subgraph');
+    expect(step).not.toHaveProperty('subgraphMeta');
+  });
+
+  it('maintains the onWait entryPoint when the entry child is rewired', () => {
+    // Drop the meta-carried entryPoint by pointing it at a missing step:
+    // addStarts must recurse into onWait and repair it from the edges.
+    const onWait = {
+      ...richOnWait,
+      entryPoint: 'missing_step',
+    };
+    const step = roundTripStep(makeWaitGraph(onWait));
+
+    expect(step.onWait.entryPoint).toBe('notify');
+  });
+
+  it('round-trips a nested onWait inside a Split subgraph', () => {
+    // Legal per the validator: validate_data_and_variable_references_with_context
+    // recurses Split → subgraph → WaitForSignal → onWait.
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      config: {
+        value: { valueType: 'reference', value: 'data.items' },
+      },
+      subgraph: {
+        entryPoint: 'inner_wait',
+        steps: {
+          inner_wait: {
+            id: 'inner_wait',
+            stepType: 'WaitForSignal',
+            onWait: richOnWait,
+          },
+          inner_finish: {
+            id: 'inner_finish',
+            stepType: 'Finish',
+          },
+        },
+        executionPlan: [
+          { fromStep: 'inner_wait', toStep: 'inner_finish', label: 'next' },
+        ],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+
+    const innerWait = step.subgraph.steps.inner_wait;
+    expect(innerWait.onWait).toEqual(richOnWait);
+    expect(innerWait).not.toHaveProperty('subgraph');
+    expect(step.subgraph.entryPoint).toBe('inner_wait');
+    expect(step.subgraph.executionPlan).toEqual([
+      { fromStep: 'inner_wait', toStep: 'inner_finish', label: 'next' },
+    ]);
+  });
+});
+
 describe('Split variable round-trip', () => {
   it('preserves numeric immediate variable without emitting backend type metadata', () => {
     const graph = makeGraph({
@@ -2694,10 +2857,13 @@ describe('WaitForSignal clear-field round-trip', () => {
     editEntry(waitNode, 'actionKey', { value: '' });
     editEntry(waitNode, 'actionCorrelation', { value: '' });
     editEntry(waitNode, 'actionContext', { value: '' });
-    // The onWait editor sets the form value to undefined when blanked
-    (waitNode.data as any).onWait = undefined;
+    // onWait is container-edited now: clearing the flow means deleting the
+    // child steps. An empty container drops the onWait key on save.
+    const remainingNodes = nodes.filter((n) => n.parentId !== 'wait');
 
-    const round = composeExecutionGraph(nodes, edges, { name: 'wait-clear' });
+    const round = composeExecutionGraph(remainingNodes, edges, {
+      name: 'wait-clear',
+    });
     expect(round).not.toBeNull();
     const step = (round!.steps as Record<string, any>).wait;
 

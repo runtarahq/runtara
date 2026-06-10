@@ -11,7 +11,8 @@ export interface VariableSuggestion {
     | 'Variables'
     | 'Step Outputs'
     | 'Loop Context'
-    | 'Split Scope';
+    | 'Split Scope'
+    | 'Wait Scope';
   type?: string;
   /** Step ID for step outputs (used to extract field path) */
   stepId?: string;
@@ -54,7 +55,8 @@ export function composeVariableSuggestions(
   inputSchemaFields?: SchemaField[],
   variables?: SimpleVariable[],
   isInsideWhileLoop?: boolean,
-  isInsideSplit?: boolean
+  isInsideSplit?: boolean,
+  isInsideWaitScope?: boolean
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
 
@@ -176,6 +178,22 @@ export function composeVariableSuggestions(
     });
   }
 
+  // Add WaitForSignal onWait scope variables when inside an onWait subgraph.
+  // The runtime injects these into the scope before the workflow suspends
+  // (see wait_on_wait_variables in runtara-workflow-stdlib/src/direct_json.rs
+  // and WAIT_ON_WAIT_SCOPE_VARIABLES in crates/runtara-workflows/src/validation.rs:
+  // _signal_id — `_instance_id` is also injected but is a global built-in).
+  if (isInsideWaitScope) {
+    suggestions.push({
+      label: 'variables._signal_id',
+      value: 'variables._signal_id',
+      description:
+        'Signal id external systems must use to resume this WaitForSignal step',
+      group: 'Wait Scope',
+      type: 'string',
+    });
+  }
+
   // Add suggestions from previous steps' outputs
   for (const step of previousSteps ?? []) {
     const flattenedParams = flattenStepParameters(step.outputs);
@@ -240,6 +258,7 @@ export function groupSuggestions(
   const grouped: Record<string, VariableSuggestion[]> = {
     'Loop Context': [],
     'Split Scope': [],
+    'Wait Scope': [],
     'Workflow Inputs': [],
     Variables: [],
     'Step Outputs': [],

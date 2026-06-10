@@ -58,4 +58,39 @@ describe('composeVariableSuggestions', () => {
     expect(grouped['Split Scope']).toHaveLength(4);
     expect(grouped['Loop Context']).toHaveLength(2);
   });
+
+  it('adds the signal id variable when inside a WaitForSignal onWait scope', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      undefined,
+      undefined,
+      false,
+      false,
+      true
+    );
+
+    const waitScope = suggestions.filter((s) => s.group === 'Wait Scope');
+    expect(waitScope.map((s) => s.value)).toEqual(['variables._signal_id']);
+  });
+
+  it('omits Wait Scope variables outside an onWait scope', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      undefined,
+      undefined,
+      false,
+      false,
+      false
+    );
+
+    expect(suggestions.some((s) => s.group === 'Wait Scope')).toBe(false);
+  });
+
+  it('groups Wait Scope suggestions under their own section', () => {
+    const grouped = groupSuggestions(
+      composeVariableSuggestions([], undefined, undefined, false, false, true)
+    );
+
+    expect(grouped['Wait Scope']).toHaveLength(1);
+  });
 });

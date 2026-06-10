@@ -31,6 +31,8 @@ export interface NodeFormContextContextData {
   isInsideWhileLoop?: boolean;
   /** Whether this step is inside a Split iteration subgraph */
   isInsideSplit?: boolean;
+  /** Whether this step is inside a WaitForSignal onWait subgraph */
+  isInsideWaitScope?: boolean;
 }
 
 export const NodeFormContext = createContext<NodeFormContextContextData>({
