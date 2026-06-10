@@ -221,16 +221,26 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
         <FormLabel>Timeout (ms)</FormLabel>
         <FormDescription>
           Optional timeout in milliseconds. If no signal is received within this
-          duration, the step fails.
+          duration, the step fails. Leave empty to wait indefinitely.
         </FormDescription>
         <FormControl>
           <MappingValueInput
             value={String(getValue('timeoutMs'))}
             onChange={(value) => updateField('timeoutMs', value)}
             valueType={getValueType('timeoutMs') as ValueMode}
-            onValueTypeChange={(vt) =>
-              updateField('timeoutMs', getValue('timeoutMs'), vt)
-            }
+            onValueTypeChange={(vt) => {
+              // The runtime resolves timeoutMs and requires a numeric result:
+              // template renders to a string and composite to an object, both
+              // rejected at runtime. Restrict the mode cycle to
+              // immediate ⇄ reference by skipping the unsupported modes.
+              const next: ValueMode =
+                vt === 'template'
+                  ? 'reference'
+                  : vt === 'composite'
+                    ? 'immediate'
+                    : vt;
+              updateField('timeoutMs', getValue('timeoutMs'), next);
+            }}
             fieldType="string"
             placeholder="e.g. 86400000 (24 hours)"
           />
@@ -260,13 +270,21 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
             <FormItem>
               <FormLabel>Poll Interval (ms)</FormLabel>
               <FormDescription>
-                How often to check for the signal (default: 1000ms). Lower
-                values mean faster response but more server load.
+                How often to check for the signal, as a whole number of
+                milliseconds (default: 1000ms). Lower values mean faster
+                response but more server load. Leave empty for the default.
               </FormDescription>
               <FormControl>
                 <MappingValueInput
                   value={String(getValue('pollIntervalMs'))}
-                  onChange={(value) => updateField('pollIntervalMs', value)}
+                  onChange={(value) => {
+                    // Backend type is u64 — reject any non-integer input
+                    // (decimals/signs/exponents) at the keystroke level.
+                    const next = value ?? '';
+                    if (/^\d*$/.test(next)) {
+                      updateField('pollIntervalMs', next);
+                    }
+                  }}
                   valueType={getValueType('pollIntervalMs') as ValueMode}
                   onValueTypeChange={(vt) =>
                     updateField(

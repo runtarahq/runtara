@@ -2255,3 +2255,270 @@ describe('AiAgent onError and mcp.<toolset> edge round-trip', () => {
     );
   });
 });
+
+describe('WaitForSignal clear-field round-trip', () => {
+  /**
+   * Clearing a WaitForSignal field in the form must actually remove the
+   * corresponding top-level key on save. Loaded step data is spread into
+   * node.data, so without an explicit delete the stale key resurrects
+   * through the `...filteredRestData` spread (load → edit → save).
+   */
+  function makeWaitGraph(): ExecutionGraphDto & { entryPoint: string } {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      responseSchema: {
+        approved: { type: 'boolean', required: true },
+      },
+      timeoutMs: { valueType: 'immediate', value: 60000 },
+      pollIntervalMs: 500,
+      action: {
+        key: 'approve-order',
+        correlation: {
+          orderId: {
+            valueType: 'reference',
+            value: 'data.orderId',
+            type: 'string',
+          },
+        },
+        context: {
+          requester: {
+            valueType: 'reference',
+            value: 'data.requester',
+            type: 'string',
+          },
+        },
+      },
+      onWait: {
+        entryPoint: 'notify',
+        steps: {
+          notify: {
+            id: 'notify',
+            stepType: 'Log',
+            message: 'waiting',
+            level: 'info',
+          },
+        },
+        executionPlan: [],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  /** Patch an inputMapping entry on a loaded node, simulating a form edit. */
+  function editEntry(
+    node: Node,
+    type: string,
+    patch: Record<string, unknown>
+  ) {
+    const mapping = ((node.data as any).inputMapping || []) as any[];
+    const idx = mapping.findIndex((item) => item.type === type);
+    expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
+      0
+    );
+    mapping[idx] = { ...mapping[idx], ...patch };
+  }
+
+  it('removes every cleared field key after load → clear → save', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+    expect(waitNode).toBeDefined();
+
+    // Simulate the user clearing every optional field in the form
+    editEntry(waitNode, 'responseSchema', { value: [] });
+    editEntry(waitNode, 'timeoutMs', { value: '', valueType: 'immediate' });
+    editEntry(waitNode, 'pollIntervalMs', { value: '' });
+    editEntry(waitNode, 'actionKey', { value: '' });
+    editEntry(waitNode, 'actionCorrelation', { value: '' });
+    editEntry(waitNode, 'actionContext', { value: '' });
+    // The onWait editor sets the form value to undefined when blanked
+    (waitNode.data as any).onWait = undefined;
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-clear' });
+    expect(round).not.toBeNull();
+    const step = (round!.steps as Record<string, any>).wait;
+
+    expect(step).not.toHaveProperty('responseSchema');
+    expect(step).not.toHaveProperty('timeoutMs');
+    expect(step).not.toHaveProperty('pollIntervalMs');
+    expect(step).not.toHaveProperty('action');
+    expect(step).not.toHaveProperty('onWait');
+    // Non-cleared fields survive
+    expect(step.signal).toBe('approval');
+  });
+
+  it('keeps populated fields intact across an untouched round-trip', () => {
+    const step = roundTripStep(makeWaitGraph());
+    expect(step.responseSchema).toEqual({
+      approved: { type: 'boolean', required: true },
+    });
+    expect(step.timeoutMs).toEqual({ valueType: 'immediate', value: 60000 });
+    expect(step.pollIntervalMs).toBe(500);
+    expect(step.action.key).toBe('approve-order');
+    expect(step.onWait.entryPoint).toBe('notify');
+  });
+
+  it('serializes reference-mode timeoutMs as a reference MappingValue', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'timeoutMs', {
+      value: 'data.timeoutMs',
+      valueType: 'reference',
+    });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-ref' });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step.timeoutMs).toEqual({
+      valueType: 'reference',
+      value: 'data.timeoutMs',
+    });
+  });
+
+  it('never emits invalid JSON for a template-mode timeoutMs', () => {
+    // The runtime requires timeoutMs to resolve to a number; a template
+    // renders to a string and previously serialized as
+    // {valueType:'template', value:NaN→null}, which serde rejects. The
+    // serializer now drops the unrepresentable value entirely.
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'timeoutMs', {
+      value: '{{ data.timeout }}',
+      valueType: 'template',
+    });
+
+    const round = composeExecutionGraph(nodes, edges, {
+      name: 'wait-template',
+    });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step).not.toHaveProperty('timeoutMs');
+  });
+
+  it('rounds decimal pollIntervalMs to an integer (backend u64)', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'pollIntervalMs', { value: '500.5' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-poll' });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step.pollIntervalMs).toBe(501);
+    expect(Number.isInteger(step.pollIntervalMs)).toBe(true);
+  });
+});
+
+describe('AiAgent memory removal round-trip', () => {
+  const MEMORY_FIELD_TYPES = new Set([
+    'memoryEnabled',
+    'memoryConversationId',
+    'memoryMaxMessages',
+    'memoryStrategy',
+    'memoryProviderStepId',
+  ]);
+
+  function makeMemoryGraph(
+    compaction?: Record<string, unknown>
+  ): ExecutionGraphDto & { entryPoint: string } {
+    return {
+      name: 'ai-memory-fixture',
+      steps: {
+        ai: {
+          id: 'ai',
+          stepType: 'AiAgent',
+          name: 'Assistant',
+          connectionId: 'conn-1',
+          config: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            userPrompt: { valueType: 'immediate', value: 'hi' },
+            memory: {
+              conversationId: {
+                valueType: 'reference',
+                value: 'data.sessionId',
+              },
+              ...(compaction ? { compaction } : {}),
+            },
+          },
+        },
+        mem: {
+          id: 'mem',
+          stepType: 'Agent',
+          name: 'Memory provider',
+          agentId: 'object-model',
+          capabilityId: 'conversation-memory',
+          inputMapping: [],
+        },
+        finish: {
+          id: 'finish',
+          stepType: 'Finish',
+          name: 'Finish',
+          outputMapping: [],
+        },
+      } as any,
+      executionPlan: [
+        { fromStep: 'ai', toStep: 'finish', label: 'next' },
+        { fromStep: 'ai', toStep: 'mem', label: 'memory' },
+      ] as any,
+      entryPoint: 'ai',
+    };
+  }
+
+  it('omits config.memory after the memory entries and provider are removed', () => {
+    const { nodes, edges } = executionGraphToReactFlow(
+      makeMemoryGraph({ maxMessages: 50, strategy: 'summarize' }) as any
+    );
+
+    const aiNode = nodes.find((n) => n.id === 'ai')!;
+    expect(aiNode).toBeDefined();
+    // Sanity: memory was loaded into the form entries
+    const loadedMapping = (aiNode.data as any).inputMapping as any[];
+    expect(
+      loadedMapping.find((item) => item.type === 'memoryEnabled')?.value
+    ).toBe(true);
+    // The stale config (incl. memory) is still spread into node.data — the
+    // serializer must rebuild config from the entries, not resurrect it.
+    expect((aiNode.data as any).config?.memory).toBeDefined();
+
+    // Simulate the form's "Remove memory": strip memory entries, drop the
+    // memory edge and the hidden provider node.
+    (aiNode.data as any).inputMapping = loadedMapping.filter(
+      (item) => !MEMORY_FIELD_TYPES.has(item.type)
+    );
+    const remainingEdges = edges.filter(
+      (e) => !(e.source === 'ai' && e.sourceHandle === 'memory')
+    );
+    const remainingNodes = nodes.filter((n) => n.id !== 'mem');
+
+    const round = composeExecutionGraph(remainingNodes, remainingEdges, {
+      name: 'ai-memory-removed',
+    });
+    expect(round).not.toBeNull();
+
+    const step = (round!.steps as Record<string, any>).ai;
+    expect(step.config).not.toHaveProperty('memory');
+    // The rest of the config survives
+    expect(step.config).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+    // Provider step and memory edge are gone from the saved graph
+    expect(round!.steps).not.toHaveProperty('mem');
+    expect(round!.executionPlan).not.toContainEqual(
+      expect.objectContaining({ label: 'memory' })
+    );
+  });
+
+  it('round-trips memory without a compaction strategy and does not invent one', () => {
+    // DSL default for CompactionConfig.strategy is SlidingWindow; the editor
+    // must not silently materialize a different strategy on save.
+    const step = roundTripStep(makeMemoryGraph({ maxMessages: 50 }) as any);
+    expect(step.config.memory.conversationId).toEqual({
+      valueType: 'reference',
+      value: 'data.sessionId',
+    });
+    expect(step.config.memory.compaction).toEqual({ maxMessages: 50 });
+    expect(step.config.memory.compaction).not.toHaveProperty('strategy');
+  });
+});

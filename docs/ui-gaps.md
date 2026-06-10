@@ -70,7 +70,7 @@ Complexity/effort: Implemented, M.
 
 ### 4. WaitForSignal `onWait` and `action` needed advanced editing
 
-Status: Implemented (partial — fields cannot be cleared once set, see finding 25).
+Status: Implemented (the cannot-clear residual was closed via finding 25).
 
 Description:
 `action.key`, `action.correlation`, `action.context`, `timeoutMs`, `pollIntervalMs`, `responseSchema`, and `onWait` are editable and round-tripped. `onWait` is edited as advanced JSON rather than as a nested visual timeline.
@@ -365,7 +365,9 @@ Complexity/effort: S.
 
 ### 25. AiAgent/WaitForSignal lifecycle residuals
 
-Status: Open. Severity: medium.
+Status: Implemented. Severity: medium.
+
+Resolution (2026-06-10): the WaitForSignal serializer now explicitly deletes `responseSchema`/`timeoutMs`/`pollIntervalMs`/`action`/`onWait` when cleared in the form, killing the stale-value resurrection (this also closes the finding-4 residual). `timeoutMs` is restricted to immediate/reference modes — verified against the runtime: `wait_timeout_ms` evaluates the MappingValue generically but requires a Number, and templates always render strings, so template/composite unconditionally failed; legacy template strings can no longer emit serde-invalid JSON. pollIntervalMs enforces integers (u64). AiAgent memory gained a "Remove memory" control (clears the mapping entries, removes the hidden provider node + memory edge; the rebuilt config provably omits `config.memory`). Both add-memory flows (canvas and timeline) stop silently writing `strategy: summarize` — unset now means the DSL default SlidingWindow, which the form also displays. The tool-name charset matches the server exactly (`/^[\p{Alphabetic}\p{N}_]+$/u`). 7 new round-trip tests.
 
 Description:
 - AiAgent memory: once configured, memory cannot be disabled/removed from the form (no clear path); compaction strategy default in the UI diverges from the DSL default (SlidingWindow).

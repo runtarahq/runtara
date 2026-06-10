@@ -115,7 +115,10 @@ const RESERVED_HANDLE_IDS = new Set([
   'memory',
 ]);
 
-const TOOL_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+// Mirrors the server-side rule (runtara-workflows validation.rs):
+// `label.chars().all(|c| c.is_alphanumeric() || c == '_')` — Unicode-aware
+// alphanumerics plus underscore, with no leading-character restriction.
+const TOOL_NAME_REGEX = /^[\p{Alphabetic}\p{N}_]+$/u;
 
 type AiAgentStepFieldProps = {
   name: string;
@@ -545,9 +548,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       return;
     }
     if (!TOOL_NAME_REGEX.test(trimmed)) {
-      setToolError(
-        'Use only letters, numbers, underscores (start with letter or underscore)'
-      );
+      setToolError('Use only letters, numbers, or underscores');
       return;
     }
     if (RESERVED_HANDLE_IDS.has(trimmed)) {
@@ -588,6 +589,68 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
           removeNode(targetId);
         }
       }
+    }
+  };
+
+  // Remove conversation memory: clear the memory-related inputMapping entries
+  // (so the serializer omits config.memory) and remove the hidden memory
+  // provider node + its 'memory'-labeled edge from the canvas.
+  const handleRemoveMemory = () => {
+    const memoryFieldTypes = new Set([
+      'memoryEnabled',
+      'memoryConversationId',
+      'memoryMaxMessages',
+      'memoryStrategy',
+      'memoryProviderStepId',
+    ]);
+
+    // (a) Clear the form's memory entries
+    const mapping = form.getValues(name) || [];
+    const filtered = mapping.filter(
+      (item: any) => !memoryFieldTypes.has(item.type)
+    );
+    form.setValue(name, filtered, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
+
+    if (nodeId) {
+      // (b) Remove the hidden memory provider node + memory edge
+      const memoryEdge = edges.find(
+        (e) => e.source === nodeId && e.sourceHandle === 'memory'
+      );
+      if (memoryEdge) {
+        const targetId = memoryEdge.target;
+        removeEdge(nodeId, targetId, 'memory');
+
+        // Remove the provider node if nothing else points at it
+        const remainingIncoming = edges.filter(
+          (e) =>
+            e.target === targetId &&
+            !(e.source === nodeId && e.sourceHandle === 'memory')
+        );
+        if (remainingIncoming.length === 0) {
+          removeNode(targetId);
+        }
+      }
+
+      // Also strip the memory entries from the node's stored data so the
+      // canvas badge updates immediately and state stays consistent even if
+      // the dialog is closed without saving (mirror of the add-memory flow).
+      const { nodes: storeNodes } = useWorkflowStore.getState();
+      const updatedNodes = storeNodes.map((n) => {
+        if (n.id !== nodeId) return n;
+        const dataMapping = (
+          ((n.data as any).inputMapping || []) as any[]
+        ).filter((item: any) => !memoryFieldTypes.has(item.type));
+        return { ...n, data: { ...n.data, inputMapping: dataMapping } };
+      });
+      useWorkflowStore.setState({
+        nodes: updatedNodes,
+        isDirty: true,
+        isStructurallyDirty: true,
+      });
     }
   };
 
@@ -1055,7 +1118,8 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
         </div>
       </div>
 
-      {/* Memory Section — read-only display, memory is added/removed from the canvas */}
+      {/* Memory Section — memory is added from the canvas; it can be
+          configured or removed here */}
       {getValue('memoryEnabled') === true && (
         <div className="border rounded-lg">
           <div className="flex items-center justify-between p-3">
@@ -1063,14 +1127,29 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               <Brain className="h-4 w-4 text-muted-foreground" />
               <span className="text-sm font-medium">Conversation Memory</span>
             </div>
-            <span className="text-xs text-muted-foreground">
-              {(() => {
-                const agent = memoryAgents.find(
-                  (a) => a.id === currentMemoryAgentId
-                );
-                return agent ? agent.name : currentMemoryAgentId || 'Connected';
-              })()}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">
+                {(() => {
+                  const agent = memoryAgents.find(
+                    (a) => a.id === currentMemoryAgentId
+                  );
+                  return agent
+                    ? agent.name
+                    : currentMemoryAgentId || 'Connected';
+                })()}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+                onClick={handleRemoveMemory}
+                title="Remove conversation memory and its provider step"
+              >
+                <Trash2 className="h-3.5 w-3.5 mr-1" />
+                Remove memory
+              </Button>
+            </div>
           </div>
 
           <div className="px-3 pb-3 space-y-4 border-t pt-3">
@@ -1147,7 +1226,10 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                       How to compact old messages when the limit is reached
                     </FormDescription>
                     <Select
-                      value={String(getValue('memoryStrategy') || 'summarize')}
+                      // DSL default (CompactionConfig.strategy) is SlidingWindow
+                      value={String(
+                        getValue('memoryStrategy') || 'slidingWindow'
+                      )}
                       onValueChange={(value) =>
                         updateField('memoryStrategy', value)
                       }

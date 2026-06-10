@@ -1406,12 +1406,8 @@ function WorkflowEditorContent({
             50,
             'integer'
           );
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryStrategy',
-            'summarize',
-            'string'
-          );
+          // No memoryStrategy: leave compaction strategy unset so the DSL
+          // default (SlidingWindow) applies, matching the canvas add-memory.
           updateNode(sourceNode.id, {
             inputMapping: sourceInputMapping,
           } as any);

@@ -162,7 +162,8 @@ function AiAgentNodeComponent({
     );
     if (strategyField?.value === 'slidingWindow') return 'Window';
     if (strategyField?.value === 'summarize') return 'Summary';
-    return 'Buffer';
+    // Unset strategy means the DSL default (SlidingWindow) applies
+    return 'Window';
   }, [data.inputMapping]);
 
   const setPendingNewNode = useWorkflowStore(
@@ -379,7 +380,8 @@ function AiAgentNodeComponent({
       setOrAdd('memoryProviderStepId', newNodeId, 'string');
       setOrAdd('memoryConversationId', '', 'string', 'reference');
       setOrAdd('memoryMaxMessages', 50, 'integer');
-      setOrAdd('memoryStrategy', 'summarize', 'string');
+      // No memoryStrategy here: leave compaction strategy unset so the DSL
+      // default (SlidingWindow, see CompactionConfig in runtara-dsl) applies.
 
       // Update AI Agent node data
       const latestNodes = useWorkflowStore.getState().nodes;

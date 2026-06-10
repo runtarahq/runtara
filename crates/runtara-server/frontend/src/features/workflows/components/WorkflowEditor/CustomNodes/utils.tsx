@@ -1623,7 +1623,11 @@ function cleanNodeData(steps: Record<string, any>) {
       cleaned[id].config = aiAgentConfig;
     }
 
-    // WaitForSignal step: fields are top-level (not nested under config)
+    // WaitForSignal step: fields are top-level (not nested under config).
+    // Cleared form fields must DELETE the stale top-level key — loaded step
+    // data is spread into node.data and would otherwise resurrect on save.
+    // Semantics of absent keys: timeoutMs = wait indefinitely; pollIntervalMs =
+    // runtime default (1000ms); responseSchema = no validation; action = none.
     if (restData.stepType === 'WaitForSignal') {
       delete cleaned[id].inputMapping;
 
@@ -1640,28 +1644,49 @@ function cleanNodeData(steps: Record<string, any>) {
           cleaned[id].responseSchema = buildSchemaFromFields(
             responseSchemaItem.value
           );
+        } else {
+          delete cleaned[id].responseSchema;
         }
 
-        // timeoutMs: serialize as MappingValue if present
+        // timeoutMs: serialize as MappingValue if present. The runtime
+        // (wait_timeout_ms in runtara-workflow-stdlib) requires the resolved
+        // value to be a number, so only immediate (numeric) and reference
+        // modes are valid — template renders to a string and composite to an
+        // object, both rejected at runtime. Non-numeric immediates (e.g.
+        // legacy template strings that would serialize as NaN → null) are
+        // dropped instead of emitting invalid JSON.
         const timeoutItem = inputMapping.find(
           (item: any) => item.type === 'timeoutMs'
         );
+        delete cleaned[id].timeoutMs;
         if (timeoutItem?.value !== undefined && timeoutItem.value !== '') {
-          cleaned[id].timeoutMs = {
-            valueType: timeoutItem.valueType || 'immediate',
-            value:
-              timeoutItem.valueType === 'reference'
-                ? timeoutItem.value
-                : Number(timeoutItem.value),
-          };
+          if (timeoutItem.valueType === 'reference') {
+            cleaned[id].timeoutMs = {
+              valueType: 'reference',
+              value: timeoutItem.value,
+            };
+          } else {
+            const timeoutNumber = Number(timeoutItem.value);
+            if (Number.isFinite(timeoutNumber)) {
+              cleaned[id].timeoutMs = {
+                valueType: 'immediate',
+                value: timeoutNumber,
+              };
+            }
+          }
         }
 
-        // pollIntervalMs: serialize as plain number
+        // pollIntervalMs: serialize as plain integer (backend type is u64;
+        // serde rejects decimals)
         const pollItem = inputMapping.find(
           (item: any) => item.type === 'pollIntervalMs'
         );
+        delete cleaned[id].pollIntervalMs;
         if (pollItem?.value !== undefined && pollItem.value !== '') {
-          cleaned[id].pollIntervalMs = Number(pollItem.value);
+          const pollNumber = Number(pollItem.value);
+          if (Number.isFinite(pollNumber)) {
+            cleaned[id].pollIntervalMs = Math.round(pollNumber);
+          }
         }
 
         const actionKeyItem = inputMapping.find(
@@ -1693,6 +1718,14 @@ function cleanNodeData(steps: Record<string, any>) {
         }
         if (Object.keys(action).length > 0) {
           cleaned[id].action = action;
+        } else {
+          delete cleaned[id].action;
+        }
+
+        // onWait: the form editor sets `onWait` to undefined when blanked;
+        // drop null/undefined leftovers so the key never resurrects.
+        if (cleaned[id].onWait == null) {
+          delete cleaned[id].onWait;
         }
       }
     }
