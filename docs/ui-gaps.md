@@ -379,7 +379,9 @@ Complexity/effort: S to M.
 
 ### 26. Timeline cannot author parallel fan-out, joins, or direct edge mutations
 
-Status: Open. Severity: medium.
+Status: Implemented (cross-branch step moves remain canvas-only). Severity: medium.
+
+Resolution (2026-06-10): the timeline gained three topology affordances plus a visual condition editor: (1) "Add parallel branch" on steps with a single unconditional outgoing edge S→T creates the diamond S→N, N→T — verified E073-compliant by construction (`parallel_branches_reconverge` needs one step reachable from every branch start; T qualifies); (2) "Connect to step" on lane-end steps creates just an edge to a picked target (same scope, cycle-checked via `wouldCreateLoop`, hidden/connected/self targets excluded); (3) "Delete route" in the route-settings popover removes the edge via the same store path the canvas uses, with orphaned branches rendering as new roots (the dangling-step validator warning covers semantics). Edge conditions are now edited with the shared visual ConditionEditor, with an "Advanced (JSON)" fallback so exotic shapes stay authorable. TimelineView.test.ts grew to 21 tests covering offer-gating, target filtering, request shapes, and orphan rendering.
 
 Description:
 The compiler supports unconditional fan-out and joins (E073-compliant merging), but the timeline offers no affordance to add a second unconditional outgoing edge or converge two branches — add actions cover only sequential insertion, Conditional/Switch routes, onError, and AI tool/memory edges; `createInsertionRequest` only splices existing edges. Individual edges cannot be deleted/re-pointed in the timeline, and moving a configured step across branches or into/out of a Split/While body is not supported.

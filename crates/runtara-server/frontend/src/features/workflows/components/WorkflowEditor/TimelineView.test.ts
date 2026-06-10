@@ -2,22 +2,29 @@ import { describe, expect, it } from 'vitest';
 import type { Edge, Node } from '@xyflow/react';
 
 import {
+  buildTimelineItems,
+  canOfferTimelineJoin,
   createMcpToolsetAddRequest,
+  createTimelineJoinRequest,
   getHiddenNodeIds,
+  getTimelineJoinTargets,
   getTimelineRouteAddActions,
 } from './TimelineView';
+import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 
 function makeNode(
   id: string,
   stepType: string,
-  type: string = NODE_TYPES.BasicNode
+  type: string = NODE_TYPES.BasicNode,
+  extra: Partial<Node> = {}
 ): Node {
   return {
     id,
     type,
     position: { x: 0, y: 0 },
     data: { id, name: id, stepType },
+    ...extra,
   } as Node;
 }
 
@@ -25,12 +32,18 @@ function makeAiAgentNode(id: string): Node {
   return makeNode(id, 'AiAgent', NODE_TYPES.AiAgentNode);
 }
 
-function makeEdge(source: string, target: string, sourceHandle: string): Edge {
+function makeEdge(
+  source: string,
+  target: string,
+  sourceHandle: string,
+  data?: Record<string, unknown>
+): Edge {
   return {
     id: `${source}-${target}-${sourceHandle}`,
     source,
     target,
     sourceHandle,
+    ...(data ? { data } : {}),
   } as Edge;
 }
 
@@ -155,6 +168,216 @@ describe('getTimelineRouteAddActions — error handler coverage', () => {
     expect(actions.some((action) => action.key === 'onError')).toBe(false);
     // Tool/memory affordances are unaffected by the error route.
     expect(actions.some((action) => action.key === 'ai-tool')).toBe(true);
+  });
+});
+
+describe('getTimelineRouteAddActions — parallel branch', () => {
+  function findParallel(
+    actions: ReturnType<typeof getTimelineRouteAddActions>
+  ) {
+    return actions.find((action) => action.key === 'parallel-branch');
+  }
+
+  it('offers the parallel branch exactly on a single unconditional outgoing edge', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('a', 'Agent'), [makeEdge('a', 'b', 'source')])
+    );
+    const parallel = findParallel(actions);
+
+    expect(parallel).toBeDefined();
+    // The request carries both edge endpoints so the editor can build the
+    // E073-compliant diamond: S->N plus N->T while keeping S->T.
+    expect(parallel!.request).toMatchObject({
+      sourceNodeId: 'a',
+      sourceHandle: 'source',
+      targetNodeId: 'b',
+      parallelBranch: true,
+    });
+  });
+
+  it('still offers the parallel branch when an onError route exists alongside', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('a', 'Agent'), [
+        makeEdge('a', 'b', 'source'),
+        makeEdge('a', 'handler', 'onError'),
+      ])
+    );
+
+    expect(findParallel(actions)).toBeDefined();
+  });
+
+  it('does not offer the parallel branch without an outgoing edge', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('a', 'Agent'))
+    );
+
+    expect(findParallel(actions)).toBeUndefined();
+  });
+
+  it('does not offer the parallel branch when the step already fans out', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('a', 'Agent'), [
+        makeEdge('a', 'b', 'source'),
+        makeEdge('a', 'c', 'source'),
+      ])
+    );
+
+    expect(findParallel(actions)).toBeUndefined();
+  });
+
+  it('does not offer the parallel branch on a conditional (condition-carrying) edge', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('a', 'Agent'), [
+        makeEdge('a', 'b', 'source', {
+          condition: { type: 'operation', op: 'EQ', arguments: [] },
+        }),
+      ])
+    );
+
+    expect(findParallel(actions)).toBeUndefined();
+  });
+
+  it('does not offer the parallel branch on Conditional true/false routes', () => {
+    const actions = getTimelineRouteAddActions(
+      makeItem(makeNode('cond', 'Conditional', NODE_TYPES.ConditionalNode), [
+        makeEdge('cond', 'a', 'true'),
+        makeEdge('cond', 'b', 'false'),
+      ])
+    );
+
+    expect(findParallel(actions)).toBeUndefined();
+  });
+});
+
+describe('timeline join (connect to existing step)', () => {
+  it('is offered only on steps without an unconditional continuation', () => {
+    expect(canOfferTimelineJoin(makeItem(makeNode('a', 'Agent')))).toBe(true);
+    expect(
+      canOfferTimelineJoin(
+        makeItem(makeNode('a', 'Agent'), [makeEdge('a', 'h', 'onError')])
+      )
+    ).toBe(true);
+    expect(
+      canOfferTimelineJoin(
+        makeItem(makeNode('a', 'Agent'), [makeEdge('a', 'b', 'source')])
+      )
+    ).toBe(false);
+    // Terminal / inherently-labeled steps never get the unconditional join.
+    expect(canOfferTimelineJoin(makeItem(makeNode('f', 'Finish')))).toBe(false);
+    expect(
+      canOfferTimelineJoin(
+        makeItem(makeNode('c', 'Conditional', NODE_TYPES.ConditionalNode))
+      )
+    ).toBe(false);
+  });
+
+  it('lists same-scope targets and excludes self, upstream (cycle) and connected steps', () => {
+    // root -> cond; cond -true-> a; cond -false-> b; b -> shared
+    const nodes = [
+      makeNode('root', 'Agent'),
+      makeNode('cond', 'Conditional', NODE_TYPES.ConditionalNode),
+      makeNode('a', 'Agent'),
+      makeNode('b', 'Agent'),
+      makeNode('shared', 'Agent'),
+      makeNode('child', 'Agent', NODE_TYPES.BasicNode, {
+        parentId: 'split-1',
+      }),
+    ];
+    const edges = [
+      makeEdge('root', 'cond', 'source'),
+      makeEdge('cond', 'a', 'true'),
+      makeEdge('cond', 'b', 'false'),
+      makeEdge('b', 'shared', 'source'),
+    ];
+
+    const targetIds = getTimelineJoinTargets(
+      nodes.find((node) => node.id === 'a')!,
+      nodes,
+      edges
+    ).map((node) => node.id);
+
+    // Valid: the sibling lane and the shared continuation.
+    expect(targetIds).toContain('b');
+    expect(targetIds).toContain('shared');
+    // Excluded: self, upstream steps (would create a cycle) and other scopes.
+    expect(targetIds).not.toContain('a');
+    expect(targetIds).not.toContain('root');
+    expect(targetIds).not.toContain('cond');
+    expect(targetIds).not.toContain('child');
+  });
+
+  it('excludes targets the step already routes to and hidden AiAgent attachments', () => {
+    const nodes = [
+      makeNode('a', 'Agent'),
+      makeNode('done', 'Finish'),
+      makeAiAgentNode('ai'),
+      makeNode('tool_step', 'Agent'),
+    ];
+    const edges = [
+      makeEdge('a', 'done', 'source'),
+      makeEdge('ai', 'tool_step', 'search_tool'),
+    ];
+
+    const targetIds = getTimelineJoinTargets(
+      nodes.find((node) => node.id === 'a')!,
+      nodes,
+      edges
+    ).map((node) => node.id);
+
+    expect(targetIds).not.toContain('done');
+    expect(targetIds).not.toContain('tool_step');
+    expect(targetIds).toContain('ai');
+  });
+
+  it('produces an edge-only request with the unconditional source handle', () => {
+    const request = createTimelineJoinRequest(
+      makeNode('a', 'Agent'),
+      makeNode('shared', 'Agent')
+    );
+
+    expect(request).toEqual({
+      sourceNodeId: 'a',
+      targetNodeId: 'shared',
+      sourceHandle: 'source',
+    });
+  });
+});
+
+describe('timeline route deletion', () => {
+  it('removes the edge through the store remove path the canvas uses', () => {
+    const nodes = [
+      makeNode('a', 'Agent'),
+      makeNode('b', 'Agent'),
+      makeNode('c', 'Agent'),
+    ];
+    const edges = [makeEdge('a', 'b', 'source'), makeEdge('b', 'c', 'source')];
+    useWorkflowStore.setState({ nodes, edges, isDirty: false });
+
+    useWorkflowStore
+      .getState()
+      .onEdgesChange([{ id: 'a-b-source', type: 'remove' }]);
+
+    const state = useWorkflowStore.getState();
+    expect(state.edges.map((edge) => edge.id)).toEqual(['b-c-source']);
+    expect(state.isDirty).toBe(true);
+  });
+
+  it('keeps rendering the timeline when deletion orphans a branch', () => {
+    // After deleting a->b, the b->c branch dangles: the validator flags it,
+    // the timeline must still render every step as a root item.
+    const nodes = [
+      makeNode('a', 'Agent'),
+      makeNode('b', 'Agent'),
+      makeNode('c', 'Agent'),
+    ];
+    const edges = [makeEdge('b', 'c', 'source')];
+
+    const items = buildTimelineItems(nodes, edges, undefined, new Set());
+    const renderedIds = items.map((item) => item.node.id);
+
+    expect(renderedIds).toContain('a');
+    expect(renderedIds).toContain('b');
+    expect(renderedIds).toContain('c');
   });
 });
 

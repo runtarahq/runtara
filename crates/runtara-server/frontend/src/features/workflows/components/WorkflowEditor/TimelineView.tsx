@@ -26,6 +26,7 @@ import {
   ListTree,
   Loader2,
   MemoryStick,
+  Merge,
   Pause,
   PenLine,
   Plug,
@@ -33,6 +34,7 @@ import {
   Repeat,
   Settings2,
   Split,
+  Trash2,
   Workflow,
   XCircle,
   Zap,
@@ -49,10 +51,16 @@ import {
   PopoverTrigger,
 } from '@/shared/components/ui/popover';
 import { Textarea } from '@/shared/components/ui/textarea';
+import {
+  ConditionEditor,
+  type ConditionSchemaFieldInfo,
+  type ConditionVariableInfo,
+} from '@/shared/components/ui/condition-editor';
 import { cn } from '@/lib/utils.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
+import { wouldCreateLoop } from '@/features/workflows/utils/graph-validation';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -69,6 +77,10 @@ type WorkflowTimelineViewProps = {
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
+  /** Workflow input schema fields for the route condition editor picker. */
+  inputSchemaFields?: ConditionSchemaFieldInfo[];
+  /** Workflow variables for the route condition editor picker. */
+  variables?: ConditionVariableInfo[];
 };
 
 export type TimelineAddStepRequest = {
@@ -86,6 +98,13 @@ export type TimelineAddStepRequest = {
   };
   aiAgentTool?: boolean;
   aiAgentMemory?: boolean;
+  /**
+   * Parallel fan-out: create the new step N alongside the existing
+   * source->target edge (S->N plus N->T, keeping S->T) instead of splicing it
+   * into the edge. The resulting diamond re-converges at the target, which is
+   * exactly what validation.rs E073 requires of unconditional fan-out.
+   */
+  parallelBranch?: boolean;
 };
 
 type TimelineItem = {
@@ -156,6 +175,12 @@ type TimelineRouteController = {
     edgeId: string,
     updates: { condition?: unknown; priority?: number }
   ) => void;
+  /** Removes an edge — same store path the canvas remove uses. */
+  onDeleteRoute: (edgeId: string) => void;
+  /** Creates an unconditional edge between two existing steps (join). */
+  onConnectSteps: (sourceNodeId: string, targetNodeId: string) => void;
+  conditionInputSchemaFields?: ConditionSchemaFieldInfo[];
+  conditionVariables?: ConditionVariableInfo[];
 };
 
 function areTimelineAddRequestsEqual(
@@ -172,7 +197,8 @@ function areTimelineAddRequestsEqual(
     first?.directStep?.stepType === second?.directStep?.stepType &&
     first?.directStep?.name === second?.directStep?.name &&
     first?.aiAgentTool === second?.aiAgentTool &&
-    first?.aiAgentMemory === second?.aiAgentMemory
+    first?.aiAgentMemory === second?.aiAgentMemory &&
+    first?.parallelBranch === second?.parallelBranch
   );
 }
 
@@ -764,7 +790,8 @@ function orderNodesInScope(
   return ordered;
 }
 
-function buildTimelineItems(
+// Exported for tests.
+export function buildTimelineItems(
   allNodes: Node[],
   allEdges: Edge[],
   parentId: string | undefined,
@@ -1069,6 +1096,34 @@ export function getTimelineRouteAddActions(
     }
   }
 
+  // Parallel branch: offered exactly when the step has a single unconditional
+  // outgoing edge S->T (handle "source", no edge condition). The new step N is
+  // wired S->N and N->T while S->T is kept, forming a diamond that re-converges
+  // at T — the shape validation.rs E073 requires of unconditional fan-out.
+  const unconditionalEdges = item.outgoingEdges.filter(
+    (edge) => getRouteSourceHandle(edge) === 'source'
+  );
+  if (
+    unconditionalEdges.length === 1 &&
+    getRouteCondition(unconditionalEdges[0]) === undefined &&
+    stepType !== 'Finish'
+  ) {
+    actions.push({
+      key: 'parallel-branch',
+      label: 'parallel branch',
+      ariaLabel: `Add parallel branch from ${stepName}`,
+      sourceHandle: 'source',
+      icon: Split,
+      request: {
+        sourceNodeId,
+        sourceHandle: 'source',
+        targetNodeId: unconditionalEdges[0].target,
+        parentId,
+        parallelBranch: true,
+      },
+    });
+  }
+
   if (!existingHandles.has('onError') && canStepHaveErrorHandler(stepType)) {
     actions.push({
       key: 'onError',
@@ -1143,6 +1198,130 @@ export function createMcpToolsetAddRequest(
       capabilityId: 'mcp-tool-invoke',
     },
   };
+}
+
+/**
+ * Whether the timeline offers a "connect to existing step" (join) action on
+ * this step: a branch/lane end with no unconditional continuation. Steps whose
+ * outgoing edges are inherently labeled (Conditional true/false, routing-mode
+ * Switch case/default) and terminal Finish steps are excluded.
+ * Exported for tests.
+ */
+export function canOfferTimelineJoin(item: TimelineItem): boolean {
+  const stepType = getStepType(item.node);
+  if (stepType === 'Finish' || stepType === 'Conditional') return false;
+  if (stepType === 'Switch' && isSwitchRoutingMode(item.node)) return false;
+  return !getOutgoingSourceHandles(item).has('source');
+}
+
+/**
+ * Valid join targets for a lane-end step: renderable steps in the same scope
+ * (same parentId), excluding the step itself, steps it already routes to, and
+ * any target that would create a cycle (graph-validation.ts check).
+ * Exported for tests.
+ */
+export function getTimelineJoinTargets(
+  sourceNode: Node,
+  nodes: Node[],
+  edges: Edge[]
+): Node[] {
+  const hiddenNodeIds = getHiddenNodeIds(nodes, edges);
+
+  return nodes
+    .filter(
+      (candidate) =>
+        candidate.id !== sourceNode.id &&
+        (candidate.parentId ?? undefined) ===
+          (sourceNode.parentId ?? undefined) &&
+        isRenderableNode(candidate, hiddenNodeIds) &&
+        !edges.some(
+          (edge) =>
+            edge.source === sourceNode.id && edge.target === candidate.id
+        ) &&
+        !wouldCreateLoop(edges, sourceNode.id, candidate.id)
+    )
+    .sort(compareByPosition);
+}
+
+/**
+ * The edge-only request a timeline join produces: an unconditional edge from
+ * the lane-end step to an existing step — no new step is created.
+ * Exported for tests.
+ */
+export function createTimelineJoinRequest(
+  sourceNode: Node,
+  targetNode: Node
+): { sourceNodeId: string; targetNodeId: string; sourceHandle: 'source' } {
+  return {
+    sourceNodeId: sourceNode.id,
+    targetNodeId: targetNode.id,
+    sourceHandle: 'source',
+  };
+}
+
+function TimelineConnectToStepButton({
+  node,
+  targets,
+  onConnectSteps,
+}: {
+  node: Node;
+  targets: Node[];
+  onConnectSteps: TimelineRouteController['onConnectSteps'];
+}) {
+  const [open, setOpen] = useState(false);
+  const stepName = getStepName(node);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+          aria-label={`Connect ${stepName} to an existing step`}
+          data-testid="timeline-join-step"
+          data-source-node-id={node.id}
+        >
+          <Merge className="size-3.5" aria-hidden="true" />
+          Connect to step
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" side="bottom" className="w-72 p-2">
+        <p className="px-1 pb-2 text-xs text-muted-foreground">
+          Continue {stepName} at an existing step in this scope.
+        </p>
+        <div className="flex max-h-64 flex-col gap-1 overflow-auto">
+          {targets.map((target) => {
+            const targetStepType = getStepType(target);
+            return (
+              <Button
+                key={target.id}
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-auto justify-start gap-2 px-2 py-1.5 text-left"
+                onClick={() => {
+                  const request = createTimelineJoinRequest(node, target);
+                  onConnectSteps(request.sourceNodeId, request.targetNodeId);
+                  setOpen(false);
+                }}
+                data-testid="timeline-join-target"
+                data-target-node-id={target.id}
+              >
+                <span className="truncate text-xs font-medium">
+                  {getStepName(target)}
+                </span>
+                <Badge variant={getStepBadgeVariant(targetStepType)}>
+                  {targetStepType}
+                </Badge>
+              </Button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function isMcpToolsetRequestForNode(
@@ -1279,6 +1458,7 @@ function TimelineRouteAddControls({
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
+  routeController,
 }: {
   item: TimelineItem;
   depth: number;
@@ -1287,12 +1467,22 @@ function TimelineRouteAddControls({
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
+  routeController: TimelineRouteController;
 }) {
+  // Join candidates need the full graph: scoped outgoingEdges miss edges into
+  // other scopes and the cycle check must see every edge.
+  const nodes = useWorkflowStore((state) => state.nodes);
+  const edges = useWorkflowStore((state) => state.edges);
+
   if (readOnly || debugInspectMode || !onAddStep) return null;
 
   const showMcpToolsetAction = isAiAgentStep(item.node);
   const actions = getTimelineRouteAddActions(item);
-  if (actions.length === 0 && !showMcpToolsetAction) return null;
+  const joinTargets = canOfferTimelineJoin(item)
+    ? getTimelineJoinTargets(item.node, nodes, edges)
+    : [];
+  if (actions.length === 0 && !showMcpToolsetAction && joinTargets.length === 0)
+    return null;
 
   const activeAction = actions.find((action) =>
     areTimelineAddRequestsEqual(action.request, activeAddStepRequest)
@@ -1334,6 +1524,13 @@ function TimelineRouteAddControls({
         })}
         {showMcpToolsetAction && (
           <TimelineAddMcpToolsetButton node={item.node} onAddStep={onAddStep} />
+        )}
+        {joinTargets.length > 0 && (
+          <TimelineConnectToStepButton
+            node={item.node}
+            targets={joinTargets}
+            onConnectSteps={routeController.onConnectSteps}
+          />
         )}
       </div>
       {inlineAddStep && (
@@ -1443,7 +1640,7 @@ function TimelineInsertionPoint({
           label={getEdgeLabel(routeEdge)}
           disabled={routeSettingsDisabled}
           className="mt-0"
-          onUpdateRouteData={routeController.onUpdateRouteData}
+          routeController={routeController}
         />
       )}
       <span
@@ -1606,21 +1803,42 @@ function parseRoutePriority(
   return { ok: true, priority };
 }
 
+/**
+ * Whether the visual ConditionEditor can represent this condition. It needs an
+ * operation object (`op` + `arguments`); anything else (or nothing) stays in
+ * the Advanced JSON editor. Empty conditions are visually editable — the
+ * builder starts from scratch.
+ */
+function isVisuallyEditableRouteCondition(condition: unknown): boolean {
+  if (condition === undefined) return true;
+  return (
+    typeof condition === 'object' &&
+    condition !== null &&
+    'op' in condition &&
+    (condition as { op?: unknown }).op !== undefined &&
+    'arguments' in condition
+  );
+}
+
 function TimelineRouteSettings({
   edge,
   label,
   disabled,
   className,
-  onUpdateRouteData,
+  routeController,
 }: {
   edge: Edge;
   label: string;
   disabled?: boolean;
   className?: string;
-  onUpdateRouteData: TimelineRouteController['onUpdateRouteData'];
+  routeController: TimelineRouteController;
 }) {
   const [open, setOpen] = useState(false);
   const [conditionText, setConditionText] = useState('');
+  const [conditionMode, setConditionMode] = useState<'visual' | 'json'>(
+    'visual'
+  );
+  const [conditionResetKey, setConditionResetKey] = useState(0);
   const [priorityText, setPriorityText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const hasMetadata =
@@ -1628,7 +1846,12 @@ function TimelineRouteSettings({
     getRoutePriority(edge) !== undefined;
 
   useEffect(() => {
-    setConditionText(formatRouteCondition(getRouteCondition(edge)));
+    const condition = getRouteCondition(edge);
+    setConditionText(formatRouteCondition(condition));
+    setConditionMode(
+      isVisuallyEditableRouteCondition(condition) ? 'visual' : 'json'
+    );
+    setConditionResetKey((key) => key + 1);
     setPriorityText(
       getRoutePriority(edge) !== undefined ? String(getRoutePriority(edge)) : ''
     );
@@ -1648,7 +1871,7 @@ function TimelineRouteSettings({
       return;
     }
 
-    onUpdateRouteData(edge.id, {
+    routeController.onUpdateRouteData(edge.id, {
       condition: conditionResult.condition,
       priority: priorityResult.priority,
     });
@@ -1660,10 +1883,37 @@ function TimelineRouteSettings({
     setConditionText('');
     setPriorityText('');
     setError(null);
-    onUpdateRouteData(edge.id, {
+    setConditionResetKey((key) => key + 1);
+    routeController.onUpdateRouteData(edge.id, {
       condition: undefined,
       priority: undefined,
     });
+  };
+
+  const handleDelete = () => {
+    routeController.onDeleteRoute(edge.id);
+    setOpen(false);
+  };
+
+  const handleToggleConditionMode = () => {
+    if (conditionMode === 'visual') {
+      setConditionMode('json');
+      return;
+    }
+
+    const conditionResult = parseRouteCondition(conditionText);
+    if (!conditionResult.ok) {
+      setError(`Condition JSON: ${conditionResult.message}`);
+      return;
+    }
+    if (!isVisuallyEditableRouteCondition(conditionResult.condition)) {
+      setError('This condition shape is only editable as JSON.');
+      return;
+    }
+
+    setError(null);
+    setConditionResetKey((key) => key + 1);
+    setConditionMode('visual');
   };
 
   return (
@@ -1688,7 +1938,7 @@ function TimelineRouteSettings({
       <PopoverContent
         align="start"
         side="right"
-        className="w-[24rem] space-y-4"
+        className="w-[26rem] space-y-4"
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
         <div>
@@ -1713,24 +1963,67 @@ function TimelineRouteSettings({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor={`route-condition-${edge.id}`}>Condition JSON</Label>
-          <Textarea
-            id={`route-condition-${edge.id}`}
-            value={conditionText}
-            onChange={(event) => setConditionText(event.target.value)}
-            placeholder='{"type": "operation", "op": "EQ", "arguments": ["data.status", "ready"]}'
-            className="min-h-32 font-mono text-xs"
-          />
+          <div className="flex items-center justify-between">
+            <Label htmlFor={`route-condition-${edge.id}`}>Condition</Label>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs text-muted-foreground"
+              onClick={handleToggleConditionMode}
+              data-testid="timeline-route-condition-mode"
+            >
+              {conditionMode === 'visual' ? 'Advanced (JSON)' : 'Visual editor'}
+            </Button>
+          </div>
+          {conditionMode === 'visual' ? (
+            <ConditionEditor
+              key={`${edge.id}-${conditionResetKey}`}
+              value={conditionText || undefined}
+              onChange={setConditionText}
+              previousSteps={[]}
+              inputSchemaFields={routeController.conditionInputSchemaFields}
+              variables={routeController.conditionVariables}
+            />
+          ) : (
+            <Textarea
+              id={`route-condition-${edge.id}`}
+              value={conditionText}
+              onChange={(event) => setConditionText(event.target.value)}
+              placeholder='{"type": "operation", "op": "EQ", "arguments": ["data.status", "ready"]}'
+              className="min-h-32 font-mono text-xs"
+            />
+          )}
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" size="sm" onClick={handleClear}>
-            Clear
+        <div className="flex items-center justify-between gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 text-destructive hover:text-destructive"
+            onClick={handleDelete}
+            disabled={disabled}
+            aria-label={`Delete ${label} route from ${edge.source} to ${edge.target}`}
+            data-testid="timeline-route-delete"
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            Delete route
           </Button>
-          <Button type="button" size="sm" onClick={handleApply}>
-            Apply
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={handleClear}
+            >
+              Clear
+            </Button>
+            <Button type="button" size="sm" onClick={handleApply}>
+              Apply
+            </Button>
+          </div>
         </div>
       </PopoverContent>
     </Popover>
@@ -1891,7 +2184,7 @@ function BranchLaneGroups({
                   edge={lane.edge}
                   label={edgeLabel}
                   disabled={routeControlsDisabled}
-                  onUpdateRouteData={routeController.onUpdateRouteData}
+                  routeController={routeController}
                 />
               )}
             </div>
@@ -2186,6 +2479,7 @@ function WorkflowTimelineItem({
         activeAddStepRequest={activeAddStepRequest}
         renderInlineAddStep={renderInlineAddStep}
         onAddStep={onAddStep}
+        routeController={routeController}
       />
 
       <BranchLaneGroups
@@ -2247,6 +2541,8 @@ export function WorkflowTimelineView({
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
+  inputSchemaFields,
+  variables,
 }: WorkflowTimelineViewProps) {
   const nodes = useWorkflowStore((state) => state.nodes);
   const edges = useWorkflowStore((state) => state.edges);
@@ -2256,6 +2552,8 @@ export function WorkflowTimelineView({
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
   const updateEdgeData = useWorkflowStore((state) => state.updateEdgeData);
+  const addStoreEdge = useWorkflowStore((state) => state.addEdge);
+  const onEdgesChange = useWorkflowStore((state) => state.onEdgesChange);
   const [expandedContainers, setExpandedContainers] = useState<
     Record<string, boolean>
   >({});
@@ -2514,8 +2812,24 @@ export function WorkflowTimelineView({
       onMoveSwitchCase: (nodeId, caseIndex, direction) =>
         moveSwitchCase({ nodeId, caseIndex, direction }),
       onUpdateRouteData: (edgeId, updates) => updateEdgeData(edgeId, updates),
+      // Same store path the canvas uses for edge removal
+      // (workflowStore.onEdgesChange with a 'remove' change).
+      onDeleteRoute: (edgeId) =>
+        onEdgesChange([{ id: edgeId, type: 'remove' }]),
+      onConnectSteps: (sourceNodeId, targetNodeId) =>
+        addStoreEdge(sourceNodeId, targetNodeId, 'source'),
+      conditionInputSchemaFields: inputSchemaFields,
+      conditionVariables: variables,
     }),
-    [flipConditionalBranches, moveSwitchCase, updateEdgeData]
+    [
+      flipConditionalBranches,
+      moveSwitchCase,
+      updateEdgeData,
+      onEdgesChange,
+      addStoreEdge,
+      inputSchemaFields,
+      variables,
+    ]
   );
 
   const rootListContext = useMemo(
