@@ -746,7 +746,9 @@ Current remaining action items:
   normal-flow backbone in topological order (porting the generated
   `build_execution_order`), so fan-out and fan-in run sequentially, each step
   once, in dependency order — exactly the generated path's execution (no
-  parallel threads in WASM). For a linear graph the topological order equals the
+  parallel threads in WASM). The same applies to Split: iterations run strictly
+  sequentially regardless of `SplitConfig.parallelism`/`sequential` (validation
+  flags concurrency-promising values with W073). For a linear graph the topological order equals the
   edge chain, so existing graphs are unaffected. Shapes that cannot linearize
   (fan-out to two terminal/branching sinks) still fall back. The only remaining
   deferral is crash/resume differential test hardening (coverage, not a feature

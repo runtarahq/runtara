@@ -1038,11 +1038,10 @@ pub enum ValidationWarning {
         recommended_max_ms: u64,
     },
     /// High parallelism may cause resource issues.
-    HighParallelism {
-        step_id: String,
-        parallelism: u32,
-        recommended_max: u32,
-    },
+    /// A Split step sets `parallelism` to a value that promises concurrency.
+    /// Split iterations execute strictly sequentially in the WASM runtime —
+    /// the field is accepted and ignored.
+    SplitParallelismIgnored { step_id: String, parallelism: u32 },
     /// High max iterations may indicate infinite loop risk.
     HighMaxIterations {
         step_id: String,
@@ -1171,15 +1170,14 @@ impl std::fmt::Display for ValidationWarning {
                     recommended_max_ms
                 )
             }
-            ValidationWarning::HighParallelism {
+            ValidationWarning::SplitParallelismIgnored {
                 step_id,
                 parallelism,
-                recommended_max,
             } => {
                 write!(
                     f,
-                    "[W032] Split step '{}' has parallelism={}. Consider reducing to {} or less for resource efficiency.",
-                    step_id, parallelism, recommended_max
+                    "[W073] Split step '{}' sets parallelism={}, but Split executes iterations strictly sequentially in the WASM runtime — the value has no effect.",
+                    step_id, parallelism
                 )
             }
             ValidationWarning::HighMaxIterations {
@@ -3008,7 +3006,6 @@ fn looks_like_mapping_value_envelope(value: &serde_json::Value) -> bool {
 // Thresholds for configuration warnings
 const MAX_RETRY_RECOMMENDED: u32 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 3_600_000; // 1 hour
-const MAX_PARALLELISM_RECOMMENDED: u32 = 100;
 const MAX_ITERATIONS_RECOMMENDED: u32 = 10_000;
 const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 
@@ -3052,15 +3049,20 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 
             Step::Split(split_step) => {
                 if let Some(config) = &split_step.config {
-                    // Check parallelism
+                    // W073: parallelism promises concurrency that the WASM
+                    // runtime does not deliver — Split is always sequential.
+                    // parallelism=1 matches actual behavior, so only other
+                    // values (0 = "unlimited", >1) warn. `sequential` also
+                    // matches actual behavior and never warns.
                     if let Some(parallelism) = config.parallelism
-                        && parallelism > MAX_PARALLELISM_RECOMMENDED
+                        && parallelism != 1
                     {
-                        result.warnings.push(ValidationWarning::HighParallelism {
-                            step_id: step_id.clone(),
-                            parallelism,
-                            recommended_max: MAX_PARALLELISM_RECOMMENDED,
-                        });
+                        result
+                            .warnings
+                            .push(ValidationWarning::SplitParallelismIgnored {
+                                step_id: step_id.clone(),
+                                parallelism,
+                            });
                     }
 
                     // Check retry count
@@ -9231,6 +9233,87 @@ mod tests {
             "{:?}",
             result.warnings
         );
+    }
+
+    // === Split Parallelism Advisory Tests (W073) ===
+
+    fn split_graph_with_config(config_extra: &str) -> ExecutionGraph {
+        let json = format!(
+            r##"{{
+              "entryPoint": "split",
+              "executionPlan": [
+                {{"fromStep":"split","toStep":"finish"}}
+              ],
+              "steps": {{
+                "split": {{"id":"split","stepType":"Split","config":{{
+                    "value": {{"valueType":"immediate","value":[1,2]}}{config_extra}
+                  }},
+                  "subgraph": {{
+                    "entryPoint": "inner",
+                    "executionPlan": [],
+                    "steps": {{"inner": {{"id":"inner","stepType":"Finish"}}}}
+                  }}}},
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }}
+            }}"##
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_split_parallelism_warns_w073() {
+        for (extra, expected_parallelism) in
+            [(r#","parallelism":8"#, 8u32), (r#","parallelism":0"#, 0u32)]
+        {
+            let graph = split_graph_with_config(extra);
+            let result = validate_workflow(&graph, &test_catalog());
+
+            let w073: Vec<_> = result
+                .warnings
+                .iter()
+                .filter_map(|w| match w {
+                    ValidationWarning::SplitParallelismIgnored {
+                        step_id,
+                        parallelism,
+                    } => Some((step_id.clone(), *parallelism)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                w073,
+                vec![("split".to_string(), expected_parallelism)],
+                "{:?}",
+                result.warnings
+            );
+        }
+        let display = format!(
+            "{}",
+            ValidationWarning::SplitParallelismIgnored {
+                step_id: "split".to_string(),
+                parallelism: 8,
+            }
+        );
+        assert!(display.contains("[W073]"), "{display}");
+        assert!(display.contains("sequentially"), "{display}");
+    }
+
+    #[test]
+    fn test_split_parallelism_one_or_sequential_no_w073() {
+        // parallelism=1 and sequential=true match the actual (sequential)
+        // behavior - no advisory.
+        for extra in [r#","parallelism":1"#, r#","sequential":true"#, ""] {
+            let graph = split_graph_with_config(extra);
+            let result = validate_workflow(&graph, &test_catalog());
+
+            assert!(
+                !result
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, ValidationWarning::SplitParallelismIgnored { .. })),
+                "extra={extra}: {:?}",
+                result.warnings
+            );
+        }
     }
 
     // === Edge Condition Tests ===

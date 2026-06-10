@@ -24,7 +24,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | todo |
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
-| [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc | S | Validator + docs; real parallelism is a separate epic | todo |
+| [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrite messages/comments/doc example | S | Text only; actively misleading today | todo |
 | [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Delete (or fix field names if a consumer exists) | S | Public crate API removal | todo |
 | [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | todo |
@@ -360,24 +360,29 @@ request subgraph to the wait gets silence.
 <a name="gap-10"></a>
 ## GAP-10 (P2) — `Split.parallelism` / `sequential` are advisory-only
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** `SplitConfig.parallelism`/`sequential` (`schema_types.rs:1986-1992`) deserialize and
 even appear in debug-event payloads (`direct_json.rs:2738-2749`), but the emitted loop is strictly
 sequential — single-threaded WASM. Users tuning `parallelism: 8` get nothing.
 
 **Fix plan.**
-- [ ] 1. `validation.rs`: add **W073** — when `parallelism` is set (>1) or `sequential` is set:
-  `[W073] Step '<id>': Split executes iterations sequentially in the WASM runtime; 'parallelism'/'sequential' have no effect.`
-  Check interaction with existing W032 (HighParallelism) — fold or chain, don't double-warn
-  confusingly.
-- [ ] 2. `schema_types.rs` doc comments on both fields; note in `docs/wasm-direct-emitter.md`.
-- [ ] 3. Real parallel Split = host-side fan-out execution model. Separate epic, explicitly out of
-  scope; link future design doc here: ______
+- [x] 1. `validation.rs`: **W073** (`SplitParallelismIgnored`) fires for `parallelism` values
+  other than 1 (0 = "unlimited" and >1 both promise concurrency that doesn't exist).
+  Scope decision: `sequential: true` and `parallelism: 1` match actual behavior and stay silent —
+  warning on them would only confuse.
+- [x] 1b. (Found during implementation) Removed **W032** `HighParallelism` ("consider reducing for
+  resource efficiency") — it implied parallelism works at all. W073 replaces it; no double-warn
+  interaction left.
+- [x] 2. `schema_types.rs` doc comments on both fields; sequential-execution note added to
+  `docs/wasm-direct-emitter.md`.
+- [x] 3. Real parallel Split (host-side fan-out execution) stays a separate, unstarted epic.
 
-**Test coverage required.**
-- [ ] Validation unit tests: parallelism set → `[W073]`; sequential set → `[W073]`; neither →
-  absent; verify W032 + W073 wording renders sanely together on one step.
+**Test coverage delivered.**
+- [x] `test_split_parallelism_warns_w073` (parallelism 8 and 0, incl. display text),
+  `test_split_parallelism_one_or_sequential_no_w073` (parallelism 1 / sequential:true / unset).
+- [x] E2E: live server `POST /api/runtime/workflows/graph/validate` returns the `[W073]` string
+  for `parallelism: 8`.
 
 ---
 

@@ -2001,11 +2001,17 @@ pub struct SplitConfig {
     /// The array to iterate over
     pub value: MappingValue,
 
-    /// Maximum concurrent iterations (0 = unlimited)
+    /// Maximum concurrent iterations (0 = unlimited).
+    ///
+    /// **Ignored** — Split iterations execute strictly sequentially in the
+    /// WASM runtime; any value other than 1 triggers validation warning W073.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 
-    /// Execute iterations sequentially instead of in parallel
+    /// Execute iterations sequentially instead of in parallel.
+    ///
+    /// **Redundant** — sequential execution is the only mode the WASM runtime
+    /// supports, so this flag changes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential: Option<bool>,
 
