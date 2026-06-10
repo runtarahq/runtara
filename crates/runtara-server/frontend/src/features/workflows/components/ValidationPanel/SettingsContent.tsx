@@ -70,6 +70,7 @@ const sections: {
 const generalSchema = z.object({
   name: z.string().min(1, 'Workflow name is required'),
   description: z.string().optional(),
+  entryPointId: z.string().optional(),
   executionTimeoutSeconds: z.coerce
     .number()
     .int()
@@ -100,6 +101,8 @@ function formValueToDurable(value: GeneralFormValues['durableMode']) {
   if (value === 'false') return false;
   return null;
 }
+
+const AUTO_ENTRY_POINT = '__auto__';
 
 interface SettingsContentProps {
   workflow: WorkflowData;
@@ -214,6 +217,7 @@ function GeneralSection({
     defaultValues: {
       name: workflow.name || '',
       description: workflow.description || '',
+      entryPointId: workflow.entryPoint || AUTO_ENTRY_POINT,
       executionTimeoutSeconds: workflow.executionTimeoutSeconds,
       rateLimitBudgetSec: workflow.rateLimitBudgetMs
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
@@ -229,6 +233,7 @@ function GeneralSection({
     form.reset({
       name: workflow.name || '',
       description: workflow.description || '',
+      entryPointId: workflow.entryPoint || AUTO_ENTRY_POINT,
       executionTimeoutSeconds: workflow.executionTimeoutSeconds,
       rateLimitBudgetSec: workflow.rateLimitBudgetMs
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
@@ -266,6 +271,10 @@ function GeneralSection({
         onChange({
           name: values.name,
           description: values.description || '',
+          entryPoint:
+            values.entryPointId && values.entryPointId !== AUTO_ENTRY_POINT
+              ? values.entryPointId
+              : undefined,
           executionTimeoutSeconds: timeoutNumber,
           rateLimitBudgetMs:
             budgetSeconds !== undefined ? budgetSeconds * 1000 : undefined,
@@ -424,6 +433,44 @@ function GeneralSection({
             )}
           />
         </div>
+
+        <FormField
+          control={form.control}
+          name="entryPointId"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Entry Point</FormLabel>
+              <Select
+                value={field.value || AUTO_ENTRY_POINT}
+                onValueChange={field.onChange}
+                disabled={readOnly}
+              >
+                <FormControl>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value={AUTO_ENTRY_POINT}>Auto</SelectItem>
+                  {(workflow.entryPointOptions || []).map((step) => (
+                    <SelectItem key={step.id} value={step.id}>
+                      {step.name}
+                    </SelectItem>
+                  ))}
+                  {workflow.entryPoint &&
+                    !(workflow.entryPointOptions || []).some(
+                      (step) => step.id === workflow.entryPoint
+                    ) && (
+                      <SelectItem value={workflow.entryPoint}>
+                        {workflow.entryPoint}
+                      </SelectItem>
+                    )}
+                </SelectContent>
+              </Select>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
 
         <FormField
           control={form.control}

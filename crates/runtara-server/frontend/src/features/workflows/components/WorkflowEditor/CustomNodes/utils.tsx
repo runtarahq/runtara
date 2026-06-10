@@ -13,6 +13,7 @@ import { type Note, ValueType } from '@/generated/RuntaraRuntimeApi.ts';
 import {
   parseSchema,
   buildSchemaFromFields,
+  type SchemaField,
 } from '@/features/workflows/utils/schema';
 import {
   snapToGrid,
@@ -84,6 +85,15 @@ function mapMatchTypeToAPI(matchType: string): string {
 
 function mapMatchTypeFromAPI(matchType: string): string {
   return MATCH_TYPE_API_TO_UI[matchType] || matchType.toLowerCase();
+}
+
+function normalizeSchemaFieldForEditor(field: SchemaField): SchemaField {
+  return {
+    ...field,
+    type: field.type || 'string',
+    required: field.required !== false,
+    description: field.description || '',
+  };
 }
 
 export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
@@ -627,7 +637,9 @@ function cleanNodeData(steps: Record<string, any>) {
         const typedVal = val as {
           valueType: 'reference' | 'immediate' | 'composite' | 'template';
           value: any;
+          type?: string;
           typeHint?: string;
+          default?: any;
           defaultValue?: any;
         };
 
@@ -660,17 +672,13 @@ function cleanNodeData(steps: Record<string, any>) {
           valueType: typedVal.valueType || 'immediate',
           value: coercedValue,
         };
-        if (
-          typedVal.valueType === 'reference' &&
-          isValidValueType(typedVal.typeHint)
-        ) {
-          out.type = typedVal.typeHint;
+        const typeHint = typedVal.typeHint ?? typedVal.type;
+        if (typedVal.valueType === 'reference' && isValidValueType(typeHint)) {
+          out.type = typeHint;
         }
-        if (
-          typedVal.valueType === 'reference' &&
-          typedVal.defaultValue !== undefined
-        ) {
-          out.default = typedVal.defaultValue;
+        const defaultValue = typedVal.defaultValue ?? typedVal.default;
+        if (typedVal.valueType === 'reference' && defaultValue !== undefined) {
+          out.default = defaultValue;
         }
         return out;
       };
@@ -803,6 +811,46 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       return [type, mappingValue];
+    };
+
+    const hasMappingValuePayload = (mappingValue: any): boolean => {
+      if (!mappingValue || typeof mappingValue !== 'object') return false;
+      if (!('value' in mappingValue)) return false;
+      if (mappingValue.value === undefined) return false;
+      if (mappingValue.value === null) {
+        return mappingValue.valueType === 'immediate';
+      }
+      if (
+        typeof mappingValue.value === 'string' &&
+        mappingValue.value.trim() === ''
+      ) {
+        return false;
+      }
+      return true;
+    };
+
+    const serializeSourceMappingValue = (mapping: any[]): any | undefined => {
+      if (!Array.isArray(mapping) || mapping.length === 0) return undefined;
+      const sourceEntry =
+        mapping.find((item: any) => item?.type === 'value') ?? mapping[0];
+      if (!sourceEntry) return undefined;
+      if (
+        sourceEntry.value === undefined ||
+        (typeof sourceEntry.value === 'string' &&
+          sourceEntry.value.trim() === '')
+      ) {
+        return undefined;
+      }
+
+      const [, sourceValue] = processMappingEntry({
+        type: 'value',
+        value: sourceEntry.value,
+        typeHint: sourceEntry.typeHint,
+        valueType: sourceEntry.valueType,
+        defaultValue: sourceEntry.defaultValue,
+      }) as [string, any];
+
+      return hasMappingValuePayload(sourceValue) ? sourceValue : undefined;
     };
 
     const parseObjectValue = (value: any): Record<string, any> | undefined => {
@@ -1069,7 +1117,7 @@ function cleanNodeData(steps: Record<string, any>) {
       // Build the config object for Split step
       const splitConfig: {
         value?: {
-          valueType: 'reference' | 'immediate';
+          valueType: 'reference' | 'immediate' | 'template' | 'composite';
           value: unknown;
           type?: string;
           default?: unknown;
@@ -1093,61 +1141,18 @@ function cleanNodeData(steps: Record<string, any>) {
         batchSize?: number;
       } = {};
 
-      // Get the array source value from inputMapping (which was the array format)
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        const hasSplitSourceValue =
-          firstMapping &&
-          firstMapping.value !== undefined &&
-          firstMapping.value !== null &&
-          !(
-            typeof firstMapping.value === 'string' &&
-            firstMapping.value.trim() === ''
-          );
-        if (hasSplitSourceValue) {
-          const splitValueType = firstMapping.valueType || 'reference';
-          splitConfig.value = {
-            valueType: splitValueType,
-            value: firstMapping.value,
-            ...(splitValueType === 'reference' &&
-            isValidValueType(firstMapping.typeHint)
-              ? { type: firstMapping.typeHint }
-              : {}),
-            ...(splitValueType === 'reference' &&
-            firstMapping.defaultValue !== undefined
-              ? { default: firstMapping.defaultValue }
-              : {}),
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        splitConfig.value = sourceValue;
       }
 
       // Keep existing value if form inputMapping is temporarily empty.
       // This prevents emitting invalid Split config without the required source value.
       if (
         !splitConfig.value &&
-        existingSplitConfig?.value &&
-        existingSplitConfig.value.value !== undefined &&
-        existingSplitConfig.value.value !== null &&
-        !(
-          typeof existingSplitConfig.value.value === 'string' &&
-          existingSplitConfig.value.value.trim() === ''
-        )
+        hasMappingValuePayload(existingSplitConfig?.value)
       ) {
-        const splitValueType =
-          existingSplitConfig.value.valueType === 'immediate'
-            ? 'immediate'
-            : 'reference';
-        splitConfig.value = {
-          valueType: splitValueType,
-          value: existingSplitConfig.value.value,
-          ...(splitValueType === 'reference' && existingSplitConfig.value.type
-            ? { type: existingSplitConfig.value.type }
-            : {}),
-          ...(splitValueType === 'reference' &&
-          existingSplitConfig.value.default !== undefined
-            ? { default: existingSplitConfig.value.default }
-            : {}),
-        };
+        splitConfig.value = existingSplitConfig.value;
       }
 
       // Add execution options from the form data
@@ -1335,26 +1340,27 @@ function cleanNodeData(steps: Record<string, any>) {
     if (restData.stepType === 'Filter') {
       delete cleaned[id].inputMapping;
       delete cleaned[id].filterCondition;
+      const existingFilterConfig = (restData as any).config;
 
       const filterConfig: {
-        value?: { valueType: 'reference' | 'immediate'; value: unknown };
+        value?: any;
         condition?: any;
       } = {};
 
-      // Get the array source value from inputMapping
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        if (firstMapping?.value) {
-          filterConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
-            value: firstMapping.value,
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        filterConfig.value = sourceValue;
+      } else if (hasMappingValuePayload(existingFilterConfig?.value)) {
+        filterConfig.value = existingFilterConfig.value;
       }
 
       // Add condition from form data
       if (filterCondition) {
         filterConfig.condition = normalizeConditionExpression(filterCondition);
+      } else if (existingFilterConfig?.condition) {
+        filterConfig.condition = normalizeConditionExpression(
+          existingFilterConfig.condition
+        );
       }
 
       // Only add config if it has the required fields
@@ -1395,27 +1401,26 @@ function cleanNodeData(steps: Record<string, any>) {
       delete cleaned[id].inputMapping;
       delete cleaned[id].groupByKey;
       delete cleaned[id].groupByExpectedKeys;
+      const existingGroupByConfig = (restData as any).config;
 
       const groupByConfig: {
-        value?: { valueType: 'reference' | 'immediate'; value: unknown };
+        value?: any;
         key?: string;
         expectedKeys?: unknown[];
       } = {};
 
-      // Get the array source value from inputMapping
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        if (firstMapping?.value) {
-          groupByConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
-            value: firstMapping.value,
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        groupByConfig.value = sourceValue;
+      } else if (hasMappingValuePayload(existingGroupByConfig?.value)) {
+        groupByConfig.value = existingGroupByConfig.value;
       }
 
       // Add group key from form data
       if (groupByKey) {
         groupByConfig.key = groupByKey;
+      } else if (existingGroupByConfig?.key) {
+        groupByConfig.key = existingGroupByConfig.key;
       }
 
       // Add expected keys from form data (already an array)
@@ -1424,6 +1429,8 @@ function cleanNodeData(steps: Record<string, any>) {
         groupByExpectedKeys.length > 0
       ) {
         groupByConfig.expectedKeys = groupByExpectedKeys;
+      } else if (Array.isArray(existingGroupByConfig?.expectedKeys)) {
+        groupByConfig.expectedKeys = existingGroupByConfig.expectedKeys;
       }
 
       // Only add config if it has the required fields
@@ -1986,25 +1993,13 @@ function normalizeNodesAndEdges(
                 // Override inputMapping with config.value for Split steps
                 inputMapping: splitInputMapping,
                 splitInputSchemaFields: parsedInputSchema
-                  ? Object.entries(parsedInputSchema).map(
-                      ([name, typeDef]) => ({
-                        name,
-                        type:
-                          typeof typeDef === 'object' && typeDef !== null
-                            ? (typeDef as any).type || 'string'
-                            : 'string',
-                      })
+                  ? parseSchema(parsedInputSchema).map(
+                      normalizeSchemaFieldForEditor
                     )
                   : [],
                 splitOutputSchemaFields: (data as any).outputSchema
-                  ? Object.entries((data as any).outputSchema).map(
-                      ([name, typeDef]) => ({
-                        name,
-                        type:
-                          typeof typeDef === 'object' && typeDef !== null
-                            ? (typeDef as any).type || 'string'
-                            : 'string',
-                      })
+                  ? parseSchema((data as any).outputSchema).map(
+                      normalizeSchemaFieldForEditor
                     )
                   : [],
                 outputSchema: safeParseValue((data as any).outputSchema),
@@ -2088,8 +2083,11 @@ function normalizeNodesAndEdges(
                     {
                       type: 'value',
                       value: config.value.value,
-                      typeHint: 'auto',
+                      typeHint: config.value.type ?? 'auto',
                       valueType: config.value.valueType || 'reference',
+                      ...(config.value.default !== undefined
+                        ? { defaultValue: config.value.default }
+                        : {}),
                     },
                   ]
                 : [];
@@ -2121,8 +2119,11 @@ function normalizeNodesAndEdges(
                     {
                       type: 'value',
                       value: config.value.value,
-                      typeHint: 'auto',
+                      typeHint: config.value.type ?? 'auto',
                       valueType: config.value.valueType || 'reference',
+                      ...(config.value.default !== undefined
+                        ? { defaultValue: config.value.default }
+                        : {}),
                     },
                   ]
                 : [];
@@ -2320,15 +2321,7 @@ function normalizeNodesAndEdges(
                 const schemaFields = parseSchema(config.outputSchema);
                 aiInputMapping.push({
                   type: 'outputSchema',
-                  value: schemaFields.map((f) => ({
-                    name: f.name,
-                    type: f.type || 'string',
-                    required: f.required !== false,
-                    description: f.description || '',
-                    ...(Array.isArray(f.enum) && f.enum.length > 0
-                      ? { enum: f.enum }
-                      : {}),
-                  })),
+                  value: schemaFields.map(normalizeSchemaFieldForEditor),
                   valueType: 'immediate',
                   typeHint: 'json',
                 });
@@ -2367,12 +2360,7 @@ function normalizeNodesAndEdges(
               const schemaFields = parseSchema(waitStep.responseSchema);
               waitInputMapping.push({
                 type: 'responseSchema',
-                value: schemaFields.map((f) => ({
-                  name: f.name,
-                  type: f.type || 'string',
-                  required: f.required !== false,
-                  description: f.description || '',
-                })),
+                value: schemaFields.map(normalizeSchemaFieldForEditor),
                 valueType: 'immediate',
                 typeHint: 'json',
               });

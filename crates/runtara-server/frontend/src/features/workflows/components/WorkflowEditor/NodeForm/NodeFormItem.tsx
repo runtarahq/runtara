@@ -3,7 +3,13 @@
 // contain JSX (renderFormField, renderComponent) which tightly couples them to components.
 // Separating would require complex refactoring with circular dependency resolution.
 import { z } from 'zod';
-import { useState, createContext, useContext, useCallback } from 'react';
+import {
+  useState,
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+} from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { InputMappingField } from './InputMappingField';
 import { TestAgentInline } from './TestAgentButton/TestAgentInline';
@@ -28,6 +34,7 @@ import { DelayStepField } from './DelayStepField';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
+import { Textarea } from '@/shared/components/ui/textarea';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -146,6 +153,22 @@ function StepAdvancedFields() {
   const maxRetries = useWatch({ name: 'maxRetries', control: form.control });
   const retryDelay = useWatch({ name: 'retryDelay', control: form.control });
   const timeout = useWatch({ name: 'timeout', control: form.control });
+  const compensation = useWatch({
+    name: 'compensation',
+    control: form.control,
+  });
+  const [compensationDraft, setCompensationDraft] = useState('');
+  const [compensationError, setCompensationError] = useState<string | null>(
+    null
+  );
+
+  useEffect(() => {
+    if (stepType !== 'Agent') return;
+    setCompensationDraft(
+      compensation ? JSON.stringify(compensation, null, 2) : ''
+    );
+    setCompensationError(null);
+  }, [stepType, compensation]);
 
   if (activeTab !== 'main' || !stepType || stepType === 'Start') {
     return null;
@@ -153,6 +176,7 @@ function StepAdvancedFields() {
 
   const showDurable = DURABLE_STEP_TYPES.has(stepType);
   const showRetries = RETRY_STEP_TYPES.has(stepType);
+  const showCompensation = stepType === 'Agent';
 
   return (
     <div className="space-y-4 rounded-md border p-3">
@@ -189,58 +213,116 @@ function StepAdvancedFields() {
       )}
 
       {showRetries && (
-        <div className="grid grid-cols-3 gap-3">
-          <div className="space-y-1">
-            <Label className="text-sm">Retries</Label>
-            <Input
-              type="number"
-              min={0}
-              value={maxRetries ?? ''}
-              onChange={(event) =>
-                form.setValue(
-                  'maxRetries',
-                  event.target.value === ''
-                    ? undefined
-                    : Number(event.target.value),
-                  { shouldDirty: true }
-                )
-              }
-            />
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1">
+              <Label className="text-sm">Retries</Label>
+              <Input
+                type="number"
+                min={0}
+                value={maxRetries ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'maxRetries',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Retry delay (ms)</Label>
+              <Input
+                type="number"
+                min={0}
+                value={retryDelay ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'retryDelay',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Timeout (ms)</Label>
+              <Input
+                type="number"
+                min={0}
+                value={timeout ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'timeout',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
           </div>
-          <div className="space-y-1">
-            <Label className="text-sm">Retry delay (ms)</Label>
-            <Input
-              type="number"
-              min={0}
-              value={retryDelay ?? ''}
-              onChange={(event) =>
-                form.setValue(
-                  'retryDelay',
-                  event.target.value === ''
-                    ? undefined
-                    : Number(event.target.value),
-                  { shouldDirty: true }
-                )
-              }
-            />
+          <p className="text-xs text-muted-foreground">
+            Timeout is accepted by the DSL for these steps; runtime validation
+            currently reports it as warning-only.
+          </p>
+        </>
+      )}
+
+      {showCompensation && (
+        <div className="space-y-2">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Compensation JSON</Label>
+            <p className="text-xs text-muted-foreground">
+              Accepted by the DSL; runtime validation reports compensation as
+              warning-only.
+            </p>
           </div>
-          <div className="space-y-1">
-            <Label className="text-sm">Timeout (ms)</Label>
-            <Input
-              type="number"
-              min={0}
-              value={timeout ?? ''}
-              onChange={(event) =>
-                form.setValue(
-                  'timeout',
-                  event.target.value === ''
-                    ? undefined
-                    : Number(event.target.value),
-                  { shouldDirty: true }
-                )
+          <Textarea
+            value={compensationDraft}
+            onChange={(event) => {
+              const nextDraft = event.target.value;
+              setCompensationDraft(nextDraft);
+
+              if (!nextDraft.trim()) {
+                form.setValue('compensation', undefined, {
+                  shouldDirty: true,
+                });
+                setCompensationError(null);
+                return;
               }
-            />
-          </div>
+
+              try {
+                const parsed = JSON.parse(nextDraft);
+                if (
+                  !parsed ||
+                  typeof parsed !== 'object' ||
+                  Array.isArray(parsed)
+                ) {
+                  setCompensationError('Compensation must be a JSON object.');
+                  return;
+                }
+
+                form.setValue('compensation', parsed, { shouldDirty: true });
+                setCompensationError(null);
+              } catch (error) {
+                setCompensationError(
+                  error instanceof Error ? error.message : 'Invalid JSON.'
+                );
+              }
+            }}
+            className="min-h-[120px] font-mono text-xs"
+            spellCheck={false}
+            placeholder='{"compensationStep":"rollback"}'
+          />
+          {compensationError && (
+            <p className="text-xs text-destructive">{compensationError}</p>
+          )}
         </div>
       )}
     </div>
@@ -592,13 +674,15 @@ export const schema = () =>
       inputSchema: z.any().optional(),
       inputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-            required: z.boolean().optional(),
-            description: z.string().optional(),
-            defaultValue: z.any().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+              required: z.boolean().optional(),
+              description: z.string().optional(),
+              defaultValue: z.any().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       variablesFields: z
@@ -614,18 +698,22 @@ export const schema = () =>
       outputSchema: z.any().optional(),
       splitInputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       splitOutputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       // Split step config fields

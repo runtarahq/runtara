@@ -548,6 +548,12 @@ function WorkflowEditorContent({
     );
 
     if (workflowNodes.length === 0) return null;
+    if (workflow?.entryPoint) {
+      const explicitEntryPoint = workflowNodes.find(
+        (node) => node.id === workflow.entryPoint
+      );
+      if (explicitEntryPoint) return explicitEntryPoint.id;
+    }
 
     const nodesWithIncomingEdges = new Set(
       edges
@@ -569,7 +575,7 @@ function WorkflowEditorContent({
     );
 
     return entryPointNode?.id || null;
-  }, [nodes, edges]);
+  }, [nodes, edges, workflow?.entryPoint]);
 
   // Identify AI Agent tool/memory nodes and edges to hide from canvas.
   // Tool steps are rendered inline in the AI Agent card, so their separate

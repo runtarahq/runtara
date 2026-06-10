@@ -61,6 +61,7 @@ import {
   buildSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
+import { NODE_TYPES } from '@/features/workflows/config/workflow';
 
 type WorkflowVariable = {
   name: string;
@@ -1412,8 +1413,9 @@ export function Workflow() {
     const durable = hasOwn(stagedWorkflowChanges, 'durable')
       ? stagedWorkflowChanges.durable
       : data.durable;
-    const entryPoint =
-      stagedWorkflowChanges.entryPoint ?? data.entryPoint ?? undefined;
+    const entryPoint = hasOwn(stagedWorkflowChanges, 'entryPoint')
+      ? stagedWorkflowChanges.entryPoint
+      : data.entryPoint;
     const memoryTier = hasOwn(stagedWorkflowChanges, 'memoryTier')
       ? stagedWorkflowChanges.memoryTier
       : data.memoryTier;
@@ -1818,8 +1820,9 @@ export function Workflow() {
     const exportDurable = hasOwn(stagedWorkflowChanges, 'durable')
       ? stagedWorkflowChanges.durable
       : data.durable;
-    const exportEntryPoint =
-      stagedWorkflowChanges.entryPoint ?? data.entryPoint ?? undefined;
+    const exportEntryPoint = hasOwn(stagedWorkflowChanges, 'entryPoint')
+      ? stagedWorkflowChanges.entryPoint
+      : data.entryPoint;
     const exportName = stagedWorkflowChanges.name ?? data.name ?? '';
     const exportDescription =
       stagedWorkflowChanges.description ?? data.description ?? '';
@@ -1852,6 +1855,9 @@ export function Workflow() {
           : {}),
         ...(exportTrackEvents !== undefined
           ? { trackEvents: exportTrackEvents }
+          : {}),
+        ...(exportDurable !== undefined && exportDurable !== null
+          ? { durable: exportDurable }
           : {}),
         executionGraph,
       };
@@ -1956,6 +1962,8 @@ export function Workflow() {
         }
         if (hasOwn(executionGraph, 'durable')) {
           workflowChanges.durable = executionGraph.durable ?? null;
+        } else if (hasOwn(parsed, 'durable')) {
+          workflowChanges.durable = parsed.durable ?? null;
         }
         if (executionGraph.entryPoint !== undefined) {
           workflowChanges.entryPoint = executionGraph.entryPoint;
@@ -2017,6 +2025,26 @@ export function Workflow() {
   const hasBreakpoints = useWorkflowStore((state) =>
     state.nodes.some((n) => (n.data as any)?.breakpoint)
   );
+  const currentEditorNodes = useWorkflowStore((state) => state.nodes);
+  const entryPointOptions = useMemo(() => {
+    const nodesForOptions =
+      currentEditorNodes.length > 0 ? currentEditorNodes : data.nodes || [];
+    return nodesForOptions
+      .filter(
+        (node: any) =>
+          node.type !== NODE_TYPES.NoteNode &&
+          node.type !== NODE_TYPES.CreateNode &&
+          node.type !== NODE_TYPES.StartIndicatorNode &&
+          !node.parentId
+      )
+      .map((node: any) => ({
+        id: node.id,
+        name: String((node.data as any)?.name || node.id),
+      }))
+      .sort((a: { name: string }, b: { name: string }) =>
+        a.name.localeCompare(b.name)
+      );
+  }, [currentEditorNodes, data.nodes]);
 
   // Memoize workflow object to prevent unnecessary re-renders in WorkflowPropertiesDialog
   const workflowForSettings = useMemo(
@@ -2039,7 +2067,10 @@ export function Workflow() {
       durable: hasOwn(stagedWorkflowChanges, 'durable')
         ? stagedWorkflowChanges.durable
         : data.durable,
-      entryPoint: stagedWorkflowChanges.entryPoint ?? data.entryPoint,
+      entryPoint: hasOwn(stagedWorkflowChanges, 'entryPoint')
+        ? stagedWorkflowChanges.entryPoint
+        : data.entryPoint,
+      entryPointOptions,
       memoryTier: hasOwn(stagedWorkflowChanges, 'memoryTier')
         ? stagedWorkflowChanges.memoryTier
         : data.memoryTier,
@@ -2058,6 +2089,7 @@ export function Workflow() {
       stagedWorkflowChanges.rateLimitBudgetMs,
       stagedWorkflowChanges.durable,
       stagedWorkflowChanges.entryPoint,
+      entryPointOptions,
       stagedWorkflowChanges.memoryTier,
       stagedWorkflowChanges.trackEvents,
       data.name,

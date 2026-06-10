@@ -13,6 +13,7 @@ export interface WorkflowData {
   rateLimitBudgetMs?: number;
   durable?: boolean | null;
   entryPoint?: string;
+  entryPointOptions?: Array<{ id: string; name: string }>;
   memoryTier?: MemoryTier | null;
   trackEvents?: boolean;
 }

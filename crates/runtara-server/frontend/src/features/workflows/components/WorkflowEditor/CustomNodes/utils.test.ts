@@ -832,6 +832,50 @@ describe('Backend DSL serialization', () => {
     expect((graph as any).nodes[0].position).toEqual({ x: 24, y: 48 });
   });
 
+  it('round-trips Agent retry, timeout, and compensation fields', () => {
+    const graph = makeGraph({
+      id: 'agent',
+      stepType: 'Agent',
+      agentId: 'payments',
+      capabilityId: 'charge-card',
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 30_000,
+      compensation: {
+        compensationStep: 'refund',
+        compensationData: {
+          chargeId: {
+            valueType: 'reference',
+            value: "steps['agent'].outputs.chargeId",
+            type: 'string',
+          },
+        },
+        trigger: 'on_downstream_error',
+        order: 10,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 30_000,
+      compensation: {
+        compensationStep: 'refund',
+        compensationData: {
+          chargeId: {
+            valueType: 'reference',
+            value: "steps['agent'].outputs.chargeId",
+            type: 'string',
+          },
+        },
+        trigger: 'on_downstream_error',
+        order: 10,
+      },
+    });
+  });
+
   it('does not preserve stale direct Error fields after form values are cleared', () => {
     const graph = composeExecutionGraph(
       [
@@ -1023,6 +1067,232 @@ describe('Backend DSL serialization', () => {
       default: 500,
     });
     expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('round-trips Split source template MappingValue', () => {
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'template',
+          value: '{{ data.dynamicItems }}',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'template',
+      value: '{{ data.dynamicItems }}',
+    });
+  });
+
+  it('round-trips Filter source reference metadata', () => {
+    const graph = makeGraph({
+      id: 'filter',
+      stepType: 'Filter',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+          type: 'json',
+          default: [],
+        },
+        condition: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { valueType: 'reference', value: 'item.active' },
+            { valueType: 'immediate', value: true },
+          ],
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.items',
+      type: 'json',
+      default: [],
+    });
+  });
+
+  it('round-trips Filter source immediate array MappingValue', () => {
+    const graph = makeGraph({
+      id: 'filter',
+      stepType: 'Filter',
+      config: {
+        value: {
+          valueType: 'immediate',
+          value: [{ status: 'active' }, { status: 'pending' }],
+        },
+        condition: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { valueType: 'reference', value: 'item.status' },
+            { valueType: 'immediate', value: 'active' },
+          ],
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'immediate',
+      value: [{ status: 'active' }, { status: 'pending' }],
+    });
+  });
+
+  it('round-trips GroupBy source composite MappingValue', () => {
+    const graph = makeGraph({
+      id: 'group',
+      stepType: 'GroupBy',
+      config: {
+        value: {
+          valueType: 'composite',
+          value: [
+            {
+              valueType: 'reference',
+              value: 'data.primary',
+              type: 'json',
+              default: [],
+            },
+            {
+              valueType: 'reference',
+              value: 'data.secondary',
+              type: 'json',
+            },
+          ],
+        },
+        key: 'status',
+        expectedKeys: ['active', 'pending'],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'composite',
+      value: [
+        {
+          valueType: 'reference',
+          value: 'data.primary',
+          type: 'json',
+          default: [],
+        },
+        {
+          valueType: 'reference',
+          value: 'data.secondary',
+          type: 'json',
+        },
+      ],
+    });
+    expect(step.config.expectedKeys).toEqual(['active', 'pending']);
+  });
+
+  it('round-trips rich Split input and output schemas', () => {
+    const inputSchema = {
+      item: {
+        type: 'object',
+        required: true,
+        description: 'Item payload',
+        example: { sku: 'sku_1', quantity: 2 },
+        properties: {
+          sku: { type: 'string', required: true, pattern: '^sku_' },
+          quantity: { type: 'integer', required: true, min: 1 },
+        },
+        visibleWhen: { field: 'mode', equals: 'manual' },
+        'x-runtime': { source: 'input' },
+      },
+    };
+    const outputSchema = {
+      accepted: {
+        type: 'boolean',
+        required: true,
+        label: 'Accepted',
+        placeholder: 'true',
+        order: 1,
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      inputSchema,
+      outputSchema,
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputSchema).toEqual(inputSchema);
+    expect(step.outputSchema).toEqual(outputSchema);
+  });
+
+  it('round-trips rich AiAgent structured output schema', () => {
+    const outputSchema = {
+      decision: {
+        type: 'string',
+        required: true,
+        description: 'Routing decision',
+        enum: ['approve', 'reject', { route: 'manual' }],
+        example: 'approve',
+        label: 'Decision',
+        order: 1,
+        'x-agent': { source: 'fixture' },
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'ai',
+      stepType: 'AiAgent',
+      config: {
+        systemPrompt: { valueType: 'immediate', value: 'You help.' },
+        userPrompt: { valueType: 'template', value: '{{ data.prompt }}' },
+        outputSchema,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.outputSchema).toEqual(outputSchema);
+  });
+
+  it('round-trips rich WaitForSignal response schema', () => {
+    const responseSchema = {
+      files: {
+        type: 'array',
+        required: false,
+        description: 'Uploaded evidence',
+        items: { type: 'file' },
+        example: [{ name: 'invoice.pdf' }],
+        nullable: true,
+        min: 0,
+        max: 3,
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      responseSchema,
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.responseSchema).toEqual(responseSchema);
   });
 
   it('round-trips AiAgent retry settings in config', () => {
