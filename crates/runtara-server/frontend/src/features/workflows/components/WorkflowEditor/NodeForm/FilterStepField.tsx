@@ -11,7 +11,8 @@ type FilterStepFieldProps = {
 
 export function FilterStepField({ name }: FilterStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps, nodeId } = useContext(NodeFormContext);
+  const { previousSteps, nodeId, inputSchemaFields, variables } =
+    useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const filterCondition = useWatch({
     name: 'filterCondition',
@@ -115,6 +116,8 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
           value={conditionValue}
           onChange={handleConditionChange}
           previousSteps={previousSteps}
+          inputSchemaFields={inputSchemaFields}
+          variables={variables}
         />
       </div>
     </div>

@@ -11,7 +11,8 @@ type WhileStepFieldProps = {
 
 export function WhileStepField({ name }: WhileStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps } = useContext(NodeFormContext);
+  const { previousSteps, inputSchemaFields, variables } =
+    useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const whileCondition = useWatch({
     name: 'whileCondition',
@@ -90,6 +91,8 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
           onChange={handleConditionChange}
           previousSteps={previousSteps}
           isInsideWhileLoop={true}
+          inputSchemaFields={inputSchemaFields}
+          variables={variables}
         />
       </div>
 

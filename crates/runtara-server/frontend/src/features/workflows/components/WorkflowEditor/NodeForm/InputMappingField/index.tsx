@@ -49,7 +49,7 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
 export function InputMappingField(props: any) {
   const { label, name } = props;
   const { watch, setValue } = useFormContext();
-  const { agents, workflows, previousSteps, nodeId } =
+  const { agents, workflows, previousSteps, nodeId, inputSchemaFields, variables } =
     useContext(NodeFormContext);
   // We're in edit mode only if we have a nodeId (not parentNodeId)
   // parentNodeId means we're creating a child node, not editing
@@ -382,6 +382,8 @@ export function InputMappingField(props: any) {
           value={conditionValue}
           onChange={handleConditionChange}
           previousSteps={previousSteps}
+          inputSchemaFields={inputSchemaFields}
+          variables={variables}
         />
         {error && (
           <div className="text-[0.8rem] mt-2 font-medium text-destructive">

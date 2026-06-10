@@ -236,7 +236,9 @@ Complexity/effort: M.
 
 ### 17. Condition-builder reference picker cannot author common legal references
 
-Status: Open (one sub-item partially fixed). Severity: high.
+Status: Implemented (picker). The `ConditionExpression::Value` variant (bare truthy condition) remains open as a medium-severity residual. Severity: high.
+
+Resolution (2026-06-10): the condition variable picker now offers per-field `workflow.inputs.data.<field>` suggestions from the workflow input schema, a Variables group (built-in `variables._workflow_id`/`_instance_id`/`_tenant_id` plus user-declared constants as `workflow.inputs.variables.<name>`), and a free-text "use as custom reference path" row that commits whatever path is typed in the search box — so any legal reference form is authorable even when not suggested. Wired through Conditional, While, and Filter condition editors from NodeFormContext.
 
 Description:
 The condition editor's reference picker has no free-text path entry (`condition-editor.tsx:633-673` renders a pill that reopens the picker) and its suggestions omit per-field `data.<field>` references and the entire `variables.*` group (`condition-editor.tsx:287-390` — only whole-object `workflow.inputs.data`/`workflow.inputs.variables`, `item.*` guesses, `loop.*` inside While, and step outputs). Conditions like `data.country == "US"` or `variables.retryCount < 3` cannot be authored visually. `steps.__error.*` references are only partially reachable. `ConditionExpression::Value` (bare truthy check) can be neither created nor rendered — a While loop using it shows an empty builder.
