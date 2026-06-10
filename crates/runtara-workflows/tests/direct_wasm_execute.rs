@@ -194,6 +194,76 @@ const FANOUT_DIAMOND_NO_FINISH: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// Cross-linked fan-out inside a Conditional branch (the distilled
+/// CategorizeViaUnspsc miss-path): `gate` fans out to `left` and `right`, and
+/// `after_left` — downstream of `left` — consumes `right`'s output. The region's
+/// topological order must run `right` before `after_left`; the per-fan-out merge
+/// recursion this replaced ran branch 0's whole chain first, so the cross
+/// reference resolved to null (and a failure there meant `right` never ran at
+/// all — the reported "second fan-out edge silently dropped").
+const FANOUT_CROSS_BRANCH_REFERENCE: &str = r#"{
+  "durable": false,
+  "steps": {
+    "cond": {
+      "stepType": "Conditional", "id": "cond",
+      "condition": {
+        "type": "operation", "op": "EQ",
+        "arguments": [
+          {"value": "x", "valueType": "immediate"},
+          {"value": "y", "valueType": "immediate"}
+        ]
+      }
+    },
+    "hit": {
+      "stepType": "Agent", "id": "hit", "name": "Hit",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "H"}}
+    },
+    "gate": {
+      "stepType": "Agent", "id": "gate", "name": "Gate",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "G"}}
+    },
+    "left": {
+      "stepType": "Agent", "id": "left", "name": "Left",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "L"}}
+    },
+    "right": {
+      "stepType": "Agent", "id": "right", "name": "Right",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "R"}}
+    },
+    "after_left": {
+      "stepType": "Agent", "id": "after_left", "name": "After Left",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "reference", "value": "steps.right.outputs"}}
+    },
+    "finish": {
+      "stepType": "Finish", "id": "finish",
+      "inputMapping": {
+        "crossed": {"valueType": "reference", "value": "steps.after_left.outputs"},
+        "left":    {"valueType": "reference", "value": "steps.left.outputs"},
+        "right":   {"valueType": "reference", "value": "steps.right.outputs"}
+      }
+    }
+  },
+  "entryPoint": "cond",
+  "executionPlan": [
+    { "fromStep": "cond", "label": "true",  "toStep": "hit" },
+    { "fromStep": "cond", "label": "false", "toStep": "gate" },
+    { "fromStep": "gate", "toStep": "left" },
+    { "fromStep": "gate", "toStep": "right" },
+    { "fromStep": "left", "toStep": "after_left" },
+    { "fromStep": "after_left", "toStep": "finish" },
+    { "fromStep": "right", "toStep": "finish" },
+    { "fromStep": "hit", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
@@ -1213,6 +1283,58 @@ fn direct_wasm_execute_fanout_diamond_without_finish_returns_null() {
     );
 
     assert_eq!(output, Value::Null);
+}
+
+#[test]
+fn direct_wasm_execute_fanout_cross_branch_reference_runs_producer_first() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Off-backbone fan-out (inside the Conditional's false branch) where a step
+    // downstream of one branch consumes the other branch's output. Both branches
+    // must run, exactly once each, with `right` ordered before its consumer
+    // `after_left` — the regression that dropped the second fan-out edge in the
+    // CategorizeViaUnspsc repro.
+    let result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-fanout-cross-branch-reference",
+        FANOUT_CROSS_BRANCH_REFERENCE,
+        br#"{}"#,
+        true,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({ "crossed": "R", "left": "L", "right": "R" })
+    );
+
+    let ended: Vec<&str> = result
+        .events
+        .iter()
+        .filter(|event| event.subtype == "step_debug_end")
+        .filter_map(|event| event.payload_json["step_id"].as_str())
+        .collect();
+    for step_id in ["gate", "left", "right", "after_left", "finish"] {
+        assert_eq!(
+            ended
+                .iter()
+                .filter(|ended_id| **ended_id == step_id)
+                .count(),
+            1,
+            "step '{step_id}' should run exactly once: {ended:?}"
+        );
+    }
+    assert!(
+        !ended.contains(&"hit"),
+        "the untaken Conditional branch must not run: {ended:?}"
+    );
+    let right_position = ended.iter().position(|step_id| *step_id == "right");
+    let consumer_position = ended.iter().position(|step_id| *step_id == "after_left");
+    assert!(
+        right_position < consumer_position,
+        "producer 'right' must run before its consumer 'after_left': {ended:?}"
+    );
 }
 
 #[test]

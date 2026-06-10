@@ -447,17 +447,6 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
-        DirectRunPlan::Fanout {
-            branches,
-            merge_plan,
-        } => {
-            for branch in branches {
-                collect_run_plan_ids(branch, condition_ids, mapping_ids);
-            }
-            if let Some(merge_plan) = merge_plan {
-                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
-            }
-        }
         DirectRunPlan::GroupBy { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
@@ -780,10 +769,9 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::AiAgentLoop { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::EdgeRoute { .. }
-        | DirectRunPlan::Fanout { .. }
-        | DirectRunPlan::Join
-        | DirectRunPlan::ImplicitFinish => None,
+        DirectRunPlan::EdgeRoute { .. } | DirectRunPlan::Join | DirectRunPlan::ImplicitFinish => {
+            None
+        }
     }
 }
 
@@ -984,8 +972,8 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
     // that fans out to two parallel normal successors (`b`, `c`) which re-converge
     // at `join`. The support gate accepted this, but the plan builder used to bail
     // with "unsupported parallel normal branches" because the fan-out is off the
-    // topological backbone. The Fanout plan node now linearizes it. Confirm the
-    // full emit pipeline produces a valid Wasm component.
+    // topological backbone. The branch's region order now linearizes it. Confirm
+    // the full emit pipeline produces a valid Wasm component.
     let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
         r##"{
           "entryPoint": "cond",

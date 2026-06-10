@@ -12,7 +12,11 @@
 //! duplicated into every branch (which would be exponential); each branch recurses
 //! with the merge as its stop point and reaches it as a `Join` no-op.
 //! Unconditional fan-out is topologically linearised (Kahn's algorithm) into one
-//! sequential chain, and `direct_find_merge_point` locates where branches
+//! sequential chain per *region* — the unconditional DAG rooted at the graph entry,
+//! a branch target, a merge continuation, or an onError handler — so every step
+//! runs exactly once, after all of its predecessors, even when branches cross-link
+//! (a shape per-fan-out merge recursion cannot represent without duplicating or
+//! dropping steps). `direct_find_merge_point` locates where exclusive branches
 //! re-converge. `Split`/`While`/`WaitForSignal`/`EmbedWorkflow` get dedicated
 //! lowerings, and `DirectFailureTarget`/`DirectHandledTarget` track how many
 //! enclosing Wasm blocks a failure must `Br` out through. The traversal
@@ -59,17 +63,6 @@ pub(super) enum DirectRunPlan {
         default_plan: Box<DirectRunPlan>,
         /// Shared continuation when the conditioned normal-flow edges re-converge,
         /// emitted once after the dispatch. `None` when terminal.
-        merge_plan: Option<Box<DirectRunPlan>>,
-    },
-    /// Unconditional parallel fan-out OFF the topological backbone (e.g. a step
-    /// with multiple normal successors inside a Conditional/Switch branch or
-    /// onError handler). Every branch runs in sequence up to their shared merge
-    /// point, then the merge runs once — the same run-each-once semantics the
-    /// backbone gets for free from `direct_execution_order`. `merge_plan` is
-    /// `None` when the branches re-converge at the enclosing branch's own merge
-    /// (`stop_at`), which the parent emits.
-    Fanout {
-        branches: Vec<DirectRunPlan>,
         merge_plan: Option<Box<DirectRunPlan>>,
     },
     GroupBy {
@@ -396,7 +389,7 @@ fn step_run_plan(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, true, None)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, true, None, step_id)
 }
 
 fn step_run_plan_without_on_error(
@@ -405,7 +398,7 @@ fn step_run_plan_without_on_error(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, false, None)
+    step_run_plan_inner(graph, child_workflows, step_id, stack, false, None, step_id)
 }
 
 fn step_breakpoint_enabled(graph: &DirectGraphManifest, step: &DirectStepManifest) -> bool {
@@ -427,6 +420,10 @@ fn step_run_plan_inner(
     // this branch with a `Join` (the merge is emitted once by the parent as the
     // shared continuation), so the branch does not recurse through it.
     stop_at: Option<&str>,
+    // The root of the unconditional region `step_id` belongs to (the graph entry,
+    // a branch target, a merge continuation, or an onError handler). Steps follow
+    // the region's topological order, which linearizes fan-out and joins.
+    region_root: &str,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     if stop_at == Some(step_id) {
         return Ok(DirectRunPlan::Join);
@@ -458,6 +455,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::Filter {
@@ -503,6 +501,7 @@ fn step_run_plan_inner(
                         stack,
                         include_on_error,
                         branch_stop,
+                        &target,
                     )?;
                     branches.push(DirectSwitchRoutePlan {
                         label,
@@ -517,6 +516,7 @@ fn step_run_plan_inner(
                     stack,
                     include_on_error,
                     branch_stop,
+                    &default_target,
                 )?;
                 let merge_plan = match &merge {
                     Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -526,6 +526,7 @@ fn step_run_plan_inner(
                         stack,
                         include_on_error,
                         stop_at,
+                        merge_step,
                     )?)),
                     None => None,
                 };
@@ -547,6 +548,7 @@ fn step_run_plan_inner(
                     stack,
                     include_on_error,
                     stop_at,
+                    region_root,
                 )?;
 
                 Ok(DirectRunPlan::SwitchValue {
@@ -566,6 +568,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::GroupBy {
@@ -592,6 +595,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
@@ -629,6 +633,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
@@ -661,6 +666,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
@@ -694,6 +700,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::Delay {
@@ -722,6 +729,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::WaitForSignal {
@@ -745,6 +753,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::Log {
@@ -767,6 +776,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
             let error_plan = if include_on_error {
                 on_error_plan(graph, child_workflows, step_id, stack)?
@@ -815,6 +825,7 @@ fn step_run_plan_inner(
                     stack,
                     include_on_error,
                     stop_at,
+                    region_root,
                 )?;
                 let error_plan = if include_on_error {
                     on_error_plan(graph, child_workflows, step_id, stack)?
@@ -1001,6 +1012,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
 
             Ok(DirectRunPlan::AiAgentLoop {
@@ -1063,6 +1075,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 branch_stop,
+                &true_step,
             )?;
             let false_plan = step_run_plan_inner(
                 graph,
@@ -1071,6 +1084,7 @@ fn step_run_plan_inner(
                 stack,
                 include_on_error,
                 branch_stop,
+                &false_step,
             )?;
             let merge_plan = match &merge {
                 Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -1080,6 +1094,7 @@ fn step_run_plan_inner(
                     stack,
                     include_on_error,
                     stop_at,
+                    merge_step,
                 )?)),
                 None => None,
             };
@@ -1121,23 +1136,30 @@ fn direct_has_conditioned_normal_flow_edges(graph: &DirectGraphManifest, step_id
     })
 }
 
-/// Topological order of the unconditional normal-flow backbone, reachable from
-/// the entry point (Kahn's algorithm, FIFO — identical to the generated
-/// `build_execution_order`). Traversal stops at branching steps, whose
-/// successors are emitted by the branch sub-plans instead. The order linearizes
+/// Topological order of the unconditional normal-flow region rooted at `root`
+/// (Kahn's algorithm, FIFO — identical to the generated `build_execution_order`).
+/// The entry backbone is the region rooted at the entry point; branch targets,
+/// merge continuations, and onError handlers root their own regions. Traversal
+/// stops at branching steps, whose successors are emitted by the branch
+/// sub-plans instead, and never enters `stop_at` — the enclosing merge point,
+/// which the parent emits as the shared continuation. The order linearizes
 /// fan-out (a step with multiple unconditional successors) and the joins it
 /// creates so each step is emitted exactly once, in dependency order — the same
 /// sequential execution the generated path produces.
-pub(super) fn direct_execution_order(graph: &DirectGraphManifest) -> Vec<String> {
+pub(super) fn direct_execution_order(
+    graph: &DirectGraphManifest,
+    root: &str,
+    stop_at: Option<&str>,
+) -> Vec<String> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
     let mut reachable = HashSet::new();
     let mut discovery_order = Vec::new();
     let mut discovery_queue = VecDeque::new();
 
-    reachable.insert(graph.entry_point.clone());
-    discovery_order.push(graph.entry_point.clone());
-    discovery_queue.push_back(graph.entry_point.clone());
+    reachable.insert(root.to_string());
+    discovery_order.push(root.to_string());
+    discovery_queue.push_back(root.to_string());
 
     while let Some(step_id) = discovery_queue.pop_front() {
         let Some(step) = graph.steps.iter().find(|candidate| candidate.id == step_id) else {
@@ -1151,6 +1173,7 @@ pub(super) fn direct_execution_order(graph: &DirectGraphManifest) -> Vec<String>
         for edge in &graph.edges {
             if edge.from_step == step_id
                 && is_normal_label(edge.label.as_deref())
+                && Some(edge.to_step.as_str()) != stop_at
                 && reachable.insert(edge.to_step.clone())
             {
                 discovery_order.push(edge.to_step.clone());
@@ -1175,10 +1198,8 @@ pub(super) fn direct_execution_order(graph: &DirectGraphManifest) -> Vec<String>
     let mut order = Vec::new();
     let mut ready = VecDeque::new();
     let mut queued = HashSet::new();
-    if reachable.contains(&graph.entry_point) {
-        ready.push_back(graph.entry_point.clone());
-        queued.insert(graph.entry_point.clone());
-    }
+    ready.push_back(root.to_string());
+    queued.insert(root.to_string());
     while let Some(step_id) = ready.pop_front() {
         order.push(step_id.clone());
         let Some(step) = graph.steps.iter().find(|candidate| candidate.id == step_id) else {
@@ -1214,11 +1235,16 @@ pub(super) fn direct_execution_order(graph: &DirectGraphManifest) -> Vec<String>
     order
 }
 
-/// The next step to run after `from_step` on the topological backbone, if
-/// `from_step` is a backbone step (the step immediately after it in
-/// `direct_execution_order`).
-fn topo_successor(graph: &DirectGraphManifest, from_step: &str) -> Option<String> {
-    let order = direct_execution_order(graph);
+/// The next step to run after `from_step` within its region — the step
+/// immediately after it in the region's topological order. `None` when
+/// `from_step` ends the region (its remaining edges, if any, exit to `stop_at`).
+fn topo_successor(
+    graph: &DirectGraphManifest,
+    region_root: &str,
+    stop_at: Option<&str>,
+    from_step: &str,
+) -> Option<String> {
+    let order = direct_execution_order(graph, region_root, stop_at);
     let position = order.iter().position(|step| step == from_step)?;
     order.get(position + 1).cloned()
 }
@@ -1230,6 +1256,7 @@ fn normal_flow_plan(
     stack: &mut Vec<String>,
     include_on_error: bool,
     stop_at: Option<&str>,
+    region_root: &str,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     let edges = normal_flow_edges(graph, from_step);
 
@@ -1245,10 +1272,30 @@ fn normal_flow_plan(
         .collect::<Vec<_>>();
 
     if conditional_edges.is_empty() {
-        // Backbone steps continue to their topological successor, which
-        // linearizes fan-out (multiple unconditional successors) and joins so
-        // each downstream step is emitted exactly once.
-        if let Some(next) = topo_successor(graph, from_step) {
+        // Steps continue to their topological successor within their region,
+        // which linearizes fan-out (multiple unconditional successors) and the
+        // joins it creates so each step is emitted exactly once, after all of
+        // its predecessors — even when fan-out branches cross-link (a shape a
+        // recursive per-fan-out merge search cannot represent without
+        // duplicating the shared continuation into earlier branches and
+        // running steps before their inputs exist).
+        if default_edges.len() > 1 {
+            // E073 guard: an unconditional fan-out must re-converge inside its
+            // region (or exit to the enclosing merge). A region with two
+            // terminals is an ambiguous multi-exit graph; validation rejects
+            // it, guard here so we never mis-emit one.
+            let region = direct_execution_order(graph, region_root, stop_at);
+            let hard_terminals = region
+                .iter()
+                .filter(|step_id| normal_flow_edges(graph, step_id).is_empty())
+                .count();
+            if hard_terminals >= 2 || (stop_at.is_some() && hard_terminals >= 1) {
+                return Err(DirectCompileError::Component(format!(
+                    "direct step '{from_step}' fans out to parallel branches that never re-converge"
+                )));
+            }
+        }
+        if let Some(next) = topo_successor(graph, region_root, stop_at, from_step) {
             stack.push(from_step.to_string());
             let next_plan = step_run_plan_inner(
                 graph,
@@ -1257,13 +1304,12 @@ fn normal_flow_plan(
                 stack,
                 include_on_error,
                 stop_at,
+                region_root,
             )?;
             stack.pop();
             return Ok(next_plan);
         }
 
-        // Off the backbone (inside a Conditional/Switch branch or onError
-        // handler) there is no global topological order to lean on.
         if edges.is_empty() {
             // Terminal step with no successor and no explicit Finish (e.g. a
             // single-Agent workflow). Match the generated compiler, which
@@ -1271,71 +1317,24 @@ fn normal_flow_plan(
             // output instead of failing to build the plan.
             return Ok(DirectRunPlan::ImplicitFinish);
         }
-        if let [edge] = default_edges.as_slice() {
-            // Single unconditional successor: follow it.
-            stack.push(from_step.to_string());
-            let next_plan = step_run_plan_inner(
-                graph,
-                child_workflows,
-                &edge.to_step,
-                stack,
-                include_on_error,
-                stop_at,
-            )?;
-            stack.pop();
-            return Ok(next_plan);
+
+        // `from_step` ends its region's topological order, so its remaining
+        // unconditional edges can only exit to the enclosing merge (`stop_at`),
+        // which the parent emits — the branch ends with a `Join`.
+        if stop_at.is_some()
+            && default_edges
+                .iter()
+                .all(|edge| Some(edge.to_step.as_str()) == stop_at)
+        {
+            return Ok(DirectRunPlan::Join);
         }
 
-        // Unconditional parallel fan-out off the backbone: linearize it locally
-        // the way the backbone is linearized globally — run every branch in
-        // sequence up to their shared merge point, then the merge once. When the
-        // branches re-converge at the enclosing branch's own merge (`stop_at`),
-        // `merge` is filtered to `None` and the parent emits that merge.
-        let branch_starts: Vec<Option<String>> = default_edges
-            .iter()
-            .map(|edge| Some(edge.to_step.clone()))
-            .collect();
-        let merge =
-            direct_find_merge_point(graph, &branch_starts).filter(|m| Some(m.as_str()) != stop_at);
-        let branch_stop = merge.as_deref().or(stop_at);
-        if merge.is_none() && branch_stop.is_none() {
-            // No shared merge and no enclosing merge: the branches end in
-            // distinct terminals (an ambiguous multi-exit graph). Validation
-            // rejects this (E073); guard here so we never mis-emit it.
-            return Err(DirectCompileError::Component(format!(
-                "direct step '{from_step}' fans out to parallel branches that never re-converge"
-            )));
-        }
-        stack.push(from_step.to_string());
-        let branches = default_edges
-            .iter()
-            .map(|edge| {
-                step_run_plan_inner(
-                    graph,
-                    child_workflows,
-                    &edge.to_step,
-                    stack,
-                    include_on_error,
-                    branch_stop,
-                )
-            })
-            .collect::<Result<Vec<_>, DirectCompileError>>()?;
-        let merge_plan = match &merge {
-            Some(merge_step) => Some(Box::new(step_run_plan_inner(
-                graph,
-                child_workflows,
-                merge_step,
-                stack,
-                include_on_error,
-                stop_at,
-            )?)),
-            None => None,
-        };
-        stack.pop();
-        return Ok(DirectRunPlan::Fanout {
-            branches,
-            merge_plan,
-        });
+        // A successor that is neither in the region order nor the enclosing
+        // merge: a normal-flow cycle back into the region. Validation rejects
+        // cycles; guard here so we never mis-emit one.
+        return Err(DirectCompileError::Component(format!(
+            "direct run plan contains a cycle at step '{from_step}'"
+        )));
     }
 
     if edges.is_empty() {
@@ -1390,6 +1389,7 @@ fn normal_flow_plan(
                 stack,
                 include_on_error,
                 branch_stop,
+                &edge.to_step,
             )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
@@ -1404,6 +1404,7 @@ fn normal_flow_plan(
         stack,
         include_on_error,
         branch_stop,
+        &default_edge.to_step,
     )?;
     let merge_plan = match &merge {
         Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -1413,6 +1414,7 @@ fn normal_flow_plan(
             stack,
             include_on_error,
             stop_at,
+            merge_step,
         )?)),
         None => None,
     };
@@ -2084,6 +2086,318 @@ fn canonicalize_direct_agent_id(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Walks a plan and records every emitted step id (and structural markers)
+    // in emission order, so tests can assert linearization properties.
+    fn collect_plan_steps(plan: &DirectRunPlan, out: &mut Vec<String>) {
+        match plan {
+            DirectRunPlan::Finish { step_id, .. } => out.push(format!("Finish:{step_id}")),
+            DirectRunPlan::Filter {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::SwitchValue {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::GroupBy {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Delay {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Log {
+                step_id, next_plan, ..
+            } => {
+                out.push(step_id.clone());
+                collect_plan_steps(next_plan, out);
+            }
+            DirectRunPlan::SwitchRoute {
+                step_id,
+                branches,
+                default_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(format!("SwitchRoute:{step_id}"));
+                for branch in branches {
+                    out.push(format!("  route:{}", branch.label));
+                    collect_plan_steps(&branch.plan, out);
+                }
+                out.push("  route:default".to_string());
+                collect_plan_steps(default_plan, out);
+                if let Some(merge) = merge_plan {
+                    out.push(format!("  merge-of:{step_id}"));
+                    collect_plan_steps(merge, out);
+                }
+            }
+            DirectRunPlan::EdgeRoute {
+                branches,
+                default_plan,
+                merge_plan,
+            } => {
+                out.push("EdgeRoute".to_string());
+                for branch in branches {
+                    collect_plan_steps(&branch.plan, out);
+                }
+                collect_plan_steps(default_plan, out);
+                if let Some(merge) = merge_plan {
+                    out.push("  merge-of:EdgeRoute".to_string());
+                    collect_plan_steps(merge, out);
+                }
+            }
+            DirectRunPlan::Split {
+                step_id,
+                nested_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("Split:{step_id}"));
+                out.push("  split-nested".to_string());
+                collect_plan_steps(nested_plan, out);
+                out.push("  split-next".to_string());
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::While {
+                step_id,
+                nested_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("While:{step_id}"));
+                collect_plan_steps(nested_plan, out);
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::EmbedWorkflow {
+                step_id,
+                child_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("Embed:{step_id}"));
+                collect_plan_steps(child_plan, out);
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::WaitForSignal {
+                step_id,
+                on_wait_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("Wait:{step_id}"));
+                if let Some(on_wait) = on_wait_plan {
+                    collect_plan_steps(on_wait, out);
+                }
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::Agent {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            }
+            | DirectRunPlan::AiAgent {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+                collect_plan_steps(next_plan, out);
+            }
+            DirectRunPlan::AiAgentLoop {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("AiLoop:{step_id}"));
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+                collect_plan_steps(next_plan, out);
+            }
+            DirectRunPlan::Error { step_id, .. } => out.push(format!("Error:{step_id}")),
+            DirectRunPlan::Conditional {
+                step_id,
+                true_plan,
+                false_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(format!("Conditional:{step_id}"));
+                out.push("  true:".to_string());
+                collect_plan_steps(true_plan, out);
+                out.push("  false:".to_string());
+                collect_plan_steps(false_plan, out);
+                if let Some(merge) = merge_plan {
+                    out.push(format!("  merge-of:{step_id}"));
+                    collect_plan_steps(merge, out);
+                }
+            }
+            DirectRunPlan::Join => out.push("Join".to_string()),
+            DirectRunPlan::ImplicitFinish => out.push("ImplicitFinish".to_string()),
+        }
+    }
+
+    fn collect_error_plan(step_id: &str, error_plan: &DirectErrorRoutePlan, out: &mut Vec<String>) {
+        out.push(format!("  onError-of:{step_id}"));
+        for branch in &error_plan.branches {
+            collect_plan_steps(&branch.plan, out);
+        }
+        if let Some(default_plan) = &error_plan.default_plan {
+            collect_plan_steps(default_plan, out);
+        }
+        out.push(format!("  onError-of:{step_id}:end"));
+    }
+
+    fn agent_step_json(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "stepType": "Agent",
+            "agentId": "utils",
+            "capabilityId": "get-current-iso-datetime",
+            "inputMapping": {}
+        })
+    }
+
+    /// Regression for the reported fan-out drop: inside a Conditional branch,
+    /// `gate` fans out to two chains that cross-link several times before
+    /// re-converging (the distilled CategorizeViaUnspsc miss-path: `fts` and
+    /// `trgm` each need both chains, `bprompt` needs four predecessors). The
+    /// old per-fan-out merge recursion inlined the shared merge (`fts`) into
+    /// the first branch, so `pvs` ran before `pfe` produced its input and the
+    /// second branch (`embq`/`pfe`) was never scheduled once the iteration
+    /// failed. The region's topological order must emit every step exactly
+    /// once, each after all of its predecessors.
+    #[test]
+    fn cross_linked_fanout_linearizes_each_step_once() {
+        let mut steps = serde_json::Map::new();
+        for id in [
+            "hit", "gate", "bcp", "embq", "dprof", "pfe", "fts", "rfts", "trgm", "bvs", "pvs",
+            "rvec", "ematch", "bprompt", "pmatch", "judge", "fpick", "persist", "tail",
+        ] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "cond".to_string(),
+            serde_json::json!({
+                "id": "cond",
+                "stepType": "Conditional",
+                "condition": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        {"value": "x", "valueType": "immediate"},
+                        {"value": "y", "valueType": "immediate"}
+                    ]
+                }
+            }),
+        );
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish",
+                "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "cond",
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "cond", "label": "true", "toStep": "hit"},
+                {"fromStep": "cond", "label": "false", "toStep": "gate"},
+                {"fromStep": "gate", "toStep": "bcp"},
+                {"fromStep": "gate", "toStep": "embq"},
+                {"fromStep": "bcp", "toStep": "dprof"},
+                {"fromStep": "embq", "toStep": "pfe"},
+                {"fromStep": "dprof", "toStep": "fts"},
+                {"fromStep": "dprof", "toStep": "trgm"},
+                {"fromStep": "dprof", "toStep": "bprompt"},
+                {"fromStep": "pfe", "toStep": "fts"},
+                {"fromStep": "pfe", "toStep": "rfts"},
+                {"fromStep": "pfe", "toStep": "trgm"},
+                {"fromStep": "fts", "toStep": "bvs"},
+                {"fromStep": "bvs", "toStep": "pvs"},
+                {"fromStep": "pvs", "toStep": "rvec"},
+                {"fromStep": "rvec", "toStep": "ematch"},
+                {"fromStep": "rvec", "toStep": "bprompt"},
+                {"fromStep": "rfts", "toStep": "ematch"},
+                {"fromStep": "rfts", "toStep": "bprompt"},
+                {"fromStep": "trgm", "toStep": "ematch"},
+                {"fromStep": "trgm", "toStep": "bprompt"},
+                {"fromStep": "ematch", "toStep": "pmatch"},
+                {"fromStep": "bprompt", "toStep": "judge"},
+                {"fromStep": "pmatch", "toStep": "fpick"},
+                {"fromStep": "judge", "toStep": "fpick"},
+                {"fromStep": "fpick", "toStep": "persist"},
+                {"fromStep": "persist", "toStep": "tail"},
+                {"fromStep": "hit", "toStep": "tail"},
+                {"fromStep": "tail", "toStep": "finish"}
+            ]
+        }))
+        .expect("graph parses");
+
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+
+        // The false branch is one linear chain in dependency order: both
+        // fan-out targets are scheduled, and every consumer runs after all of
+        // its producers (`pvs` after `pfe`, `bprompt` after `rvec`, ...).
+        let false_chain: Vec<&str> = emitted
+            .iter()
+            .skip_while(|entry| *entry != "  false:")
+            .skip(1)
+            .take_while(|entry| *entry != "  merge-of:cond")
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            false_chain,
+            vec![
+                "gate", "bcp", "embq", "dprof", "pfe", "fts", "rfts", "trgm", "bvs", "pvs", "rvec",
+                "ematch", "bprompt", "pmatch", "judge", "fpick", "persist", "Join",
+            ],
+            "false branch should linearize the cross-linked fan-out in dependency order: {emitted:?}"
+        );
+
+        // The merge (`tail`) is emitted exactly once, by the Conditional.
+        let step_ids: Vec<&str> = emitted
+            .iter()
+            .map(String::as_str)
+            .filter(|entry| !entry.starts_with("  ") && !entry.starts_with("Conditional:"))
+            .map(|entry| entry.strip_prefix("Finish:").unwrap_or(entry))
+            .filter(|entry| *entry != "Join")
+            .collect();
+        let mut deduped = step_ids.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            step_ids.len(),
+            "every step should be emitted exactly once: {emitted:?}"
+        );
+    }
 
     fn direct_agent_manifest_with_retry_defaults(
         rate_limited: bool,
