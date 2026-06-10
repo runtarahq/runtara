@@ -1290,7 +1290,12 @@ function cleanNodeData(steps: Record<string, any>) {
       delete cleaned[id].switchRoutingMode;
 
       const switchConfig: {
-        value?: { valueType: string; value: unknown };
+        value?: {
+          valueType: string;
+          value: unknown;
+          type?: string;
+          default?: unknown;
+        };
         cases?: Array<{
           match: any;
           matchType: string;
@@ -1301,19 +1306,12 @@ function cleanNodeData(steps: Record<string, any>) {
       } = {};
 
       if (Array.isArray(inputMapping)) {
-        // Extract value field
-        const valueItem = inputMapping.find(
-          (item: any) => item.type === 'value'
-        );
-        if (valueItem?.value !== undefined && valueItem.value !== '') {
-          const isRef =
-            typeof valueItem.value === 'string' &&
-            valueItem.value.includes('{{');
-          switchConfig.value = {
-            valueType:
-              valueItem.valueType || (isRef ? 'reference' : 'immediate'),
-            value: valueItem.value,
-          };
+        // Serialize the switch value through the shared mapping path (same as
+        // Split/Filter/GroupBy) so reference type hints, fallback defaults,
+        // and composite values round-trip.
+        const sourceValue = serializeSourceMappingValue(inputMapping);
+        if (sourceValue) {
+          switchConfig.value = sourceValue;
         }
 
         // Extract cases
@@ -1333,21 +1331,24 @@ function cleanNodeData(steps: Record<string, any>) {
           }));
         }
 
-        // Extract default
+        // Extract default — only when the entry was authored. An absent
+        // default means "no match is an error" at runtime, so fabricating
+        // one (or persisting a cleared '') would change semantics.
         const defaultItem = inputMapping.find(
           (item: any) => item.type === 'default'
         );
-        if (defaultItem?.value !== undefined) {
+        if (
+          defaultItem !== undefined &&
+          defaultItem.value !== undefined &&
+          defaultItem.value !== ''
+        ) {
           switchConfig.default = defaultItem.value;
         }
       }
 
-      // Add config if it has any meaningful fields (value, cases, or default)
-      if (
-        switchConfig.value ||
-        switchConfig.cases ||
-        switchConfig.default !== undefined
-      ) {
+      // SwitchConfig requires `value` (deny_unknown_fields + mandatory field
+      // on the backend); never emit a config object lacking it.
+      if (switchConfig.value) {
         cleaned[id].config = switchConfig;
       }
     }
@@ -2056,19 +2057,24 @@ function normalizeNodesAndEdges(
               const config = (data as any).config;
               const switchInputMapping: any[] = [];
 
-              // Convert config.value to value field
+              // Convert config.value to value field. Carry the backend `type`
+              // and `default` through so the save path can round-trip them.
               if (config?.value) {
                 switchInputMapping.push({
                   type: 'value',
                   value: config.value.value,
-                  typeHint: config.value.type || 'string',
+                  typeHint: config.value.type ?? 'auto',
                   valueType: config.value.valueType || 'reference',
+                  ...(config.value.default !== undefined
+                    ? { defaultValue: config.value.default }
+                    : {}),
                 });
               } else {
                 switchInputMapping.push({
                   type: 'value',
                   value: '',
-                  typeHint: 'string',
+                  typeHint: 'auto',
+                  valueType: 'reference',
                 });
               }
 
@@ -2085,12 +2091,16 @@ function normalizeNodesAndEdges(
                 typeHint: 'json',
               });
 
-              // Convert config.default
-              switchInputMapping.push({
-                type: 'default',
-                value: config?.default ?? {},
-                typeHint: 'json',
-              });
+              // Convert config.default — only when the workflow authored one.
+              // An absent default means "no match fails the step"; fabricating
+              // a {} here would silently change semantics on the next save.
+              if (config?.default !== undefined) {
+                switchInputMapping.push({
+                  type: 'default',
+                  value: config.default,
+                  typeHint: 'json',
+                });
+              }
 
               // Detect routing mode: any case with a route field
               const hasRoutes = uiCases.some(

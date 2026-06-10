@@ -29,6 +29,12 @@ type SourceMappingValueFieldProps = {
   description: string;
   suggestions: SourceSuggestion[];
   placeholder?: string;
+  /**
+   * Field type forwarded to MappingValueInput. Defaults to 'array' for the
+   * original Split/Filter/GroupBy "array source" use case; Switch passes a
+   * scalar-friendly type.
+   */
+  fieldType?: string;
 };
 
 type SourceEntry = {
@@ -106,6 +112,7 @@ export function SourceMappingValueField({
   description,
   suggestions,
   placeholder = 'Select or enter array source...',
+  fieldType = 'array',
 }: SourceMappingValueFieldProps) {
   const form = useFormContext();
   const mapping = useWatch({ name, control: form.control });
@@ -122,33 +129,48 @@ export function SourceMappingValueField({
   );
 
   const setSourceEntry = (updates: Partial<SourceEntry>) => {
-    const currentEntry = getSourceEntry(form.getValues(name));
+    const currentMapping = form.getValues(name);
+    const currentArray = Array.isArray(currentMapping) ? currentMapping : [];
+    const currentEntry = getSourceEntry(currentArray);
     const hasUpdate = (field: keyof SourceEntry) =>
       Object.prototype.hasOwnProperty.call(updates, field);
 
-    form.setValue(
-      name,
-      [
-        {
-          type: 'value',
-          value: hasUpdate('value')
-            ? updates.value
-            : (currentEntry.value ?? ''),
-          typeHint: hasUpdate('typeHint')
-            ? updates.typeHint
-            : (currentEntry.typeHint ?? 'auto'),
-          valueType: hasUpdate('valueType')
-            ? updates.valueType
-            : (currentEntry.valueType ?? 'reference'),
-          ...(hasUpdate('defaultValue')
-            ? { defaultValue: updates.defaultValue }
-            : currentEntry.defaultValue !== undefined
-              ? { defaultValue: currentEntry.defaultValue }
-              : {}),
-        },
-      ],
-      { shouldDirty: true, shouldTouch: true, shouldValidate: true }
+    const nextEntry = {
+      type: 'value',
+      value: hasUpdate('value') ? updates.value : (currentEntry.value ?? ''),
+      typeHint: hasUpdate('typeHint')
+        ? updates.typeHint
+        : (currentEntry.typeHint ?? 'auto'),
+      valueType: hasUpdate('valueType')
+        ? updates.valueType
+        : (currentEntry.valueType ?? 'reference'),
+      ...(hasUpdate('defaultValue')
+        ? { defaultValue: updates.defaultValue }
+        : currentEntry.defaultValue !== undefined
+          ? { defaultValue: currentEntry.defaultValue }
+          : {}),
+    };
+
+    // Preserve sibling entries (e.g. Switch keeps cases/default/routingMode
+    // in the same mapping array); only the 'value' entry is owned here.
+    const valueIndex = currentArray.findIndex(
+      (item) =>
+        typeof item === 'object' &&
+        item !== null &&
+        (item as { type?: unknown }).type === 'value'
     );
+    const nextArray =
+      valueIndex >= 0
+        ? currentArray.map((item, index) =>
+            index === valueIndex ? nextEntry : item
+          )
+        : [nextEntry, ...currentArray];
+
+    form.setValue(name, nextArray, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
   };
 
   return (
@@ -195,7 +217,7 @@ export function SourceMappingValueField({
                 : '',
           })
         }
-        fieldType="array"
+        fieldType={fieldType}
         fieldName="source"
         placeholder={placeholder}
         allowNull

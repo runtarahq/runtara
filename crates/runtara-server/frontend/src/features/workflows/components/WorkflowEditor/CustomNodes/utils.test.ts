@@ -1046,6 +1046,150 @@ describe('Backend DSL serialization', () => {
     expect(step).not.toHaveProperty('inputMapping');
   });
 
+  it('round-trips Switch value reference type hint and default', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.country',
+          type: 'string',
+          default: 'US',
+        },
+        cases: [{ match: 'US', matchType: 'EQ', output: { region: 'NA' } }],
+        default: { region: 'OTHER' },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.country',
+      type: 'string',
+      default: 'US',
+    });
+    expect(step.config.cases).toEqual([
+      { match: 'US', matchType: 'EQ', output: { region: 'NA' } },
+    ]);
+  });
+
+  it('does not fabricate a Switch default output on round-trip', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: { valueType: 'reference', value: 'data.status' },
+        cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+        // No default: at runtime an unmatched value must fail the step.
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).not.toHaveProperty('default');
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.status',
+    });
+  });
+
+  it('round-trips an authored Switch default output (including {})', () => {
+    const emptyDefault = roundTripStep(
+      makeGraph({
+        id: 'sw',
+        stepType: 'Switch',
+        config: {
+          value: { valueType: 'reference', value: 'data.status' },
+          cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+          default: {},
+        },
+        renderingParameters: { x: 0, y: 0 },
+      })
+    );
+    expect(emptyDefault.config.default).toEqual({});
+
+    const objectDefault = roundTripStep(
+      makeGraph({
+        id: 'sw',
+        stepType: 'Switch',
+        config: {
+          value: { valueType: 'reference', value: 'data.status' },
+          cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+          default: { state: 'unknown' },
+        },
+        renderingParameters: { x: 0, y: 0 },
+      })
+    );
+    expect(objectDefault.config.default).toEqual({ state: 'unknown' });
+  });
+
+  it('round-trips a composite Switch value', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: {
+          valueType: 'composite',
+          value: {
+            country: { valueType: 'reference', value: 'data.country' },
+            tier: { valueType: 'immediate', value: 'gold' },
+          },
+        },
+        cases: [
+          {
+            match: { country: 'US', tier: 'gold' },
+            matchType: 'EQ',
+            output: 'vip',
+          },
+        ],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'composite',
+      value: {
+        country: { valueType: 'reference', value: 'data.country' },
+        tier: { valueType: 'immediate', value: 'gold' },
+      },
+    });
+  });
+
+  it('never emits a Switch config object lacking value', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'sw',
+          type: NODE_TYPES.SwitchNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'sw',
+            stepType: 'Switch',
+            name: 'Route',
+            inputMapping: [
+              { type: 'value', value: '', typeHint: 'auto' },
+              {
+                type: 'cases',
+                value: [{ match: 'a', matchType: 'exact', output: 'a' }],
+              },
+              { type: 'default', value: {} },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'switch-empty-value' }
+    );
+
+    // SwitchConfig.value is mandatory on the backend (deny_unknown_fields);
+    // a config without it would be rejected by serde at save time.
+    const step = (graph!.steps as Record<string, any>).sw;
+    expect(step).not.toHaveProperty('config');
+  });
+
   it('round-trips Delay duration MappingValue', () => {
     const graph = makeGraph({
       id: 'delay',

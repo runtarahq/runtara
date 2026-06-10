@@ -790,6 +790,37 @@ export const schema = () =>
       groupByExpectedKeys: z.array(z.string()).optional(),
     })
     .superRefine((inputs, ctx) => {
+      // Switch requires a value to switch on: SwitchConfig.value is mandatory
+      // on the backend (deny_unknown_fields serde struct), so an empty value
+      // must block the form save instead of failing with a raw serde error.
+      if (inputs.stepType !== 'Switch') return;
+      const valueItem = (inputs.inputMapping || []).find(
+        (item) => item.type === 'value'
+      );
+      const rawValue = valueItem?.value;
+      const isEmptyComposite =
+        valueItem?.valueType === 'composite' &&
+        rawValue !== null &&
+        typeof rawValue === 'object' &&
+        (Array.isArray(rawValue)
+          ? rawValue.length === 0
+          : Object.keys(rawValue as object).length === 0);
+      const hasValue =
+        valueItem !== undefined &&
+        rawValue !== undefined &&
+        (rawValue !== null || valueItem.valueType === 'immediate') &&
+        !(typeof rawValue === 'string' && rawValue.trim() === '') &&
+        !isEmptyComposite;
+
+      if (!hasValue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['inputMapping'],
+          message: 'Value to Switch On is required',
+        });
+      }
+    })
+    .superRefine((inputs, ctx) => {
       if (inputs.stepType !== 'Split') return;
       const splitVariables = inputs.splitVariablesFields || [];
       splitVariables.forEach((item, index) => {

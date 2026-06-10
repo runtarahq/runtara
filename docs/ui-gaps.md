@@ -337,7 +337,9 @@ Complexity/effort: M to L.
 
 ### 23. Switch residuals
 
-Status: Open. Severity: medium.
+Status: Implemented. Severity: medium.
+
+Resolution (2026-06-10): the Switch "Value to Switch On" now uses the shared SourceMappingValueField (reference type hints, default fallbacks, and composite values all author and round-trip via the generic mapping serialization path). `config.default` is no longer fabricated: load pushes the entry only when authored, new nodes don't seed it, and the form shows "No default — execution fails when no case matches" with explicit Add/Remove Default controls. The dead moustache autocomplete was removed from value/output fields (the runtime resolves only reference/immediate objects there), and a Switch-specific zod superRefine blocks saving without a value (serde would reject `config` lacking `value`). Round-trip tests added in `CustomNodes/utils.test.ts`.
 
 Description:
 `config.value`'s reference type hint is locked to `string` with no UI to change it (`SwitchCasesField/index.tsx:192-193`) and its `default` fallback is dropped on save; a Switch authored with no `default` output gets `default: {}` injected on every save (changes no-match behavior from error to empty output); moustache `{{...}}` autocomplete suggests syntax that is dead in Switch outputs; the form does not enforce the DSL-required `config.value`; composite values dead-end.
