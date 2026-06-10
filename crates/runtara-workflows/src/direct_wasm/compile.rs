@@ -583,6 +583,18 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
+/// Stack size for the dedicated compile thread.
+///
+/// Run-plan construction, Wasm emission, and the run-plan drop all recurse
+/// proportionally to the longest unconditional step chain in the graph. On the
+/// 2 MiB default stack of `tokio::task::spawn_blocking` threads a release
+/// build overflows — aborting the whole process — between 400 and 800 chained
+/// steps, and a debug build around 100. This is address space, not committed
+/// memory: pages are only touched as the recursion actually deepens, and it
+/// buys two orders of magnitude of headroom over the largest graphs seen in
+/// practice.
+const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 /// Compile a workflow through the direct path — the only compile path.
 ///
 /// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
@@ -590,7 +602,29 @@ pub fn compile_direct_workflow_composed(
 /// per-feature report. The emitted component-format artifact is a stable
 /// direct pipeline artifact with a canonical `wasi:cli/run` export, stdlib
 /// JSON calls, and runtime completion calls.
+///
+/// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
+/// stack so compilation never depends on the caller's stack budget; panics
+/// from the compile body resume on the caller.
 pub fn compile_direct_workflow(
+    input: DirectCompilationInput,
+) -> Result<DirectCompilationResult, DirectCompileError> {
+    let span = tracing::Span::current();
+    let handle = std::thread::Builder::new()
+        .name("direct-compile".to_string())
+        .stack_size(DIRECT_COMPILE_STACK_SIZE)
+        .spawn(move || {
+            let _span = span.entered();
+            compile_direct_workflow_inner(input)
+        })
+        .map_err(DirectCompileError::Io)?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the

@@ -1021,6 +1021,91 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
 }
 
 #[test]
+fn direct_compile_long_chain_compiles_from_small_stack_caller() {
+    // compile_direct_workflow must not depend on the caller's stack budget:
+    // production invokes it from tokio `spawn_blocking` threads (2 MiB).
+    // Run-plan build, emit, and the run-plan drop all recurse with chain
+    // length; before the dedicated compile thread a chain this long overflowed
+    // the caller's 2 MiB stack in debug builds and aborted the process
+    // (release builds died between 400 and 800 chained steps). Kept at 300 —
+    // 3x the debug overflow threshold — because plan construction recomputes
+    // region orders per step (O(n^3) in chain length), so longer chains make
+    // this test disproportionately slow.
+    let chain_len = 300usize;
+    let mut steps = serde_json::Map::new();
+    let mut plan = Vec::new();
+    for i in 0..chain_len {
+        steps.insert(
+            format!("s{i}"),
+            serde_json::json!({
+                "id": format!("s{i}"),
+                "stepType": "Agent",
+                "agentId": "utils",
+                "capabilityId": "return-input",
+                "inputMapping": {"value": {"valueType": "immediate", "value": i}}
+            }),
+        );
+        if i + 1 < chain_len {
+            plan.push(serde_json::json!({
+                "fromStep": format!("s{i}"),
+                "toStep": format!("s{}", i + 1)
+            }));
+        }
+    }
+    steps.insert(
+        "finish".to_string(),
+        serde_json::json!({
+            "id": "finish",
+            "stepType": "Finish",
+            "inputMapping": {
+                "out": {
+                    "valueType": "reference",
+                    "value": format!("steps.s{}.outputs", chain_len - 1)
+                }
+            }
+        }),
+    );
+    plan.push(serde_json::json!({
+        "fromStep": format!("s{}", chain_len - 1),
+        "toStep": "finish"
+    }));
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "entryPoint": "s0",
+        "steps": steps,
+        "executionPlan": plan
+    }))
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output_dir = temp.path().to_path_buf();
+    let handle = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            compile_direct_workflow(DirectCompilationInput {
+                workflow_id: "repro/long-chain".to_string(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir,
+                track_events: true,
+                agent_catalog: None,
+                connection_integration_ids: std::collections::HashMap::new(),
+            })
+        })
+        .expect("spawn 2 MiB caller thread");
+    let result = handle
+        .join()
+        .expect("compile must not exhaust the caller thread's stack")
+        .expect("long chain should compile");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
+}
+
+#[test]
 fn direct_compile_embeds_manifest_and_support_sections() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {
