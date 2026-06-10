@@ -200,6 +200,13 @@ export const NodeFormProvider = ({
     return parentStep?.stepType === 'While';
   }, [parentNodeId, executionGraph]);
 
+  // Detect if this step is inside a Split iteration container
+  const isInsideSplit = useMemo(() => {
+    if (!parentNodeId || !executionGraph?.steps) return false;
+    const parentStep = executionGraph.steps[parentNodeId];
+    return parentStep?.stepType === 'Split';
+  }, [parentNodeId, executionGraph]);
+
   const isLoading =
     agentsQuery.isFetching ||
     stepTypesQuery.isFetching ||
@@ -219,6 +226,7 @@ export const NodeFormProvider = ({
       inputSchemaFields,
       variables,
       isInsideWhileLoop,
+      isInsideSplit,
     }),
     [
       nodeId,
@@ -233,6 +241,7 @@ export const NodeFormProvider = ({
       inputSchemaFields,
       variables,
       isInsideWhileLoop,
+      isInsideSplit,
     ]
   );
 

@@ -9,6 +9,7 @@ import { useContext, useEffect, useMemo, useRef } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { SwitchCasesField } from '../SwitchCasesField';
 import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
+import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
 import { ValueType } from '../TypeHintSelector';
 import { parseSchema } from '@/features/workflows/utils/schema';
 
@@ -405,14 +406,10 @@ export function InputMappingField(props: any) {
 
   // Sync Zustand store changes back to react-hook-form
   const handleSimpleEditorDataChange = (entries: any[]) => {
-    // Convert entries to the format expected by react-hook-form
-    // Include typeHint to ensure proper type conversion when saving
-    const formEntries = entries.map((entry) => ({
-      type: entry.type,
-      value: entry.value,
-      valueType: entry.valueType,
-      typeHint: entry.typeHint,
-    }));
+    // Convert entries to the format expected by react-hook-form.
+    // Include typeHint for proper type conversion and preserve defaultValue
+    // (ReferenceValue.default) so saving the form doesn't destroy it.
+    const formEntries = toFormMappingEntries(entries);
     // Use shouldValidate to ensure validation runs with the new values
     setValue(name, formEntries, {
       shouldDirty: true,
@@ -429,12 +426,8 @@ export function InputMappingField(props: any) {
     }
 
     // Convert current form data to initial data format
-    const initialData = fieldArray.map((item: any) => ({
-      type: item.type,
-      value: item.value ?? '',
-      valueType: item.valueType ?? 'immediate',
-      typeHint: item.typeHint,
-    }));
+    // (preserves defaultValue for reference entries)
+    const initialData = toEditorInitialData(fieldArray);
 
     // Use actual nodeId for edit mode, or a temporary ID for create mode
     const editorNodeId = nodeId || '__temp_create_node__';
@@ -500,12 +493,8 @@ export function InputMappingField(props: any) {
 
     // Convert current form data to initial data format
     // Include typeHint to ensure proper type conversion when saving
-    const initialData = fieldArray.map((item: any) => ({
-      type: item.type,
-      value: item.value ?? '',
-      valueType: item.valueType ?? 'immediate',
-      typeHint: item.typeHint,
-    }));
+    // (preserves defaultValue for reference entries)
+    const initialData = toEditorInitialData(fieldArray);
 
     // Use actual nodeId for edit mode, or a temporary ID for create mode
     const editorNodeId = nodeId || '__temp_create_node__';

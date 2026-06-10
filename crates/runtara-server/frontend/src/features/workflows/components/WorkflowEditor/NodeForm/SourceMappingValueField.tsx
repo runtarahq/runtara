@@ -199,6 +199,10 @@ export function SourceMappingValueField({
         fieldName="source"
         placeholder={placeholder}
         allowNull
+        defaultValue={sourceEntry.defaultValue}
+        onDefaultValueChange={(nextDefault) =>
+          setSourceEntry({ defaultValue: nextDefault })
+        }
       />
 
       {valueType === 'composite' && (

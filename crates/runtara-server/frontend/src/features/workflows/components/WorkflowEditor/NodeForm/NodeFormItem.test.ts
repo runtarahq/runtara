@@ -114,6 +114,38 @@ describe('NodeFormItem schema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('passes ReferenceValue.default (defaultValue) through the resolver', () => {
+    const result = testSchema.safeParse({
+      ...baseFormData,
+      inputMapping: [
+        {
+          type: 'orderId',
+          value: "steps['fetch'].outputs.orderId",
+          typeHint: 'string',
+          valueType: 'reference' as const,
+          defaultValue: 'unknown-order',
+        },
+        {
+          type: 'payload',
+          value: "steps['fetch'].outputs.payload",
+          typeHint: 'json',
+          valueType: 'reference' as const,
+          defaultValue: { fallback: true },
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // zodResolver replaces form data with the parsed output on save —
+      // a stripped key here means the JSON-authored default is destroyed.
+      expect(result.data.inputMapping[0].defaultValue).toBe('unknown-order');
+      expect(result.data.inputMapping[1].defaultValue).toEqual({
+        fallback: true,
+      });
+    }
+  });
+
   it('allows a Finish output with a literal null source', () => {
     const result = testSchema.safeParse({
       ...baseFormData,

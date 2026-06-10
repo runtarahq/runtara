@@ -29,6 +29,8 @@ export interface NodeFormContextContextData {
   variables?: SimpleVariable[];
   /** Whether this step is inside a While loop (or the While condition itself) */
   isInsideWhileLoop?: boolean;
+  /** Whether this step is inside a Split iteration subgraph */
+  isInsideSplit?: boolean;
 }
 
 export const NodeFormContext = createContext<NodeFormContextContextData>({

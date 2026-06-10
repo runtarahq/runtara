@@ -77,6 +77,50 @@ describe('nodeFormStore', () => {
     });
   });
 
+  describe('setFieldDefaultValue', () => {
+    it('sets the reference fallback for a field', () => {
+      useNodeFormStore.getState().setFieldValue('node-1', 'field', 'ref.path');
+      useNodeFormStore
+        .getState()
+        .setFieldDefaultValue('node-1', 'field', 'fallback');
+
+      const entry = useNodeFormStore
+        .getState()
+        .getFieldEntry('node-1', 'field');
+      expect(entry?.defaultValue).toBe('fallback');
+    });
+
+    it('removes the key when cleared with undefined', () => {
+      useNodeFormStore.getState().setFieldValue('node-1', 'field', 'ref.path');
+      useNodeFormStore
+        .getState()
+        .setFieldDefaultValue('node-1', 'field', 'fallback');
+      useNodeFormStore
+        .getState()
+        .setFieldDefaultValue('node-1', 'field', undefined);
+
+      const entry = useNodeFormStore
+        .getState()
+        .getFieldEntry('node-1', 'field');
+      expect(entry).toBeDefined();
+      expect(entry).not.toHaveProperty('defaultValue');
+    });
+
+    it('survives a getNodeInputMapping round-trip', () => {
+      useNodeFormStore.getState().setFieldValue('node-1', 'field', 'ref.path');
+      useNodeFormStore
+        .getState()
+        .setFieldValueType('node-1', 'field', 'reference');
+      useNodeFormStore
+        .getState()
+        .setFieldDefaultValue('node-1', 'field', 'fallback');
+
+      const entries = useNodeFormStore.getState().getNodeInputMapping('node-1');
+      expect(entries).toHaveLength(1);
+      expect(entries[0].defaultValue).toBe('fallback');
+    });
+  });
+
   describe('initializeField', () => {
     it('initializes a new field', () => {
       const entry: InputMappingEntry = {

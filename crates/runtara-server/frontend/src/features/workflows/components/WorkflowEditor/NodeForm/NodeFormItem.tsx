@@ -631,6 +631,10 @@ export const schema = () =>
             valueType: z
               .enum(['immediate', 'reference', 'composite', 'template'])
               .optional(),
+            // ReferenceValue.default — fallback used at runtime when the
+            // referenced path is missing or null. Must pass through the
+            // resolver or a node-form save strips a JSON-authored default.
+            defaultValue: z.any().optional(),
           })
           .refine(
             (item) => {

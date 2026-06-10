@@ -78,6 +78,11 @@ export type InputMappingEntry = {
     | CompositeArrayValue;
   valueType: InputMappingValueType;
   typeHint?: string; // Type hint for value conversion (e.g., 'integer', 'number', 'boolean', 'string', 'json', 'auto')
+  /**
+   * ReferenceValue.default — fallback used at runtime when the referenced
+   * path resolves to missing or null. Only meaningful for reference entries.
+   */
+  defaultValue?: unknown;
 };
 
 type NodeFormState = {
@@ -99,6 +104,12 @@ type NodeFormState = {
     nodeId: string,
     fieldName: string,
     typeHint: string
+  ) => void;
+  /** Set or clear (pass undefined) the reference fallback for a field */
+  setFieldDefaultValue: (
+    nodeId: string,
+    fieldName: string,
+    defaultValue: unknown | undefined
   ) => void;
   initializeField: (
     nodeId: string,
@@ -168,6 +179,27 @@ export const useNodeFormStore = create<NodeFormState>()(
             };
           }
           state.nodeInputMappings[nodeId][fieldName].typeHint = typeHint;
+        });
+      },
+
+      setFieldDefaultValue: (nodeId, fieldName, defaultValue) => {
+        set((state) => {
+          if (!state.nodeInputMappings[nodeId]) {
+            state.nodeInputMappings[nodeId] = {};
+          }
+          if (!state.nodeInputMappings[nodeId][fieldName]) {
+            state.nodeInputMappings[nodeId][fieldName] = {
+              type: fieldName,
+              value: '',
+              valueType: 'immediate',
+            };
+          }
+          if (defaultValue === undefined) {
+            delete state.nodeInputMappings[nodeId][fieldName].defaultValue;
+          } else {
+            state.nodeInputMappings[nodeId][fieldName].defaultValue =
+              defaultValue;
+          }
         });
       },
 

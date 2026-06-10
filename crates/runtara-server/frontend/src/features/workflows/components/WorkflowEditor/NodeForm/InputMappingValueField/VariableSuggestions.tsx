@@ -6,7 +6,12 @@ export interface VariableSuggestion {
   label: string;
   value: string;
   description?: string;
-  group: 'Workflow Inputs' | 'Variables' | 'Step Outputs' | 'Loop Context';
+  group:
+    | 'Workflow Inputs'
+    | 'Variables'
+    | 'Step Outputs'
+    | 'Loop Context'
+    | 'Split Scope';
   type?: string;
   /** Step ID for step outputs (used to extract field path) */
   stepId?: string;
@@ -48,7 +53,8 @@ export function composeVariableSuggestions(
   previousSteps: StepInfo[],
   inputSchemaFields?: SchemaField[],
   variables?: SimpleVariable[],
-  isInsideWhileLoop?: boolean
+  isInsideWhileLoop?: boolean,
+  isInsideSplit?: boolean
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
 
@@ -134,6 +140,42 @@ export function composeVariableSuggestions(
     });
   }
 
+  // Add Split iteration scope variables when inside a Split subgraph.
+  // The runtime injects these into each iteration's variables
+  // (see SPLIT_SCOPE_VARIABLES in crates/runtara-workflows/src/validation.rs:
+  // _index, _item, _loop, _loop_indices — referenceable as `variables.<name>`).
+  if (isInsideSplit) {
+    suggestions.push({
+      label: 'variables._item',
+      value: 'variables._item',
+      description: 'Current array item for this Split iteration',
+      group: 'Split Scope',
+    });
+    suggestions.push({
+      label: 'variables._index',
+      value: 'variables._index',
+      description: '0-based index of the current Split iteration',
+      group: 'Split Scope',
+      type: 'number',
+    });
+    suggestions.push({
+      label: 'variables._loop',
+      value: 'variables._loop',
+      description:
+        'Enclosing While loop context ({index, outputs}); null unless the Split is nested in a While loop',
+      group: 'Split Scope',
+      type: 'object',
+    });
+    suggestions.push({
+      label: 'variables._loop_indices',
+      value: 'variables._loop_indices',
+      description:
+        'Iteration indices of all enclosing loop scopes, outermost first',
+      group: 'Split Scope',
+      type: 'array',
+    });
+  }
+
   // Add suggestions from previous steps' outputs
   for (const step of previousSteps ?? []) {
     const flattenedParams = flattenStepParameters(step.outputs);
@@ -197,6 +239,7 @@ export function groupSuggestions(
 ): Record<string, VariableSuggestion[]> {
   const grouped: Record<string, VariableSuggestion[]> = {
     'Loop Context': [],
+    'Split Scope': [],
     'Workflow Inputs': [],
     Variables: [],
     'Step Outputs': [],

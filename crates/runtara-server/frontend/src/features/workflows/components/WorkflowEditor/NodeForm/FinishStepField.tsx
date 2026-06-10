@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
 import { NodeFormContext } from './NodeFormContext';
+import { deriveTypeHintFromSchemaType } from './finish-type-hints';
 import {
   MappingValueInput,
   ValueMode,
@@ -176,7 +177,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
       .map((field) => ({
         type: field.name,
         value: '',
-        typeHint: 'string' as const,
+        // Schema-bound rows derive the hint from the schema's declared type
+        typeHint: deriveTypeHintFromSchemaType(field.type),
         valueType: 'immediate' as const,
       }));
 
@@ -186,6 +188,23 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepType, outputSchemaFields, isEdit]);
+
+  // Schema-bound rows: the workflow output schema is the source of truth for
+  // the type hint. Re-derive on load so stale hints (e.g. 'string' persisted
+  // while the schema says number/boolean) don't coerce values to the wrong
+  // type at runtime. Custom rows keep their user-editable hint.
+  useEffect(() => {
+    if (stepType !== 'Finish') return;
+    fieldArray.forEach((row: any, index: number) => {
+      if (!row?.type) return;
+      const fieldInfo = schemaFieldMap.get(row.type);
+      if (!fieldInfo) return;
+      const derived = deriveTypeHintFromSchemaType(fieldInfo.type);
+      if (derived && row.typeHint !== derived) {
+        form.setValue(`${name}.${index}.typeHint`, derived);
+      }
+    });
+  }, [stepType, fieldArray, schemaFieldMap, form, name]);
 
   // Early return after all hooks are called
   if (stepType !== 'Finish') {
@@ -227,7 +246,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               const newFields = missingRequiredFields.map((field) => ({
                 type: field.name,
                 value: '',
-                typeHint: 'string' as const,
+                // Schema-bound rows derive the hint from the schema type
+                typeHint: deriveTypeHintFromSchemaType(field.type),
                 valueType: 'immediate' as const,
               }));
               append(newFields);
@@ -399,6 +419,16 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                       fieldType={outputFieldType}
                                       allowNull={allowsNull}
                                       placeholder="Enter value or select reference..."
+                                      defaultValue={
+                                        fieldArray[index]?.defaultValue
+                                      }
+                                      onDefaultValueChange={(nextDefault) =>
+                                        form.setValue(
+                                          `${name}.${index}.defaultValue`,
+                                          nextDefault,
+                                          { shouldDirty: true }
+                                        )
+                                      }
                                     />
                                     {isCompositeMode && (
                                       <div className="mt-2 border-t border-primary/20 bg-muted/20 rounded-b-md">
@@ -513,7 +543,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                     append({
                       type: field.name,
                       value: '',
-                      typeHint: 'string',
+                      // Schema-bound rows derive the hint from the schema type
+                      typeHint: deriveTypeHintFromSchemaType(field.type),
                       valueType: 'immediate',
                     })
                   }

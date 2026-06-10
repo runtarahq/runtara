@@ -212,6 +212,7 @@ function FieldRow({
   const entry = useNodeFormStore((s) => s.getFieldEntry(nodeId, field.name));
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
   const setFieldValueType = useNodeFormStore((s) => s.setFieldValueType);
+  const setFieldDefaultValue = useNodeFormStore((s) => s.setFieldDefaultValue);
 
   const label = getFieldLabel(field);
   const helpText = getFieldHelpText(field);
@@ -236,6 +237,11 @@ function FieldRow({
 
   const handleValueTypeChange = (newType: ValueMode) => {
     setFieldValueType(nodeId, field.name, newType);
+    onFieldChange?.();
+  };
+
+  const handleDefaultValueChange = (newDefault: string | undefined) => {
+    setFieldDefaultValue(nodeId, field.name, newDefault);
     onFieldChange?.();
   };
 
@@ -378,6 +384,8 @@ function FieldRow({
               enumOptions={enumOptions}
               allowNull={allowsNull}
               hideReferenceToggle={hideReferenceToggle}
+              defaultValue={entry?.defaultValue}
+              onDefaultValueChange={handleDefaultValueChange}
             />
           </div>
         )}

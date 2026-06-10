@@ -55,6 +55,17 @@ interface MappingValueInputProps {
   hideReferenceToggle?: boolean;
   /** Allow setting literal null for nullable-compatible immediate values */
   allowNull?: boolean;
+  /**
+   * ReferenceValue.default — fallback used at runtime when the referenced
+   * path is missing or null. Only shown in reference mode.
+   */
+  defaultValue?: unknown;
+  /**
+   * Called when the fallback value changes. Pass-through of `undefined`
+   * removes the key from the entry. When omitted, the fallback editor is
+   * not rendered (for call sites without entry default semantics).
+   */
+  onDefaultValueChange?: (value: string | undefined) => void;
 }
 
 function fieldTypeSupportsNull(fieldType: string): boolean {
@@ -101,6 +112,8 @@ export function MappingValueInput({
   className,
   hideReferenceToggle = false,
   allowNull = false,
+  defaultValue,
+  onDefaultValueChange,
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
@@ -114,6 +127,15 @@ export function MappingValueInput({
   const isComposite = valueType === 'composite';
   const stringValue =
     value === null || value === undefined ? '' : String(value);
+  // Display form of the reference fallback (defaultValue). Non-string
+  // JSON-authored values are shown serialized; edits store the raw string
+  // (the reference type hint coerces it at runtime).
+  const defaultValueString =
+    defaultValue === undefined
+      ? ''
+      : typeof defaultValue === 'string'
+        ? defaultValue
+        : JSON.stringify(defaultValue);
   const isNullValue = value === null;
   const canSetNull =
     allowNull &&
@@ -191,14 +213,35 @@ export function MappingValueInput({
     if (isReference) {
       if (stringValue) {
         return (
-          <div className="flex-1 flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
-            <ReferencePill
-              path={stringValue}
-              stepName={stepInfo.stepName}
-              fieldPath={stepInfo.fieldPath ?? undefined}
-              onRemove={handleRemoveReference}
-              disabled={disabled}
-            />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
+              <ReferencePill
+                path={stringValue}
+                stepName={stepInfo.stepName}
+                fieldPath={stepInfo.fieldPath ?? undefined}
+                onRemove={handleRemoveReference}
+                disabled={disabled}
+              />
+            </div>
+            {onDefaultValueChange && (
+              <div className="mt-1">
+                <Input
+                  type="text"
+                  value={defaultValueString}
+                  onChange={(e) =>
+                    onDefaultValueChange(
+                      e.target.value === '' ? undefined : e.target.value
+                    )
+                  }
+                  placeholder="Fallback value (optional)"
+                  disabled={disabled}
+                  className="h-7 font-mono text-xs"
+                />
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  Used when the referenced path is missing or null
+                </p>
+              </div>
+            )}
           </div>
         );
       } else {

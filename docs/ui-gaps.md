@@ -311,7 +311,14 @@ Complexity/effort: M.
 
 ### 22. Mapping editors: residual reference/immediate fidelity holes
 
-Status: Open. Severity: high (first three), medium/low (rest).
+Status: Partially implemented — the high-severity items and the reference-default editor are fixed; the remaining medium/low residuals (empty-string immediates dropped, composite-nested template mode, Split `config.variables` template/typing, dotted mapping keys, deprecated bare `__error.*` template emission, Finish duplicate output names / object-array immediates) are still open. Severity: high (first three), medium/low (rest).
+
+Resolution of the high items + default editor (2026-06-10):
+- The mapping variable picker gained a free-text "use as custom reference path" row (any legal path is authorable: deep `data.*`, `steps.__error.*`, indices, schema-unknown outputs) and now renders the previously-computed-but-never-displayed Loop Context section.
+- Steps inside a Split body get a Split Scope suggestion group (`variables._item`, `_index`, `_loop`, `_loop_indices` — list verified against `SPLIT_SCOPE_VARIABLES`, `validation.rs:1817`; `_loop` documented as While-inherited), driven by a new `isInsideSplit` context flag.
+- `ReferenceValue.default` is now editable (a "Fallback value" input in reference mode) AND survives form saves: the node-form zod schema, the simple-editor entry rebuilds, and the EmbedWorkflow/Agent initialData conversions all preserve `defaultValue` — previously merely opening and saving a step's form silently deleted JSON-authored fallbacks.
+- Finish schema-bound output rows derive their reference type hint from the schema field's declared type instead of hardcoded `'string'` (which silently stringified numbers/booleans at runtime via `apply_type_hint`); stale `'string'` hints on schema-bound rows are re-derived on load, and unknown types omit the hint rather than writing an illegal one.
+Covered by new tests: `mapping-entries.test.ts`, `finish-type-hints.test.ts`, `VariableSuggestions.test.ts`, plus zod/nodeFormStore assertions.
 
 Description:
 - Reference pickers in mapping editors have no free-text path mode; arbitrary-but-legal paths (deep `data.*` chains, `steps.<id>.outputs.<deep>` not present in schemas) require picking from suggestions only.
