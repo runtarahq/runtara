@@ -47,6 +47,7 @@
 //! | E021 | UnknownCapability | Capability doesn't exist |
 //! | E022 | MissingRequiredInput | Required agent input missing |
 //! | E026 | AgentMissingConnection | Agent capability requires connectionId |
+//! | E027 | QueryOnlyConditionOperator | Operator only valid in object-model query conditions |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -306,6 +307,17 @@ pub enum ValidationError {
         field_name: String,
         path: String,
         message: String,
+    },
+    /// A workflow condition (Conditional/While/Filter step or executionPlan
+    /// edge) uses an operator that only exists for object-model query
+    /// conditions. The workflow runtime has no evaluator for these operators,
+    /// so the condition can never hold.
+    QueryOnlyConditionOperator {
+        step_id: String,
+        /// Where the condition lives: `"condition"` for step conditions, or a
+        /// human-readable edge description for executionPlan edges.
+        location: String,
+        operator: String,
     },
 
     // === Naming Errors ===
@@ -807,6 +819,18 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E025] Step '{}': condition input '{}' has invalid shape at {}: {}",
                     step_id, field_name, path, message
+                )
+            }
+            ValidationError::QueryOnlyConditionOperator {
+                step_id,
+                location,
+                operator,
+            } => {
+                write!(
+                    f,
+                    "[E027] Step '{}': operator '{}' in {} is only valid inside object-model \
+                     query conditions; the workflow runtime cannot evaluate it",
+                    step_id, operator, location
                 )
             }
 
@@ -1350,6 +1374,9 @@ pub fn validate_workflow(
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
+
+    // Phase 10.5: Reject query-only condition operators in workflow conditions (E027)
+    validate_condition_operators(graph, &mut result);
 
     // Phase 11: AI Agent validation
     validate_ai_agent_steps(graph, &mut result);
@@ -3332,6 +3359,98 @@ fn validate_compensation_recursive(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+}
+
+/// E027: workflow conditions must not use operators that only exist for
+/// object-model query conditions (`SIMILARITY_GTE`, `MATCH`,
+/// `COSINE_DISTANCE_LTE`, `L2_DISTANCE_LTE`). Those are evaluated server-side
+/// inside an object-model query; the workflow runtime has no evaluator for
+/// them, so a Conditional/While/Filter/edge condition using one can never
+/// hold. Checks step conditions and executionPlan edge conditions (including
+/// `onError` edges), recursing into Split/While subgraphs and WaitForSignal
+/// `onWait` graphs. Object-model query conditions travel inside agent
+/// `inputMapping` values and are deliberately NOT visited here.
+fn validate_condition_operators(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::Conditional(conditional) => check_condition_expression_operators(
+                step_id,
+                "condition",
+                &conditional.condition,
+                result,
+            ),
+            Step::Filter(filter) => check_condition_expression_operators(
+                step_id,
+                "condition",
+                &filter.config.condition,
+                result,
+            ),
+            Step::While(while_step) => {
+                check_condition_expression_operators(
+                    step_id,
+                    "condition",
+                    &while_step.condition,
+                    result,
+                );
+                validate_condition_operators(&while_step.subgraph, result);
+            }
+            Step::Split(split) => validate_condition_operators(&split.subgraph, result),
+            Step::WaitForSignal(wait) => {
+                if let Some(on_wait) = &wait.on_wait {
+                    validate_condition_operators(on_wait, result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for edge in &graph.execution_plan {
+        if let Some(condition) = &edge.condition {
+            let location = match edge.label.as_deref() {
+                Some("onError") => format!("the onError edge to '{}'", edge.to_step),
+                _ => format!("the edge to '{}'", edge.to_step),
+            };
+            check_condition_expression_operators(&edge.from_step, &location, condition, result);
+        }
+    }
+}
+
+fn check_condition_expression_operators(
+    step_id: &str,
+    location: &str,
+    expr: &runtara_dsl::ConditionExpression,
+    result: &mut ValidationResult,
+) {
+    match expr {
+        runtara_dsl::ConditionExpression::Operation(operation) => {
+            if let Some(operator) = query_only_operator_name(&operation.op) {
+                result
+                    .errors
+                    .push(ValidationError::QueryOnlyConditionOperator {
+                        step_id: step_id.to_string(),
+                        location: location.to_string(),
+                        operator: operator.to_string(),
+                    });
+            }
+            for argument in &operation.arguments {
+                if let runtara_dsl::ConditionArgument::Expression(nested) = argument {
+                    check_condition_expression_operators(step_id, location, nested, result);
+                }
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(_) => {}
+    }
+}
+
+fn query_only_operator_name(op: &runtara_dsl::ConditionOperator) -> Option<&'static str> {
+    use runtara_dsl::ConditionOperator;
+    match op {
+        ConditionOperator::SimilarityGte => Some("SIMILARITY_GTE"),
+        ConditionOperator::Match => Some("MATCH"),
+        ConditionOperator::CosineDistanceLte => Some("COSINE_DISTANCE_LTE"),
+        ConditionOperator::L2DistanceLte => Some("L2_DISTANCE_LTE"),
+        _ => None,
+    }
 }
 
 /// W040: a step has both a normal-flow edge and an `onError` edge to the SAME
@@ -9498,6 +9617,249 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
+        );
+    }
+
+    // --- E027: query-only condition operators in workflow conditions ---
+
+    fn e027_operators(result: &ValidationResult) -> Vec<(String, String)> {
+        result
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                ValidationError::QueryOnlyConditionOperator {
+                    step_id, operator, ..
+                } => Some((step_id.clone(), operator.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn e027_rejected_in_conditional_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "check",
+              "executionPlan": [
+                {"fromStep":"check","toStep":"finish_true","label":"true"},
+                {"fromStep":"check","toStep":"finish_false","label":"false"}
+              ],
+              "steps": {
+                "check": {"id":"check","stepType":"Conditional","condition":{
+                  "type":"operation","op":"MATCH","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"needle"}
+                  ]}},
+                "finish_true": {"id":"finish_true","stepType":"Finish"},
+                "finish_false": {"id":"finish_false","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("check".to_string(), "MATCH".to_string())],
+            "{:?}",
+            result.errors
+        );
+        let display = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, ValidationError::QueryOnlyConditionOperator { .. }))
+            .map(|e| format!("{e}"))
+            .unwrap();
+        assert!(display.contains("[E027]"), "{display}");
+        assert!(display.contains("MATCH"), "{display}");
+    }
+
+    #[test]
+    fn e027_rejected_in_while_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [
+                {"fromStep":"loop","toStep":"finish"}
+              ],
+              "steps": {
+                "loop": {"id":"loop","stepType":"While","condition":{
+                  "type":"operation","op":"SIMILARITY_GTE","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"query"},
+                    {"valueType":"immediate","value":0.8}
+                  ]},
+                  "subgraph": {
+                    "entryPoint": "inner_finish",
+                    "executionPlan": [],
+                    "steps": {"inner_finish": {"id":"inner_finish","stepType":"Finish"}}
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("loop".to_string(), "SIMILARITY_GTE".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_in_filter_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "filter",
+              "executionPlan": [
+                {"fromStep":"filter","toStep":"finish"}
+              ],
+              "steps": {
+                "filter": {"id":"filter","stepType":"Filter","config":{
+                  "value": {"valueType":"immediate","value":[1,2,3]},
+                  "condition": {"type":"operation","op":"COSINE_DISTANCE_LTE","arguments":[
+                    {"valueType":"reference","value":"item.embedding"},
+                    {"valueType":"immediate","value":[0.1,0.2]},
+                    {"valueType":"immediate","value":0.3}
+                  ]}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("filter".to_string(), "COSINE_DISTANCE_LTE".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_in_edge_and_on_error_edge_conditions() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"finish_match","condition":{
+                  "type":"operation","op":"MATCH","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"needle"}
+                  ]}},
+                {"fromStep":"a","toStep":"finish_default"},
+                {"fromStep":"a","toStep":"finish_err","label":"onError","condition":{
+                  "type":"operation","op":"L2_DISTANCE_LTE","arguments":[
+                    {"valueType":"reference","value":"steps.__error.embedding"},
+                    {"valueType":"immediate","value":[0.0]},
+                    {"valueType":"immediate","value":1.0}
+                  ]}}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_match": {"id":"finish_match","stepType":"Finish"},
+                "finish_default": {"id":"finish_default","stepType":"Finish"},
+                "finish_err": {"id":"finish_err","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        let mut operators = e027_operators(&result);
+        operators.sort();
+        assert_eq!(
+            operators,
+            vec![
+                ("a".to_string(), "L2_DISTANCE_LTE".to_string()),
+                ("a".to_string(), "MATCH".to_string())
+            ],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_inside_split_subgraph_and_nested_under_and() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "check",
+                    "executionPlan": [
+                      {"fromStep":"check","toStep":"f_true","label":"true"},
+                      {"fromStep":"check","toStep":"f_false","label":"false"}
+                    ],
+                    "steps": {
+                      "check": {"id":"check","stepType":"Conditional","condition":{
+                        "type":"operation","op":"AND","arguments":[
+                          {"type":"operation","op":"MATCH","arguments":[
+                            {"valueType":"reference","value":"data.text"},
+                            {"valueType":"immediate","value":"needle"}
+                          ]},
+                          {"type":"operation","op":"EQ","arguments":[
+                            {"valueType":"immediate","value":1},
+                            {"valueType":"immediate","value":1}
+                          ]}
+                        ]}},
+                      "f_true": {"id":"f_true","stepType":"Finish"},
+                      "f_false": {"id":"f_false","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("check".to_string(), "MATCH".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_not_raised_for_object_model_query_conditions() {
+        // SIMILARITY_GTE is legitimate inside an object-model query condition
+        // (it travels as agent inputMapping JSON, not a workflow condition).
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "SIMILARITY_GTE",
+            "arguments": [
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "reference", "value": "data.query_embedding"},
+                {"valueType": "immediate", "value": 0.8}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            e027_operators(&result).is_empty(),
+            "object-model query conditions must not trigger E027: {:?}",
+            result.errors
         );
     }
 }

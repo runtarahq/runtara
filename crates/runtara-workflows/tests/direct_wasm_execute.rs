@@ -38,6 +38,8 @@ const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_prio
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
+const CONDITIONAL_QUERY_ONLY_OPERATOR: &str =
+    include_str!("fixtures/conditional_query_only_operator.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
   "durable": true,
   "steps": {
@@ -1332,6 +1334,36 @@ fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
             "category": "timeout",
             "severity": "error"
         })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-01: MATCH (like SIMILARITY_GTE / COSINE_DISTANCE_LTE /
+    // L2_DISTANCE_LTE) is an object-model query operator with no workflow
+    // evaluator. Validation rejects new workflows up front (E027); this
+    // compiles the graph directly (bypassing validation, as any workflow
+    // registered before E027 existed would have) and proves the runtime now
+    // fails loudly instead of silently evaluating the condition to false and
+    // taking the false branch.
+    let result = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-query-only-operator",
+        CONDITIONAL_QUERY_ONLY_OPERATOR,
+        br#"{"text":"haystack with needle"}"#,
+    );
+
+    // Unhandled stdlib errors surface through `runtime.fail` as a bare message
+    // string (not an Error-step envelope object).
+    let message = result.error_json.as_str().unwrap_or_default();
+    assert!(
+        message.contains("MATCH") && message.contains("object-model"),
+        "expected loud query-only-operator failure, got: {}",
+        result.error_json
     );
 }
 

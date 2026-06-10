@@ -234,6 +234,21 @@ impl ValidationErrorDto {
                 Some(field_name.clone()),
                 None,
             ),
+            ValidationError::QueryOnlyConditionOperator {
+                step_id,
+                location,
+                operator,
+            } => (
+                "E027".to_string(),
+                format!(
+                    "Step '{}': operator '{}' in {} is only valid inside object-model \
+                     query conditions; the workflow runtime cannot evaluate it",
+                    step_id, operator, location
+                ),
+                Some(step_id.clone()),
+                None,
+                None,
+            ),
             ValidationError::InvalidChildVersion {
                 step_id,
                 child_workflow_id,

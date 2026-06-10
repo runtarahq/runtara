@@ -3961,7 +3961,14 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
                 })
             })
             .unwrap_or(Ok(false)),
-        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => Ok(false),
+        // Query-only operators: evaluated server-side inside object-model
+        // query conditions, never by the workflow runtime. Validation rejects
+        // them up front (E027); erroring here (instead of silently returning
+        // false) covers workflows compiled before that validation existed.
+        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => Err(format!(
+            "condition operator '{op}' is only valid inside object-model query conditions; \
+             the workflow runtime cannot evaluate it"
+        )),
         other => Err(format!("unsupported condition operator '{other}'")),
     }
 }
@@ -5313,6 +5320,41 @@ mod tests {
         let source = build_source(br#"{"flag":true}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn eval_condition_errors_on_query_only_operators() {
+        // SIMILARITY_GTE / MATCH / COSINE_DISTANCE_LTE / L2_DISTANCE_LTE are
+        // object-model query operators with no workflow-runtime evaluator.
+        // They must error loudly (validation rejects them up front with E027;
+        // this covers workflows compiled before that validation existed) —
+        // never silently evaluate to false.
+        for op in [
+            "SIMILARITY_GTE",
+            "MATCH",
+            "COSINE_DISTANCE_LTE",
+            "L2_DISTANCE_LTE",
+        ] {
+            let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
+                "type": "operation",
+                "op": op,
+                "arguments": [
+                    { "valueType": "reference", "value": "data.text" },
+                    { "valueType": "immediate", "value": "needle" },
+                    { "valueType": "immediate", "value": 0.5 }
+                ]
+            })))
+            .expect("manifest");
+            let source = build_source(br#"{"text":"haystack"}"#, b"{}", b"{}").expect("source");
+
+            let error = manifest
+                .eval_condition(0, &source)
+                .expect_err("query-only operator must error, not evaluate");
+            assert!(
+                error.contains(op) && error.contains("object-model"),
+                "unexpected error for {op}: {error}"
+            );
+        }
     }
 
     #[test]

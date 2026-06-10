@@ -1,0 +1,39 @@
+{
+  "name": "Conditional with query-only operator",
+  "entryPoint": "check",
+  "inputSchema": {
+    "text": { "type": "string", "required": true }
+  },
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "MATCH",
+        "arguments": [
+          { "valueType": "reference", "value": "data.text" },
+          { "valueType": "immediate", "value": "needle" }
+        ]
+      }
+    },
+    "finish_true": {
+      "stepType": "Finish",
+      "id": "finish_true",
+      "inputMapping": {
+        "matched": { "valueType": "immediate", "value": true }
+      }
+    },
+    "finish_false": {
+      "stepType": "Finish",
+      "id": "finish_false",
+      "inputMapping": {
+        "matched": { "valueType": "immediate", "value": false }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "check", "toStep": "finish_true", "label": "true" },
+    { "fromStep": "check", "toStep": "finish_false", "label": "false" }
+  ]
+}
