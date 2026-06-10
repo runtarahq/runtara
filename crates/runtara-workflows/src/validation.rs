@@ -1075,6 +1075,12 @@ pub enum ValidationWarning {
     /// ignored end-to-end: it is never emitted by the compiler, never wired to
     /// the SDK, and never triggered by the host. No rollback will run.
     CompensationNotEnforced { step_id: String },
+    /// An Agent or EmbedWorkflow step configures `timeout`, but no deadline
+    /// exists anywhere for these step types: a running capability invoke
+    /// cannot be preempted in the synchronous component model, so the value
+    /// is accepted and ignored. (Split, While, and WaitForSignal timeouts
+    /// ARE enforced.)
+    TimeoutNotEnforced { step_id: String, step_type: String },
     /// A reference is valid through a known prefix, but the remaining suffix is
     /// inside an open/dynamic object where static validation cannot prove fields.
     PartiallyUnverifiedReference {
@@ -1230,6 +1236,15 @@ impl std::fmt::Display for ValidationWarning {
                     step_id
                 )
             }
+            ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
+                write!(
+                    f,
+                    "[W071] Step '{}': 'timeout' is accepted but not enforced for {} steps — the \
+                     step will not fail when the duration is exceeded. Split, While, and \
+                     WaitForSignal timeouts are enforced.",
+                    step_id, step_type
+                )
+            }
             ValidationWarning::PartiallyUnverifiedReference {
                 step_id,
                 reference,
@@ -1326,6 +1341,9 @@ pub fn validate_workflow(
 
     // Phase 9: Compensation validation (W070 — configured compensation is not enforced)
     validate_compensation(graph, &mut result);
+
+    // Phase 9.5: Timeout validation (W071 — Agent/EmbedWorkflow timeouts are not enforced)
+    validate_unenforced_timeouts(graph, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -3270,6 +3288,47 @@ fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) 
             Step::WaitForSignal(wait_step) => {
                 if let Some(on_wait) = &wait_step.on_wait {
                     validate_compensation(on_wait, result);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// W071: warn when an Agent or EmbedWorkflow step configures `timeout`.
+///
+/// No deadline exists for these step types — a running capability invoke
+/// cannot be preempted in the synchronous component model, so the value is
+/// parsed and ignored. Split, While, and WaitForSignal timeouts ARE enforced
+/// by the emitter, so those step types are deliberately not flagged.
+fn validate_unenforced_timeouts(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::Agent(agent_step) if agent_step.timeout.is_some() => {
+                result.warnings.push(ValidationWarning::TimeoutNotEnforced {
+                    step_id: step_id.clone(),
+                    step_type: "Agent".to_string(),
+                });
+            }
+            Step::EmbedWorkflow(embed_step) if embed_step.timeout.is_some() => {
+                result.warnings.push(ValidationWarning::TimeoutNotEnforced {
+                    step_id: step_id.clone(),
+                    step_type: "EmbedWorkflow".to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        match step {
+            Step::Split(split_step) => {
+                validate_unenforced_timeouts(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_unenforced_timeouts(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    validate_unenforced_timeouts(on_wait, result);
                 }
             }
             _ => {}
@@ -8870,6 +8929,156 @@ mod tests {
                 ValidationWarning::CompensationNotEnforced { step_id } if step_id == "inner"
             )),
             "compensation in a Split subgraph must warn W070: {:?}",
+            result.warnings
+        );
+    }
+
+    // === Unenforced Timeout Tests (W071) ===
+
+    #[test]
+    fn test_agent_and_embed_timeout_warn_w071() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"embed"},
+                {"fromStep":"embed","toStep":"finish"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils",
+                  "capabilityId":"get-current-iso-datetime","inputMapping":{},"timeout":5000},
+                "embed": {"id":"embed","stepType":"EmbedWorkflow",
+                  "childWorkflowId":"child","childVersion":"latest","timeout":9000},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        let mut flagged: Vec<(String, String)> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
+                    Some((step_id.clone(), step_type.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        flagged.sort();
+        assert_eq!(
+            flagged,
+            vec![
+                ("a".to_string(), "Agent".to_string()),
+                ("embed".to_string(), "EmbedWorkflow".to_string())
+            ],
+            "{:?}",
+            result.warnings
+        );
+        let display = result
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ValidationWarning::TimeoutNotEnforced { .. }))
+            .map(|w| format!("{w}"))
+            .unwrap();
+        assert!(display.contains("[W071]"), "{display}");
+        assert!(display.contains("not enforced"), "{display}");
+    }
+
+    #[test]
+    fn test_enforced_timeouts_do_not_warn_w071() {
+        // Split / While / WaitForSignal timeouts ARE enforced - no W071.
+        // The Agent inside the Split subgraph has no timeout either.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"loop"},
+                {"fromStep":"loop","toStep":"wait"},
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1]},
+                    "timeout": 10000
+                  },
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [],
+                    "steps": {"inner": {"id":"inner","stepType":"Finish"}}
+                  }},
+                "loop": {"id":"loop","stepType":"While","condition":{
+                    "type":"operation","op":"EQ","arguments":[
+                      {"valueType":"immediate","value":1},
+                      {"valueType":"immediate","value":2}
+                    ]},
+                  "config": {"maxIterations": 2, "timeout": 10000},
+                  "subgraph": {
+                    "entryPoint": "wf",
+                    "executionPlan": [],
+                    "steps": {"wf": {"id":"wf","stepType":"Finish"}}
+                  }},
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "timeoutMs": {"valueType":"immediate","value":10000}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::TimeoutNotEnforced { .. })),
+            "enforced Split/While/Wait timeouts must not warn W071: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_timeout_warns_w071_inside_while_subgraph() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [
+                {"fromStep":"loop","toStep":"finish"}
+              ],
+              "steps": {
+                "loop": {"id":"loop","stepType":"While","condition":{
+                    "type":"operation","op":"EQ","arguments":[
+                      {"valueType":"immediate","value":1},
+                      {"valueType":"immediate","value":2}
+                    ]},
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [
+                      {"fromStep":"inner","toStep":"inner_finish"}
+                    ],
+                    "steps": {
+                      "inner": {"id":"inner","stepType":"Agent","agentId":"utils",
+                        "capabilityId":"get-current-iso-datetime","inputMapping":{},"timeout":1000},
+                      "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::TimeoutNotEnforced { step_id, .. } if step_id == "inner"
+            )),
+            "Agent timeout in a While subgraph must warn W071: {:?}",
             result.warnings
         );
     }

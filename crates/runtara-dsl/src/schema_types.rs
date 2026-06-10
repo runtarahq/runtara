@@ -439,7 +439,12 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds.
+    ///
+    /// **Not enforced** — a running capability invoke cannot be preempted in
+    /// the synchronous component model, so this value is accepted and ignored
+    /// (validation warns with W071). Split, While, and WaitForSignal timeouts
+    /// are enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -600,7 +605,11 @@ pub struct EmbedWorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds.
+    ///
+    /// **Not enforced** — no deadline exists for a running child workflow, so
+    /// this value is accepted and ignored (validation warns with W071).
+    /// Split, While, and WaitForSignal timeouts are enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 

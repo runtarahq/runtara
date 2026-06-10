@@ -17,7 +17,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 |----|------|-----|-------------|--------|--------------|--------|
 | [GAP-01](#gap-01) | P0 | `MATCH`/`SIMILARITY_GTE`/`COSINE_DISTANCE_LTE`/`L2_DISTANCE_LTE` silently evaluate `false` in workflow conditions | Validation error E027 + stdlib stub → `Err` | S | validation.rs + 1 stdlib arm; mis-using workflows stop validating (intended) | done |
 | [GAP-02](#gap-02) | P0 | `Agent.compensation` accepted, saga never runs | Validation warning W070 + doc honesty; removed W060 which suggested the no-op | S | Validator only; warning, not error | done |
-| [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | todo |
+| [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | done |
 | [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | todo |
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | todo |
@@ -133,7 +133,7 @@ rollback gets none, with no signal.
 <a name="gap-03"></a>
 ## GAP-03 (P0) — `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** Both fields deserialize and deploy but no deadline exists anywhere
 (`support.rs:825-835` for Agent, `:947-955` for EmbedWorkflow). A synchronous
@@ -142,21 +142,20 @@ structurally unenforceable in-guest. Split/While/WaitForSignal timeouts *are* en
 checks) — the inconsistency is invisible to users.
 
 **Fix plan.**
-- [ ] 1. `validation.rs`: add **W071** — warn when `AgentStep.timeout` or
-  `EmbedWorkflowStep.timeout` is set:
-  `[W071] Step '<id>': 'timeout' is accepted but not enforced for <Agent|EmbedWorkflow> steps. Split, While and WaitForSignal timeouts are enforced.`
-- [ ] 2. `schema_types.rs`: doc comments on both fields stating non-enforcement.
-- [ ] 3. Record the only viable real-enforcement avenue as a parked epic: host-side wasmtime
-  epoch/deadline interruption in the environment runner, with checkpoint-consistency analysis
-  (a killed invoke must not leave a half-written checkpoint). Do **not** start it under this
-  tracker. Decision owner: ______
-- [ ] 4. Frontend follow-up: surface W071 in the step inspector.
+- [x] 1. `validation.rs`: **W071** (`TimeoutNotEnforced`) warns when `AgentStep.timeout` or
+  `EmbedWorkflowStep.timeout` is set, recursing Split/While subgraphs and `onWait` graphs.
+- [x] 2. `schema_types.rs`: doc comments on both fields state non-enforcement and name the
+  step types whose timeouts ARE enforced.
+- [x] 3. Real enforcement (wasmtime epoch/deadline interruption in the runner +
+  checkpoint-consistency analysis) stays a parked epic — not started under this tracker.
+- [ ] 4. Frontend follow-up: surface W071 in the step inspector. *(Not part of this commit.)*
 
-**Test coverage required.**
-- [ ] Validation unit tests: timeout on Agent → `[W071]`; on EmbedWorkflow → `[W071]`; absent
-  otherwise; fires inside subgraphs.
-- [ ] Grep-style regression guard in the validation test: assert Split/While/Wait timeout fixtures
-  do **not** produce W071 (their timeouts are real).
+**Test coverage delivered.**
+- [x] `test_agent_and_embed_timeout_warn_w071` (both step types + display text),
+  `test_timeout_warns_w071_inside_while_subgraph` (nested).
+- [x] `test_enforced_timeouts_do_not_warn_w071`: Split/While/WaitForSignal timeouts stay silent.
+- [x] E2E: live server `POST /api/runtime/workflows/graph/validate` returns both W071 strings for
+  an Agent+EmbedWorkflow-timeout graph and none for a Split-timeout graph.
 
 ---
 
