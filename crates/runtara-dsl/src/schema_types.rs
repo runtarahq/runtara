@@ -378,8 +378,11 @@ pub struct FinishStep {
 
 /// Compensation configuration for saga pattern support.
 ///
-/// Defines what compensation step to execute if a downstream step fails,
-/// enabling distributed transaction rollback.
+/// **Not enforced.** This configuration is parsed and stored but the compiler
+/// never emits it, the SDK never receives it, and the host never triggers it —
+/// no compensation step will run on failure (validation flags it with W070).
+/// Model rollback explicitly with `onError` routing instead, which is
+/// enforced end-to-end.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -441,7 +444,9 @@ pub struct AgentStep {
     pub timeout: Option<u64>,
 
     /// Compensation configuration for saga pattern support.
-    /// Defines what step to execute to rollback this step's effects on failure.
+    ///
+    /// **Not enforced** — accepted and ignored end-to-end; no rollback runs
+    /// (validation warns with W070). Use `onError` routing for rollback logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation: Option<CompensationConfig>,
 

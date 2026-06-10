@@ -1071,14 +1071,10 @@ pub enum ValidationWarning {
         to_step: String,
         labels: Vec<String>,
     },
-    /// A step with side effects has no compensation defined in its transaction.
-    MissingCompensation {
-        step_id: String,
-        agent_id: String,
-        capability_id: String,
-        /// If the agent provides a compensation hint, this suggests what to use.
-        suggested_compensation: Option<CompensationSuggestion>,
-    },
+    /// A step configures `compensation`, but compensation is accepted and
+    /// ignored end-to-end: it is never emitted by the compiler, never wired to
+    /// the SDK, and never triggered by the host. No rollback will run.
+    CompensationNotEnforced { step_id: String },
     /// A reference is valid through a known prefix, but the remaining suffix is
     /// inside an open/dynamic object where static validation cannot prove fields.
     PartiallyUnverifiedReference {
@@ -1104,26 +1100,6 @@ pub enum ValidationWarning {
         reference_path: String,
         suggested_path: String,
     },
-}
-
-// ============================================================================
-// Compensation Suggestions
-// ============================================================================
-
-/// Suggestion for how to compensate a step with side effects.
-///
-/// These suggestions come from agent capability metadata and are never
-/// auto-applied - they're only provided to help workflow authors.
-///
-/// Note: The actual compensation data mapping is defined by the workflow author
-/// in the workflow definition, not here. This hint only suggests which capability
-/// can reverse the effects - the author decides how to wire up the inputs.
-#[derive(Debug, Clone)]
-pub struct CompensationSuggestion {
-    /// The capability ID that can undo the effects (e.g., "release" for "reserve").
-    pub compensation_capability_id: String,
-    /// Human-readable description of what the compensation does.
-    pub description: Option<String>,
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -1246,34 +1222,13 @@ impl std::fmt::Display for ValidationWarning {
                     labels.join(", ")
                 )
             }
-            ValidationWarning::MissingCompensation {
-                step_id,
-                agent_id,
-                capability_id,
-                suggested_compensation,
-            } => {
-                let base_msg = format!(
-                    "[W060] Step '{}' calls '{}:{}' which has side effects but no compensation is defined",
-                    step_id, agent_id, capability_id
-                );
-                if let Some(suggestion) = suggested_compensation {
-                    let desc_str = suggestion
-                        .description
-                        .as_ref()
-                        .map(|d| format!(" ({})", d))
-                        .unwrap_or_default();
-                    write!(
-                        f,
-                        "{}\n       Suggested: use '{}:{}' as compensation{}",
-                        base_msg, agent_id, suggestion.compensation_capability_id, desc_str
-                    )
-                } else {
-                    write!(
-                        f,
-                        "{}\n       Note: Agent does not provide a compensation hint. Consider defining manual compensation.",
-                        base_msg
-                    )
-                }
+            ValidationWarning::CompensationNotEnforced { step_id } => {
+                write!(
+                    f,
+                    "[W070] Step '{}': 'compensation' is accepted but not enforced — no rollback \
+                     will execute on failure. Model rollback explicitly with onError routing.",
+                    step_id
+                )
             }
             ValidationWarning::PartiallyUnverifiedReference {
                 step_id,
@@ -1369,8 +1324,8 @@ pub fn validate_workflow(
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
 
-    // Phase 9: Compensation validation (warnings for missing compensation)
-    validate_compensation(graph, catalog, &mut result);
+    // Phase 9: Compensation validation (W070 — configured compensation is not enforced)
+    validate_compensation(graph, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -3283,63 +3238,39 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 // Phase 9: Compensation Validation
 // ============================================================================
 
-/// Validate that steps with side effects have proper compensation when needed.
+/// W070: warn when a step configures `compensation`.
 ///
-/// This generates warnings (not errors) for steps that:
-/// - Have side effects (according to agent capability metadata)
-/// - Don't have compensation defined
-///
-/// The warning includes a suggestion if the agent provides compensation hints.
-fn validate_compensation(
-    graph: &ExecutionGraph,
-    catalog: &runtara_dsl::agent_meta::AgentCatalog,
-    result: &mut ValidationResult,
-) {
-    validate_compensation_recursive(graph, catalog, result);
-}
-
-fn validate_compensation_recursive(
-    graph: &ExecutionGraph,
-    catalog: &runtara_dsl::agent_meta::AgentCatalog,
-    result: &mut ValidationResult,
-) {
+/// Compensation is accepted by the DSL but ignored end-to-end — it is never
+/// emitted by the compiler, never wired to the SDK, and never triggered by
+/// the host, so no rollback runs. Until that changes, any configured
+/// compensation is a false promise; the warning points authors at onError
+/// routing, which is enforced. (The old W060 warning that *suggested* adding
+/// compensation to side-effecting steps was removed for the same reason:
+/// it encouraged configuring a no-op.)
+fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
-        if let Step::Agent(agent_step) = step {
-            // Find the capability metadata in the runtime catalog
-            let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
-
-            // Check if capability has side effects and no compensation is defined
-            if let Some(cap) = capability
-                && cap.has_side_effects
-                && agent_step.compensation.is_none()
-            {
-                // Build suggestion from capability's compensation hint
-                let suggested_compensation =
-                    cap.compensation_hint
-                        .as_ref()
-                        .map(|hint| CompensationSuggestion {
-                            compensation_capability_id: hint.capability_id.clone(),
-                            description: hint.description.clone(),
-                        });
-
-                result
-                    .warnings
-                    .push(ValidationWarning::MissingCompensation {
-                        step_id: step_id.clone(),
-                        agent_id: agent_step.agent_id.clone(),
-                        capability_id: agent_step.capability_id.clone(),
-                        suggested_compensation,
-                    });
-            }
+        if let Step::Agent(agent_step) = step
+            && agent_step.compensation.is_some()
+        {
+            result
+                .warnings
+                .push(ValidationWarning::CompensationNotEnforced {
+                    step_id: step_id.clone(),
+                });
         }
 
         // Recursively validate subgraphs
         match step {
             Step::Split(split_step) => {
-                validate_compensation_recursive(&split_step.subgraph, catalog, result);
+                validate_compensation(&split_step.subgraph, result);
             }
             Step::While(while_step) => {
-                validate_compensation_recursive(&while_step.subgraph, catalog, result);
+                validate_compensation(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    validate_compensation(on_wait, result);
+                }
             }
             _ => {}
         }
@@ -8780,122 +8711,11 @@ mod tests {
         );
     }
 
-    // === Compensation Validation Tests ===
+    // === Compensation Validation Tests (W070) ===
 
     #[test]
-    fn test_side_effects_without_compensation_generates_warning() {
-        // object_model:create-instance has side_effects = true
-        let mut steps = HashMap::new();
-        steps.insert(
-            "om_call".to_string(),
-            Step::Agent(AgentStep {
-                id: "om_call".to_string(),
-                name: None,
-                agent_id: "object_model".to_string(),
-                capability_id: "create-instance".to_string(),
-                connection_id: None,
-                input_mapping: None,
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                compensation: None, // No compensation defined
-                breakpoint: None,
-                durable: None,
-            }),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "om_call");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "om_call".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        // Should have MissingCompensation warning
-        let missing_comp_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
-            .collect();
-        assert!(
-            !missing_comp_warnings.is_empty(),
-            "Should have MissingCompensation warning for object_model:create-instance step"
-        );
-
-        // Check warning contents
-        if let Some(ValidationWarning::MissingCompensation {
-            step_id,
-            agent_id,
-            capability_id,
-            ..
-        }) = missing_comp_warnings.first()
-        {
-            assert_eq!(step_id, "om_call");
-            assert_eq!(agent_id, "object_model");
-            assert_eq!(capability_id, "create-instance");
-        }
-    }
-
-    #[test]
-    fn test_no_side_effects_no_compensation_warning() {
-        // transform:map has no side effects
-        let mut steps = HashMap::new();
-        steps.insert(
-            "transform_step".to_string(),
-            create_agent_step(
-                "transform_step",
-                "transform",
-                Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "data".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!({"key": "value"}),
-                        }),
-                    );
-                    m.insert(
-                        "expression".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("data"),
-                        }),
-                    );
-                    m
-                }),
-            ),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "transform_step");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "transform_step".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        // Should NOT have MissingCompensation warning
-        let missing_comp_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
-            .collect();
-        assert!(
-            missing_comp_warnings.is_empty(),
-            "Should NOT have MissingCompensation warning for transform:map (no side effects)"
-        );
-    }
-
-    #[test]
-    fn test_side_effects_with_compensation_no_warning() {
-        // http:request with compensation defined should NOT warn
+    fn test_compensation_present_warns_w070() {
+        // Compensation is accepted but not enforced; configuring it must warn.
         let mut steps = HashMap::new();
         steps.insert(
             "http_call".to_string(),
@@ -8934,39 +8754,6 @@ mod tests {
                 durable: None,
             }),
         );
-        // Add a rollback step (even though we won't actually execute it in this test)
-        steps.insert(
-            "rollback_step".to_string(),
-            Step::Agent(AgentStep {
-                id: "rollback_step".to_string(),
-                name: None,
-                agent_id: "http".to_string(),
-                capability_id: "http-request".to_string(),
-                connection_id: None,
-                input_mapping: Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "url".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("https://example.com/rollback"),
-                        }),
-                    );
-                    m.insert(
-                        "method".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("DELETE"),
-                        }),
-                    );
-                    m
-                }),
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                compensation: None,
-                breakpoint: None,
-                durable: None,
-            }),
-        );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
         let mut graph = create_basic_graph(steps, "http_call");
@@ -8980,62 +8767,110 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        // Should NOT have MissingCompensation warning for http_call (has compensation)
-        let missing_comp_for_http_call: Vec<_> = result
+        let w070: Vec<_> = result
             .warnings
             .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { step_id, .. } if step_id == "http_call"))
+            .filter(|w| {
+                matches!(w, ValidationWarning::CompensationNotEnforced { step_id } if step_id == "http_call")
+            })
             .collect();
-        assert!(
-            missing_comp_for_http_call.is_empty(),
-            "Should NOT have MissingCompensation warning for http_call (has compensation defined)"
+        assert_eq!(
+            w070.len(),
+            1,
+            "configured compensation must warn W070: {:?}",
+            result.warnings
         );
+        let display = format!("{}", w070[0]);
+        assert!(display.contains("[W070]"), "{display}");
+        assert!(display.contains("not enforced"), "{display}");
+        assert!(display.contains("onError"), "{display}");
     }
 
     #[test]
-    fn test_compensation_warning_display_format() {
-        let warning = ValidationWarning::MissingCompensation {
-            step_id: "test_step".to_string(),
-            agent_id: "inventory".to_string(),
-            capability_id: "reserve".to_string(),
-            suggested_compensation: Some(CompensationSuggestion {
-                compensation_capability_id: "release".to_string(),
-                description: Some("Releases the reserved inventory".to_string()),
+    fn test_no_compensation_no_w070_warning() {
+        // No compensation configured (even on a side-effecting capability):
+        // nothing to warn about. The old W060 "consider adding compensation"
+        // suggestion was removed because it encouraged configuring a no-op.
+        let mut steps = HashMap::new();
+        steps.insert(
+            "om_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "om_call".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "create-instance".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
             }),
-        };
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
 
-        let display = format!("{}", warning);
-        assert!(display.contains("[W060]"), "Should have warning code W060");
-        assert!(display.contains("test_step"), "Should include step ID");
+        let mut graph = create_basic_graph(steps, "om_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "om_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph, &test_catalog());
+
         assert!(
-            display.contains("inventory:reserve"),
-            "Should include capability"
-        );
-        assert!(
-            display.contains("inventory:release"),
-            "Should suggest compensation"
-        );
-        assert!(
-            display.contains("Releases the reserved inventory"),
-            "Should include description"
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::CompensationNotEnforced { .. })),
+            "no compensation configured must not warn W070: {:?}",
+            result.warnings
         );
     }
 
     #[test]
-    fn test_compensation_warning_display_no_hint() {
-        let warning = ValidationWarning::MissingCompensation {
-            step_id: "test_step".to_string(),
-            agent_id: "http".to_string(),
-            capability_id: "http-request".to_string(),
-            suggested_compensation: None,
-        };
+    fn test_compensation_warns_w070_inside_split_subgraph() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [
+                      {"fromStep":"inner","toStep":"inner_finish"}
+                    ],
+                    "steps": {
+                      "inner": {"id":"inner","stepType":"Agent","agentId":"utils",
+                        "capabilityId":"get-current-iso-datetime","inputMapping":{},
+                        "compensation":{"compensationStep":"inner_finish"}},
+                      "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
 
-        let display = format!("{}", warning);
-        assert!(display.contains("[W060]"), "Should have warning code W060");
-        assert!(display.contains("test_step"), "Should include step ID");
+        let result = validate_workflow(&graph, &test_catalog());
+
         assert!(
-            display.contains("manual compensation"),
-            "Should mention manual compensation when no hint"
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::CompensationNotEnforced { step_id } if step_id == "inner"
+            )),
+            "compensation in a Split subgraph must warn W070: {:?}",
+            result.warnings
         );
     }
 

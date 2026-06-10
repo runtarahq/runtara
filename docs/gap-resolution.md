@@ -16,7 +16,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | ID | Prio | Gap | Fix (short) | Effort | Blast radius | Status |
 |----|------|-----|-------------|--------|--------------|--------|
 | [GAP-01](#gap-01) | P0 | `MATCH`/`SIMILARITY_GTE`/`COSINE_DISTANCE_LTE`/`L2_DISTANCE_LTE` silently evaluate `false` in workflow conditions | Validation error E027 + stdlib stub → `Err` | S | validation.rs + 1 stdlib arm; mis-using workflows stop validating (intended) | done |
-| [GAP-02](#gap-02) | P0 | `Agent.compensation` accepted, saga never runs | Validation warning W070 + doc honesty | S | Validator only; warning, not error | todo |
+| [GAP-02](#gap-02) | P0 | `Agent.compensation` accepted, saga never runs | Validation warning W070 + doc honesty; removed W060 which suggested the no-op | S | Validator only; warning, not error | done |
 | [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | todo |
 | [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | todo |
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
@@ -99,7 +99,7 @@ object-model *field condition* path where these ops are legitimate).
 <a name="gap-02"></a>
 ## GAP-02 (P0) — `Agent.compensation` is a silent no-op (saga illusion)
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** `AgentStep.compensation` / `CompensationConfig` (`schema_types.rs:443-446`,
 `:380-405`) parse and deploy, but compensation is never emitted, never wired to the SDK, and never
@@ -108,20 +108,25 @@ triggered by the host — in the deleted generated path *or* the direct path
 rollback gets none, with no signal.
 
 **Fix plan.**
-- [ ] 1. `validation.rs`: add **W070** — warn whenever any `AgentStep.compensation` is present:
-  `[W070] Step '<id>': compensation is accepted but not enforced — no rollback will execute on failure. Model compensation explicitly with onError routing.`
-  Warning, not error: existing workflows must keep validating.
-- [ ] 2. `schema_types.rs`: update `CompensationConfig` and `AgentStep.compensation` doc comments to
-  state non-enforcement and point at `onError` as the working alternative.
+- [x] 1. `validation.rs`: **W070** (`CompensationNotEnforced`) warns whenever
+  `AgentStep.compensation` is present, recursing Split/While subgraphs and WaitForSignal `onWait`
+  graphs. Warning, not error: existing workflows keep validating.
+- [x] 1b. (Found during implementation) Removed the old **W060** `MissingCompensation` warning and
+  `CompensationSuggestion` — it *suggested adding* compensation to side-effecting steps, actively
+  pushing authors into the no-op. Suggesting a feature that does nothing is worse than silence.
+- [x] 2. `schema_types.rs`: `CompensationConfig` and `AgentStep.compensation` doc comments now
+  state non-enforcement and point at `onError` routing.
 - [ ] 3. Frontend follow-up (separate PR): remove/disable the compensation section in the step
-  inspector, or render the W070 text inline.
-- [ ] 4. If real saga support is ever wanted, open a separate design doc (host + SDK + runtime DB
-  + emitter); explicitly **out of scope** here.
+  inspector, or render the W070 text inline. *(Not part of this commit.)*
+- [x] 4. Real saga support stays out of scope; no design doc opened.
 
-**Test coverage required.**
-- [ ] Validation unit test: AgentStep with `compensation` → `[W070]` present; without → absent.
-- [ ] Validation unit test: warning fires for Agent steps nested in Split/While subgraphs too.
-- [ ] Doc check only for item 2 (`cargo doc -p runtara-dsl` clean).
+**Test coverage delivered.**
+- [x] `test_compensation_present_warns_w070` (presence → W070 incl. display text),
+  `test_no_compensation_no_w070_warning` (absence → silent, incl. on side-effecting capability).
+- [x] `test_compensation_warns_w070_inside_split_subgraph` (nested case).
+- [x] E2E: booted the full server stack and asserted
+  `POST /api/runtime/workflows/graph/validate` returns the `[W070]` warning string for a graph
+  with compensation, and no W060/W070 for one without.
 
 ---
 
