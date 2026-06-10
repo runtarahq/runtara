@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import { enableMapSet } from 'immer';
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -31,10 +32,125 @@ import {
 } from '@/features/workflows/config/workflow.ts';
 import { validateConnection } from '@/features/workflows/utils/graph-validation';
 
+// State holds Sets (stagedNodeIds, stepsWithErrors); renameStep reads them
+// inside an immer draft, which requires the MapSet plugin.
+enableMapSet();
+
 interface HistoryEntry {
   executionGraph: ExecutionGraphDto | null;
   nodes: Node[];
   edges: Edge[];
+}
+
+/**
+ * Allowed charset for user-supplied step ids.
+ *
+ * The DSL validator (crates/runtara-workflows/src/validation.rs) does not
+ * enforce an explicit charset, but reference parsing constrains it:
+ * - dot form `steps.<id>.` terminates the id at the first `.`
+ * - bracket form `steps['<id>']` terminates at `']` (quotes/brackets illegal)
+ * This pattern is safe for both forms and for minijinja templates.
+ */
+export const STEP_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+/**
+ * Implicit step ids injected by the runtime (RESERVED_IMPLICIT_STEP_IDS in
+ * crates/runtara-workflows/src/validation.rs). Renaming a step to one of
+ * these would shadow the implicit onError envelope.
+ */
+const RESERVED_STEP_IDS = new Set(['__error']);
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Rewrite every step-reference occurrence of `oldId` to `newId` inside a
+ * string. Handles all reference forms that appear in mapping values,
+ * condition arguments, and {{ ... }} template strings:
+ * - dot form: `steps.<id>` (followed by a non-id char or end of string)
+ * - bracket form: `steps['<id>']` and `steps["<id>"]`
+ *
+ * Boundary-safe: an id that is a prefix of another id (`a` vs `ab`) never
+ * corrupts the longer id, because the dot form requires the next char to be
+ * outside the id charset and the bracket form is delimited by the quote.
+ */
+export function rewriteStepReferencesInString(
+  text: string,
+  oldId: string,
+  newId: string
+): string {
+  const escaped = escapeRegExp(oldId);
+  // `(?<![\w.])` prevents matching inside other identifiers (e.g. `mysteps.a`
+  // or `foo.steps.a`); `(?![A-Za-z0-9_-])` prevents matching id prefixes.
+  const dotForm = new RegExp(
+    `(?<![\\w.])steps\\.${escaped}(?![A-Za-z0-9_-])`,
+    'g'
+  );
+  const bracketForm = new RegExp(
+    `(?<![\\w.])steps\\[(['"])${escaped}\\1\\]`,
+    'g'
+  );
+  return text
+    .replace(dotForm, `steps.${newId}`)
+    .replace(bracketForm, (_match, quote: string) => {
+      return `steps[${quote}${newId}${quote}]`;
+    });
+}
+
+/**
+ * Deep-walk an arbitrary JSON-ish value (node/edge data, mapping values,
+ * conditions, templates) and rewrite step references in every string.
+ */
+export function rewriteStepReferencesDeep(
+  value: unknown,
+  oldId: string,
+  newId: string
+): unknown {
+  if (typeof value === 'string') {
+    return rewriteStepReferencesInString(value, oldId, newId);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => rewriteStepReferencesDeep(item, oldId, newId));
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = rewriteStepReferencesDeep(entry, oldId, newId);
+    }
+    return result;
+  }
+  return value;
+}
+
+/**
+ * Validate a candidate step id for a rename. Returns an error message, or
+ * null when the candidate is acceptable. Exposed so the editor UI can show
+ * inline errors with the exact same rules the store enforces.
+ */
+export function getStepIdValidationError(
+  candidate: string,
+  currentId: string,
+  existingIds: Iterable<string>
+): string | null {
+  if (!candidate) {
+    return 'Step id cannot be empty';
+  }
+  if (candidate === currentId) {
+    return 'New step id is the same as the current id';
+  }
+  if (!STEP_ID_PATTERN.test(candidate)) {
+    return 'Step id may only contain letters, numbers, hyphens, and underscores';
+  }
+  if (RESERVED_STEP_IDS.has(candidate)) {
+    return `'${candidate}' is reserved by the runtime`;
+  }
+  for (const id of existingIds) {
+    if (id === candidate) {
+      return `A step with id '${candidate}' already exists`;
+    }
+  }
+  return null;
 }
 
 type TimelineMovePlacement = 'before' | 'after';
@@ -185,6 +301,11 @@ interface WorkflowState {
     }
   >;
 
+  // Last successful step-id rename, so views holding step ids in local state
+  // (config dialog, staged changes) can re-point themselves. A new object is
+  // set on every successful rename.
+  lastStepRename: { oldId: string; newId: string } | null;
+
   // History management
   history: HistoryEntry[];
   historyIndex: number;
@@ -216,6 +337,14 @@ interface WorkflowState {
   ) => string;
   updateNode: (nodeId: string, updates: Partial<ExecutionGraphStepDto>) => void;
   removeNode: (nodeId: string) => void;
+  /**
+   * Atomically rename a step id: renames the node, re-points edges and child
+   * parentIds, and rewrites every `steps.<oldId>` / `steps['<oldId>']`
+   * reference across all node and edge data. Returns an error string (and
+   * performs no mutation) for duplicate/invalid/same-id renames; returns null
+   * on success.
+   */
+  renameStep: (oldId: string, newId: string) => string | null;
 
   // Actions - Note Operations
   addNote: (position: { x: number; y: number }, content?: string) => string;
@@ -288,6 +417,7 @@ const initialState = {
   pendingNewNode: null,
   requestEditNodeId: null,
   resizeTracking: {},
+  lastStepRename: null,
   history: [],
   historyIndex: -1,
   maxHistorySize: 50,
@@ -550,6 +680,151 @@ export const useWorkflowStore = create<WorkflowState>()(
           state.isStructurallyDirty = true;
           state.saveToHistory();
         }),
+
+      renameStep: (oldId, newId) => {
+        const current = get();
+        const node = current.nodes.find((n) => n.id === oldId);
+        if (!node) {
+          return `Step '${oldId}' was not found`;
+        }
+        const validationError = getStepIdValidationError(
+          newId,
+          oldId,
+          current.nodes.map((n) => n.id)
+        );
+        if (validationError) {
+          return validationError;
+        }
+
+        set((state) => {
+          const remapId = (id: string) => (id === oldId ? newId : id);
+
+          // Rename the node (React Flow id + data.id), re-point children of
+          // containers (Split/While subgraph membership lives in parentId),
+          // and rewrite step references in every node's data.
+          for (const n of state.nodes) {
+            const isRenamedNode = n.id === oldId;
+            if (isRenamedNode) {
+              n.id = newId;
+            }
+            if (n.parentId === oldId) {
+              n.parentId = newId;
+            }
+            if (n.data && typeof n.data === 'object') {
+              const data = rewriteStepReferencesDeep(
+                n.data,
+                oldId,
+                newId
+              ) as Record<string, unknown>;
+              if (isRenamedNode && data.id === oldId) {
+                data.id = newId;
+              }
+              n.data = data;
+            }
+          }
+
+          // Re-point edges and rewrite references in edge data (execution
+          // plan edge conditions live in edge.data.condition).
+          const untouchedEdgeIds = new Set(
+            state.edges
+              .filter((e) => e.source !== oldId && e.target !== oldId)
+              .map((e) => e.id)
+          );
+          const assignedEdgeIds = new Set<string>();
+          const edgeIdRemap = new Map<string, string>();
+          for (const e of state.edges) {
+            const endpointsTouched = e.source === oldId || e.target === oldId;
+            e.source = remapId(e.source);
+            e.target = remapId(e.target);
+            if (e.data && typeof e.data === 'object') {
+              e.data = rewriteStepReferencesDeep(
+                e.data,
+                oldId,
+                newId
+              ) as typeof e.data;
+            }
+            if (endpointsTouched) {
+              // Regenerate the edge id so the `${source}-${target}-${handle}`
+              // convention keeps holding (string surgery on the old id would
+              // be ambiguous for ids containing hyphens).
+              const base = `${e.source}-${e.target}-${e.sourceHandle ?? 'default'}`;
+              let candidate = base;
+              let counter = 1;
+              while (
+                untouchedEdgeIds.has(candidate) ||
+                assignedEdgeIds.has(candidate)
+              ) {
+                candidate = `${base}-${counter}`;
+                counter += 1;
+              }
+              assignedEdgeIds.add(candidate);
+              edgeIdRemap.set(e.id, candidate);
+              e.id = candidate;
+            }
+          }
+
+          // Remap auxiliary state that holds step or edge ids.
+          state.selectedNodes = state.selectedNodes.map(remapId);
+          state.selectedEdges = state.selectedEdges.map(
+            (id) => edgeIdRemap.get(id) ?? id
+          );
+          if (state.selectedNodeId === oldId) {
+            state.selectedNodeId = newId;
+          }
+          if (state.pendingCenterNodeId === oldId) {
+            state.pendingCenterNodeId = newId;
+          }
+          if (state.requestEditNodeId === oldId) {
+            state.requestEditNodeId = newId;
+          }
+          if (state.stagedNodeIds.has(oldId)) {
+            const nextStaged = new Set(state.stagedNodeIds);
+            nextStaged.delete(oldId);
+            nextStaged.add(newId);
+            state.stagedNodeIds = nextStaged;
+          }
+          if (state.stepsWithErrors.has(oldId)) {
+            const nextErrors = new Set(state.stepsWithErrors);
+            nextErrors.delete(oldId);
+            nextErrors.add(newId);
+            state.stepsWithErrors = nextErrors;
+          }
+          state.validationErrors = state.validationErrors.map((error) => ({
+            ...error,
+            stepId: error.stepId === oldId ? newId : error.stepId,
+            relatedStepIds: error.relatedStepIds
+              ? error.relatedStepIds.map(remapId)
+              : error.relatedStepIds,
+          }));
+          if (state.pendingNewNode) {
+            const pending = state.pendingNewNode;
+            if (pending.parentId === oldId) pending.parentId = newId;
+            if (pending.sourceNodeId === oldId) pending.sourceNodeId = newId;
+            if (pending.targetNodeId === oldId) pending.targetNodeId = newId;
+            if (pending.insertionEdge) {
+              pending.insertionEdge.source = remapId(
+                pending.insertionEdge.source
+              );
+              pending.insertionEdge.target = remapId(
+                pending.insertionEdge.target
+              );
+            }
+            if (pending.data && typeof pending.data === 'object') {
+              pending.data = rewriteStepReferencesDeep(
+                pending.data,
+                oldId,
+                newId
+              ) as typeof pending.data;
+            }
+          }
+
+          state.lastStepRename = { oldId, newId };
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
+        });
+        return null;
+      },
 
       // Note Operations
       addNote: (position, content = 'New note...') => {

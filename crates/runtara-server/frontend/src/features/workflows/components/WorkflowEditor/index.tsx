@@ -447,6 +447,19 @@ function WorkflowEditorContent({
     setEditingSurface(null);
   }, []);
 
+  // Keep the config dialog/panel bound to the step being edited when its id
+  // is renamed (renameStep changes the node id in the store immediately).
+  const lastStepRename = useWorkflowStore((state) => state.lastStepRename);
+  useEffect(() => {
+    if (!lastStepRename) return;
+    setEditingNodeId((current) =>
+      current === lastStepRename.oldId ? lastStepRename.newId : current
+    );
+    // Keyed on the rename event only so a stale rename is never re-applied
+    // to a step that later reuses the freed id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastStepRename]);
+
   const closeCreateStep = useCallback(() => {
     setCreateStepContext(null);
     setCreateStepSurface(null);

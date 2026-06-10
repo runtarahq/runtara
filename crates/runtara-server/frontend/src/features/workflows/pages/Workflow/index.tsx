@@ -20,7 +20,10 @@ import { queryClient } from '@/main.tsx';
 import { slugify } from '@/shared/utils/string-utils';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  rewriteStepReferencesDeep,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { DebugStepInspector } from '@/features/workflows/components/DebugStepInspector';
 
 import { WorkflowExecuteDialog } from '@/features/workflows/components/WorkflowExecuteDialog';
@@ -171,6 +174,31 @@ export function Workflow() {
     const stagedIds = new Set(Object.keys(stagedNodeChanges));
     useWorkflowStore.getState().setStagedNodeIds(stagedIds);
   }, [stagedNodeChanges]);
+
+  // When a step id is renamed in the store, follow the rename in staged node
+  // changes: re-key the renamed step's entry and rewrite step references
+  // (mapping values, conditions, templates) inside every staged value.
+  const lastStepRename = useWorkflowStore((state) => state.lastStepRename);
+  useEffect(() => {
+    if (!lastStepRename) return;
+    const { oldId, newId } = lastStepRename;
+    setStagedNodeChanges((prev) => {
+      const entries = Object.entries(prev);
+      if (entries.length === 0) return prev;
+      const next: Record<string, form.SchemaType> = {};
+      for (const [key, value] of entries) {
+        next[key === oldId ? newId : key] = rewriteStepReferencesDeep(
+          value,
+          oldId,
+          newId
+        ) as form.SchemaType;
+      }
+      return next;
+    });
+    // Intentionally keyed on the rename event only: each rename is applied
+    // exactly once, even if staged changes update for other reasons.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastStepRename]);
 
   // Reactively subscribe to isDirty state
   const isDirty = useWorkflowStore((state) => state.isDirty);

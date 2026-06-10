@@ -415,7 +415,9 @@ Complexity/effort: M overall.
 
 ### 28. Step ids and UI-written extension fields
 
-Status: Partially implemented — the three DSL extension fields are added; step-id rename remains open. Severity: low.
+Status: Implemented. Severity: low.
+
+Step-id rename resolution (2026-06-10): the node form now shows the step id (monospace, with helper copy about reference paths) and allows renaming it with inline validation (`/^[a-zA-Z0-9_-]+$/`, unique across all steps incl. subgraphs, `__error` reserved per `RESERVED_IMPLICIT_STEP_IDS`). `workflowStore.renameStep` atomically renames the node, re-points edges and container `parentId`s, and boundary-safely rewrites every reference form across all node/edge data — `steps.<id>.` dot form, `steps['<id>']`/`steps["<id>"]` bracket forms (both quote styles, per `extract_step_id_from_reference`), and template strings — plus staged changes and editor selection state. 9 new store tests cover re-pointing, all rewrite forms, prefix-boundary safety, and the rejection matrix.
 
 Resolution of the DSL fields (2026-06-10): `Note.metadata` (NoteMetadata width/height), `ExecutionGraph.executionTimeoutSeconds` (Option<u32>, documented as server-enforced at scheduling), and `SchemaField.nullable` (form-layer hint) are now modeled in `schema_types.rs` as optional skip-if-none fields, so typed deserialize→reserialize round-trips no longer drop what the editor writes. Known pre-existing quirk surfaced during this work: the OpenAPI spec registers both `runtara_dsl::Note` and the server DTO `Note` under one component name and the DTO wins, shadowing the DSL Note schema.
 
