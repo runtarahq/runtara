@@ -380,7 +380,9 @@ Complexity/effort: L.
 
 ### 27. Trigger/platform surfaces missing from the UI
 
-Status: Open. Severity: high (cron inputs), medium/low (rest).
+Status: Partially implemented — the high-severity items (CRON inputs, configuration wipe on edit) and the CRON debug flag are fixed; discovery surfaces (pause, lastRun, sync endpoint, actions/dependency endpoints), the inert APPLICATION trigger, and the cron 5-field/6-field validation mismatch remain open. Severity: high (cron inputs), medium/low (rest).
+
+Resolution of the high items (2026-06-10): the trigger form now has a "Static inputs (JSON)" editor (validated live, must be a JSON object, blocks save while invalid) and a Debug mode switch for CRON triggers, round-tripping `configuration.inputs` and `configuration.debug` (stored as a real boolean, matching the scheduler's `as_bool` read). Edit-save no longer rebuilds trigger configuration from scratch for ANY trigger type: it merges form-managed fields over the loaded trigger's existing configuration, so API-authored keys (HTTP/EMAIL `debug` + webhook-verification `connection_id`, CRON `inputs`, etc.) survive UI edits instead of being wiped. Covered by unit tests in `features/triggers/utils/trigger-configuration.test.ts`.
 
 Description:
 - CRON trigger static `inputs` envelope: the scheduler reads `configuration.inputs` per fire (`workers/cron_scheduler.rs:230-236`), but the trigger UI cannot set it and edit-save rebuilds configuration as `{expression}` only, silently wiping API-set inputs. Cron-triggered workflows with required input schemas cannot be configured from the UI.

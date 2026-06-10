@@ -65,6 +65,10 @@ export function TriggerForm(props: Props) {
         if (field.name === 'connectionId' || field.name === 'sessionMode') {
           return triggerType === 'CHANNEL';
         }
+        // Only include static inputs and debug mode fields if triggerType is CRON
+        if (field.name === 'cronInputs' || field.name === 'cronDebug') {
+          return triggerType === 'CRON';
+        }
         return true;
       })
       .map((field) => {

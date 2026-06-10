@@ -7,6 +7,7 @@ import { Loader } from '@/shared/components/loader.tsx';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { queryClient } from '@/main';
 import { scheduleToCron, cronToSchedule } from '@/features/triggers/utils/cron';
+import { buildCronConfiguration } from '@/features/triggers/utils/trigger-configuration';
 import {
   getInvocationTriggerById,
   updateInvocationTrigger,
@@ -75,20 +76,36 @@ export function EditTrigger() {
       eventType,
       connectionId,
       sessionMode,
+      cronInputs,
+      cronDebug,
       configuration,
       ...restTrigger
     } = data;
 
-    let finalConfiguration = null;
+    // The server reads keys the form does not edit (e.g. `connection_id` for
+    // webhook signature verification, `debug`, `inputs`), and the form's own
+    // `configuration` value is rebuilt by ConfigurationField (reset to {} for
+    // non-APPLICATION types). Merge over the loaded trigger's configuration
+    // so API-authored keys survive an edit-save.
+    const existingConfiguration: Record<string, unknown> =
+      triggerData?.configuration && typeof triggerData.configuration === 'object'
+        ? { ...triggerData.configuration }
+        : {};
+
+    let finalConfiguration: Record<string, unknown> | null = null;
 
     switch (triggerType) {
       case 'CRON':
-        if (scheduleConfig) {
-          finalConfiguration = { expression: scheduleToCron(scheduleConfig) };
-        }
+        finalConfiguration = buildCronConfiguration({
+          existing: existingConfiguration,
+          expression: scheduleConfig ? scheduleToCron(scheduleConfig) : undefined,
+          inputsText: cronInputs,
+          debug: cronDebug,
+        });
         break;
       case 'APPLICATION':
         finalConfiguration = {
+          ...existingConfiguration,
           ...(configuration || {}),
           applicationName,
           eventType,
@@ -96,15 +113,24 @@ export function EditTrigger() {
         break;
       case 'CHANNEL':
         finalConfiguration = {
-          ...(configuration || {}),
-          connection_id: connectionId || (configuration as any)?.connection_id,
-          ...(sessionMode && sessionMode !== 'per_sender'
-            ? { session_mode: sessionMode }
-            : {}),
+          ...existingConfiguration,
+          connection_id:
+            connectionId || (existingConfiguration as any)?.connection_id,
         };
+        if (sessionMode && sessionMode !== 'per_sender') {
+          finalConfiguration.session_mode = sessionMode;
+        } else {
+          // per_sender is the default; remove the key so it doesn't linger
+          delete finalConfiguration.session_mode;
+        }
         break;
       default:
-        finalConfiguration = null;
+        // HTTP, EMAIL, etc.: keep the trigger's existing configuration
+        // (debug, connection_id, ...) instead of wiping it to null.
+        finalConfiguration =
+          Object.keys(existingConfiguration).length > 0
+            ? existingConfiguration
+            : null;
         break;
     }
 
@@ -141,6 +167,20 @@ export function EditTrigger() {
     );
   } else {
     initValues.scheduleConfig = defaultScheduleConfig;
+  }
+
+  // Surface CRON-managed configuration keys (inputs, debug) as form fields
+  initValues.cronInputs = '';
+  initValues.cronDebug = false;
+  if (initValues.triggerType === 'CRON' && initValues.configuration) {
+    if (initValues.configuration.inputs !== undefined) {
+      initValues.cronInputs = JSON.stringify(
+        initValues.configuration.inputs,
+        null,
+        2
+      );
+    }
+    initValues.cronDebug = initValues.configuration.debug === true;
   }
 
   // Extract connectionId and sessionMode for CHANNEL triggers

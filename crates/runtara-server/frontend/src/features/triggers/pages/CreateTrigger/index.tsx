@@ -6,6 +6,7 @@ import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Loader } from '@/shared/components/loader.tsx';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { scheduleToCron } from '@/features/triggers/utils/cron';
+import { buildCronConfiguration } from '@/features/triggers/utils/trigger-configuration';
 import { createInvocationTrigger } from '@/features/triggers/queries';
 import { getWorkflows } from '@/features/workflows/queries';
 import { getConnections } from '@/features/connections/queries';
@@ -54,13 +55,19 @@ export function CreateTrigger() {
       triggerType,
       connectionId,
       sessionMode,
+      cronInputs,
+      cronDebug,
       ...restTrigger
     } = data;
 
     // Build configuration based on trigger type
-    let configuration = null;
+    let configuration: Record<string, unknown> | null = null;
     if (triggerType === 'CRON' && scheduleConfig) {
-      configuration = { expression: scheduleToCron(scheduleConfig) };
+      configuration = buildCronConfiguration({
+        expression: scheduleToCron(scheduleConfig),
+        inputsText: cronInputs,
+        debug: cronDebug,
+      });
     } else if (triggerType === 'CHANNEL' && connectionId) {
       configuration = {
         connection_id: connectionId,
