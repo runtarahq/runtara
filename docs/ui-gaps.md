@@ -26,7 +26,9 @@ This document tracks parity between the workflow DSL/platform and the current ti
 
 As of 2026-06-10, findings 1-15 below are closed for DSL editability (finding 4 has one residual hole, see finding 25). Some complex fields use advanced JSON editors rather than dedicated visual builders; those are now considered UX polish, not parity blockers.
 
-A second, independent multi-agent audit (138 raw findings, re-verified against the tree after findings 1-15 were implemented) confirmed the implementation of findings 1-15 and identified additional gaps not covered by the first audit. Those are tracked as findings 16-28 below: 22 high-severity items remain open, mostly around condition-argument fidelity, onError routing coverage, While/Split semantics misrepresentation, and Log/Error value-mode no-ops.
+A second, independent multi-agent audit (138 raw findings, re-verified against the tree after findings 1-15 were implemented) confirmed the implementation of findings 1-15 and identified additional gaps not covered by the first audit, tracked as findings 16-28 below.
+
+As of the end of 2026-06-10, findings 16-28 are implemented (each in its own commit with tests; see the Resolution notes per finding). The only items still open are listed under Recommended Follow-Up.
 
 Implemented areas include graph/root metadata, wrapper import/export metadata, variable descriptions, entry point selection, edge condition/priority authoring, Delay authoring, Split advanced config, common breakpoint/durable controls, Agent/EmbedWorkflow retry and timeout fields with warning copy, Agent compensation JSON, AiAgent retry config, Log/Error context, WaitForSignal action and `onWait`, richer schema fields, and Split/Filter/GroupBy source `MappingValue` modes.
 
@@ -311,7 +313,9 @@ Complexity/effort: M.
 
 ### 22. Mapping editors: residual reference/immediate fidelity holes
 
-Status: Partially implemented — the high-severity items and the reference-default editor are fixed; the remaining medium/low residuals (empty-string immediates dropped, composite-nested template mode, Split `config.variables` template/typing, dotted mapping keys, deprecated bare `__error.*` template emission, Finish duplicate output names / object-array immediates) are still open. Severity: high (first three), medium/low (rest).
+Status: Implemented. Severity: high (first three), medium/low (rest).
+
+Residuals resolution (2026-06-10, second pass): empty-string immediates now survive saves — rows auto-seeded by schema population carry an editor-only `autoSeeded` marker and only those are dropped when blank, so JSON-authored and user-typed `""` values persist (Log/Error keep blank-equals-cleared semantics for their direct fields). Composite editors emit and render real nested template values. Split `config.variables` route through the shared mapping serialization (template mode legal in the form schema, typed immediates coerce, no illegal type hints emitted). Dotted mapping keys validate per segment (they build nested objects at runtime). The error-condition templates emit canonical `steps.__error.*` (W053-clean). Finish blocks duplicate output names with per-row errors, and object/array immediates JSON-parse at the save boundary so they land as real JSON.
 
 Resolution of the high items + default editor (2026-06-10):
 - The mapping variable picker gained a free-text "use as custom reference path" row (any legal path is authorable: deep `data.*`, `steps.__error.*`, indices, schema-unknown outputs) and now renders the previously-computed-but-never-displayed Loop Context section.
@@ -432,11 +436,11 @@ Complexity/effort: S (DSL fields), M (id rename).
 
 ## Recommended Follow-Up
 
-Findings 1-15 are implemented. Remaining work, in suggested order:
+Findings 1-28 are implemented. What remains open, in suggested order:
 
-1. Finding 16 + 19 (silent corruption / wrong semantics on every save: condition-argument rewriting, While timeout units, "0 for unlimited", sequential toggle).
-2. Finding 18 (Log/Error fake binding modes) and finding 20 (subgraph field drops) — both silent-loss classes.
-3. Finding 21 (onError/MCP routing coverage) and finding 17 (condition reference picker).
-4. Finding 25 (cannot-clear serializer paths, incl. the finding-4 residual) and findings 22-24 residual fidelity holes.
-5. Finding 27 (trigger inputs/config wipe first, then discovery surfaces), finding 26 (fan-out/join authoring), finding 28 (DSL extension fields + step ids).
-6. UX polish from the first audit: visual editors for `WaitForSignal.onWait`, schema `items/properties/visibleWhen`, and route conditions; browser-driven coverage for settings popovers and the advanced schema dialog; revisit Agent compensation UX if enforcement lands.
+1. Browser/e2e verification pass: all fixes in findings 16-28 are verified by unit/round-trip tests and typecheck only — exercise the new affordances (condition picker custom paths, parallel branch/join/delete-route, AiAgent error routes + memory removal, Switch default controls, CRON inputs, step-id rename) against a running stack.
+2. Discovery surfaces still API-only (finding 27): a workflow-actions browser (list/submit open actions) and an embed dependency/dependents viewer.
+3. Timeline: moving an existing configured step across branches or into/out of a Split/While body remains canvas-only (finding 26 residue).
+4. `ConditionExpression::Value` (bare truthy condition) can be neither created nor rendered by the condition builder (finding 17 residue, medium).
+5. UX polish from the first audit: visual editors for `WaitForSignal.onWait` (nested timeline) and schema `items/properties/visibleWhen` (currently advanced-JSON dialogs); revisit Agent compensation UX if runtime enforcement lands.
+6. Housekeeping surfaced during the work: the OpenAPI component name collision between `runtara_dsl::Note` and the server DTO `Note` (the DTO shadows the DSL schema in the spec).

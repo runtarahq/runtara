@@ -44,7 +44,11 @@ type SplitStepFieldProps = {
   name: string;
 };
 
-type SplitVariableValueType = 'reference' | 'immediate' | 'composite';
+type SplitVariableValueType =
+  | 'reference'
+  | 'immediate'
+  | 'composite'
+  | 'template';
 
 type SplitVariableField = {
   name?: string;
@@ -389,10 +393,16 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                     : variable.value === undefined || variable.value === null
                       ? ''
                       : JSON.stringify(variable.value);
+                // Pass template through so MappingValueInput renders its
+                // template input and the mode toggle can cycle out of it —
+                // clamping it to 'immediate' left the form stuck holding a
+                // valueType the UI never displayed.
                 const scalarValueType: ValueMode =
                   variable.valueType === 'reference'
                     ? 'reference'
-                    : 'immediate';
+                    : variable.valueType === 'template'
+                      ? 'template'
+                      : 'immediate';
 
                 return (
                   <Fragment key={field.id}>
@@ -552,6 +562,22 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                                 form.formState
                               ).error?.message
                             }
+                          </p>
+                        )}
+                        {/* Visible fallback for valueType (enum) failures —
+                            without it a rejected mode silently dead-ends the
+                            Save button with no rendered error. */}
+                        {form.getFieldState(
+                          `splitVariablesFields.${index}.valueType`,
+                          form.formState
+                        ).error?.message && (
+                          <p className="text-xs text-destructive mt-1">
+                            {`Unsupported value mode: ${
+                              form.getFieldState(
+                                `splitVariablesFields.${index}.valueType`,
+                                form.formState
+                              ).error?.message
+                            }`}
                           </p>
                         )}
                       </td>

@@ -764,9 +764,17 @@ function cleanNodeData(steps: Record<string, any>) {
         const isTemplate = value.includes('{{');
 
         if (!isTemplate) {
-          // For non-template strings, only parse as JSON if typeHint is explicitly 'json'
-          // No auto-detection - explicit typeHint required
-          if (typeHint === 'json') {
+          // For non-template strings, only parse as JSON if the typeHint is
+          // explicitly JSON-shaped. 'object'/'array' are form-level hints
+          // (e.g. Finish output types) that keep the editors' object-vs-array
+          // distinction; they carry the same parse semantics as 'json' and
+          // are never emitted as backend type hints (isValidValueType).
+          // No auto-detection - explicit typeHint required.
+          if (
+            typeHint === 'json' ||
+            typeHint === 'object' ||
+            typeHint === 'array'
+          ) {
             try {
               finalValue = JSON.parse(value);
             } catch {
@@ -923,15 +931,23 @@ function cleanNodeData(steps: Record<string, any>) {
     if (Array.isArray(inputMapping)) {
       const preserveInvalidMappingsForRustValidation =
         data.stepType === 'Finish';
+      // Error/Log extract direct fields (code, message, level, ...) from the
+      // filtered mapping, where '' is the form's "field cleared" signal and
+      // must keep deleting the key. Every other consumer serializes a real
+      // inputMapping object, where immediate '' is a legal DSL value.
+      const emptyStringMeansCleared =
+        data.stepType === 'Error' || data.stepType === 'Log';
       const filteredMapping = inputMapping.filter(
         ({
           type,
           value,
           valueType,
+          autoSeeded,
         }: {
           type: string;
           value: any;
           valueType?: string;
+          autoSeeded?: boolean;
         }) => {
           // Filter out entries with empty keys (field names)
           if (!type || type.trim() === '') {
@@ -946,7 +962,20 @@ function cleanNodeData(steps: Record<string, any>) {
             if (preserveInvalidMappingsForRustValidation) {
               return true;
             }
-            return value === null && valueType === 'immediate';
+            if (value === null && valueType === 'immediate') {
+              return true;
+            }
+            // Immediate '' is legal DSL: keep entries that were loaded from the
+            // step JSON or explicitly authored by the user. Only drop rows the
+            // editor auto-seeded from the capability/child-workflow schema and
+            // that still hold their untouched empty value (autoSeeded flag set
+            // at seed time, see InputMappingField auto-populate).
+            return (
+              !emptyStringMeansCleared &&
+              value === '' &&
+              valueType === 'immediate' &&
+              !autoSeeded
+            );
           }
           return true;
         }
@@ -1144,7 +1173,7 @@ function cleanNodeData(steps: Record<string, any>) {
         variables?: Record<
           string,
           {
-            valueType: 'reference' | 'immediate' | 'composite';
+            valueType: 'reference' | 'immediate' | 'composite' | 'template';
             value: unknown;
             type?: string;
           }
@@ -1199,7 +1228,11 @@ function cleanNodeData(steps: Record<string, any>) {
         }
       }
 
-      // Add variables from splitVariablesFields
+      // Add variables from splitVariablesFields. Route every variable through
+      // the shared processMappingEntry path so templates serialize as real
+      // template MappingValues, typed immediates (number/boolean) are coerced
+      // from their form strings, composites are normalized to backend format,
+      // and reference type hints only carry legal backend ValueTypes.
       if (
         Array.isArray(data.splitVariablesFields) &&
         data.splitVariablesFields.length > 0
@@ -1207,7 +1240,7 @@ function cleanNodeData(steps: Record<string, any>) {
         const variables: Record<
           string,
           {
-            valueType: 'reference' | 'immediate' | 'composite';
+            valueType: 'reference' | 'immediate' | 'composite' | 'template';
             value: unknown;
             type?: string;
           }
@@ -1216,18 +1249,22 @@ function cleanNodeData(steps: Record<string, any>) {
           const variableName =
             typeof varField.name === 'string' ? varField.name.trim() : '';
           if (variableName && varField.value !== undefined) {
-            const resolvedValueType: 'reference' | 'immediate' | 'composite' =
+            const resolvedValueType:
+              | 'reference'
+              | 'immediate'
+              | 'composite'
+              | 'template' =
               varField.valueType ||
               (typeof varField.value === 'object' && varField.value !== null
                 ? 'composite'
                 : 'immediate');
-            variables[variableName] = {
-              valueType: resolvedValueType,
+            const [, mappingValue] = processMappingEntry({
+              type: variableName,
               value: varField.value,
-              ...(resolvedValueType === 'reference' && varField.type
-                ? { type: varField.type }
-                : {}),
-            };
+              typeHint: varField.type,
+              valueType: resolvedValueType,
+            }) as [string, (typeof variables)[string]];
+            variables[variableName] = mappingValue;
           }
         }
         if (Object.keys(variables).length > 0) {
@@ -2013,14 +2050,19 @@ function normalizeNodesAndEdges(
               const splitVariablesFields = config?.variables
                 ? Object.entries(config.variables).map(([name, varDef]) => {
                     const typedVarDef = varDef as {
-                      valueType?: 'reference' | 'immediate' | 'composite';
+                      valueType?:
+                        | 'reference'
+                        | 'immediate'
+                        | 'composite'
+                        | 'template';
                       value: unknown;
                       type?: string;
                     };
                     const resolvedValueType:
                       | 'reference'
                       | 'immediate'
-                      | 'composite' =
+                      | 'composite'
+                      | 'template' =
                       typedVarDef.valueType ||
                       (typeof typedVarDef.value === 'object' &&
                       typedVarDef.value !== null

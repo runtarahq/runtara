@@ -80,9 +80,14 @@ function validateCompositeItem(
     return errors;
   }
 
-  switch (item.valueType) {
+  switch (item.valueType as string) {
     case 'immediate':
       // Immediate values are always valid (type checking is done at runtime)
+      break;
+
+    case 'template':
+      // Template strings are rendered with minijinja at runtime; missing
+      // references resolve there, so any string is structurally valid.
       break;
 
     case 'reference':

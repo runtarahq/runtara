@@ -11,12 +11,24 @@
 import type { InputMappingEntry } from '@/features/workflows/stores/nodeFormStore';
 
 /**
+ * Mapping entry extended with the editor-only `autoSeeded` marker.
+ *
+ * `autoSeeded: true` means the row was created by the editor (capability /
+ * child-workflow schema population) and the user never entered a value. The
+ * save path (cleanNodeData in CustomNodes/utils.tsx) drops such rows when
+ * their value is still the empty string, while explicit immediate '' values
+ * (loaded from the step JSON or typed by the user) are preserved — passing ""
+ * to an input is legal DSL.
+ */
+export type SeededMappingEntry = InputMappingEntry & { autoSeeded?: boolean };
+
+/**
  * Convert editor entries to the format stored in the react-hook-form
  * `inputMapping` field array.
  */
 export function toFormMappingEntries(
-  entries: InputMappingEntry[]
-): InputMappingEntry[] {
+  entries: SeededMappingEntry[]
+): SeededMappingEntry[] {
   return entries.map((entry) => ({
     type: entry.type,
     value: entry.value,
@@ -25,6 +37,7 @@ export function toFormMappingEntries(
     ...(entry.defaultValue !== undefined
       ? { defaultValue: entry.defaultValue }
       : {}),
+    ...(entry.autoSeeded !== undefined ? { autoSeeded: entry.autoSeeded } : {}),
   }));
 }
 
@@ -32,8 +45,8 @@ export function toFormMappingEntries(
  * Convert form field-array items to the editor's initial-data format.
  */
 export function toEditorInitialData(
-  items: Array<Partial<InputMappingEntry> & { type: string }>
-): InputMappingEntry[] {
+  items: Array<Partial<SeededMappingEntry> & { type: string }>
+): SeededMappingEntry[] {
   return items.map((item) => ({
     type: item.type,
     value: item.value ?? '',
@@ -42,5 +55,6 @@ export function toEditorInitialData(
     ...(item.defaultValue !== undefined
       ? { defaultValue: item.defaultValue }
       : {}),
+    ...(item.autoSeeded !== undefined ? { autoSeeded: item.autoSeeded } : {}),
   }));
 }

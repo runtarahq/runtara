@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
+import {
+  toEditorInitialData,
+  toFormMappingEntries,
+  type SeededMappingEntry,
+} from './mapping-entries';
 import type { InputMappingEntry } from '@/features/workflows/stores/nodeFormStore';
 
 describe('toFormMappingEntries', () => {
@@ -114,5 +118,39 @@ describe('toEditorInitialData', () => {
     const roundTripped = toFormMappingEntries(toEditorInitialData(formItems));
 
     expect(roundTripped).toEqual(formItems);
+  });
+});
+
+describe('autoSeeded passthrough', () => {
+  it('carries the autoSeeded marker editor → form → editor', () => {
+    const seeded: SeededMappingEntry[] = [
+      {
+        type: 'note',
+        value: '',
+        valueType: 'immediate',
+        typeHint: 'text',
+        autoSeeded: true,
+      },
+    ];
+
+    const formEntries = toFormMappingEntries(seeded);
+    expect(formEntries[0].autoSeeded).toBe(true);
+
+    const editorEntries = toEditorInitialData(formEntries);
+    expect(editorEntries[0].autoSeeded).toBe(true);
+  });
+
+  it('does not invent autoSeeded on entries that never had it', () => {
+    const entries: SeededMappingEntry[] = [
+      {
+        type: 'note',
+        value: '',
+        valueType: 'immediate',
+        typeHint: 'text',
+      },
+    ];
+
+    expect(toFormMappingEntries(entries)[0]).not.toHaveProperty('autoSeeded');
+    expect(toEditorInitialData(entries)[0]).not.toHaveProperty('autoSeeded');
   });
 });

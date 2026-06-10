@@ -330,6 +330,42 @@ describe('MappingValue round-trip', () => {
     ]);
   });
 
+  it('preserves a template nested inside a composite object', () => {
+    // The composite editors create nested templates (CompositeValueItem /
+    // CompositeArrayEditor); this locks the save/load contract they rely on.
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'request',
+      inputMapping: {
+        headers: {
+          valueType: 'composite',
+          value: {
+            authorization: {
+              valueType: 'template',
+              value: 'Bearer {{ steps.conn.outputs.api_key }}',
+            },
+            accept: { valueType: 'immediate', value: 'application/json' },
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.headers).toEqual({
+      valueType: 'composite',
+      value: {
+        authorization: {
+          valueType: 'template',
+          value: 'Bearer {{ steps.conn.outputs.api_key }}',
+        },
+        accept: { valueType: 'immediate', value: 'application/json' },
+      },
+    });
+  });
+
   it('preserves template valueType', () => {
     const graph = makeGraph({
       id: 's1',
@@ -1804,6 +1840,331 @@ describe('Split variable round-trip', () => {
       allowNull: true,
       convertSingleValue: true,
       batchSize: 25,
+    });
+  });
+
+  it('round-trips a template variable', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          greeting: {
+            valueType: 'template',
+            value: 'Hello {{ data.name }}',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hello {{ data.name }}',
+    });
+  });
+
+  it('serializes form-state template variables as template MappingValues', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'greeting',
+                value: 'Hi {{ data.name }}',
+                valueType: 'template',
+                type: 'string',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-template-variable-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).split;
+    expect(step.config.variables.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hi {{ data.name }}',
+    });
+  });
+
+  it('coerces typed immediate variables from their form strings', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'count',
+                value: '5',
+                valueType: 'immediate',
+                type: 'number',
+              },
+              {
+                name: 'flag',
+                value: 'true',
+                valueType: 'immediate',
+                type: 'boolean',
+              },
+              {
+                name: 'label',
+                value: 'plain',
+                valueType: 'immediate',
+                type: 'string',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-typed-immediates-fixture' }
+    );
+
+    const variables = (graph!.steps as Record<string, any>).split.config
+      .variables;
+    expect(variables.count).toEqual({ valueType: 'immediate', value: 5 });
+    expect(variables.flag).toEqual({ valueType: 'immediate', value: true });
+    expect(variables.label).toEqual({
+      valueType: 'immediate',
+      value: 'plain',
+    });
+  });
+
+  it('never emits non-ValueType variable types as backend reference hints', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'payload',
+                value: 'data.payload',
+                valueType: 'reference',
+                // 'object' is a UI variable type but not a legal backend
+                // ValueType — emitting it as `type` fails serde.
+                type: 'object',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-illegal-type-hint-fixture' }
+    );
+
+    const variables = (graph!.steps as Record<string, any>).split.config
+      .variables;
+    expect(variables.payload).toEqual({
+      valueType: 'reference',
+      value: 'data.payload',
+    });
+  });
+});
+
+describe('Empty-string immediate preservation', () => {
+  it('round-trips a JSON-authored immediate empty string on an Agent input', () => {
+    const graph = makeGraph({
+      id: 'agent',
+      stepType: 'Agent',
+      agentId: 'text',
+      capabilityId: 'concat',
+      inputMapping: {
+        separator: { valueType: 'immediate', value: '' },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: '',
+    });
+  });
+
+  it('keeps an explicit (unflagged) immediate empty string from form state', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: '',
+                typeHint: 'text',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'explicit-empty-string-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: '',
+    });
+  });
+
+  it('drops auto-seeded rows the user never filled in', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: '',
+                typeHint: 'text',
+                valueType: 'immediate',
+                autoSeeded: true,
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'auto-seeded-empty-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('keeps filled auto-seeded rows without leaking the marker', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: ', ',
+                typeHint: 'text',
+                valueType: 'immediate',
+                autoSeeded: true,
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'auto-seeded-filled-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: ', ',
+    });
+    expect(JSON.stringify(graph)).not.toContain('autoSeeded');
+  });
+});
+
+describe('Finish object/array immediate outputs', () => {
+  it('parses object/array hinted immediates into real JSON values', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'finish',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'finish',
+            stepType: 'Finish',
+            name: 'Finish',
+            inputMapping: [
+              {
+                type: 'payload',
+                value: '{"a": 1}',
+                typeHint: 'object',
+                valueType: 'immediate',
+              },
+              {
+                type: 'list',
+                value: '[1, 2, 3]',
+                typeHint: 'array',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'finish-object-array-fixture' }
+    );
+
+    const mapping = (graph!.steps as Record<string, any>).finish.inputMapping;
+    // Values are real JSON, and the form-level object/array hints are never
+    // emitted as backend type hints (they are not legal ValueTypes).
+    expect(mapping.payload).toEqual({
+      valueType: 'immediate',
+      value: { a: 1 },
+    });
+    expect(mapping.list).toEqual({
+      valueType: 'immediate',
+      value: [1, 2, 3],
     });
   });
 });

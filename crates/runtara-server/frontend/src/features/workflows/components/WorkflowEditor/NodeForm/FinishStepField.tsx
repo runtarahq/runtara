@@ -34,7 +34,15 @@ type FinishStepFieldProps = {
   name: string;
 };
 
-/** Available types for output fields */
+/**
+ * Available types for output fields.
+ *
+ * The 'object'/'array' hints are form-level only (they keep the composite
+ * editors' object-vs-array distinction); the save path (processMappingEntry
+ * in CustomNodes/utils.tsx) and the form's JSON refine (NodeFormItem.tsx)
+ * treat them exactly like 'json': the text is validated and JSON.parsed
+ * before serialization, and the backend never receives them as type hints.
+ */
 const OUTPUT_FIELD_TYPES = [
   { value: 'string', short: 's', full: 'String' },
   { value: 'integer', short: 'n', full: 'Integer' },
@@ -61,6 +69,8 @@ function getTypeAbbreviation(type: string | undefined): {
   if (lowerType === 'boolean') return { short: 'b', full: 'Boolean' };
   if (lowerType === 'object') return { short: '{}', full: 'Object' };
   if (lowerType === 'array') return { short: '[]', full: 'Array' };
+  // Custom rows store Object/Array choices as the backend-legal 'json' hint
+  if (lowerType === 'json') return { short: '{}', full: 'JSON' };
   if (lowerType === 'file') return { short: 'f', full: 'File' };
 
   return { short: type[0].toLowerCase(), full: type };

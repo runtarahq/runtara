@@ -635,15 +635,25 @@ export const schema = () =>
             // referenced path is missing or null. Must pass through the
             // resolver or a node-form save strips a JSON-authored default.
             defaultValue: z.any().optional(),
+            // Editor-only marker for rows auto-seeded from a capability/child
+            // workflow schema that the user never filled in. Must pass through
+            // the resolver (zodResolver replaces form data with parsed output)
+            // so the save path can drop untouched empty seeds while keeping
+            // explicit immediate '' values.
+            autoSeeded: z.boolean().optional(),
           })
           .refine(
             (item) => {
               // Validate JSON fields contain valid JSON strings
+              // ('object'/'array' are form-level hints — e.g. Finish output
+              // types — that carry the same JSON parse semantics on save)
               // BUT skip validation for:
               // - Reference values (they resolve at runtime)
               // - Template variables (they resolve at runtime)
               if (
-                item.typeHint === 'json' &&
+                (item.typeHint === 'json' ||
+                  item.typeHint === 'object' ||
+                  item.typeHint === 'array') &&
                 typeof item.value === 'string' &&
                 item.value
               ) {
@@ -731,8 +741,11 @@ export const schema = () =>
               name: z.string().optional(),
               value: z.any().optional(),
               type: z.string().optional(),
+              // Must accept every mode MappingValueInput's toggle can cycle
+              // into — omitting 'template' made the enum fail invisibly (no
+              // rendered error for valueType) and Save silently no-op.
               valueType: z
-                .enum(['reference', 'immediate', 'composite'])
+                .enum(['reference', 'immediate', 'composite', 'template'])
                 .optional(),
             })
             .superRefine((item, ctx) => {
@@ -853,6 +866,29 @@ export const schema = () =>
             code: z.ZodIssueCode.custom,
             path: ['splitVariablesFields', index, 'value'],
             message: 'Variable value is required',
+          });
+        }
+      });
+    })
+    .superRefine((inputs, ctx) => {
+      // Finish outputs serialize through Object.fromEntries, which silently
+      // collapses duplicate names last-wins before the server ever sees them.
+      // Block the save with a visible error on every duplicated row instead.
+      if (inputs.stepType !== 'Finish') return;
+      const nameCounts = new Map<string, number>();
+      (inputs.inputMapping || []).forEach((item) => {
+        const trimmedName = (item.type || '').trim();
+        if (!trimmedName) return;
+        nameCounts.set(trimmedName, (nameCounts.get(trimmedName) || 0) + 1);
+      });
+      (inputs.inputMapping || []).forEach((item, index) => {
+        const trimmedName = (item.type || '').trim();
+        if (!trimmedName) return;
+        if ((nameCounts.get(trimmedName) || 0) > 1) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['inputMapping', index, 'type'],
+            message: `Duplicate output name "${trimmedName}"`,
           });
         }
       });

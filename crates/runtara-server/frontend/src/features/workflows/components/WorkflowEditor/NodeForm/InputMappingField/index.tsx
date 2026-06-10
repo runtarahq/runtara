@@ -205,7 +205,10 @@ export function InputMappingField(props: any) {
         (fieldArray.length === 0 || !fieldsMatch);
 
       if (shouldAutoPopulate) {
-        // Include all fields - objects can be used with JSON type hint
+        // Include all fields - objects can be used with JSON type hint.
+        // Mark rows as autoSeeded: schema-populated rows the user never fills
+        // in are dropped on save, while explicit immediate '' values (loaded
+        // from the step JSON or typed by the user) are preserved.
         const newFields = parsedFields.map((field) => ({
           type: field.name,
           value:
@@ -213,6 +216,7 @@ export function InputMappingField(props: any) {
             (field.enum && field.enum.length > 0 ? field.enum[0] : ''),
           typeHint: getValueTypeFromSchemaType(field.type),
           valueType: 'immediate' as const,
+          autoSeeded: true,
         }));
 
         if (newFields.length > 0) {

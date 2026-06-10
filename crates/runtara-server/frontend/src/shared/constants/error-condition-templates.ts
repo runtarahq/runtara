@@ -2,10 +2,14 @@ import type { Condition } from '@/shared/components/ui/condition-editor';
 
 /**
  * Pre-built condition templates for handling errors in workflow onError edges.
- * These templates help users quickly build conditions that check the __error context
- * available when a step fails.
+ * These templates help users quickly build conditions that check the error
+ * context available when a step fails.
  *
- * @see docs/structured-errors.md for __error context structure
+ * References use the canonical `steps.__error.*` path (validation.rs W053):
+ * the bare `__error.*` root still resolves for back-compat but warns and is
+ * not typo-checked.
+ *
+ * @see docs/structured-errors.md for the error context structure
  */
 
 interface ErrorConditionTemplate {
@@ -23,7 +27,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'EQ',
       arguments: [
-        { valueType: 'reference', value: '__error.category' },
+        { valueType: 'reference', value: 'steps.__error.category' },
         { valueType: 'immediate', value: 'transient', immediateType: 'string' },
       ],
     },
@@ -36,7 +40,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'EQ',
       arguments: [
-        { valueType: 'reference', value: '__error.category' },
+        { valueType: 'reference', value: 'steps.__error.category' },
         { valueType: 'immediate', value: 'permanent', immediateType: 'string' },
       ],
     },
@@ -48,7 +52,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'CONTAINS',
       arguments: [
-        { valueType: 'reference', value: '__error.code' },
+        { valueType: 'reference', value: 'steps.__error.code' },
         {
           valueType: 'immediate',
           value: 'RATE_LIMITED',
@@ -69,7 +73,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
           type: 'operation',
           op: 'EQ',
           arguments: [
-            { valueType: 'reference', value: '__error.category' },
+            { valueType: 'reference', value: 'steps.__error.category' },
             {
               valueType: 'immediate',
               value: 'permanent',
@@ -81,7 +85,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
           type: 'operation',
           op: 'EQ',
           arguments: [
-            { valueType: 'reference', value: '__error.severity' },
+            { valueType: 'reference', value: 'steps.__error.severity' },
             {
               valueType: 'immediate',
               value: 'warning',
@@ -99,7 +103,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'EQ',
       arguments: [
-        { valueType: 'reference', value: '__error.severity' },
+        { valueType: 'reference', value: 'steps.__error.severity' },
         { valueType: 'immediate', value: 'critical', immediateType: 'string' },
       ],
     },
@@ -111,7 +115,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'CONTAINS',
       arguments: [
-        { valueType: 'reference', value: '__error.code' },
+        { valueType: 'reference', value: 'steps.__error.code' },
         { valueType: 'immediate', value: 'OPENAI_', immediateType: 'string' },
       ],
     },
@@ -123,7 +127,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
       type: 'operation',
       op: 'CONTAINS',
       arguments: [
-        { valueType: 'reference', value: '__error.code' },
+        { valueType: 'reference', value: 'steps.__error.code' },
         { valueType: 'immediate', value: 'SHOPIFY_', immediateType: 'string' },
       ],
     },
@@ -139,7 +143,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
           type: 'operation',
           op: 'CONTAINS',
           arguments: [
-            { valueType: 'reference', value: '__error.code' },
+            { valueType: 'reference', value: 'steps.__error.code' },
             {
               valueType: 'immediate',
               value: 'INVALID_API_KEY',
@@ -151,7 +155,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
           type: 'operation',
           op: 'CONTAINS',
           arguments: [
-            { valueType: 'reference', value: '__error.code' },
+            { valueType: 'reference', value: 'steps.__error.code' },
             {
               valueType: 'immediate',
               value: 'UNAUTHORIZED',
@@ -163,7 +167,7 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
           type: 'operation',
           op: 'CONTAINS',
           arguments: [
-            { valueType: 'reference', value: '__error.code' },
+            { valueType: 'reference', value: 'steps.__error.code' },
             {
               valueType: 'immediate',
               value: 'MISSING_CONNECTION',
