@@ -440,7 +440,9 @@ Findings 1-28 made every DSL field authorable and lossless, but seven surfaces s
 
 ### 29. Shared mapping-object editor for InputMapping-shaped JSON textareas
 
-Status: Planned. Effort: M (component) + S per swap.
+Status: Implemented. Effort: M (component) + S per swap.
+
+Resolution (2026-06-10): new `MappingObjectField` (key/value rows with the full MappingValueInput surface — all four modes, reference picker, type hints, fallback defaults, nested composite editing — plus duplicate/empty-key blocking and a collapsed "Edit as JSON" toggle) replaced the four textareas: `Log.context`, `Error.context`, `WaitForSignal.action.correlation`, `.context`. Serializers untouched — a dedicated test proves normalized write-back serializes byte-identical DSL; empty editor produces `{}` so the clear-when-empty delete pattern holds; unrepresentable shapes force JSON-only mode with a notice instead of corrupting. 30 new tests.
 
 Four fields are `InputMapping` objects (name → MappingValue) edited as JSON textareas: `Log.context` (LogStepField.tsx:184), `Error.context` (ErrorStepField.tsx:263), `WaitForSignal.action.correlation` and `.context` (WaitForSignalStepField.tsx:325/346). The structured editor they need already exists — `SimpleInputMappingEditor`/`MappingValueInput` (all four value modes, reference picker, fallback defaults) — but is coupled to the node form's `inputMapping` field array.
 

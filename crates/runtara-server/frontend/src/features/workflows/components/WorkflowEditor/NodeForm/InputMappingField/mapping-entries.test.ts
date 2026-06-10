@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatMappingObjectJson,
+  normalizeMappingObject,
+  normalizeMappingValue,
+  parseMappingObjectJson,
   toEditorInitialData,
   toFormMappingEntries,
   type SeededMappingEntry,
@@ -152,5 +156,176 @@ describe('autoSeeded passthrough', () => {
 
     expect(toFormMappingEntries(entries)[0]).not.toHaveProperty('autoSeeded');
     expect(toEditorInitialData(entries)[0]).not.toHaveProperty('autoSeeded');
+  });
+});
+
+describe('normalizeMappingValue', () => {
+  it('converts raw DSL reference aliases (type/default) to UI format', () => {
+    expect(
+      normalizeMappingValue({
+        valueType: 'reference',
+        value: 'data.caseId',
+        type: 'string',
+        default: 'unknown',
+      })
+    ).toEqual({
+      valueType: 'reference',
+      value: 'data.caseId',
+      typeHint: 'string',
+      defaultValue: 'unknown',
+    });
+  });
+
+  it('passes UI-format entries through unchanged (idempotent)', () => {
+    const entry = {
+      valueType: 'reference' as const,
+      value: 'data.caseId',
+      typeHint: 'string',
+      defaultValue: 'unknown',
+    };
+    const once = normalizeMappingValue(entry);
+    expect(once).toEqual(entry);
+    expect(normalizeMappingValue(once)).toEqual(once);
+  });
+
+  it('wraps bare literals as immediate values', () => {
+    expect(normalizeMappingValue('hello')).toEqual({
+      valueType: 'immediate',
+      value: 'hello',
+    });
+    expect(normalizeMappingValue(5)).toEqual({
+      valueType: 'immediate',
+      value: 5,
+    });
+    expect(normalizeMappingValue(null)).toEqual({
+      valueType: 'immediate',
+      value: null,
+    });
+    expect(normalizeMappingValue({ plain: 'object' })).toEqual({
+      valueType: 'immediate',
+      value: { plain: 'object' },
+    });
+  });
+
+  it('does not copy a default onto non-reference entries', () => {
+    expect(
+      normalizeMappingValue({
+        valueType: 'immediate',
+        value: 'x',
+        default: 'ignored',
+      })
+    ).toEqual({ valueType: 'immediate', value: 'x' });
+  });
+
+  it('recursively normalizes nested composite objects and arrays', () => {
+    expect(
+      normalizeMappingValue({
+        valueType: 'composite',
+        value: {
+          ref: { valueType: 'reference', value: 'data.x', type: 'integer' },
+          list: {
+            valueType: 'composite',
+            value: [{ valueType: 'immediate', value: 1 }],
+          },
+        },
+      })
+    ).toEqual({
+      valueType: 'composite',
+      value: {
+        ref: { valueType: 'reference', value: 'data.x', typeHint: 'integer' },
+        list: {
+          valueType: 'composite',
+          value: [{ valueType: 'immediate', value: 1 }],
+        },
+      },
+    });
+  });
+
+  it('seeds an empty object for non-object composite payloads', () => {
+    expect(
+      normalizeMappingValue({ valueType: 'composite', value: '' })
+    ).toEqual({ valueType: 'composite', value: {} });
+  });
+
+  it('rejects unknown valueType discriminants', () => {
+    expect(normalizeMappingValue({ valueType: 'exotic', value: 1 })).toBeNull();
+    expect(
+      normalizeMappingValue({
+        valueType: 'composite',
+        value: { bad: { valueType: 'exotic', value: 1 } },
+      })
+    ).toBeNull();
+  });
+});
+
+describe('normalizeMappingObject', () => {
+  it('normalizes empty-ish form values to an empty mapping', () => {
+    expect(normalizeMappingObject('')).toEqual({});
+    expect(normalizeMappingObject(null)).toEqual({});
+    expect(normalizeMappingObject(undefined)).toEqual({});
+  });
+
+  it('returns null for non-object values (JSON-only editing)', () => {
+    expect(normalizeMappingObject('not json')).toBeNull();
+    expect(normalizeMappingObject([1, 2])).toBeNull();
+    expect(normalizeMappingObject(42)).toBeNull();
+  });
+
+  it('returns null when any entry is unrepresentable', () => {
+    expect(
+      normalizeMappingObject({
+        ok: { valueType: 'immediate', value: 1 },
+        bad: { valueType: 'exotic', value: 1 },
+      })
+    ).toBeNull();
+  });
+
+  it('normalizes a mixed mapping object preserving key order', () => {
+    const result = normalizeMappingObject({
+      caseId: { valueType: 'reference', value: 'data.caseId', type: 'string' },
+      summary: { valueType: 'template', value: 'Case {{ data.caseId }}' },
+      flag: true,
+    });
+    expect(result).toEqual({
+      caseId: {
+        valueType: 'reference',
+        value: 'data.caseId',
+        typeHint: 'string',
+      },
+      summary: { valueType: 'template', value: 'Case {{ data.caseId }}' },
+      flag: { valueType: 'immediate', value: true },
+    });
+    expect(Object.keys(result!)).toEqual(['caseId', 'summary', 'flag']);
+  });
+});
+
+describe('parseMappingObjectJson / formatMappingObjectJson', () => {
+  it('parses blank input to {} (clears the field on save)', () => {
+    expect(parseMappingObjectJson('')).toEqual({});
+    expect(parseMappingObjectJson('   ')).toEqual({});
+  });
+
+  it('parses valid JSON and keeps invalid JSON as the raw string', () => {
+    expect(parseMappingObjectJson('{"a": 1}')).toEqual({ a: 1 });
+    expect(parseMappingObjectJson('{"a": ')).toBe('{"a": ');
+  });
+
+  it('formats falsy values as empty text and objects as pretty JSON', () => {
+    expect(formatMappingObjectJson('')).toBe('');
+    expect(formatMappingObjectJson(undefined)).toBe('');
+    expect(formatMappingObjectJson('raw string')).toBe('raw string');
+    expect(formatMappingObjectJson({ a: 1 })).toBe('{\n  "a": 1\n}');
+  });
+
+  it('round-trips structured edits through the JSON view', () => {
+    const obj = {
+      caseId: {
+        valueType: 'reference',
+        value: 'data.caseId',
+        typeHint: 'string',
+        defaultValue: 'unknown',
+      },
+    };
+    expect(parseMappingObjectJson(formatMappingObjectJson(obj))).toEqual(obj);
   });
 });

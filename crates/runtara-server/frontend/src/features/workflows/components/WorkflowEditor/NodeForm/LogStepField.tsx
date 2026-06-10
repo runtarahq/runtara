@@ -16,6 +16,7 @@ import {
 import { Textarea } from '@/shared/components/ui/textarea';
 import { NodeFormContext } from './NodeFormContext';
 import { ValueMode } from './InputMappingField/MappingValueInput';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
 
 type LogStepFieldProps = {
   name: string;
@@ -65,21 +66,6 @@ export function LogStepField({ name }: LogStepFieldProps) {
     const mapping = inputMapping || [];
     const field = mapping.find((item: any) => item.type === fieldName);
     return field?.value || '';
-  };
-
-  const getJsonValue = (fieldName: string) => {
-    const value = getValue(fieldName);
-    if (!value) return '';
-    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  };
-
-  const parseJsonObject = (value: string) => {
-    if (!value.trim()) return {};
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
   };
 
   const updateField = (
@@ -180,20 +166,11 @@ export function LogStepField({ name }: LogStepFieldProps) {
         <FormDescription>
           Optional DSL input-mapping object attached to the log event.
         </FormDescription>
-        <FormControl>
-          <Textarea
-            value={getJsonValue('context')}
-            onChange={(event) =>
-              updateField(
-                'context',
-                parseJsonObject(event.target.value),
-                'composite'
-              )
-            }
-            placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
-            className="min-h-24 font-mono text-sm"
-          />
-        </FormControl>
+        <MappingObjectField
+          value={getValue('context')}
+          onChange={(next) => updateField('context', next, 'composite')}
+          jsonPlaceholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+        />
       </FormItem>
     </div>
   );

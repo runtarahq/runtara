@@ -15,6 +15,7 @@ import {
   MappingValueInput,
   ValueMode,
 } from './InputMappingField/MappingValueInput';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
 import {
   SchemaFieldsEditor,
   type SchemaField as EditorSchemaField,
@@ -86,21 +87,6 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
     const mapping = inputMapping || [];
     const field = mapping.find((item: any) => item.type === fieldName);
     return field?.value ?? '';
-  };
-
-  const getJsonValue = (fieldName: string) => {
-    const value = getValue(fieldName);
-    if (!value) return '';
-    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  };
-
-  const parseJsonObject = (value: string) => {
-    if (!value.trim()) return {};
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
   };
 
   const getValueType = (fieldName: string) => {
@@ -321,20 +307,13 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
               <FormDescription>
                 DSL input-mapping object used for action correlation fields.
               </FormDescription>
-              <FormControl>
-                <Textarea
-                  value={getJsonValue('actionCorrelation')}
-                  onChange={(event) =>
-                    updateField(
-                      'actionCorrelation',
-                      parseJsonObject(event.target.value),
-                      'composite'
-                    )
-                  }
-                  placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
-                  className="min-h-24 font-mono text-sm"
-                />
-              </FormControl>
+              <MappingObjectField
+                value={getValue('actionCorrelation')}
+                onChange={(next) =>
+                  updateField('actionCorrelation', next, 'composite')
+                }
+                jsonPlaceholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+              />
             </FormItem>
 
             <FormItem>
@@ -342,20 +321,13 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
               <FormDescription>
                 Optional non-authoritative display/query context.
               </FormDescription>
-              <FormControl>
-                <Textarea
-                  value={getJsonValue('actionContext')}
-                  onChange={(event) =>
-                    updateField(
-                      'actionContext',
-                      parseJsonObject(event.target.value),
-                      'composite'
-                    )
-                  }
-                  placeholder='{"summary": {"valueType": "template", "value": "Case {{ data.caseId }}"}}'
-                  className="min-h-24 font-mono text-sm"
-                />
-              </FormControl>
+              <MappingObjectField
+                value={getValue('actionContext')}
+                onChange={(next) =>
+                  updateField('actionContext', next, 'composite')
+                }
+                jsonPlaceholder='{"summary": {"valueType": "template", "value": "Case {{ data.caseId }}"}}'
+              />
             </FormItem>
 
             <FormItem>

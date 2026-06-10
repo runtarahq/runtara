@@ -10,6 +10,7 @@ import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
 } from '@/features/workflows/config/workflow.ts';
+import { normalizeMappingObject } from '../NodeForm/InputMappingField/mapping-entries';
 
 /**
  * Round-trip tests for the workflow editor's save/load conversion.
@@ -2881,5 +2882,178 @@ describe('AiAgent memory removal round-trip', () => {
     });
     expect(step.config.memory.compaction).toEqual({ maxMessages: 50 });
     expect(step.config.memory.compaction).not.toHaveProperty('strategy');
+  });
+});
+
+describe('Mapping-object round-trip (Log/Error/WaitForSignal contexts)', () => {
+  /**
+   * Finding 29: the four InputMapping-shaped JSON fields (Log.context,
+   * Error.context, WaitForSignal.action.correlation/.context) are now edited
+   * by MappingObjectField, which writes back the UI-format object produced by
+   * normalizeMappingObject. These tests pin two contracts:
+   *   1. a rich mapping object (reference with type+default, template,
+   *      nested composite) survives load → save unchanged;
+   *   2. writing the normalized UI-format object back into form state (what a
+   *      structured edit does) serializes to the identical DSL output; and
+   *   3. an empty editor value ({}) clears the key, like the empty textarea.
+   */
+  const RICH_MAPPING = {
+    caseId: {
+      valueType: 'reference',
+      value: 'data.caseId',
+      type: 'string',
+      default: 'unknown-case',
+    },
+    summary: { valueType: 'template', value: 'Case {{ data.caseId }}' },
+    meta: {
+      valueType: 'composite',
+      value: {
+        flag: { valueType: 'immediate', value: true },
+        nested: {
+          valueType: 'composite',
+          value: {
+            inner: { valueType: 'reference', value: 'data.x' },
+          },
+        },
+      },
+    },
+    count: { valueType: 'immediate', value: 5 },
+  };
+
+  function makeLogGraph() {
+    return makeGraph({
+      id: 'log',
+      stepType: 'Log',
+      message: 'hello',
+      level: 'info',
+      context: structuredClone(RICH_MAPPING),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function makeErrorGraph() {
+    return makeGraph({
+      id: 'err',
+      stepType: 'Error',
+      code: 'E_TEST',
+      message: 'boom',
+      category: 'permanent',
+      severity: 'error',
+      context: structuredClone(RICH_MAPPING),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function makeWaitGraph() {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      action: {
+        key: 'approve',
+        correlation: structuredClone(RICH_MAPPING),
+        context: structuredClone(RICH_MAPPING),
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function editEntry(node: Node, type: string, patch: Record<string, unknown>) {
+    const mapping = ((node.data as any).inputMapping || []) as any[];
+    const idx = mapping.findIndex((item) => item.type === type);
+    expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
+      0
+    );
+    mapping[idx] = { ...mapping[idx], ...patch };
+  }
+
+  it('round-trips a rich Log.context unchanged', () => {
+    const step = roundTripStep(makeLogGraph());
+    expect(step.context).toEqual(RICH_MAPPING);
+  });
+
+  it('round-trips a rich Error.context unchanged', () => {
+    const step = roundTripStep(makeErrorGraph());
+    expect(step.context).toEqual(RICH_MAPPING);
+  });
+
+  it('round-trips rich WaitForSignal action correlation/context unchanged', () => {
+    const step = roundTripStep(makeWaitGraph());
+    expect(step.action.key).toBe('approve');
+    expect(step.action.correlation).toEqual(RICH_MAPPING);
+    expect(step.action.context).toEqual(RICH_MAPPING);
+  });
+
+  it('structured-editor write-back (normalized UI object) serializes identically', () => {
+    // Simulate MappingObjectField: normalize the loaded value and write the
+    // normalized object back into form state, then save.
+    for (const [graph, stepId, entryType, extract] of [
+      [makeLogGraph(), 'log', 'context', (s: any) => s.context],
+      [makeErrorGraph(), 'err', 'context', (s: any) => s.context],
+      [
+        makeWaitGraph(),
+        'wait',
+        'actionCorrelation',
+        (s: any) => s.action.correlation,
+      ],
+      [makeWaitGraph(), 'wait', 'actionContext', (s: any) => s.action.context],
+    ] as const) {
+      const { nodes, edges } = executionGraphToReactFlow(graph as any);
+      const node = nodes.find((n) => n.id === stepId)!;
+      const mapping = ((node.data as any).inputMapping || []) as any[];
+      const entry = mapping.find((item) => item.type === entryType);
+      expect(entry, `${stepId}.${entryType} entry missing`).toBeDefined();
+
+      const normalized = normalizeMappingObject(entry.value);
+      expect(normalized, `${stepId}.${entryType} not normalizable`).not.toBeNull();
+      editEntry(node, entryType, { value: normalized, valueType: 'composite' });
+
+      const round = composeExecutionGraph(nodes, edges, { name: 'norm' });
+      expect(round).not.toBeNull();
+      const step = (round!.steps as Record<string, any>)[stepId];
+      expect(extract(step), `${stepId}.${entryType} drifted`).toEqual(
+        RICH_MAPPING
+      );
+    }
+  });
+
+  it('an empty mapping editor ({}) clears Log.context like the empty textarea', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeLogGraph() as any);
+    const node = nodes.find((n) => n.id === 'log')!;
+    editEntry(node, 'context', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'log-clear' });
+    const step = (round!.steps as Record<string, any>).log;
+    expect(step).not.toHaveProperty('context');
+    expect(step.message).toBe('hello');
+  });
+
+  it('an empty mapping editor ({}) clears Error.context like the empty textarea', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeErrorGraph() as any);
+    const node = nodes.find((n) => n.id === 'err')!;
+    editEntry(node, 'context', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'err-clear' });
+    const step = (round!.steps as Record<string, any>).err;
+    expect(step).not.toHaveProperty('context');
+    expect(step.code).toBe('E_TEST');
+  });
+
+  it('empty mapping editors ({}) clear WaitForSignal action keys', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const node = nodes.find((n) => n.id === 'wait')!;
+    editEntry(node, 'actionCorrelation', { value: {}, valueType: 'composite' });
+    editEntry(node, 'actionContext', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-clear' });
+    const step = (round!.steps as Record<string, any>).wait;
+    // Key survives, the two cleared mapping objects are gone entirely.
+    expect(step.action).toEqual({ key: 'approve' });
+
+    // Clearing the key as well removes the whole action object.
+    editEntry(node, 'actionKey', { value: '' });
+    const round2 = composeExecutionGraph(nodes, edges, { name: 'wait-clear2' });
+    const step2 = (round2!.steps as Record<string, any>).wait;
+    expect(step2).not.toHaveProperty('action');
   });
 });

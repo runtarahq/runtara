@@ -18,6 +18,7 @@ import { Textarea } from '@/shared/components/ui/textarea';
 import { Input } from '@/shared/components/ui/input';
 import { NodeFormContext } from './NodeFormContext';
 import { ValueMode } from './InputMappingField/MappingValueInput';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
 
 type ErrorStepFieldProps = {
   name: string;
@@ -83,21 +84,6 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
     const mapping = inputMapping || [];
     const field = mapping.find((item: any) => item.type === fieldName);
     return field?.value || '';
-  };
-
-  const getJsonValue = (fieldName: string) => {
-    const value = getValue(fieldName);
-    if (!value) return '';
-    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  };
-
-  const parseJsonObject = (value: string) => {
-    if (!value.trim()) return {};
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
   };
 
   // Helper to update a field in the inputMapping array
@@ -259,20 +245,11 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
         <FormDescription>
           Optional DSL input-mapping object attached to the structured error.
         </FormDescription>
-        <FormControl>
-          <Textarea
-            value={getJsonValue('context')}
-            onChange={(event) =>
-              updateField(
-                'context',
-                parseJsonObject(event.target.value),
-                'composite'
-              )
-            }
-            placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
-            className="min-h-24 font-mono text-sm"
-          />
-        </FormControl>
+        <MappingObjectField
+          value={getValue('context')}
+          onChange={(next) => updateField('context', next, 'composite')}
+          jsonPlaceholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+        />
       </FormItem>
 
       <div className="rounded-md border border-blue-500/50 bg-blue-500/10 p-3 text-sm">
