@@ -1078,6 +1078,10 @@ pub struct WaitForSignalStep {
     /// This runs before suspending and is typically used to notify
     /// external systems of the signal_id they should use.
     /// The subgraph has access to `variables._signal_id` and `variables._instance_id`.
+    ///
+    /// **Ignored when this step is used as an AiAgent tool** (reached via a
+    /// tool-labelled edge): the tool lowering emits the durable wait but never
+    /// runs `onWait` (validation warns with W072).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub on_wait: Option<Box<ExecutionGraph>>,

@@ -23,7 +23,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | todo |
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | todo |
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
-| [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | todo |
+| [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc | S | Validator + docs; real parallelism is a separate epic | todo |
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrite messages/comments/doc example | S | Text only; actively misleading today | todo |
 | [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Delete (or fix field names if a consumer exists) | S | Public crate API removal | todo |
@@ -335,7 +335,7 @@ mode cannot pause before a tool-loop step.
 <a name="gap-09"></a>
 ## GAP-09 (P2) — `onWait` ignored for WaitForSignal-as-AiAgent-tool
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** A WaitForSignal step used as an AiAgent tool suspends and resumes correctly, but its
 `on_wait` subgraph never runs (`plan.rs:865-874` builds `DirectAiToolPlan::Wait` without it; parity
@@ -343,17 +343,17 @@ with the generated path, documented at `support.rs:914-918`). A user who attache
 request subgraph to the wait gets silence.
 
 **Fix plan.**
-- [ ] 1. `validation.rs`: add **W072** — when an AiAgent tool edge targets a WaitForSignal step
-  with `onWait` set:
-  `[W072] Step '<ai>': tool '<label>' targets WaitForSignal '<id>' whose onWait subgraph is ignored for tool waits.`
-- [ ] 2. Doc note in `schema_types.rs` (`WaitForSignalStep.on_wait`) and
-  `docs/wasm-direct-emitter.md`.
-- [ ] 3. Optional later (separate item, M): actually run `onWait` once before the durable poll in
-  `emit_ai_wait_tool_arm` — only if demand appears. Not in scope.
+- [x] 1. `validation.rs`: **W072** (`OnWaitIgnoredForAiAgentTool`) fires inside
+  `validate_ai_agent_steps` when a tool-labelled edge (not next/onError/memory/mcp.*) targets a
+  WaitForSignal step with `onWait` set.
+- [x] 2. Doc note on `WaitForSignalStep.on_wait` in `schema_types.rs`.
+- [x] 3. Running `onWait` for tool waits stays out of scope (demand-driven follow-up).
 
-**Test coverage required.**
-- [ ] Validation unit tests: tool-edge → WaitForSignal with onWait → `[W072]`; same step in normal
-  flow (not a tool) → no W072; tool target without onWait → no W072.
+**Test coverage delivered.**
+- [x] `test_wait_tool_with_on_wait_warns_w072` (incl. display text),
+  `test_wait_tool_without_on_wait_no_w072`, `test_normal_flow_wait_with_on_wait_no_w072`.
+- [x] E2E: live server `POST /api/runtime/workflows/graph/validate` returns the `[W072]` string
+  for an AiAgent tool edge to a WaitForSignal-with-onWait.
 
 ---
 

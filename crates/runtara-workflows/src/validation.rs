@@ -1081,6 +1081,15 @@ pub enum ValidationWarning {
     /// is accepted and ignored. (Split, While, and WaitForSignal timeouts
     /// ARE enforced.)
     TimeoutNotEnforced { step_id: String, step_type: String },
+    /// An AiAgent tool edge targets a WaitForSignal step that has an `onWait`
+    /// subgraph. The tool lowering emits the durable wait and feeds the signal
+    /// payload back to the model, but never runs `onWait` (parity with the
+    /// generated path) — the subgraph is dead code in this position.
+    OnWaitIgnoredForAiAgentTool {
+        step_id: String,
+        tool_label: String,
+        wait_step_id: String,
+    },
     /// A reference is valid through a known prefix, but the remaining suffix is
     /// inside an open/dynamic object where static validation cannot prove fields.
     PartiallyUnverifiedReference {
@@ -1243,6 +1252,17 @@ impl std::fmt::Display for ValidationWarning {
                      step will not fail when the duration is exceeded. Split, While, and \
                      WaitForSignal timeouts are enforced.",
                     step_id, step_type
+                )
+            }
+            ValidationWarning::OnWaitIgnoredForAiAgentTool {
+                step_id,
+                tool_label,
+                wait_step_id,
+            } => {
+                write!(
+                    f,
+                    "[W072] Step '{}': tool '{}' targets WaitForSignal '{}' whose onWait subgraph is ignored for AiAgent tool waits — it will never run. Move that logic before the AiAgent step or into a tool the model can call.",
+                    step_id, tool_label, wait_step_id
                 )
             }
             ValidationWarning::PartiallyUnverifiedReference {
@@ -4853,6 +4873,38 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                             label: label.to_string(),
                         });
                     }
+                }
+            }
+
+            // === W072: WaitForSignal tools never run their onWait subgraph ===
+            // A tool edge (any label except next/onError/memory/mcp.*) whose
+            // target is a WaitForSignal step emits the durable wait, but the
+            // tool lowering ignores `onWait` entirely (parity with the
+            // generated path) — warn so authors don't rely on dead logic.
+            for edge in &graph.execution_plan {
+                if edge.from_step != *step_id {
+                    continue;
+                }
+                let Some(ref label) = edge.label else {
+                    continue;
+                };
+                if label == "next"
+                    || label == "onError"
+                    || label == "memory"
+                    || label.starts_with("mcp.")
+                {
+                    continue;
+                }
+                if let Some(Step::WaitForSignal(wait_step)) = graph.steps.get(&edge.to_step)
+                    && wait_step.on_wait.is_some()
+                {
+                    result
+                        .warnings
+                        .push(ValidationWarning::OnWaitIgnoredForAiAgentTool {
+                            step_id: step_id.clone(),
+                            tool_label: label.clone(),
+                            wait_step_id: edge.to_step.clone(),
+                        });
                 }
             }
         }
@@ -9079,6 +9131,104 @@ mod tests {
                 ValidationWarning::TimeoutNotEnforced { step_id, .. } if step_id == "inner"
             )),
             "Agent timeout in a While subgraph must warn W071: {:?}",
+            result.warnings
+        );
+    }
+
+    // === AiAgent WaitForSignal Tool onWait Tests (W072) ===
+
+    fn w072_graph(with_on_wait: bool, tool_edge: bool) -> ExecutionGraph {
+        let on_wait = if with_on_wait {
+            r##","onWait":{"entryPoint":"notify_finish","executionPlan":[],"steps":{"notify_finish":{"id":"notify_finish","stepType":"Finish"}}}"##
+        } else {
+            ""
+        };
+        let edge_label = if tool_edge { "approval" } else { "next" };
+        let json = format!(
+            r##"{{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {{"fromStep":"ai","toStep":"wait","label":"{edge_label}"}},
+                {{"fromStep":"ai","toStep":"finish","label":"next"}}
+              ],
+              "steps": {{
+                "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+                  "systemPrompt":{{"valueType":"immediate","value":"You are helpful"}},
+                  "userPrompt":{{"valueType":"immediate","value":"Do the thing"}},
+                  "provider":"openai"
+                }}}},
+                "wait": {{"id":"wait","stepType":"WaitForSignal"{on_wait}}},
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }}
+            }}"##
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_wait_tool_with_on_wait_warns_w072() {
+        let graph = w072_graph(true, true);
+        let result = validate_workflow(&graph, &test_catalog());
+
+        let w072: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. }))
+            .collect();
+        assert_eq!(w072.len(), 1, "{:?}", result.warnings);
+        let display = format!("{}", w072[0]);
+        assert!(display.contains("[W072]"), "{display}");
+        assert!(display.contains("'approval'"), "{display}");
+        assert!(display.contains("'wait'"), "{display}");
+    }
+
+    #[test]
+    fn test_wait_tool_without_on_wait_no_w072() {
+        let graph = w072_graph(false, true);
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. })),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_normal_flow_wait_with_on_wait_no_w072() {
+        // The wait sits on the AiAgent's "next" edge (normal flow, not a
+        // tool): onWait DOES run there, so no warning.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {"fromStep":"ai","toStep":"wait","label":"next"},
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                  "systemPrompt":{"valueType":"immediate","value":"You are helpful"},
+                  "userPrompt":{"valueType":"immediate","value":"Do the thing"},
+                  "provider":"openai"
+                }},
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"nf","executionPlan":[],"steps":{"nf":{"id":"nf","stepType":"Finish"}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. })),
+            "{:?}",
             result.warnings
         );
     }
