@@ -3,9 +3,13 @@ import { WorkflowField } from './WorkflowField';
 import { ScheduleField } from './ScheduleField';
 import { ConfigurationField } from './ConfigurationField';
 import { ChannelConnectionField } from './ChannelConnectionField';
+import { WebhookConnectionField } from './WebhookConnectionField';
 import { CronInputsField } from './CronInputsField';
 import { type ScheduleConfig } from '@/features/triggers/utils/cron';
-import { staticInputsError } from '@/features/triggers/utils/trigger-configuration';
+import {
+  isAcceptedCronExpression,
+  staticInputsError,
+} from '@/features/triggers/utils/trigger-configuration';
 
 // Default schedule configuration
 export const defaultScheduleConfig: ScheduleConfig = {
@@ -63,6 +67,24 @@ export const fieldsConfig = [
     name: 'cronDebug',
     initialValue: false,
     hint: 'Capture detailed step events for each scheduled run',
+  },
+  {
+    type: 'checkbox',
+    label: 'Debug mode',
+    name: 'webhookDebug',
+    initialValue: false,
+    hint: 'Capture detailed step events for each webhook-triggered run',
+  },
+  {
+    label: 'Webhook verification connection',
+    name: 'webhookConnectionId',
+    initialValue: '',
+    renderFormField: (config: Record<string, unknown>) => (
+      <WebhookConnectionField
+        label={config.label as string}
+        disabled={config.disabled as boolean}
+      />
+    ),
   },
   {
     type: 'text',
@@ -182,6 +204,8 @@ export const schema = z
     sessionMode: z.string().optional(),
     cronInputs: z.string().optional(),
     cronDebug: z.boolean().optional(),
+    webhookDebug: z.boolean().optional(),
+    webhookConnectionId: z.string().optional(),
     // Loaded configurations can contain non-string values (e.g. CRON
     // `inputs` objects or the `debug` boolean), so values must stay loose.
     configuration: z.record(z.any()).optional().default({}),
@@ -231,9 +255,9 @@ export const schema = z
           if (!customExpression) {
             return false;
           }
-          // Basic cron validation: 5 space-separated fields
-          const parts = customExpression.trim().split(/\s+/);
-          return parts.length === 5;
+          // Mirror the server's normalize_cron_expression: 5 fields, or 6
+          // fields when the leading seconds field is '0'.
+          return isAcceptedCronExpression(customExpression);
         }
 
         default:
@@ -260,7 +284,7 @@ export const schema = z
       if (scheduleConfig.type === 'custom') {
         return {
           message:
-            'Please enter a valid cron expression (5 fields: minute hour day-of-month month day-of-week).',
+            'Please enter a valid cron expression (5 fields: minute hour day-of-month month day-of-week; a leading seconds field is accepted only when it is "0").',
           path: ['scheduleConfig'],
         };
       }

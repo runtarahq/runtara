@@ -43,6 +43,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { useToken } from '@/shared/hooks';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
+import { PauseButton } from '@/features/workflows/components/PauseButton';
 import { ReplayButton } from '@/features/workflows/components/ReplayButton';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
@@ -273,11 +274,23 @@ export function WorkflowHistory() {
                   View Logs
                 </Button>
                 {isActiveStatus(data.status) ? (
-                  <StopButton
-                    instanceId={data.id}
-                    variant="outline"
-                    size="sm"
-                  />
+                  <>
+                    {/* The pause handler only accepts instances in the
+                        'running' state (suspended is a no-op, anything else
+                        is a 400), so gate on the exact status. */}
+                    {data.status?.toLowerCase() === 'running' && (
+                      <PauseButton
+                        instanceId={data.id}
+                        variant="outline"
+                        size="sm"
+                      />
+                    )}
+                    <StopButton
+                      instanceId={data.id}
+                      variant="outline"
+                      size="sm"
+                    />
+                  </>
                 ) : (
                   <>
                     {(data.status === 'failed' ||

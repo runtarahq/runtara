@@ -7,7 +7,11 @@ import { Loader } from '@/shared/components/loader.tsx';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { queryClient } from '@/main';
 import { scheduleToCron, cronToSchedule } from '@/features/triggers/utils/cron';
-import { buildCronConfiguration } from '@/features/triggers/utils/trigger-configuration';
+import {
+  buildCronConfiguration,
+  buildWebhookConfiguration,
+} from '@/features/triggers/utils/trigger-configuration';
+import { AlertTriangle } from 'lucide-react';
 import {
   getInvocationTriggerById,
   updateInvocationTrigger,
@@ -78,6 +82,8 @@ export function EditTrigger() {
       sessionMode,
       cronInputs,
       cronDebug,
+      webhookDebug,
+      webhookConnectionId,
       configuration,
       ...restTrigger
     } = data;
@@ -124,9 +130,24 @@ export function EditTrigger() {
           delete finalConfiguration.session_mode;
         }
         break;
+      case 'HTTP':
+      case 'EMAIL': {
+        // Merge the form-managed keys (debug, connection_id) over the
+        // existing configuration so API-authored keys survive an edit-save.
+        const webhookConfiguration = buildWebhookConfiguration({
+          existing: existingConfiguration,
+          debug: webhookDebug,
+          connectionId: webhookConnectionId,
+        });
+        finalConfiguration =
+          Object.keys(webhookConfiguration).length > 0
+            ? webhookConfiguration
+            : null;
+        break;
+      }
       default:
-        // HTTP, EMAIL, etc.: keep the trigger's existing configuration
-        // (debug, connection_id, ...) instead of wiping it to null.
+        // Other types: keep the trigger's existing configuration
+        // instead of wiping it to null.
         finalConfiguration =
           Object.keys(existingConfiguration).length > 0
             ? existingConfiguration
@@ -181,6 +202,19 @@ export function EditTrigger() {
       );
     }
     initValues.cronDebug = initValues.configuration.debug === true;
+  }
+
+  // Surface webhook-managed configuration keys (debug, connection_id) for
+  // HTTP/EMAIL triggers
+  initValues.webhookDebug = false;
+  initValues.webhookConnectionId = '';
+  if (
+    (initValues.triggerType === 'HTTP' || initValues.triggerType === 'EMAIL') &&
+    initValues.configuration
+  ) {
+    initValues.webhookDebug = initValues.configuration.debug === true;
+    initValues.webhookConnectionId =
+      initValues.configuration.connection_id || '';
   }
 
   // Extract connectionId and sessionMode for CHANNEL triggers
@@ -238,6 +272,16 @@ export function EditTrigger() {
         </section>
 
         <section className="space-y-4 px-4 sm:px-5">
+          {initValues.triggerType === 'APPLICATION' && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>
+                Application triggers are not currently fired by the platform.
+                You can still edit this trigger, but it will not launch its
+                workflow until Application events are supported.
+              </p>
+            </div>
+          )}
           <TriggerForm
             title="Trigger details"
             description="Adjust the workflow mapping, schedule, and application payloads."

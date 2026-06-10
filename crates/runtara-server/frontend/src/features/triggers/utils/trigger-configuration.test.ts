@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCronConfiguration,
+  buildWebhookConfiguration,
+  isAcceptedCronExpression,
   parseStaticInputs,
   staticInputsError,
 } from './trigger-configuration';
@@ -138,5 +140,80 @@ describe('buildCronConfiguration', () => {
       inputs: { data: {} },
       debug: true,
     });
+  });
+});
+
+describe('isAcceptedCronExpression', () => {
+  it('accepts standard 5-field expressions', () => {
+    expect(isAcceptedCronExpression('0 0 * * *')).toBe(true);
+    expect(isAcceptedCronExpression('*/5 * * * *')).toBe(true);
+    expect(isAcceptedCronExpression('  15 9 * * 1  ')).toBe(true);
+  });
+
+  it('accepts 6-field expressions whose seconds field is 0', () => {
+    // Mirrors the server's normalize_cron_expression (cron_scheduler.rs),
+    // which strips a leading '0' seconds field.
+    expect(isAcceptedCronExpression('0 0 0 * * *')).toBe(true);
+    expect(isAcceptedCronExpression('0 */5 * * * 1')).toBe(true);
+  });
+
+  it('rejects 6-field expressions with non-zero seconds', () => {
+    expect(isAcceptedCronExpression('30 0 0 * * *')).toBe(false);
+    expect(isAcceptedCronExpression('* 0 0 * * *')).toBe(false);
+  });
+
+  it('rejects other field counts and blank values', () => {
+    expect(isAcceptedCronExpression('')).toBe(false);
+    expect(isAcceptedCronExpression('   ')).toBe(false);
+    expect(isAcceptedCronExpression('* * * *')).toBe(false);
+    expect(isAcceptedCronExpression('0 0 0 0 * * *')).toBe(false);
+    expect(isAcceptedCronExpression(undefined)).toBe(false);
+    expect(isAcceptedCronExpression(null)).toBe(false);
+  });
+});
+
+describe('buildWebhookConfiguration', () => {
+  it('returns an empty object when nothing is set', () => {
+    expect(buildWebhookConfiguration({})).toEqual({});
+  });
+
+  it('stores debug as a real boolean and connection_id as a string', () => {
+    expect(
+      buildWebhookConfiguration({ debug: true, connectionId: 'conn-1' })
+    ).toEqual({
+      debug: true,
+      connection_id: 'conn-1',
+    });
+  });
+
+  it('removes debug and connection_id when cleared', () => {
+    expect(
+      buildWebhookConfiguration({
+        existing: { debug: true, connection_id: 'conn-1', other: 'kept' },
+        debug: false,
+        connectionId: '',
+      })
+    ).toEqual({ other: 'kept' });
+  });
+
+  it('preserves unknown keys from the existing configuration', () => {
+    expect(
+      buildWebhookConfiguration({
+        existing: { custom_key: { nested: true }, path: '/hook' },
+        debug: true,
+        connectionId: 'conn-2',
+      })
+    ).toEqual({
+      custom_key: { nested: true },
+      path: '/hook',
+      debug: true,
+      connection_id: 'conn-2',
+    });
+  });
+
+  it('does not mutate the existing configuration object', () => {
+    const existing = { debug: true, connection_id: 'conn-1' };
+    buildWebhookConfiguration({ existing, debug: false, connectionId: '' });
+    expect(existing).toEqual({ debug: true, connection_id: 'conn-1' });
   });
 });

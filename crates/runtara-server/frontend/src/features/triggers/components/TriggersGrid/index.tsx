@@ -9,6 +9,7 @@ import { queryClient } from '@/main.tsx';
 import { removeInvocationTrigger } from '@/features/triggers/queries';
 import {
   getHttpTriggerUrl,
+  getHttpSyncUrl,
   getEmailTriggerAddress,
   getChannelWebhookUrl,
 } from '@/features/triggers/utils/endpoints';
@@ -77,6 +78,26 @@ function getEndpoint(trigger: EnrichedTrigger): string | null {
     );
   }
   return null;
+}
+
+/** Synchronous-execution endpoint variant; HTTP triggers only. */
+function getSyncEndpoint(trigger: EnrichedTrigger): string | null {
+  const { triggerType, tenantId, workflowId } = trigger;
+  if (triggerType === 'HTTP' && tenantId && workflowId) {
+    return getHttpSyncUrl(workflowId, tenantId);
+  }
+  return null;
+}
+
+function formatLastRun(lastRun?: string | null): string {
+  if (!lastRun) {
+    return '—';
+  }
+  const date = new Date(lastRun);
+  if (isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleString();
 }
 
 export function TriggersGrid({
@@ -182,6 +203,7 @@ export function TriggersGrid({
               <TableHead>Name</TableHead>
               <TableHead>Type</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Last run</TableHead>
               <TableHead>Endpoint</TableHead>
               <TableHead className="w-0" />
             </TableRow>
@@ -189,6 +211,7 @@ export function TriggersGrid({
           <TableBody>
             {sortedTriggers.map((trigger) => {
               const endpoint = getEndpoint(trigger);
+              const syncEndpoint = getSyncEndpoint(trigger);
               return (
                 <TableRow key={trigger.id}>
                   <TableCell className="font-medium text-foreground">
@@ -210,28 +233,59 @@ export function TriggersGrid({
                       label={trigger.active ? 'Active' : 'Inactive'}
                     />
                   </TableCell>
+                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                    {formatLastRun(trigger.lastRun)}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {endpoint ? (
-                      <div className="flex items-center gap-1">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="block max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="block max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
+                                {endpoint}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
                               {endpoint}
+                            </TooltipContent>
+                          </Tooltip>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 text-muted-foreground"
+                            title="Copy endpoint"
+                            onClick={() => handleCopyEndpoint(endpoint)}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                        {syncEndpoint && (
+                          <div className="flex items-center gap-1">
+                            <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                              Sync (30s, no history)
                             </span>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
-                            {endpoint}
-                          </TooltipContent>
-                        </Tooltip>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6 shrink-0 text-muted-foreground"
-                          title="Copy endpoint"
-                          onClick={() => handleCopyEndpoint(endpoint)}
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </Button>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="block max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
+                                  {syncEndpoint}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
+                                {syncEndpoint}
+                              </TooltipContent>
+                            </Tooltip>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0 text-muted-foreground"
+                              title="Copy sync endpoint"
+                              onClick={() => handleCopyEndpoint(syncEndpoint)}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <span className="font-mono text-xs text-muted-foreground/70">

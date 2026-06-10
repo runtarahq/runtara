@@ -22,8 +22,15 @@ type Props = {
   submitLabel?: string;
   loadingLabel?: string;
   cancelHref?: string;
+  /**
+   * Trigger types removed from the type selector (e.g. APPLICATION on the
+   * create page — the platform never fires Application triggers).
+   */
+  hiddenTriggerTypes?: string[];
   onSubmit: (data: TriggerSchemaType) => void;
 };
+
+const EMPTY_HIDDEN_TYPES: string[] = [];
 
 export function TriggerForm(props: Props) {
   const {
@@ -35,6 +42,7 @@ export function TriggerForm(props: Props) {
     submitLabel = 'Save trigger',
     loadingLabel = 'Saving...',
     cancelHref = '/invocation-triggers',
+    hiddenTriggerTypes = EMPTY_HIDDEN_TYPES,
     onSubmit,
   } = props;
 
@@ -69,12 +77,29 @@ export function TriggerForm(props: Props) {
         if (field.name === 'cronInputs' || field.name === 'cronDebug') {
           return triggerType === 'CRON';
         }
+        // Only include webhook debug + verification connection fields if
+        // triggerType is HTTP or EMAIL (both ingest via the events handler)
+        if (
+          field.name === 'webhookDebug' ||
+          field.name === 'webhookConnectionId'
+        ) {
+          return triggerType === 'HTTP' || triggerType === 'EMAIL';
+        }
         return true;
       })
       .map((field) => {
         // Inject workflows into the WorkflowField config
         if (field.name === 'workflowId') {
           return { ...field, workflows };
+        }
+        // Optionally hide trigger types (e.g. APPLICATION on create)
+        if (field.name === 'triggerType' && hiddenTriggerTypes.length > 0) {
+          return {
+            ...field,
+            options: (field.options as { label: string; value: string }[]).filter(
+              (option) => !hiddenTriggerTypes.includes(option.value)
+            ),
+          };
         }
         // Inject messaging connections into the connectionId select
         if (field.name === 'connectionId') {
@@ -95,7 +120,7 @@ export function TriggerForm(props: Props) {
         }
         return field;
       });
-  }, [triggerType, workflows, connections]);
+  }, [triggerType, workflows, connections, hiddenTriggerTypes]);
 
   const handleSubmit = (values: TriggerSchemaType) => {
     onSubmit(values);

@@ -373,6 +373,36 @@ export async function resumeInstance(token: string, instanceId: string) {
   return result.data;
 }
 
+/**
+ * Pause a running workflow instance.
+ *
+ * POST /api/runtime/workflows/instances/{instanceId}/pause
+ * (api/handlers/workflows.rs::pause_instance_handler). Only instances in the
+ * 'running' state can be paused; already-suspended instances are a no-op 200
+ * and any other state returns 400 "Instance not pausable". The generated API
+ * client does not expose this handler yet, so call it with a raw fetch like
+ * rebuildWorkflowVersion does.
+ */
+export async function pauseInstance(token: string, instanceId: string) {
+  const base = getRuntimeBaseUrl();
+  const url = `${base}/workflows/instances/${encodeURIComponent(
+    instanceId
+  )}/pause`;
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(url, { method: 'POST', headers });
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.message || `Failed to pause instance (HTTP ${response.status})`
+    );
+  }
+
+  return payload;
+}
+
 export async function cloneWorkflow(
   token: string,
   workflowId: string,

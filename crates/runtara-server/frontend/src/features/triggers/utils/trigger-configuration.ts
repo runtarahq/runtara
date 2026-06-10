@@ -45,6 +45,24 @@ export function parseStaticInputs(text: unknown): unknown {
   return JSON.parse(trimmed);
 }
 
+/**
+ * Validate a custom cron expression against what the server's cron scheduler
+ * accepts. `normalize_cron_expression` (workers/cron_scheduler.rs) runs
+ * standard 5-field expressions as-is and additionally accepts 6-field
+ * expressions whose seconds field is '0' (the seconds field is stripped).
+ * Mirror that here so the form does not reject expressions the server runs.
+ */
+export function isAcceptedCronExpression(expression: unknown): boolean {
+  if (typeof expression !== 'string' || expression.trim() === '') {
+    return false;
+  }
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length === 5) {
+    return true;
+  }
+  return parts.length === 6 && parts[0] === '0';
+}
+
 export interface CronConfigurationOptions {
   /** Existing trigger configuration whose unknown keys must be preserved. */
   existing?: Record<string, unknown> | null;
@@ -84,6 +102,49 @@ export function buildCronConfiguration(
     configuration.debug = true;
   } else {
     delete configuration.debug;
+  }
+
+  return configuration;
+}
+
+export interface WebhookConfigurationOptions {
+  /** Existing trigger configuration whose unknown keys must be preserved. */
+  existing?: Record<string, unknown> | null;
+  /**
+   * Debug mode toggle. The webhook ingest handler reads
+   * `configuration.debug` via as_bool (api/handlers/events.rs), so this must
+   * be stored as a real boolean; false removes the key.
+   */
+  debug?: boolean;
+  /**
+   * Connection used for webhook signature verification. The server reads
+   * `configuration.connection_id` (api/services/webhook_verification.rs) and
+   * verifies the request against that connection's signing key. Blank
+   * removes the key (verification disabled).
+   */
+  connectionId?: string | null;
+}
+
+/**
+ * Build an HTTP/EMAIL trigger configuration, merging the form-managed keys
+ * (`debug`, `connection_id`) over the existing configuration object.
+ */
+export function buildWebhookConfiguration(
+  options: WebhookConfigurationOptions
+): Record<string, unknown> {
+  const { existing, debug, connectionId } = options;
+  const configuration: Record<string, unknown> = { ...(existing ?? {}) };
+
+  if (debug) {
+    configuration.debug = true;
+  } else {
+    delete configuration.debug;
+  }
+
+  if (connectionId) {
+    configuration.connection_id = connectionId;
+  } else {
+    delete configuration.connection_id;
   }
 
   return configuration;
