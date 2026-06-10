@@ -35,6 +35,7 @@ const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const AGENT_EDGE_CONDITION: &str = include_str!("fixtures/agent_edge_condition.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
@@ -1986,6 +1987,36 @@ fn direct_wasm_execute_ai_agent_loop_tool_error_feeds_back_not_on_error() {
         second_request.to_lowercase().contains("error"),
         "tool error envelope must feed back to the model: {second_request}"
     );
+}
+
+#[test]
+fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-13: conditioned normal-flow edges from an AGENT source route on the
+    // agent's own output (steps.echo.outputs.*), with priority ordering and
+    // the default fallback — and coexist with an onError edge on the same
+    // step (success path must take the EdgeRoute, not the handler).
+    for (input, expected_path) in [
+        // tier=vip outranks status=active (priority 10 > 5)
+        (r#"{"status":"active","tier":"vip"}"#, "vip"),
+        (r#"{"status":"active"}"#, "active"),
+        (r#"{"status":"dormant"}"#, "default"),
+    ] {
+        let output = run_direct_workflow(
+            &components_dir,
+            "agent-edge-condition",
+            AGENT_EDGE_CONDITION,
+            input.as_bytes(),
+        );
+        assert_eq!(
+            output.get("path").and_then(Value::as_str),
+            Some(expected_path),
+            "input {input} routed wrong: {output}"
+        );
+    }
 }
 
 #[test]

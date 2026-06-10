@@ -1138,7 +1138,14 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         return false;
     };
     match step {
+        // Data steps whose output drives the route, plus (GAP-13) Agent /
+        // Delay / WaitForSignal sources — the EdgeRoute lowering is
+        // source-agnostic; the historical restriction was only this gate.
+        // Split / While / EmbedWorkflow stay excluded: their successor
+        // handling owns next/error-plan interplay and needs its own analysis.
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
+        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Delay(_) | Step::WaitForSignal(_) => {}
         Step::Switch(step)
             if !step
                 .config
@@ -3731,5 +3738,81 @@ mod handler_step_on_error_tests {
 
         let report = analyze_direct_wasm_support(&graph);
         assert!(report.supported, "{:?}", report.unsupported);
+    }
+    #[test]
+    fn agent_source_conditioned_edges_are_supported() {
+        // GAP-13: conditioned normal-flow edges from Agent / Delay /
+        // WaitForSignal sources lower as EdgeRoute like the data-step sources.
+        let graph: ExecutionGraph = serde_json::from_str(include_str!(
+            "../../tests/fixtures/agent_edge_condition.json"
+        ))
+        .expect("fixture parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn delay_and_wait_source_conditioned_edges_are_supported() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "pause": { "stepType": "Delay", "id": "pause",
+                    "durationMs": { "valueType": "immediate", "value": 1 } },
+                "wait": { "stepType": "WaitForSignal", "id": "wait",
+                    "timeoutMs": { "valueType": "immediate", "value": 10 } },
+                "finish_fast": { "stepType": "Finish", "id": "finish_fast" },
+                "finish_default": { "stepType": "Finish", "id": "finish_default" }
+            },
+            "entryPoint": "pause",
+            "executionPlan": [
+                { "fromStep": "pause", "toStep": "wait" },
+                { "fromStep": "wait", "toStep": "finish_fast", "condition": {
+                    "type": "operation", "op": "EQ", "arguments": [
+                        { "valueType": "reference", "value": "steps.wait.outputs.kind" },
+                        { "valueType": "immediate", "value": "fast" }
+                    ]}},
+                { "fromStep": "wait", "toStep": "finish_default" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn agent_source_conditioned_edges_with_two_defaults_rejected() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "echo": { "stepType": "Agent", "id": "echo", "agentId": "utils",
+                    "capabilityId": "return-input", "inputMapping": {} },
+                "finish_a": { "stepType": "Finish", "id": "finish_a" },
+                "finish_b": { "stepType": "Finish", "id": "finish_b" },
+                "finish_c": { "stepType": "Finish", "id": "finish_c" }
+            },
+            "entryPoint": "echo",
+            "executionPlan": [
+                { "fromStep": "echo", "toStep": "finish_a", "condition": {
+                    "type": "operation", "op": "EQ", "arguments": [
+                        { "valueType": "reference", "value": "steps.echo.outputs.x" },
+                        { "valueType": "immediate", "value": 1 }
+                    ]}},
+                { "fromStep": "echo", "toStep": "finish_b" },
+                { "fromStep": "echo", "toStep": "finish_c" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(
+            !report.supported,
+            "two unconditioned defaults must stay rejected"
+        );
     }
 }

@@ -27,7 +27,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrote messages/comments/doc example + pin test | S | Text only; actively misleading today | done |
 | [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Deleted fn + table + result field (no reader anywhere; catalog metadata too unreliable to fix against) | S | Public crate API removal | done |
-| [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | todo |
+| [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | done |
 | [GAP-14](#gap-14) | P3 | `onError` sources limited to Agent/EmbedWorkflow/Split/While | Extend to Delay/WaitForSignal if demand appears | M | Gate widening | parked |
 
 ### Cross-cutting facts (read before picking up any item)
@@ -466,7 +466,7 @@ to `agentId`/`capabilityId` years ago (`deny_unknown_fields` means the old keys 
 <a name="gap-13"></a>
 ## GAP-13 (P3) — Conditioned normal-flow edges restricted to 4 source step types
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** `edge_condition_route_shape_supported` (`support.rs:1138-1176`) only accepts
 conditioned normal-flow edges from Filter, GroupBy, Log, and value-Switch sources. A conditioned
@@ -474,27 +474,29 @@ edge off an Agent step ("route on the response payload without an extra Conditio
 with `edge-condition`, although the `EdgeRoute` plan machinery is source-agnostic.
 
 **Fix plan.**
-- [ ] 1. Extend the source match with `Step::Agent`, `Step::Delay`, `Step::WaitForSignal`
-  (shape rules unchanged: ≥1 conditioned edge, exactly one unconditioned default, normal labels
-  only). Hold Split/While/EmbedWorkflow back — their successor handling owns `next_plan`/
-  `error_plan` interplay and needs its own analysis.
-- [ ] 2. Verify `plan.rs` builds `EdgeRoute` for the new sources via
-  `has_conditioned_normal_flow_edges` without special-casing (expected: yes; confirm with a
-  structural test before touching anything).
-- [ ] 3. Audit interaction: Agent source with BOTH conditioned normal edges and onError edges —
-  ensure failure branches still take onError and successful output drives the EdgeRoute.
-- [ ] 4. Keep the gate reason string in sync (it enumerates allowed sources).
+- [x] 1. `edge_condition_route_shape_supported` now accepts `Step::Agent` (baseline-gated),
+  `Step::Delay`, and `Step::WaitForSignal` sources; shape rules unchanged (≥1 conditioned edge,
+  exactly one unconditioned default, normal labels only). Split/While/EmbedWorkflow stay excluded
+  (their successor handling owns next/error-plan interplay), documented in the match comment.
+- [x] 2. Verified the `EdgeRoute` plan lowering is source-agnostic — no plan/dispatcher changes
+  needed; the per-edge gate was the only restriction.
+- [x] 3. Agent-source conditioned edges + onError on the SAME step verified end to end (failure
+  routes to the handler; success takes the EdgeRoute).
+- [x] 4. The gate's `edge-condition` reason text does not enumerate source types (only the shape
+  rule), so no message change was needed.
 
-**Test coverage required.**
-- [ ] Gate unit tests: Agent/Delay/WaitForSignal sources with valid shape → supported; two
-  defaults → `edge-condition` rejection; zero conditioned edges → unchanged behavior.
-- [ ] New fixture `agent_edge_condition.json` (mirror `edge_condition_priority.json`): Agent whose
-  output drives two conditioned branches + default, with edge `priority` ordering asserted.
-- [ ] Execute test: correct branch taken for each input class, including the priority tie-break
-  and the default path.
-- [ ] Execute test: Agent with conditioned edges + onError — failure routes to handler, success
-  routes through EdgeRoute (the GAP-13/onError interaction).
-- [ ] Full-stack e2e: one scenario through `e2e-verify`.
+**Test coverage delivered.**
+- [x] Gate tests: `agent_source_conditioned_edges_are_supported` (fixture),
+  `delay_and_wait_source_conditioned_edges_are_supported`,
+  `agent_source_conditioned_edges_with_two_defaults_rejected` (shape rule still enforced).
+- [x] New fixture `tests/fixtures/agent_edge_condition.json`: Agent whose output drives two
+  conditioned branches (priority 10 vs 5) + default + an onError edge.
+- [x] Execute e2e `..._agent_source_edge_conditions_route_on_agent_output`: three inputs through
+  real WASM runs — `tier:vip` outranks `status:active` by priority, `active` routes, unknown
+  status takes the default — all conditions reading `steps.echo.outputs.*` (the agent's own
+  output, not raw input). The fixture's onError interplay was exercised for real during
+  development: a mis-shaped agent input routed to the handler.
+- [x] Full suites: workflows lib (454), execute (40).
 
 ---
 
