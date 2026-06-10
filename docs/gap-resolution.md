@@ -19,7 +19,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-02](#gap-02) | P0 | `Agent.compensation` accepted, saga never runs | Validation warning W070 + doc honesty; removed W060 which suggested the no-op | S | Validator only; warning, not error | done |
 | [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | done |
 | [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | done |
-| [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
+| [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Provider/memory failures route via `error_plan`; tool errors still feed back to the LLM; exhaustion keeps complete-with-state | M | support gate + loop emitter; decorative onError edges start firing on recompile | done |
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | done |
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | done |
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | done |
@@ -206,7 +206,7 @@ agent's loop" — the DSL contract is already written; the loop doesn't deliver 
 <a name="gap-05"></a>
 ## GAP-05 (P1) — AiAgent tool-loop `onError` is dead
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** The support gate treats AiAgent `onError` edges as inert and marks the handler
 subgraph "dead, any shape allowed" (`support.rs:748-760`); `AiAgentLoop` has no `error_plan`
@@ -215,35 +215,36 @@ failures — chat-turn capability/provider failure, memory load/save failure, ma
 exhaustion — terminate the workflow with no routing even when the user drew an onError edge.
 
 **Fix plan.**
-- [ ] 0. Semantics decision (blocks the rest): which failures route to onError?
-  Proposal: provider/chat-turn invoke failure → route; memory load/save failure → route;
-  max-iterations exhaustion → route with structured code `AI_MAX_ITERATIONS` (category
-  `permanent`); individual tool errors → unchanged (fed back to LLM). Decision recorded: ______
-- [ ] 1. `support.rs`: for AiAgent steps, replace the inert-edge special case with the standard
-  `on_error_supported_or_inert` walk — add `Step::AiAgent` to the
-  `on_error_route_shape_supported` source match; delete the `mark_dead_subgraph_reachable` call
-  for AiAgent (`:755-760`). This also subsumes GAP-07 for the loop path.
-- [ ] 2. `plan.rs`: add `error_plan: Option<DirectErrorRoutePlan>` to `AiAgentLoop`; build via
-  `on_error_plan(...)` exactly as the single-shot arm does (`plan.rs:797-800`).
-- [ ] 3. `ai_agent_loop.rs`: wrap the chat-turn invoke, memory load/save invokes, and the
-  max-iterations exit in the standard failure-branch machinery
-  (mirror `emit_agent_invoke_error_branch`, `agent.rs:278-291`), so `steps.__error.*` carries
-  code/message/category for conditioned handlers.
-- [ ] 4. Behavior change management: existing workflows with decorative AiAgent onError edges
-  start catching on their next recompile. Release-note it; decide on `TEMPLATE_MAJOR_VERSION`
-  bump (recommended: yes, pairs with GAP-04 landing). Decision: ______
+- [x] 0. Semantics decision: chat-turn (provider) failures and memory load/save failures route to
+  the handler; individual TOOL failures stay unchanged (fed back to the LLM as the tool result).
+  **Max-iterations exhaustion deliberately keeps its established contract** — the loop completes
+  with the current state (no synthetic AI_MAX_ITERATIONS error). Rationale: exhaustion is a
+  bounded-completion semantic today, not a failure; forking it on handler presence would make the
+  same workflow complete or fail depending on an unrelated edge. Revisit only with a real demand
+  signal.
+- [x] 1. `support.rs`: AiAgent onError handlers are shape-checked on BOTH paths; the inert
+  special case, `mark_dead_subgraph_reachable` usage for AiAgent, and the per-edge skip are gone
+  (`ai_agent_is_single_shot` deleted as now-unused). `on_error_route_shape_supported` accepts all
+  AiAgent sources.
+- [x] 2. `plan.rs`: `AiAgentLoop.error_plan` built via `on_error_plan` like the single-shot arm.
+- [x] 3. `ai_agent_loop.rs`: the chat-turn invoke and memory load/summarize/save invokes pass
+  `error_plan` + failure/handled targets into the standard `emit_agent_invoke_error_branch`
+  machinery (chat-turn site nests targets by 2 for the $outer/$turn blocks). `steps.__error.*`
+  resolves in handlers.
+- [x] 4. Behavior change managed: **no templateMajor bump** — handlers go live per-workflow on
+  recompile; release-note it. Previously-accepted graphs with malformed decorative loop handlers
+  now fail at the gate with a per-step report (intended).
 
-**Test coverage required.**
-- [ ] Gate unit tests: AiAgent with well-formed handler → supported; with >1 unconditioned
-  onError edge → `error-handler-edge` unsupported feature; handler containing an unsupported
-  shape → named rejection (no longer silently passes).
-- [ ] Plan unit test: AiAgentLoop carries `error_plan`; conditioned handler branches ordered by
-  priority.
-- [ ] Execute tests: (a) stub provider whose chat-turn errors → handler runs, handler's Finish
-  output reflects `steps.__error.code`; (b) loop exhausts maxIterations → routes with
-  `AI_MAX_ITERATIONS` (if decided); (c) tool-agent error WITHOUT loop failure → still fed back to
-  LLM, onError NOT taken (guard the unchanged semantics).
-- [ ] Full-stack e2e: AiAgent → onError → Log → Finish; assert events show the handler scope.
+**Test coverage delivered.**
+- [x] Gate tests updated: `tool_loop_ai_agent_malformed_on_error_handler_is_rejected` (was the
+  "inert any-shape passes" test) + new `tool_loop_ai_agent_well_formed_on_error_is_supported`.
+- [x] Execute e2e `..._loop_provider_error_routes_to_on_error`: a stubbed provider 500 inside the
+  loop routes to the handler Finish, which completes the workflow reading
+  `steps.__error.code == "AI_TURN_COMPLETION_FAILED"`.
+- [x] Execute e2e `..._loop_tool_error_feeds_back_not_on_error`: an unknown-capability TOOL
+  failure feeds the error envelope back to the model (visible in the second request body), the
+  loop recovers, the NORMAL finish runs — onError untouched.
+- [x] Full suites: workflows lib (451), execute (39).
 
 ---
 

@@ -38,7 +38,10 @@ use super::{
     DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
     DirectVariables,
 };
-use crate::direct_wasm::plan::{DirectAiMemoryPlan, DirectAiToolPlan};
+use crate::direct_wasm::plan::{
+    DirectAiMemoryPlan, DirectAiToolPlan, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_ai_agent_loop_plan(
@@ -57,6 +60,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     tools: &[DirectAiToolPlan],
     memory: Option<&DirectAiMemoryPlan>,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -69,6 +73,8 @@ pub(super) fn emit_ai_agent_loop_plan(
     route_len_local: u32,
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     // Pause before any loop work — matching every other step's
     // "execution pauses before this step" breakpoint contract: the pause
@@ -154,7 +160,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             source_len_local,
             steps_ptr_local,
             steps_len_local,
-            None,
+            error_plan,
             route_ptr_local,
             route_len_local,
             variables,
@@ -162,8 +168,8 @@ pub(super) fn emit_ai_agent_loop_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            None,
-            None,
+            failure_target,
+            handled_target,
         );
         load_agent_retptr_list(
             body,
@@ -324,7 +330,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         source_len_local,
         steps_ptr_local,
         steps_len_local,
-        None,
+        error_plan,
         route_ptr_local,
         route_len_local,
         variables,
@@ -332,8 +338,10 @@ pub(super) fn emit_ai_agent_loop_plan(
         data_len_local,
         workflow_log_kind,
         workflow_error_kind,
-        None,
-        None,
+        // Inside Block($outer) + Loop($turn): rejoining handlers and Split
+        // failure collectors must branch out through two extra blocks.
+        failure_target.map(|target| target.nested(2)),
+        handled_target.map(|target| target.nested(2)),
     );
     load_agent_retptr_list(
         body,
@@ -672,7 +680,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                 source_len_local,
                 steps_ptr_local,
                 steps_len_local,
-                None,
+                error_plan,
                 route_ptr_local,
                 route_len_local,
                 variables,
@@ -680,8 +688,8 @@ pub(super) fn emit_ai_agent_loop_plan(
                 data_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
-                None,
-                None,
+                failure_target,
+                handled_target,
             );
             load_agent_retptr_list(
                 body,
@@ -750,7 +758,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             source_len_local,
             steps_ptr_local,
             steps_len_local,
-            None,
+            error_plan,
             route_ptr_local,
             route_len_local,
             variables,
@@ -758,8 +766,8 @@ pub(super) fn emit_ai_agent_loop_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            None,
-            None,
+            failure_target,
+            handled_target,
         );
         load_agent_retptr_list(
             body,

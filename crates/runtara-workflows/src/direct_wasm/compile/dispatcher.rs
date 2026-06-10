@@ -720,6 +720,7 @@ pub(super) fn emit_run_plan_mapping(
             tools,
             memory,
             next_plan,
+            error_plan,
         } => {
             super::ai_agent_loop::emit_ai_agent_loop_plan(
                 body,
@@ -737,6 +738,7 @@ pub(super) fn emit_run_plan_mapping(
                 tools,
                 memory.as_ref(),
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -749,6 +751,8 @@ pub(super) fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Error {

@@ -181,6 +181,10 @@ pub(super) enum DirectRunPlan {
         /// Conversation memory: load history before the loop, save it after.
         memory: Option<DirectAiMemoryPlan>,
         next_plan: Box<DirectRunPlan>,
+        /// Loop-level failure routing (GAP-05): chat-turn (provider) and
+        /// memory load/save failures dispatch here. Individual TOOL failures
+        /// never route — they feed back to the LLM as the tool result.
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     Error {
         step_id: String,
@@ -1002,6 +1006,11 @@ fn step_run_plan_inner(
                 tools,
                 memory,
                 next_plan: Box::new(next_plan),
+                error_plan: if include_on_error {
+                    on_error_plan(graph, child_workflows, step_id, stack)?
+                } else {
+                    None
+                },
             })
         }
         "Error" => Ok(DirectRunPlan::Error {

@@ -1882,6 +1882,112 @@ fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
     );
 }
 
+fn ai_agent_tool_loop_on_error_graph_json(tool_capability: &str) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}},
+        {{"fromStep":"ai","toStep":"echo_tool","label":"echo"}},
+        {{"fromStep":"ai","toStep":"handler_finish","label":"onError"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
+          "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
+          "provider":"openai",
+          "model":"gpt-4o"}}}},
+        "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"{tool_capability}","inputMapping":{{}}}},
+        "handler_finish": {{"id":"handler_finish","stepType":"Finish","inputMapping":{{
+          "handled": {{"valueType":"immediate","value":true}},
+          "code": {{"valueType":"reference","value":"steps.__error.code"}}
+        }}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_provider_error_routes_to_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-05: a chat-turn (provider) failure inside the tool loop routes to
+    // the step's onError handler instead of failing the workflow. The handler
+    // Finish reads steps.__error, so the workflow COMPLETES with the handler
+    // output.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-on-error-provider",
+        &ai_agent_tool_loop_on_error_graph_json("return-input"),
+        br#"{}"#,
+        vec![llm_http_500()],
+    );
+
+    assert!(
+        result.status_success,
+        "handler completion is a clean exit; error: {:?}; stderr: {}",
+        result.error_json, result.stderr
+    );
+    let output = result.output_json.expect("handler Finish completes");
+    assert_eq!(
+        output.get("handled").and_then(Value::as_bool),
+        Some(true),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("code").and_then(Value::as_str),
+        Some("AI_TURN_COMPLETION_FAILED"),
+        "handler must see the chat-turn error envelope: {output}"
+    );
+    assert_eq!(result.llm_requests.len(), 1);
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_tool_error_feeds_back_not_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Guard the unchanged semantics: an individual TOOL failure (unknown
+    // capability here) is fed back to the model as the tool result; the loop
+    // continues and the NORMAL finish runs - onError is not taken.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-tool-error-feedback",
+        &ai_agent_tool_loop_on_error_graph_json("definitely-not-a-capability"),
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_ok("recovered from tool error"),
+        ],
+    );
+
+    assert!(
+        result.status_success,
+        "error: {:?}; stderr: {}",
+        result.error_json, result.stderr
+    );
+    let output = result.output_json.expect("normal finish completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("recovered from tool error"),
+        "tool failures must not route to onError: {output}"
+    );
+    assert_eq!(result.llm_requests.len(), 2);
+    // The second model call must carry the tool error envelope as the result.
+    let second_request = result.llm_requests[1].to_string();
+    assert!(
+        second_request.to_lowercase().contains("error"),
+        "tool error envelope must feed back to the model: {second_request}"
+    );
+}
+
 #[test]
 fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
     let Some(components_dir) = direct_e2e_components_dir() else {
