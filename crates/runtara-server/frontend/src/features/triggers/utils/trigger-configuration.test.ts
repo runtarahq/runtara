@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  analyzeStaticInputs,
   buildCronConfiguration,
+  buildStaticInputsText,
   buildWebhookConfiguration,
   isAcceptedCronExpression,
   parseStaticInputs,
@@ -56,6 +58,205 @@ describe('parseStaticInputs', () => {
 
   it('throws on invalid JSON', () => {
     expect(() => parseStaticInputs('{nope')).toThrow();
+  });
+});
+
+describe('analyzeStaticInputs', () => {
+  const schemaFields = ['region', 'limit'];
+
+  it('treats blank text as an empty structured form', () => {
+    expect(analyzeStaticInputs('', schemaFields)).toEqual({
+      representable: true,
+      data: {},
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    });
+    expect(analyzeStaticInputs('   ', schemaFields)).toEqual({
+      representable: true,
+      data: {},
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    });
+    expect(analyzeStaticInputs(undefined, schemaFields)).toEqual({
+      representable: true,
+      data: {},
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    });
+  });
+
+  it('exposes data fields covered by the schema with no warnings', () => {
+    expect(
+      analyzeStaticInputs('{"data": {"region": "eu", "limit": 5}}', schemaFields)
+    ).toEqual({
+      representable: true,
+      data: { region: 'eu', limit: 5 },
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    });
+  });
+
+  it('treats a missing data key as an empty form', () => {
+    expect(analyzeStaticInputs('{}', schemaFields)).toEqual({
+      representable: true,
+      data: {},
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    });
+  });
+
+  it('surfaces envelope keys other than data (e.g. variables)', () => {
+    const analysis = analyzeStaticInputs(
+      '{"data": {"region": "eu"}, "variables": {"retries": 3}, "custom": 1}',
+      schemaFields
+    );
+    expect(analysis.representable).toBe(true);
+    if (analysis.representable) {
+      expect(analysis.unrepresentedEnvelopeKeys.sort()).toEqual([
+        'custom',
+        'variables',
+      ]);
+      expect(analysis.unrepresentedDataKeys).toEqual([]);
+    }
+  });
+
+  it('surfaces data keys the schema has no field for', () => {
+    const analysis = analyzeStaticInputs(
+      '{"data": {"region": "eu", "extra": true}}',
+      schemaFields
+    );
+    expect(analysis.representable).toBe(true);
+    if (analysis.representable) {
+      expect(analysis.unrepresentedEnvelopeKeys).toEqual([]);
+      expect(analysis.unrepresentedDataKeys).toEqual(['extra']);
+    }
+  });
+
+  it('rejects invalid JSON and non-object envelopes', () => {
+    expect(analyzeStaticInputs('{not json', schemaFields)).toEqual({
+      representable: false,
+      reason: 'invalid-json',
+    });
+    expect(analyzeStaticInputs('[1, 2]', schemaFields)).toEqual({
+      representable: false,
+      reason: 'invalid-json',
+    });
+    expect(analyzeStaticInputs('"text"', schemaFields)).toEqual({
+      representable: false,
+      reason: 'invalid-json',
+    });
+  });
+
+  it('rejects envelopes whose data key is not a plain object', () => {
+    expect(analyzeStaticInputs('{"data": [1]}', schemaFields)).toEqual({
+      representable: false,
+      reason: 'data-not-object',
+    });
+    expect(analyzeStaticInputs('{"data": 5}', schemaFields)).toEqual({
+      representable: false,
+      reason: 'data-not-object',
+    });
+    expect(analyzeStaticInputs('{"data": null}', schemaFields)).toEqual({
+      representable: false,
+      reason: 'data-not-object',
+    });
+  });
+});
+
+describe('buildStaticInputsText', () => {
+  const schemaFields = ['region', 'limit'];
+
+  it('builds a data envelope from blank text', () => {
+    const text = buildStaticInputsText('', { region: 'eu' }, schemaFields);
+    expect(JSON.parse(text)).toEqual({ data: { region: 'eu' } });
+  });
+
+  it('preserves envelope keys the form cannot represent verbatim', () => {
+    const previous = JSON.stringify({
+      data: { region: 'us' },
+      variables: { retries: 3 },
+      custom: { nested: true },
+    });
+    const text = buildStaticInputsText(
+      previous,
+      { region: 'eu', limit: 10 },
+      schemaFields
+    );
+    expect(JSON.parse(text)).toEqual({
+      data: { region: 'eu', limit: 10 },
+      variables: { retries: 3 },
+      custom: { nested: true },
+    });
+  });
+
+  it('preserves data keys the schema has no field for verbatim', () => {
+    const previous = JSON.stringify({
+      data: { region: 'us', extra: [1, 2] },
+    });
+    const text = buildStaticInputsText(previous, { region: 'eu' }, schemaFields);
+    expect(JSON.parse(text)).toEqual({
+      data: { region: 'eu', extra: [1, 2] },
+    });
+  });
+
+  it('removes schema fields cleared in the form', () => {
+    const previous = JSON.stringify({
+      data: { region: 'eu', limit: 5, extra: true },
+    });
+    // The form cleared `limit`: it is absent from the form data object.
+    const text = buildStaticInputsText(previous, { region: 'eu' }, schemaFields);
+    expect(JSON.parse(text)).toEqual({
+      data: { region: 'eu', extra: true },
+    });
+  });
+
+  it('drops undefined entries (cleared number inputs)', () => {
+    const text = buildStaticInputsText(
+      '',
+      { region: 'eu', limit: undefined },
+      schemaFields
+    );
+    expect(JSON.parse(text)).toEqual({ data: { region: 'eu' } });
+  });
+
+  it('returns blank when nothing remains in the envelope', () => {
+    expect(buildStaticInputsText('', {}, schemaFields)).toBe('');
+    expect(
+      buildStaticInputsText('{"data": {"region": "eu"}}', {}, schemaFields)
+    ).toBe('');
+  });
+
+  it('keeps non-data envelope keys even when the data object empties', () => {
+    const previous = JSON.stringify({
+      data: { region: 'eu' },
+      variables: { retries: 3 },
+    });
+    const text = buildStaticInputsText(previous, {}, schemaFields);
+    expect(JSON.parse(text)).toEqual({ variables: { retries: 3 } });
+  });
+
+  it('round-trips with analyzeStaticInputs', () => {
+    const text = buildStaticInputsText(
+      '{"variables": {"a": 1}, "data": {"unknown": true}}',
+      { region: 'eu' },
+      schemaFields
+    );
+    const analysis = analyzeStaticInputs(text, schemaFields);
+    expect(analysis.representable).toBe(true);
+    if (analysis.representable) {
+      expect(analysis.data).toEqual({ unknown: true, region: 'eu' });
+      expect(analysis.unrepresentedEnvelopeKeys).toEqual(['variables']);
+      expect(analysis.unrepresentedDataKeys).toEqual(['unknown']);
+    }
+  });
+
+  it('treats unparsable previous text as blank instead of throwing', () => {
+    const text = buildStaticInputsText(
+      '{not json',
+      { region: 'eu' },
+      schemaFields
+    );
+    expect(JSON.parse(text)).toEqual({ data: { region: 'eu' } });
   });
 });
 

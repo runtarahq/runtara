@@ -45,6 +45,138 @@ export function parseStaticInputs(text: unknown): unknown {
   return JSON.parse(trimmed);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Analysis of the static inputs text for the schema-driven (structured)
+ * editor. The structured form edits `envelope.data` fields covered by the
+ * workflow's input schema; everything else (the `variables` key, unknown
+ * `data.*` keys, any other envelope keys) is "unrepresented" and must be
+ * preserved verbatim by `buildStaticInputsText` — surfaced here so the UI
+ * can warn instead of silently dropping them.
+ */
+export type StaticInputsAnalysis =
+  | {
+      representable: false;
+      /**
+       * 'invalid-json': text fails staticInputsError (not parseable / not an
+       * object). 'data-not-object': envelope parses but `data` is not a
+       * plain object, so a field form cannot edit it.
+       */
+      reason: 'invalid-json' | 'data-not-object';
+    }
+  | {
+      representable: true;
+      /** The `data` object the structured form edits ({} when absent). */
+      data: Record<string, unknown>;
+      /** Envelope keys other than `data` (e.g. `variables`). */
+      unrepresentedEnvelopeKeys: string[];
+      /** Keys inside `data` that no schema field covers. */
+      unrepresentedDataKeys: string[];
+    };
+
+/**
+ * Analyze the raw "Static inputs (JSON)" text against the selected
+ * workflow's input schema field names. Blank text is representable as an
+ * empty form.
+ */
+export function analyzeStaticInputs(
+  text: unknown,
+  schemaFieldNames: string[]
+): StaticInputsAnalysis {
+  if (staticInputsError(text) !== null) {
+    return { representable: false, reason: 'invalid-json' };
+  }
+
+  const parsed = parseStaticInputs(text);
+  if (parsed === undefined) {
+    // Blank: an empty structured form.
+    return {
+      representable: true,
+      data: {},
+      unrepresentedEnvelopeKeys: [],
+      unrepresentedDataKeys: [],
+    };
+  }
+
+  const envelope = parsed as Record<string, unknown>;
+  if ('data' in envelope && !isPlainObject(envelope.data)) {
+    return { representable: false, reason: 'data-not-object' };
+  }
+
+  const data = isPlainObject(envelope.data) ? envelope.data : {};
+  const knownFields = new Set(schemaFieldNames);
+
+  return {
+    representable: true,
+    data,
+    unrepresentedEnvelopeKeys: Object.keys(envelope).filter(
+      (key) => key !== 'data'
+    ),
+    unrepresentedDataKeys: Object.keys(data).filter(
+      (key) => !knownFields.has(key)
+    ),
+  };
+}
+
+/**
+ * Build the next "Static inputs (JSON)" text from the structured form's
+ * data object, preserving everything the form cannot represent verbatim:
+ * envelope keys other than `data` (e.g. `variables`) and `data.*` keys not
+ * covered by the schema survive untouched. Returns '' (blank, which removes
+ * `configuration.inputs` on save) when nothing remains in the envelope.
+ *
+ * `previousText` is expected to be blank or valid JSON (the structured form
+ * is unavailable otherwise); an unparsable value is treated as blank.
+ */
+export function buildStaticInputsText(
+  previousText: unknown,
+  formData: Record<string, unknown>,
+  schemaFieldNames: string[]
+): string {
+  let envelope: Record<string, unknown> = {};
+  if (staticInputsError(previousText) === null) {
+    const parsed = parseStaticInputs(previousText);
+    if (isPlainObject(parsed)) {
+      envelope = parsed;
+    }
+  }
+
+  const knownFields = new Set(schemaFieldNames);
+  const previousData = isPlainObject(envelope.data) ? envelope.data : {};
+
+  // Keep data keys the schema has no field for, then layer the form's data
+  // (which only ever writes schema-covered keys) on top.
+  const data: Record<string, unknown> = {
+    ...Object.fromEntries(
+      Object.entries(previousData).filter(([key]) => !knownFields.has(key))
+    ),
+    ...formData,
+  };
+
+  // Drop undefined entries (e.g. a cleared number input) so they don't
+  // linger as JSON-unserializable values.
+  for (const key of Object.keys(data)) {
+    if (data[key] === undefined) {
+      delete data[key];
+    }
+  }
+
+  const next: Record<string, unknown> = { ...envelope, data };
+
+  if (Object.keys(data).length === 0) {
+    delete next.data;
+    if (Object.keys(next).length === 0) {
+      // Blank removes `configuration.inputs` entirely on save.
+      return '';
+    }
+  }
+
+  return JSON.stringify(next, null, 2);
+}
+
 /**
  * Validate a custom cron expression against what the server's cron scheduler
  * accepts. `normalize_cron_expression` (workers/cron_scheduler.rs) runs

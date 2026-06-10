@@ -58,6 +58,9 @@ export const fieldsConfig = [
       <CronInputsField
         label={config.label as string}
         disabled={config.disabled as boolean}
+        workflows={
+          config.workflows as { id: string; inputSchema?: any }[] | undefined
+        }
       />
     ),
   },

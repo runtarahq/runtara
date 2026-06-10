@@ -28,6 +28,8 @@ export function CreateTrigger() {
       return workflowsData.map((workflow: WorkflowDto) => ({
         id: workflow.id,
         name: workflow.name,
+        // CronInputsField renders this as a structured static-inputs form
+        inputSchema: workflow.inputSchema,
       }));
     },
   });

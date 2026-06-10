@@ -460,7 +460,9 @@ Status: Planned. Effort: M.
 
 ### 32. Schema-aware CRON static inputs
 
-Status: Planned. Effort: M.
+Status: Implemented. Effort: M.
+
+Resolution (2026-06-10): the schema-driven form renderer was extracted from WorkflowExecuteDialog into `shared/components/SchemaInputForm.tsx` (move-don't-fork; the Run dialog consumes it, behavior unchanged) and the CRON "Static inputs" field renders it whenever the selected workflow has an input schema, writing the `{"data": {...}}` envelope into the same value the textarea edits. An "Advanced (JSON)" toggle keeps the validated textarea; envelope keys the form can't represent (`variables`, schema-unknown `data.*` keys) are surfaced in a warning and preserved verbatim on every structured edit. 21 new unit tests on the envelope analyze/build helpers.
 
 The CRON "Static inputs (JSON)" textarea (finding 27) should render the selected workflow's input schema as a form. `WorkflowExecuteDialog` already does exactly this (`parseSchema` + `renderField`, WorkflowExecuteDialog.tsx:189/387) — extract that renderer into a shared component, fetch the workflow's inputSchema from the trigger form's `workflowId`, and produce the `{"data": {...}}` envelope, with an optional variables-overrides section. Keep the JSON textarea as an advanced toggle for envelopes that don't match the schema. Watch the feature boundary (triggers importing from workflows): move the renderer to `shared/` or follow the repo's existing cross-feature import pattern.
 

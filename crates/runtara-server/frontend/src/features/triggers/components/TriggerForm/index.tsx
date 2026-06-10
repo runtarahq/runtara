@@ -88,8 +88,9 @@ export function TriggerForm(props: Props) {
         return true;
       })
       .map((field) => {
-        // Inject workflows into the WorkflowField config
-        if (field.name === 'workflowId') {
+        // Inject workflows into the WorkflowField config; CronInputsField
+        // also needs them to resolve the selected workflow's input schema
+        if (field.name === 'workflowId' || field.name === 'cronInputs') {
           return { ...field, workflows };
         }
         // Optionally hide trigger types (e.g. APPLICATION on create)
