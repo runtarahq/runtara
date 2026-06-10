@@ -129,6 +129,13 @@ pub struct ExecutionGraph {
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
     pub rate_limit_budget_ms: u64,
 
+    /// Maximum wall-clock time (in seconds) an execution of this workflow may
+    /// run before the server stops it. Written by the workflow editor
+    /// (validated 1-3600 in the UI) and enforced server-side when scheduling
+    /// the execution — the compiler does not interpret this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_timeout_seconds: Option<u32>,
+
     /// Disable durability for this workflow when `Some(false)`. Mirrors
     /// `Workflow.durable`; `parse_workflow` copies the top-level flag here when
     /// this field is `None`. Codegen reads `ctx.durable` from this value at
@@ -160,6 +167,7 @@ impl Default for ExecutionGraph {
             nodes: None,
             edges: None,
             rate_limit_budget_ms: default_rate_limit_budget_ms(),
+            execution_timeout_seconds: None,
             durable: None,
         }
     }
@@ -264,6 +272,25 @@ pub struct Note {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
+
+    /// Sizing metadata (width/height) written by the workflow editor UI.
+    /// Not used in compilation or execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<NoteMetadata>,
+}
+
+/// Sizing metadata for a note, managed by the workflow editor UI
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NoteMetadata {
+    /// Note width in pixels
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+
+    /// Note height in pixels
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
 }
 
 /// Position coordinates for UI elements
@@ -1672,9 +1699,10 @@ pub struct Variable {
 /// ## Form rendering extensions
 ///
 /// The optional fields `label`, `placeholder`, `order`, `format`, `min`, `max`,
-/// `pattern`, `properties`, and `visible_when` enable clients to render rich
-/// forms from WaitForSignal response schemas. All are backward-compatible —
-/// existing schemas without these fields continue to work unchanged.
+/// `pattern`, `properties`, `visible_when`, and `nullable` enable clients to
+/// render rich forms from WaitForSignal response schemas. All are
+/// backward-compatible — existing schemas without these fields continue to
+/// work unchanged.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1756,6 +1784,13 @@ pub struct SchemaField {
     /// matches a specific value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<VisibleWhen>,
+
+    /// Whether the field value may be `null`.
+    ///
+    /// Form-layer hint written by the workflow editor (rendered as a
+    /// checkbox); the runtime does not enforce nullability today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
 }
 
 /// Conditional visibility rule for a schema field.

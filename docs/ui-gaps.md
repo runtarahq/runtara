@@ -407,7 +407,9 @@ Complexity/effort: M overall.
 
 ### 28. Step ids and UI-written extension fields
 
-Status: Open. Severity: low.
+Status: Partially implemented — the three DSL extension fields are added; step-id rename remains open. Severity: low.
+
+Resolution of the DSL fields (2026-06-10): `Note.metadata` (NoteMetadata width/height), `ExecutionGraph.executionTimeoutSeconds` (Option<u32>, documented as server-enforced at scheduling), and `SchemaField.nullable` (form-layer hint) are now modeled in `schema_types.rs` as optional skip-if-none fields, so typed deserialize→reserialize round-trips no longer drop what the editor writes. Known pre-existing quirk surfaced during this work: the OpenAPI spec registers both `runtara_dsl::Note` and the server DTO `Note` under one component name and the DTO wins, shadowing the DSL Note schema.
 
 Description:
 - Step ids are always machine UUIDs — no form shows or edits them, so readable reference paths like `steps.group-by-status.outputs.*` are JSON/API-only (`workflowStore.ts:379`).

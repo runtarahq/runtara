@@ -170,6 +170,7 @@ mod tests {
             pattern: None,
             properties: None,
             visible_when: None,
+            nullable: None,
         }
     }
 
@@ -212,6 +213,7 @@ mod tests {
                 pattern: None,
                 properties: None,
                 visible_when: None,
+                nullable: None,
             },
         );
 
@@ -246,6 +248,7 @@ mod tests {
                 pattern: None,
                 properties: None,
                 visible_when: None,
+                nullable: None,
             },
         );
 
