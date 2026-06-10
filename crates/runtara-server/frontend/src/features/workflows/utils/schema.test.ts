@@ -75,4 +75,24 @@ describe('parseSchema/buildSchemaFromFields', () => {
 
     expect(buildSchemaFromFields(fields)).toEqual(rawSchema);
   });
+
+  it('normalizes snake_case visible_when into the camelCase VisibleWhen shape', () => {
+    // DSL shape: crates/runtara-dsl/src/schema_types.rs `VisibleWhen`
+    // { field, equals?, notEquals? } — camelCase on the wire.
+    const fields = parseSchema({
+      note: {
+        type: 'string',
+        visible_when: { field: 'status', not_equals: 'closed' },
+      },
+    });
+
+    expect(fields[0].visibleWhen).toEqual({
+      field: 'status',
+      notEquals: 'closed',
+    });
+    expect(buildSchemaFromFields(fields).note.visibleWhen).toEqual({
+      field: 'status',
+      notEquals: 'closed',
+    });
+  });
 });

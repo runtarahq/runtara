@@ -27,7 +27,7 @@ export type SchemaField = {
   extensions?: Record<string, any>;
 };
 
-const KNOWN_SCHEMA_FIELD_KEYS = new Set([
+export const KNOWN_SCHEMA_FIELD_KEYS: ReadonlySet<string> = new Set([
   'type',
   'required',
   'description',

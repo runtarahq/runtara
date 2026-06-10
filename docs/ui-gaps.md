@@ -456,7 +456,9 @@ Status: Planned (gated on finding 29's component). Effort: S.
 
 ### 31. Structured controls in the schema advanced dialog
 
-Status: Planned. Effort: M.
+Status: Implemented. Effort: M.
+
+Resolution (2026-06-10): the AdvancedSchemaFieldDialog is now a structured three-tier form — typed inputs for label/placeholder/order/min/max/pattern (live RegExp check)/format (select from the DSL's documented set, preserving unknown values)/example; `items` as an element-type select with a recursive SchemaFieldsEditor for object elements (non-type/properties keys preserved verbatim); `properties` as a nested recursive editor; and `visibleWhen` as structured field + equals/notEquals rows (shape verified at `schema_types.rs:1810-1822` — exactly those two operator slots). Raw JSON remains only for unknown extension keys, collapsed, with reserved keys rejected so structured and JSON edits can't clobber each other. The apply path is exported as pure functions with 15 new tests including a byte-for-byte decorated-field round-trip.
 
 `AdvancedSchemaFieldDialog` (SchemaFieldsEditor.tsx) edits `items`, `properties`, `visibleWhen`, and validation/display metadata as JSON. Plan: dedicated controls in three tiers — (a) trivial typed inputs for label/placeholder/order/format/min/max/pattern; (b) `items` as an element-type select with recursion into object elements; (c) `properties` as a nested (recursive) SchemaFieldsEditor and `visibleWhen` as field/operator/value rows (verify its exact shape in schema_types.rs). The JSON dialog remains only for unknown extension keys. The parser/builder are already lossless (finding 9), so this is purely form work.
 
