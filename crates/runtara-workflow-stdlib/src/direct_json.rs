@@ -2909,6 +2909,7 @@ fn split_dont_stop_result(
             "skipped": skipped.len(),
             "total": total
         },
+        "hasFailures": !error.is_empty(),
         "outputs": success
     }))
 }
@@ -5631,10 +5632,52 @@ mod tests {
             steps["split"]["data"]["error"],
             json!([{ "error": "bad item", "index": 1 }])
         );
-        assert_eq!(steps["split"]["stats"]["success"], json!(1));
-        assert_eq!(steps["split"]["stats"]["error"], json!(1));
-        assert_eq!(steps["split"]["stats"]["total"], json!(2));
+        assert_eq!(
+            steps["split"]["stats"],
+            json!({
+                "success": 1,
+                "error": 1,
+                "aborted": 0,
+                "unknown": 0,
+                "skipped": 0,
+                "total": 2
+            })
+        );
+        assert_eq!(steps["split"]["hasFailures"], json!(true));
         assert_eq!(steps["split"]["outputs"], json!([{ "id": 1 }]));
+    }
+
+    #[test]
+    fn split_dont_stop_result_matches_split_output_and_flags_no_failures() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "dontStopOnFailed": true
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1,2]}"#, b"{}", b"{}").expect("source");
+
+        let results = manifest
+            .split_initial_results(0)
+            .expect("initial accumulator");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":1}"#)
+            .expect("success append");
+
+        let result = manifest
+            .split_result(0, &source, &results)
+            .expect("Split result");
+        let steps = manifest
+            .split_output_from_result(0, &source, &result)
+            .expect("durable Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let fresh = manifest
+            .split_output(0, &source, &results)
+            .expect("fresh Split steps context");
+        let fresh: Value = serde_json::from_slice(&fresh).expect("steps json");
+
+        assert_eq!(steps["split"], fresh["split"]);
+        assert_eq!(steps["split"]["hasFailures"], json!(false));
+        assert_eq!(steps["split"]["stats"]["error"], json!(0));
     }
 
     #[test]
