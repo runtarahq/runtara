@@ -5885,43 +5885,47 @@ pub mod exports {
                     arg0: i32,
                     arg1: *mut u8,
                     arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
                 ) -> *mut u8 {
                     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
                     let len0 = arg2;
-                    let result1 = T::agent_debug_error(
+                    let len1 = arg4;
+                    let result2 = T::agent_debug_error(
                         arg0 as u32,
                         _rt::Vec::from_raw_parts(arg1.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
                     );
-                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result1 {
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
                         Ok(e) => {
-                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
-                            let vec3 = (e).into_boxed_slice();
-                            let ptr3 = vec3.as_ptr().cast::<u8>();
-                            let len3 = vec3.len();
-                            ::core::mem::forget(vec3);
-                            *ptr2
-                                .add(2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len3;
-                            *ptr2
-                                .add(::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr3.cast_mut();
-                        }
-                        Err(e) => {
-                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
                             let ptr4 = vec4.as_ptr().cast::<u8>();
                             let len4 = vec4.len();
                             ::core::mem::forget(vec4);
-                            *ptr2
+                            *ptr3
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<usize>() = len4;
-                            *ptr2
+                            *ptr3
                                 .add(::core::mem::size_of::<*const u8>())
                                 .cast::<*mut u8>() = ptr4.cast_mut();
                         }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
                     };
-                    ptr2
+                    ptr3
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
@@ -6498,6 +6502,7 @@ pub mod exports {
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_debug_error(
                         agent_id: u32,
+                        source: _rt::Vec<u8>,
                         error: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn step_debug_start(
@@ -7343,9 +7348,10 @@ pub mod exports {
                         (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-debug-error")] unsafe
                         extern "C" fn export_agent_debug_error(arg0 : i32, arg1 : * mut
-                        u8, arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
-                        _export_agent_debug_error_cabi::<$ty > (arg0, arg1, arg2) } }
-                        #[unsafe (export_name =
+                        u8, arg2 : usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_agent_debug_error_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
                         "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-debug-error")]
                         unsafe extern "C" fn _post_return_agent_debug_error(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
@@ -7548,8 +7554,8 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4371] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x8d!\x01A\x02\x01A\x02\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4379] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x95!\x01A\x02\x01A\x02\
 \x01B\xa8\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
@@ -7629,12 +7635,12 @@ attributes\xcd\0\0\x05\x04\0\x10agent-error-info\x01N\x01j\x01\x02\x01s\x01@\x07
 ms*\x0aattributes\xcd\0\0\xcf\0\x04\0\x16agent-retry-error-info\x01P\x01@\x08\x08\
 agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eret\
 ry-after-ms*\x0aattributes\xcd\0\0\x05\x04\0\x0bagent-error\x01Q\x01@\x02\x08age\
-nt-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01R\x01@\x02\x08age\
-nt-idy\x05error\0\0\x05\x04\0\x11agent-debug-error\x01S\x04\0\x10step-debug-star\
-t\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\
-\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fwo\
-rkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
-0.227.1\x10wit-bindgen-rust\x060.41.0";
+nt-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01R\x01@\x03\x08age\
+nt-idy\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01S\x04\0\x10ste\
+p-debug-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/j\
+son@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\
+\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit\
+-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

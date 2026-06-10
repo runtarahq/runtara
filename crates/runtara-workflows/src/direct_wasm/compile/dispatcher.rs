@@ -30,8 +30,9 @@ use super::switch_route::emit_switch_route_plan;
 use super::wait::emit_wait_for_signal_plan;
 use super::while_loop::emit_while_plan;
 use super::{
-    DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
+    DIRECT_CONDITION_RESULT_LOCAL, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -809,6 +810,19 @@ pub(super) fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
             );
+            // Capture the evaluated condition BEFORE the debug-end event below.
+            // step-debug-end / custom-event reuse the shared retptr scratch and
+            // overwrite the bool at offset 4, so reading it *after* the event
+            // returned a clobbered (always-non-zero) byte — the Conditional then
+            // always took the `true` branch whenever track-events was on.
+            body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            body.instruction(&Instruction::I32Load8U(MemArg {
+                offset: 4,
+                align: 0,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::LocalSet(DIRECT_CONDITION_RESULT_LOCAL));
+
             emit_step_debug_event(
                 body,
                 indices,
@@ -822,12 +836,7 @@ pub(super) fn emit_run_plan_mapping(
                 output_len_local,
             );
 
-            body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-            body.instruction(&Instruction::I32Load8U(MemArg {
-                offset: 4,
-                align: 0,
-                memory_index: 0,
-            }));
+            body.instruction(&Instruction::LocalGet(DIRECT_CONDITION_RESULT_LOCAL));
             body.instruction(&Instruction::If(BlockType::Empty));
             emit_run_plan_mapping(
                 body,

@@ -1156,6 +1156,42 @@ fn direct_wasm_execute_conditional_finish_branches_report_completion() {
 }
 
 #[test]
+fn direct_wasm_execute_conditional_branches_correctly_with_track_events() {
+    // Regression: with track-events on, the Conditional's step-debug-end event
+    // reuses the shared retptr scratch and overwrote the evaluated condition bool
+    // (at offset 4), so the runtime always followed the `true` edge regardless of
+    // the result. The earlier branch tests ran with track_events=false, so they
+    // never exercised this. Both branches must route by the actual result.
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let true_result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-conditional-true-track-events",
+        CONDITIONAL_WORKFLOW,
+        br#"{"flag":true}"#,
+        true,
+    );
+    assert_eq!(
+        true_result.output_json,
+        serde_json::json!({ "result": "yes" })
+    );
+
+    let false_result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-conditional-false-track-events",
+        CONDITIONAL_WORKFLOW,
+        br#"{"flag":false}"#,
+        true,
+    );
+    assert_eq!(
+        false_result.output_json,
+        serde_json::json!({ "result": "no" })
+    );
+}
+
+#[test]
 fn direct_wasm_execute_nested_conditional_branches_report_completion() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;

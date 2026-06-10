@@ -101,7 +101,7 @@ pub enum XmlDataInput {
     Bytes(Vec<u8>),
     /// File data with base64 content
     File(FileData),
-    /// Plain base64 string
+    /// Bare string: base64-encoded XML, or raw XML text (fallback)
     Base64String(String),
 }
 
@@ -113,12 +113,14 @@ impl XmlDataInput {
             XmlDataInput::File(f) => f
                 .decode()
                 .map_err(|e| AgentError::permanent("XML_DECODE_ERROR", e.message)),
-            XmlDataInput::Base64String(s) => BASE64.decode(s).map_err(|e| {
-                AgentError::permanent(
-                    "XML_DECODE_ERROR",
-                    format!("Failed to decode base64 XML content: {}", e),
-                )
-            }),
+            // A bare string may be base64-encoded XML or raw XML text. Real XML
+            // contains `<`, `>`, spaces and newlines (outside the base64
+            // alphabet), so base64 decoding fails on it — fall back to the raw
+            // UTF-8 bytes. Honors the documented "raw XML ... or base64 encoded
+            // string" contract.
+            XmlDataInput::Base64String(s) => {
+                Ok(BASE64.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec()))
+            }
         }
     }
 }
@@ -458,6 +460,7 @@ bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_from_xml_simple_element() {
@@ -499,6 +502,44 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(xml_data);
         let input = FromXmlInput {
             data: XmlDataInput::Base64String(encoded),
+            encoding: Encoding::default(),
+            preserve_text: true,
+            include_attributes: true,
+            trim_text: true,
+        };
+
+        let result = from_xml(input).unwrap();
+        assert_eq!(result["root"]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_from_xml_raw_string_via_untagged() {
+        // Mirrors the production path: a bare JSON string deserializes through
+        // the untagged XmlDataInput enum into the Base64String arm. Raw XML is
+        // not valid base64, so to_bytes() must fall back to the raw bytes.
+        let data: XmlDataInput =
+            serde_json::from_value(json!("<root><name>Alice</name></root>")).unwrap();
+        let input = FromXmlInput {
+            data,
+            encoding: Encoding::default(),
+            preserve_text: true,
+            include_attributes: true,
+            trim_text: true,
+        };
+
+        let result = from_xml(input).unwrap();
+        assert_eq!(result["root"]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_from_xml_base64_string_via_untagged() {
+        // The same untagged path must still decode genuine base64: the raw
+        // fallback only triggers when base64 decoding fails.
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(b"<root><name>Alice</name></root>");
+        let data: XmlDataInput = serde_json::from_value(json!(encoded)).unwrap();
+        let input = FromXmlInput {
+            data,
             encoding: Encoding::default(),
             preserve_text: true,
             include_attributes: true,

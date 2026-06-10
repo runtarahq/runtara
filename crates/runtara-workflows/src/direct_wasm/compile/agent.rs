@@ -429,6 +429,8 @@ fn emit_agent_input_validation(
         static_data,
         track_events,
         agent_id,
+        source_ptr_local,
+        source_len_local,
         route_ptr_local,
         route_len_local,
         input_ptr_local,

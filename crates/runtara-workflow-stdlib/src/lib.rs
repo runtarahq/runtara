@@ -1026,13 +1026,17 @@ mod component {
             })
         }
 
-        fn agent_debug_error(agent_id: u32, error: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn agent_debug_error(
+            agent_id: u32,
+            source: Vec<u8>,
+            error: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
                 let manifest = slot
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
-                manifest.agent_debug_error(agent_id, &error)
+                manifest.agent_debug_error(agent_id, &source, &error)
             })
         }
 

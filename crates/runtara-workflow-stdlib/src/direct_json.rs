@@ -981,7 +981,7 @@ impl DirectJsonManifest {
         timeout_ms: Option<u64>,
         source: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let _source: Value = serde_json::from_slice(source)
+        let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-debug-start source: {err}"))?;
         let step = self.wait_step(step_id)?;
         let timestamp = timestamp_ms();
@@ -989,7 +989,7 @@ impl DirectJsonManifest {
             .borrow_mut()
             .insert(step_id.to_string(), timestamp);
 
-        let mut payload = debug_event_base(step, timestamp);
+        let mut payload = debug_event_base(step, &source, timestamp);
         payload.insert(
             "inputs".to_string(),
             serde_json::json!({
@@ -1707,7 +1707,14 @@ impl DirectJsonManifest {
     }
 
     /// Build generated-code-compatible Agent `step_debug_end` payload for failures.
-    pub fn agent_debug_error(&self, agent_id: u32, error: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn agent_debug_error(
+        &self,
+        agent_id: u32,
+        source: &[u8],
+        error: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse agent-debug-error source: {err}"))?;
         let agent = self
             .agents
             .get(&agent_id)
@@ -1725,7 +1732,7 @@ impl DirectJsonManifest {
             .unwrap_or(0);
         let error = String::from_utf8_lossy(error).to_string();
 
-        let mut payload = debug_event_base(step, timestamp);
+        let mut payload = debug_event_base(step, &source, timestamp);
         payload.insert(
             "outputs".to_string(),
             serde_json::json!({
@@ -1852,7 +1859,7 @@ impl DirectJsonManifest {
             .borrow_mut()
             .insert(step_id.to_string(), timestamp);
 
-        let mut payload = debug_event_base(step, timestamp);
+        let mut payload = debug_event_base(step, &source, timestamp);
         let (inputs, input_mapping) = self.debug_start_data(step, &source)?;
         payload.insert("inputs".to_string(), inputs);
         if let Some(input_mapping) = input_mapping {
@@ -1879,7 +1886,7 @@ impl DirectJsonManifest {
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
 
-        let mut payload = debug_event_base(step, timestamp);
+        let mut payload = debug_event_base(step, &source, timestamp);
         payload.insert("outputs".to_string(), self.debug_end_output(step, &source)?);
         payload.insert(
             "duration_ms".to_string(),
@@ -1993,6 +2000,20 @@ impl DirectJsonManifest {
                 let details = apply_log(&log.value, source)?;
                 Ok((details.context, None))
             }
+            "Split" => {
+                let split = self
+                    .split_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
+                let inputs = split_debug_inputs(split, source)?;
+                Ok((inputs, None))
+            }
+            "While" => {
+                let while_step = self
+                    .while_by_step(step.id.as_str())
+                    .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
+                let inputs = while_debug_inputs(while_step)?;
+                Ok((inputs, None))
+            }
             other => Err(format!(
                 "direct step-debug-start does not support step type '{other}'"
             )),
@@ -2095,6 +2116,14 @@ impl DirectJsonManifest {
                     "severity": details.severity,
                 }))
             }
+            "Split" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct Split output for '{}'", step.id)),
+            "While" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct While output for '{}'", step.id)),
             other => Err(format!(
                 "direct step-debug-end does not support step type '{other}'"
             )),
@@ -2780,11 +2809,12 @@ fn split_iteration_variables(
     variables.insert("_index".to_string(), serde_json::json!(index));
     variables.insert("_item".to_string(), item);
 
-    let scope_id = variables
-        .get("_scope_id")
-        .and_then(Value::as_str)
+    let parent_scope_id = variables.get("_scope_id").cloned().unwrap_or(Value::Null);
+    let scope_id = parent_scope_id
+        .as_str()
         .map(|parent| format!("{}_{}_{}", parent, split.step_id, index))
         .unwrap_or_else(|| format!("sc_{}_{}", split.step_id, index));
+    variables.insert("_parent_scope_id".to_string(), parent_scope_id);
     variables.insert("_scope_id".to_string(), Value::String(scope_id));
 
     Ok(variables)
@@ -2879,6 +2909,7 @@ fn split_dont_stop_result(
             "skipped": skipped.len(),
             "total": total
         },
+        "hasFailures": !error.is_empty(),
         "outputs": success
     }))
 }
@@ -2992,11 +3023,12 @@ fn while_iteration_variables(
     }
     variables.insert("_loop".to_string(), while_loop_context(state));
 
-    let scope_id = variables
-        .get("_scope_id")
-        .and_then(Value::as_str)
+    let parent_scope_id = variables.get("_scope_id").cloned().unwrap_or(Value::Null);
+    let scope_id = parent_scope_id
+        .as_str()
         .map(|parent| format!("{}_{}_{}", parent, while_step.step_id, state.index))
         .unwrap_or_else(|| format!("sc_{}_{}", while_step.step_id, state.index));
+    variables.insert("_parent_scope_id".to_string(), parent_scope_id);
     variables.insert("_scope_id".to_string(), Value::String(scope_id));
 
     variables
@@ -3453,7 +3485,32 @@ fn timestamp_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn debug_event_base(step: &DirectJsonStep, timestamp_ms: i64) -> Map<String, Value> {
+fn debug_event_base(
+    step: &DirectJsonStep,
+    source: &Value,
+    timestamp_ms: i64,
+) -> Map<String, Value> {
+    // Scope/loop context lives in the runtime variables: each Split/While
+    // iteration sets a distinct `_scope_id` (plus `_parent_scope_id` /
+    // `_loop_indices`). Surface them so step-debug events from parallel
+    // iterations are distinguishable — otherwise the paired-summary query joins
+    // start/end by (step_id, scope_id) alone and cross-products every
+    // iteration's events (9 phantom rows + negative durations for 3 iterations).
+    let variables = source.get("variables").and_then(Value::as_object);
+    let scope_id = variables
+        .and_then(|vars| vars.get("_scope_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let parent_scope_id = variables
+        .and_then(|vars| vars.get("_parent_scope_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let loop_indices = variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+
     let mut payload = Map::new();
     payload.insert("step_id".to_string(), Value::String(step.id.clone()));
     payload.insert(
@@ -3467,9 +3524,9 @@ fn debug_event_base(step: &DirectJsonStep, timestamp_ms: i64) -> Map<String, Val
         "step_type".to_string(),
         Value::String(step.step_type.clone()),
     );
-    payload.insert("scope_id".to_string(), Value::Null);
-    payload.insert("parent_scope_id".to_string(), Value::Null);
-    payload.insert("loop_indices".to_string(), Value::Array(Vec::new()));
+    payload.insert("scope_id".to_string(), scope_id);
+    payload.insert("parent_scope_id".to_string(), parent_scope_id);
+    payload.insert("loop_indices".to_string(), loop_indices);
     payload.insert(
         "timestamp_ms".to_string(),
         Value::Number(serde_json::Number::from(timestamp_ms)),
@@ -5575,10 +5632,52 @@ mod tests {
             steps["split"]["data"]["error"],
             json!([{ "error": "bad item", "index": 1 }])
         );
-        assert_eq!(steps["split"]["stats"]["success"], json!(1));
-        assert_eq!(steps["split"]["stats"]["error"], json!(1));
-        assert_eq!(steps["split"]["stats"]["total"], json!(2));
+        assert_eq!(
+            steps["split"]["stats"],
+            json!({
+                "success": 1,
+                "error": 1,
+                "aborted": 0,
+                "unknown": 0,
+                "skipped": 0,
+                "total": 2
+            })
+        );
+        assert_eq!(steps["split"]["hasFailures"], json!(true));
         assert_eq!(steps["split"]["outputs"], json!([{ "id": 1 }]));
+    }
+
+    #[test]
+    fn split_dont_stop_result_matches_split_output_and_flags_no_failures() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "dontStopOnFailed": true
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1,2]}"#, b"{}", b"{}").expect("source");
+
+        let results = manifest
+            .split_initial_results(0)
+            .expect("initial accumulator");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":1}"#)
+            .expect("success append");
+
+        let result = manifest
+            .split_result(0, &source, &results)
+            .expect("Split result");
+        let steps = manifest
+            .split_output_from_result(0, &source, &result)
+            .expect("durable Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let fresh = manifest
+            .split_output(0, &source, &results)
+            .expect("fresh Split steps context");
+        let fresh: Value = serde_json::from_slice(&fresh).expect("steps json");
+
+        assert_eq!(steps["split"], fresh["split"]);
+        assert_eq!(steps["split"]["hasFailures"], json!(false));
+        assert_eq!(steps["split"]["stats"]["error"], json!(0));
     }
 
     #[test]
@@ -7561,6 +7660,74 @@ mod tests {
     }
 
     #[test]
+    fn split_debug_payloads_supported() {
+        // Regression: a Split step (`stepType: "Split"`) must build
+        // step-debug-start/end payloads like the other step types. These
+        // previously hit the `other =>` arm and returned
+        // `Err("...does not support step type 'Split'")`; with track-events
+        // enabled the emitter's debug-event guard turned that error into a
+        // silent non-zero exit, so the instance failed the moment the Split was
+        // due to start — no `step_debug_start` and no scope events were emitted.
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "immediate", "value": [1, 2, 3] },
+            "parallelism": 4
+        })))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("split", &source)
+            .expect("Split debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"]["value"], json!([1, 2, 3]));
+        assert_eq!(start["inputs"]["parallelism"], json!(4));
+
+        // The Split result is recorded in the steps context before debug-end runs.
+        let steps = manifest
+            .split_output(0, &source, br#"[{"ok":true}]"#)
+            .expect("Split steps context");
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("split", &source)
+            .expect("Split debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("Split"));
+        assert_eq!(end["outputs"]["outputs"], json!([{ "ok": true }]));
+    }
+
+    #[test]
+    fn while_debug_payloads_supported() {
+        // Regression: a While step has the same debug-event gap as Split — its
+        // `step_debug_start`/`step_debug_end` must not fall through to the
+        // `other =>` arm (which would silently crash a track-events run).
+        let manifest = DirectJsonManifest::parse(&while_manifest(
+            json!({ "maxIterations": 5 }),
+            json!({ "valueType": "immediate", "value": false }),
+        ))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("loop", &source)
+            .expect("While debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["inputs"]["maxIterations"], json!(5));
+
+        let steps = manifest
+            .while_output(0, &source, br#"{"index":2,"outputs":[{"ok":true}]}"#)
+            .expect("While steps context");
+        let source = build_source(b"{}", b"{}", &steps).expect("source");
+
+        let end = manifest
+            .step_debug_end("loop", &source)
+            .expect("While debug end should be supported");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("While"));
+        assert_eq!(end["outputs"]["outputs"]["iterations"], json!(2));
+    }
+
+    #[test]
     fn agent_error_formats_error_info_like_component_dispatch() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
 
@@ -7669,7 +7836,7 @@ mod tests {
             .expect("debug start");
 
         let payload = manifest
-            .agent_debug_error(0, b"Step agent failed")
+            .agent_debug_error(0, &source, b"Step agent failed")
             .expect("debug error");
         let payload: Value = serde_json::from_slice(&payload).expect("payload json");
 
@@ -7680,6 +7847,44 @@ mod tests {
             json!({ "_error": true, "error": "Step agent failed" })
         );
         assert!(payload["duration_ms"].as_i64().is_some());
+    }
+
+    #[test]
+    fn debug_events_carry_iteration_scope_from_source_variables() {
+        // Regression: step-debug start/end (and the failed-agent debug-end) must
+        // surface the per-iteration `_scope_id` / `_loop_indices` that
+        // split/while set in the variables. They used to be hardcoded
+        // null/[], so parallel Split iterations of the same step were
+        // indistinguishable and the paired-summary query cross-produced them.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let variables =
+            br#"{"_scope_id":"sc_split_2","_parent_scope_id":"sc_split","_loop_indices":[2]}"#;
+        let source = build_source(b"{}", variables, b"{}").expect("source");
+
+        let start = manifest.step_debug_start("agent", &source).expect("start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["scope_id"], json!("sc_split_2"));
+        assert_eq!(start["parent_scope_id"], json!("sc_split"));
+        assert_eq!(start["loop_indices"], json!([2]));
+
+        // The failed-agent debug-end goes through agent_debug_error, which now
+        // takes the same source so its scope matches the start (otherwise a
+        // failed agent inside an iteration can't be paired with its start).
+        let end = manifest
+            .agent_debug_error(0, &source, b"boom")
+            .expect("agent debug error");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["scope_id"], json!("sc_split_2"));
+        assert_eq!(end["loop_indices"], json!([2]));
+
+        // A root-scope step (no iteration variables) stays null/[] as before.
+        let root = build_source(b"{}", b"{}", b"{}").expect("root source");
+        let root_start = manifest
+            .step_debug_start("agent", &root)
+            .expect("root start");
+        let root_start: Value = serde_json::from_slice(&root_start).expect("root json");
+        assert_eq!(root_start["scope_id"], Value::Null);
+        assert_eq!(root_start["loop_indices"], json!([]));
     }
 
     #[test]

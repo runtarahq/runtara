@@ -314,6 +314,13 @@ const DIRECT_EMBED_SAVED_DATA_LEN_LOCAL: u32 = 105;
 /// resume-stable ids (mirrors the generated `__tool_call_counter`). i32 local.
 const DIRECT_AI_TOOL_CALL_COUNTER_LOCAL: u32 = 106;
 
+/// Scratch i32 holding a Conditional step's evaluated boolean. The condition
+/// result is read out of the shared retptr scratch *before* the step's
+/// debug-end event (which reuses that same scratch) and stashed here, so the
+/// branch decision survives the event. See the Conditional arm in
+/// `compile/dispatcher.rs`. i32 local.
+const DIRECT_CONDITION_RESULT_LOCAL: u32 = 107;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {
