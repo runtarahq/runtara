@@ -819,7 +819,8 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           <div className="space-y-0.5">
             <Label className="text-sm">Sequential Execution</Label>
             <p className="text-xs text-muted-foreground">
-              Execute iterations one at a time instead of in parallel
+              Iterations always run one at a time in the current runtime; this flag is
+              informational and does not change execution
             </p>
           </div>
           <Switch
