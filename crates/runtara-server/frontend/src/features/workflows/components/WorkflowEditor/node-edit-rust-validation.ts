@@ -26,11 +26,18 @@ import type * as form from './NodeForm/NodeFormItem';
 type WorkflowValidationContext = {
   name?: string;
   description?: string;
-  variables?: Array<{ name: string; value: unknown; type: string }>;
+  variables?: Array<{
+    name: string;
+    value: unknown;
+    type: string;
+    description?: string | null;
+  }>;
   inputSchemaFields?: SchemaField[];
   outputSchemaFields?: SchemaField[];
   executionTimeoutSeconds?: number;
   rateLimitBudgetMs?: number;
+  durable?: boolean | null;
+  entryPoint?: string;
 };
 
 export type PendingNodeCandidate = {
@@ -208,10 +215,16 @@ function buildGraphOptions(workflow?: WorkflowValidationContext) {
           acc[variable.name] = {
             type: variable.type || 'string',
             value: variable.value,
+            ...(variable.description
+              ? { description: variable.description }
+              : {}),
           };
           return acc;
         },
-        {} as Record<string, { type: string; value: unknown }>
+        {} as Record<
+          string,
+          { type: string; value: unknown; description?: string }
+        >
       )
     : undefined;
 
@@ -227,6 +240,8 @@ function buildGraphOptions(workflow?: WorkflowValidationContext) {
       : undefined,
     executionTimeoutSeconds: workflow?.executionTimeoutSeconds,
     rateLimitBudgetMs: workflow?.rateLimitBudgetMs,
+    durable: workflow?.durable,
+    entryPoint: workflow?.entryPoint,
   };
 }
 

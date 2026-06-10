@@ -893,6 +893,48 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 />
               </FormControl>
             </FormItem>
+
+            <div className="grid grid-cols-2 gap-3">
+              <FormItem>
+                <FormLabel>Retries</FormLabel>
+                <FormDescription>Maximum LLM retry attempts</FormDescription>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={getValue('maxRetries') ?? ''}
+                    onChange={(e) =>
+                      updateField(
+                        'maxRetries',
+                        e.target.value ? Number(e.target.value) : ''
+                      )
+                    }
+                    placeholder="0"
+                    className="w-24"
+                  />
+                </FormControl>
+              </FormItem>
+
+              <FormItem>
+                <FormLabel>Retry Delay (ms)</FormLabel>
+                <FormDescription>Base delay between retries</FormDescription>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={getValue('retryDelay') ?? ''}
+                    onChange={(e) =>
+                      updateField(
+                        'retryDelay',
+                        e.target.value ? Number(e.target.value) : ''
+                      )
+                    }
+                    placeholder="1000"
+                    className="w-28"
+                  />
+                </FormControl>
+              </FormItem>
+            </div>
           </div>
         )}
       </div>

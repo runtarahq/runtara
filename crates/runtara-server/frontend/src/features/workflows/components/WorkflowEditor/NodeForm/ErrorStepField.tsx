@@ -14,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { NodeFormContext } from './NodeFormContext';
 import {
   MappingValueInput,
@@ -86,6 +87,21 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
     return field?.value || '';
   };
 
+  const getJsonValue = (fieldName: string) => {
+    const value = getValue(fieldName);
+    if (!value) return '';
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  };
+
+  const parseJsonObject = (value: string) => {
+    if (!value.trim()) return {};
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  };
+
   // Helper to get current valueType from inputMapping array
   const getValueType = (fieldName: string) => {
     const mapping = inputMapping || [];
@@ -127,7 +143,7 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: 'string',
+            typeHint: fieldName === 'context' ? 'json' : 'string',
             valueType: valueType || 'immediate',
           },
         ],
@@ -247,6 +263,27 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
           </SelectContent>
         </Select>
         <FormMessage />
+      </FormItem>
+
+      <FormItem>
+        <FormLabel>Context</FormLabel>
+        <FormDescription>
+          Optional DSL input-mapping object attached to the structured error.
+        </FormDescription>
+        <FormControl>
+          <Textarea
+            value={getJsonValue('context')}
+            onChange={(event) =>
+              updateField(
+                'context',
+                parseJsonObject(event.target.value),
+                'composite'
+              )
+            }
+            placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+            className="min-h-24 font-mono text-sm"
+          />
+        </FormControl>
       </FormItem>
 
       <div className="rounded-md border border-blue-500/50 bg-blue-500/10 p-3 text-sm">

@@ -11,8 +11,8 @@
 //!
 use crate::agent_meta::StepTypeMeta;
 use crate::{
-    AgentStep, AiAgentStep, ConditionalStep, EmbedWorkflowStep, ErrorStep, FilterStep, FinishStep,
-    GroupByStep, LogStep, SplitStep, SwitchStep, WaitForSignalStep, WhileStep,
+    AgentStep, AiAgentStep, ConditionalStep, DelayStep, EmbedWorkflowStep, ErrorStep, FilterStep,
+    FinishStep, GroupByStep, LogStep, SplitStep, SwitchStep, WaitForSignalStep, WhileStep,
 };
 
 // ========================================================================
@@ -69,6 +69,10 @@ fn schema_wait_for_signal_step() -> schemars::Schema {
 
 fn schema_ai_agent_step() -> schemars::Schema {
     schemars::schema_for!(AiAgentStep)
+}
+
+fn schema_delay_step() -> schemars::Schema {
+    schemars::schema_for!(DelayStep)
 }
 
 // ========================================================================
@@ -179,6 +183,14 @@ static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_ai_agent_step,
 };
 
+static DELAY_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "Delay",
+    display_name: "Delay",
+    description: "Pause workflow execution for a fixed duration",
+    category: "control",
+    schema_fn: schema_delay_step,
+};
+
 pub(crate) static STEP_TYPES: &[&StepTypeMeta] = &[
     &FINISH_STEP_META,
     &AGENT_STEP_META,
@@ -193,4 +205,5 @@ pub(crate) static STEP_TYPES: &[&StepTypeMeta] = &[
     &GROUP_BY_STEP_META,
     &WAIT_FOR_SIGNAL_STEP_META,
     &AI_AGENT_STEP_META,
+    &DELAY_STEP_META,
 ];

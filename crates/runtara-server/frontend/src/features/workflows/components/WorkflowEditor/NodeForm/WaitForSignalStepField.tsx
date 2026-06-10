@@ -6,6 +6,8 @@ import {
   FormLabel,
   FormDescription,
 } from '@/shared/components/ui/form';
+import { Input } from '@/shared/components/ui/input';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { Button } from '@/shared/components/ui/button';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { NodeFormContext } from './NodeFormContext';
@@ -77,6 +79,21 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
     return field?.value ?? '';
   };
 
+  const getJsonValue = (fieldName: string) => {
+    const value = getValue(fieldName);
+    if (!value) return '';
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  };
+
+  const parseJsonObject = (value: string) => {
+    if (!value.trim()) return {};
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  };
+
   const getValueType = (fieldName: string) => {
     const mapping = inputMapping || [];
     const field = mapping.find((item: any) => item.type === fieldName);
@@ -107,6 +124,14 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
         });
       }
     } else {
+      const typeHint =
+        fieldName === 'responseSchema' ||
+        fieldName === 'actionCorrelation' ||
+        fieldName === 'actionContext'
+          ? 'json'
+          : fieldName === 'actionKey'
+            ? 'string'
+            : 'number';
       form.setValue(
         name,
         [
@@ -114,7 +139,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: fieldName === 'responseSchema' ? 'json' : 'number',
+            typeHint,
             valueType: valueType || 'immediate',
           },
         ],
@@ -212,6 +237,64 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                   fieldType="string"
                   placeholder="1000"
                   hideReferenceToggle
+                />
+              </FormControl>
+            </FormItem>
+
+            <FormItem>
+              <FormLabel>Action Key</FormLabel>
+              <FormDescription>
+                Stable key for reports and action consumers.
+              </FormDescription>
+              <FormControl>
+                <Input
+                  value={String(getValue('actionKey'))}
+                  onChange={(event) =>
+                    updateField('actionKey', event.target.value, 'immediate')
+                  }
+                  placeholder="case_review_decision"
+                />
+              </FormControl>
+            </FormItem>
+
+            <FormItem>
+              <FormLabel>Action Correlation</FormLabel>
+              <FormDescription>
+                DSL input-mapping object used for action correlation fields.
+              </FormDescription>
+              <FormControl>
+                <Textarea
+                  value={getJsonValue('actionCorrelation')}
+                  onChange={(event) =>
+                    updateField(
+                      'actionCorrelation',
+                      parseJsonObject(event.target.value),
+                      'composite'
+                    )
+                  }
+                  placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+                  className="min-h-24 font-mono text-sm"
+                />
+              </FormControl>
+            </FormItem>
+
+            <FormItem>
+              <FormLabel>Action Context</FormLabel>
+              <FormDescription>
+                Optional non-authoritative display/query context.
+              </FormDescription>
+              <FormControl>
+                <Textarea
+                  value={getJsonValue('actionContext')}
+                  onChange={(event) =>
+                    updateField(
+                      'actionContext',
+                      parseJsonObject(event.target.value),
+                      'composite'
+                    )
+                  }
+                  placeholder='{"summary": {"valueType": "template", "value": "Case {{ data.caseId }}"}}'
+                  className="min-h-24 font-mono text-sm"
                 />
               </FormControl>
             </FormItem>

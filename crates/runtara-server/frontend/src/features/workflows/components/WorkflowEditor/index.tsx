@@ -257,7 +257,12 @@ type WorkflowEditorProps = {
     id: string;
     name: string;
     description?: string;
-    variables?: Array<{ name: string; value: string; type: string }>;
+    variables?: Array<{
+      name: string;
+      value: unknown;
+      type: string;
+      description?: string | null;
+    }>;
     inputSchemaFields?: Array<{
       name: string;
       type: string;
@@ -274,6 +279,8 @@ type WorkflowEditorProps = {
     }>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
+    durable?: boolean | null;
+    entryPoint?: string;
   };
   stagedNodeChanges?: StagedNodeChanges;
   onStagedNodeChange?: (nodeId: string, data: form.SchemaType) => void;

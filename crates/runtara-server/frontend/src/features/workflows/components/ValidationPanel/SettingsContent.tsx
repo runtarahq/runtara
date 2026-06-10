@@ -14,6 +14,14 @@ import {
 } from '@/shared/components/ui/form';
 import { Input } from '@/shared/components/ui/input';
 import { Textarea } from '@/shared/components/ui/textarea';
+import { Switch } from '@/shared/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/shared/components/ui/select';
 import { WorkflowData } from '../WorkflowEditor/EditorSidebar';
 import {
   VariablesEditor,
@@ -23,6 +31,7 @@ import {
   SchemaFieldsEditor,
   SchemaField,
 } from '../WorkflowEditor/EditorSidebar/SchemaFieldsEditor';
+import type { MemoryTier } from '@/generated/RuntaraRuntimeApi';
 
 type SettingsSection = 'general' | 'variables' | 'input' | 'output';
 
@@ -73,9 +82,24 @@ const generalSchema = z.object({
     .min(1, 'Budget must be at least 1 second')
     .max(86400, 'Budget cannot exceed 86400 seconds (24 hours)')
     .optional(),
+  durableMode: z.enum(['default', 'true', 'false']),
+  memoryTier: z.enum(['default', 'S', 'M', 'L', 'XL']),
+  trackEvents: z.boolean(),
 });
 
 type GeneralFormValues = z.infer<typeof generalSchema>;
+
+function durableToFormValue(durable?: boolean | null) {
+  if (durable === true) return 'true';
+  if (durable === false) return 'false';
+  return 'default';
+}
+
+function formValueToDurable(value: GeneralFormValues['durableMode']) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
 
 interface SettingsContentProps {
   workflow: WorkflowData;
@@ -194,6 +218,9 @@ function GeneralSection({
       rateLimitBudgetSec: workflow.rateLimitBudgetMs
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
         : undefined,
+      durableMode: durableToFormValue(workflow.durable),
+      memoryTier: workflow.memoryTier ?? 'default',
+      trackEvents: workflow.trackEvents ?? true,
     },
   });
 
@@ -206,6 +233,9 @@ function GeneralSection({
       rateLimitBudgetSec: workflow.rateLimitBudgetMs
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
         : undefined,
+      durableMode: durableToFormValue(workflow.durable),
+      memoryTier: workflow.memoryTier ?? 'default',
+      trackEvents: workflow.trackEvents ?? true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflow.id]);
@@ -239,6 +269,12 @@ function GeneralSection({
           executionTimeoutSeconds: timeoutNumber,
           rateLimitBudgetMs:
             budgetSeconds !== undefined ? budgetSeconds * 1000 : undefined,
+          durable: formValueToDurable(values.durableMode ?? 'default'),
+          memoryTier:
+            values.memoryTier && values.memoryTier !== 'default'
+              ? (values.memoryTier as MemoryTier)
+              : null,
+          trackEvents: values.trackEvents ?? true,
         });
       }
     });
@@ -314,6 +350,81 @@ function GeneralSection({
           />
         </div>
 
+        <div className="flex gap-4">
+          <FormField
+            control={form.control}
+            name="durableMode"
+            render={({ field }) => (
+              <FormItem className="w-44">
+                <FormLabel>Durability</FormLabel>
+                <Select
+                  value={field.value ?? 'default'}
+                  onValueChange={field.onChange}
+                  disabled={readOnly}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="default">Default</SelectItem>
+                    <SelectItem value="true">Durable</SelectItem>
+                    <SelectItem value="false">Non-durable</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="memoryTier"
+            render={({ field }) => (
+              <FormItem className="w-40">
+                <FormLabel>Memory tier</FormLabel>
+                <Select
+                  value={field.value ?? 'default'}
+                  onValueChange={field.onChange}
+                  disabled={readOnly}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="default">Default</SelectItem>
+                    <SelectItem value="S">S</SelectItem>
+                    <SelectItem value="M">M</SelectItem>
+                    <SelectItem value="L">L</SelectItem>
+                    <SelectItem value="XL">XL</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="trackEvents"
+            render={({ field }) => (
+              <FormItem className="flex flex-1 items-center justify-between rounded-md border px-3 py-2">
+                <FormLabel className="m-0">Track step events</FormLabel>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={readOnly}
+                  />
+                </FormControl>
+              </FormItem>
+            )}
+          />
+        </div>
+
         <FormField
           control={form.control}
           name="description"
@@ -373,6 +484,7 @@ function InputSchemaSection({
       readOnly={readOnly}
       emptyMessage="No input fields defined. Define the expected input parameters for this workflow."
       hideLabel
+      showEnum
     />
   );
 }
@@ -394,6 +506,7 @@ function OutputSchemaSection({
       readOnly={readOnly}
       emptyMessage="No output fields defined. Define the expected output structure for this workflow."
       hideLabel
+      showEnum
     />
   );
 }

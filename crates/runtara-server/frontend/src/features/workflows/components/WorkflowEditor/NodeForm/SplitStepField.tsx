@@ -53,10 +53,12 @@ type SplitVariableField = {
 
 const SUPPORTED_TYPES: { label: string; value: string }[] = [
   { label: 'String', value: 'string' },
+  { label: 'Integer', value: 'integer' },
   { label: 'Number', value: 'number' },
   { label: 'Boolean', value: 'boolean' },
   { label: 'Object', value: 'object' },
   { label: 'Array', value: 'array' },
+  { label: 'File', value: 'file' },
 ];
 
 const SPLIT_VARIABLE_TYPES: { label: string; value: string }[] = [
@@ -118,6 +120,34 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
   });
   const splitDontStopOnFailed = useWatch({
     name: 'splitDontStopOnFailed',
+    control: form.control,
+  });
+  const splitParallelism = useWatch({
+    name: 'splitParallelism',
+    control: form.control,
+  });
+  const splitMaxRetries = useWatch({
+    name: 'splitMaxRetries',
+    control: form.control,
+  });
+  const splitRetryDelay = useWatch({
+    name: 'splitRetryDelay',
+    control: form.control,
+  });
+  const splitTimeout = useWatch({
+    name: 'splitTimeout',
+    control: form.control,
+  });
+  const splitAllowNull = useWatch({
+    name: 'splitAllowNull',
+    control: form.control,
+  });
+  const splitConvertSingleValue = useWatch({
+    name: 'splitConvertSingleValue',
+    control: form.control,
+  });
+  const splitBatchSize = useWatch({
+    name: 'splitBatchSize',
     control: form.control,
   });
 
@@ -941,6 +971,97 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
       <div className="space-y-4">
         <Label className="text-sm font-medium">Execution Options</Label>
 
+        <div className="grid grid-cols-3 gap-3">
+          <div className="space-y-1">
+            <Label className="text-sm">Parallelism</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitParallelism ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitParallelism',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Runtime currently warns when this is not 1.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Retries</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitMaxRetries ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitMaxRetries',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Retry delay (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitRetryDelay ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitRetryDelay',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Timeout (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitTimeout ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitTimeout',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Batch size</Label>
+            <Input
+              type="number"
+              min={1}
+              value={splitBatchSize ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitBatchSize',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
           <div className="space-y-0.5">
             <Label className="text-sm">Sequential Execution</Label>
@@ -967,6 +1088,38 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
             checked={splitDontStopOnFailed ?? false}
             onCheckedChange={(checked) =>
               form.setValue('splitDontStopOnFailed', checked, {
+                shouldDirty: true,
+              })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Allow Null Input</Label>
+            <p className="text-xs text-muted-foreground">
+              Treat null input as an empty array.
+            </p>
+          </div>
+          <Switch
+            checked={splitAllowNull ?? false}
+            onCheckedChange={(checked) =>
+              form.setValue('splitAllowNull', checked, { shouldDirty: true })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Convert Single Value</Label>
+            <p className="text-xs text-muted-foreground">
+              Wrap a non-array input in a single-item array.
+            </p>
+          </div>
+          <Switch
+            checked={splitConvertSingleValue ?? false}
+            onCheckedChange={(checked) =>
+              form.setValue('splitConvertSingleValue', checked, {
                 shouldDirty: true,
               })
             }

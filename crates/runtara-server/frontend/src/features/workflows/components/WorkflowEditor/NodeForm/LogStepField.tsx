@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { NodeFormContext } from './NodeFormContext';
 import {
   MappingValueInput,
@@ -69,6 +70,21 @@ export function LogStepField({ name }: LogStepFieldProps) {
     return field?.value || '';
   };
 
+  const getJsonValue = (fieldName: string) => {
+    const value = getValue(fieldName);
+    if (!value) return '';
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  };
+
+  const parseJsonObject = (value: string) => {
+    if (!value.trim()) return {};
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  };
+
   const getValueType = (fieldName: string) => {
     const mapping = inputMapping || [];
     const field = mapping.find((item: any) => item.type === fieldName);
@@ -106,7 +122,7 @@ export function LogStepField({ name }: LogStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: 'string',
+            typeHint: fieldName === 'context' ? 'json' : 'string',
             valueType: valueType || 'immediate',
           },
         ],
@@ -166,6 +182,27 @@ export function LogStepField({ name }: LogStepFieldProps) {
             <SelectItem value="error">Error</SelectItem>
           </SelectContent>
         </Select>
+      </FormItem>
+
+      <FormItem>
+        <FormLabel>Context</FormLabel>
+        <FormDescription>
+          Optional DSL input-mapping object attached to the log event.
+        </FormDescription>
+        <FormControl>
+          <Textarea
+            value={getJsonValue('context')}
+            onChange={(event) =>
+              updateField(
+                'context',
+                parseJsonObject(event.target.value),
+                'composite'
+              )
+            }
+            placeholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+            className="min-h-24 font-mono text-sm"
+          />
+        </FormControl>
       </FormItem>
     </div>
   );

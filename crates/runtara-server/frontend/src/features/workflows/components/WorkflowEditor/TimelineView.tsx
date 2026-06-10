@@ -231,6 +231,13 @@ function getStepIcon(stepType: string) {
     case 'AiAgent':
     case 'AI Agent':
       return Bot;
+    case 'Delay':
+    case 'WaitForSignal':
+      return Pause;
+    case 'Log':
+      return PenLine;
+    case 'Error':
+      return AlertCircle;
     default:
       return Cpu;
   }
@@ -676,9 +683,7 @@ function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
 }
 
 function isRenderableNode(node: Node, hiddenNodeIds: Set<string>): boolean {
-  return (
-    !hiddenNodeIds.has(node.id) && !excludedNodeTypes.has(node.type || '')
-  );
+  return !hiddenNodeIds.has(node.id) && !excludedNodeTypes.has(node.type || '');
 }
 
 function orderNodesInScope(

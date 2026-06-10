@@ -486,6 +486,142 @@ describe('Form-input coercion on save', () => {
 });
 
 describe('Backend DSL serialization', () => {
+  it('serializes graph metadata supplied by workflow settings', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+      ] as any,
+      [],
+      {
+        name: 'metadata-workflow',
+        description: '',
+        variables: {
+          limit: {
+            type: 'integer',
+            value: 10,
+            description: 'Max rows',
+          },
+        },
+        inputSchema: {
+          order_id: {
+            type: 'string',
+            required: true,
+            default: 'ord_1',
+            format: 'uuid',
+          },
+        },
+        outputSchema: {
+          ok: { type: 'boolean', required: true },
+        },
+        executionTimeoutSeconds: 120,
+        rateLimitBudgetMs: 30_000,
+        durable: false,
+        entryPoint: 'agent',
+      }
+    );
+
+    expect(graph).toMatchObject({
+      name: 'metadata-workflow',
+      description: '',
+      variables: {
+        limit: {
+          type: 'integer',
+          value: 10,
+          description: 'Max rows',
+        },
+      },
+      inputSchema: {
+        order_id: {
+          type: 'string',
+          required: true,
+          default: 'ord_1',
+          format: 'uuid',
+        },
+      },
+      outputSchema: {
+        ok: { type: 'boolean', required: true },
+      },
+      executionTimeoutSeconds: 120,
+      rateLimitBudgetMs: 30_000,
+      durable: false,
+      entryPoint: 'agent',
+    });
+  });
+
+  it('serializes execution-plan edge conditions and priority', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'start',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'start',
+            stepType: 'Agent',
+            name: 'Start',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+        {
+          id: 'next',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 240, y: 0 },
+          data: {
+            id: 'next',
+            stepType: 'Agent',
+            name: 'Next',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+      ] as any,
+      [
+        {
+          id: 'start-next',
+          source: 'start',
+          target: 'next',
+          sourceHandle: 'source',
+          data: {
+            condition: {
+              type: 'operation',
+              op: 'EQ',
+              arguments: ['data.status', 'ready'],
+            },
+            priority: 5,
+          },
+        },
+      ] as any,
+      { name: 'conditional-edge-workflow' }
+    );
+
+    expect(graph!.executionPlan?.[0]).toMatchObject({
+      fromStep: 'start',
+      toStep: 'next',
+      label: 'next',
+      condition: {
+        type: 'operation',
+        op: 'EQ',
+        arguments: ['data.status', 'ready'],
+      },
+      priority: 5,
+    });
+  });
+
   it('does not emit backend type hints for immediate Finish outputs', () => {
     const graph = composeExecutionGraph(
       [
@@ -865,6 +1001,163 @@ describe('Backend DSL serialization', () => {
     expect(step).not.toHaveProperty('switchRoutingMode');
     expect(step).not.toHaveProperty('inputMapping');
   });
+
+  it('round-trips Delay duration MappingValue', () => {
+    const graph = makeGraph({
+      id: 'delay',
+      stepType: 'Delay',
+      durationMs: {
+        valueType: 'reference',
+        value: 'variables.delayMs',
+        type: 'integer',
+        default: 500,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.durationMs).toEqual({
+      valueType: 'reference',
+      value: 'variables.delayMs',
+      type: 'integer',
+      default: 500,
+    });
+    expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('round-trips AiAgent retry settings in config', () => {
+    const graph = makeGraph({
+      id: 'ai',
+      stepType: 'AiAgent',
+      config: {
+        systemPrompt: { valueType: 'immediate', value: 'You help.' },
+        userPrompt: { valueType: 'template', value: '{{ data.prompt }}' },
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        maxRetries: 3,
+        retryDelay: 250,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      maxRetries: 3,
+      retryDelay: 250,
+    });
+  });
+
+  it('round-trips WaitForSignal action metadata without synthesizing poll interval', () => {
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      action: {
+        key: 'approve-order',
+        correlation: {
+          orderId: {
+            valueType: 'reference',
+            value: 'data.orderId',
+            type: 'string',
+          },
+        },
+        context: {
+          requester: {
+            valueType: 'reference',
+            value: 'data.requester',
+            type: 'string',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.action).toEqual({
+      key: 'approve-order',
+      correlation: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      context: {
+        requester: {
+          valueType: 'reference',
+          value: 'data.requester',
+          type: 'string',
+        },
+      },
+    });
+    expect(step).not.toHaveProperty('pollIntervalMs');
+  });
+
+  it('round-trips Log context metadata', () => {
+    const graph = makeGraph({
+      id: 'log',
+      stepType: 'Log',
+      message: 'created',
+      level: 'info',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      message: 'created',
+      level: 'info',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+    });
+  });
+
+  it('round-trips Error context metadata', () => {
+    const graph = makeGraph({
+      id: 'error',
+      stepType: 'Error',
+      code: 'ORDER_INVALID',
+      message: 'Order is invalid',
+      category: 'permanent',
+      severity: 'error',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      code: 'ORDER_INVALID',
+      message: 'Order is invalid',
+      category: 'permanent',
+      severity: 'error',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+    });
+  });
 });
 
 describe('Split variable round-trip', () => {
@@ -1025,6 +1318,42 @@ describe('Split variable round-trip', () => {
       valueType: 'reference',
       value: 'data.items',
       type: 'json',
+    });
+  });
+
+  it('round-trips advanced execution options', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        parallelism: 4,
+        sequential: true,
+        dontStopOnFailed: true,
+        maxRetries: 2,
+        retryDelay: 500,
+        timeout: 10_000,
+        allowNull: true,
+        convertSingleValue: true,
+        batchSize: 25,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).toMatchObject({
+      parallelism: 4,
+      sequential: true,
+      dontStopOnFailed: true,
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 10_000,
+      allowNull: true,
+      convertSingleValue: true,
+      batchSize: 25,
     });
   });
 });

@@ -132,11 +132,16 @@ export function composeExecutionGraph(
   options?: {
     name?: string;
     description?: string;
-    variables?: Record<string, { type: string; value: unknown }>;
+    variables?: Record<
+      string,
+      { type: string; value: unknown; description?: string | null }
+    >;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
+    durable?: boolean | null;
+    entryPoint?: string;
   }
 ): ExecutionGraph | null {
   const nodesMap: any = new Map();
@@ -147,8 +152,7 @@ export function composeExecutionGraph(
   if (options?.name !== undefined) {
     executionGraph.name = options.name;
   }
-  // Only include description if it has a non-empty value
-  if (options?.description) {
+  if (options?.description !== undefined) {
     executionGraph.description = options.description;
   }
 
@@ -167,6 +171,12 @@ export function composeExecutionGraph(
   }
   if (options?.rateLimitBudgetMs !== undefined) {
     executionGraph.rateLimitBudgetMs = options.rateLimitBudgetMs;
+  }
+  if (options?.durable !== undefined) {
+    executionGraph.durable = options.durable;
+  }
+  if (options?.entryPoint) {
+    executionGraph.entryPoint = options.entryPoint;
   }
 
   // Separate notes from regular nodes
@@ -308,21 +318,35 @@ export function composeExecutionGraph(
         if (!parent.subgraph.executionPlan) {
           parent.subgraph.executionPlan = [];
         }
-        parent.subgraph.executionPlan.push({
+        const planEdge: Record<string, unknown> = {
           fromStep: edge.source,
           toStep: edge.target,
           label: specLabel,
-        });
+        };
+        if ((edge.data as any)?.condition !== undefined) {
+          planEdge.condition = (edge.data as any).condition;
+        }
+        if ((edge.data as any)?.priority !== undefined) {
+          planEdge.priority = Number((edge.data as any).priority);
+        }
+        parent.subgraph.executionPlan.push(planEdge);
       }
     } else {
       if (!executionGraph.executionPlan) {
         executionGraph.executionPlan = [];
       }
-      executionGraph.executionPlan.push({
+      const planEdge: Record<string, unknown> = {
         fromStep: edge.source,
         toStep: edge.target,
         label: specLabel,
-      });
+      };
+      if ((edge.data as any)?.condition !== undefined) {
+        planEdge.condition = (edge.data as any).condition;
+      }
+      if ((edge.data as any)?.priority !== undefined) {
+        planEdge.priority = Number((edge.data as any).priority);
+      }
+      executionGraph.executionPlan.push(planEdge);
     }
   });
 
@@ -446,8 +470,10 @@ function addStarts(executionGraph: ExecutionGraphDto) {
 
   function findAllStarts(executionGraph: ExecutionGraphDto) {
     const { steps = {}, executionPlan = [] } = executionGraph;
-    const entry = findStart(steps, executionPlan);
-    executionGraph.entryPoint = entry;
+    if (!executionGraph.entryPoint || !steps[executionGraph.entryPoint]) {
+      const entry = findStart(steps, executionPlan);
+      executionGraph.entryPoint = entry;
+    }
 
     for (const step of Object.values(steps)) {
       if (step.subgraph) {
@@ -531,6 +557,12 @@ function cleanNodeData(steps: Record<string, any>) {
       splitParallelism: _7,
       splitSequential: _8,
       splitDontStopOnFailed: _9,
+      splitMaxRetries,
+      splitRetryDelay,
+      splitTimeout,
+      splitAllowNull,
+      splitConvertSingleValue,
+      splitBatchSize,
       formTabs: _10,
       startMode: _11,
       selectedTriggerId: _12,
@@ -725,9 +757,7 @@ function cleanNodeData(steps: Record<string, any>) {
             if (!isNaN(numValue)) {
               // For integers, ensure we get a whole number
               finalValue =
-                typeHint === 'integer'
-                  ? Math.trunc(numValue)
-                  : numValue;
+                typeHint === 'integer' ? Math.trunc(numValue) : numValue;
             }
           }
 
@@ -773,6 +803,44 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       return [type, mappingValue];
+    };
+
+    const parseObjectValue = (value: any): Record<string, any> | undefined => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return value;
+      }
+      if (typeof value === 'string' && value.trim()) {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed;
+          }
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    };
+
+    const serializeMappingObject = (
+      value: any,
+      valueType?: string
+    ): Record<string, any> | undefined => {
+      const objectValue = parseObjectValue(value);
+      if (!objectValue) {
+        return undefined;
+      }
+
+      if (valueType === 'composite') {
+        const processed = processCompositeValue(objectValue);
+        return processed.value &&
+          typeof processed.value === 'object' &&
+          !Array.isArray(processed.value)
+          ? processed.value
+          : undefined;
+      }
+
+      return objectValue;
     };
 
     // Filter out empty optional fields that shouldn't be sent to the API
@@ -833,9 +901,24 @@ function cleanNodeData(steps: Record<string, any>) {
           delete filteredRestData[field];
         });
         normalizedMapping.forEach(
-          ({ type, value }: { type: string; value: any }) => {
+          ({
+            type,
+            value,
+            valueType,
+          }: {
+            type: string;
+            value: any;
+            valueType?: string;
+          }) => {
             if (errorFields.includes(type)) {
               filteredRestData[type] = value; // Direct string value
+            } else if (type === 'context') {
+              const context = serializeMappingObject(value, valueType);
+              if (context && Object.keys(context).length > 0) {
+                filteredRestData.context = context;
+              } else {
+                delete filteredRestData.context;
+              }
             }
           }
         );
@@ -848,9 +931,24 @@ function cleanNodeData(steps: Record<string, any>) {
           delete filteredRestData[field];
         });
         normalizedMapping.forEach(
-          ({ type, value }: { type: string; value: any }) => {
+          ({
+            type,
+            value,
+            valueType,
+          }: {
+            type: string;
+            value: any;
+            valueType?: string;
+          }) => {
             if (logFields.includes(type)) {
               filteredRestData[type] = value;
+            } else if (type === 'context') {
+              const context = serializeMappingObject(value, valueType);
+              if (context && Object.keys(context).length > 0) {
+                filteredRestData.context = context;
+              } else {
+                delete filteredRestData.context;
+              }
             }
           }
         );
@@ -924,6 +1022,23 @@ function cleanNodeData(steps: Record<string, any>) {
       );
     }
 
+    if (restData.stepType === 'Delay') {
+      const durationItem = Array.isArray(inputMapping)
+        ? inputMapping.find((item: any) => item.type === 'durationMs')
+        : undefined;
+      delete cleaned[id].inputMapping;
+      if (durationItem?.value !== undefined && durationItem.value !== '') {
+        const [, durationValue] = processMappingEntry({
+          type: 'durationMs',
+          value: durationItem.value,
+          typeHint: durationItem.typeHint || 'number',
+          valueType: durationItem.valueType || 'immediate',
+          defaultValue: durationItem.defaultValue,
+        }) as [string, unknown];
+        cleaned[id].durationMs = durationValue;
+      }
+    }
+
     // Ensure EmbedWorkflow has childWorkflowId and childVersion at root level (DSL v2.0.0 requirement)
     if (restData.stepType === 'EmbedWorkflow') {
       if (childWorkflowId) {
@@ -970,6 +1085,12 @@ function cleanNodeData(steps: Record<string, any>) {
             type?: string;
           }
         >;
+        maxRetries?: number;
+        retryDelay?: number;
+        timeout?: number;
+        allowNull?: boolean;
+        convertSingleValue?: boolean;
+        batchSize?: number;
       } = {};
 
       // Get the array source value from inputMapping (which was the array format)
@@ -1039,6 +1160,23 @@ function cleanNodeData(steps: Record<string, any>) {
       if (data.splitDontStopOnFailed === true) {
         splitConfig.dontStopOnFailed = true;
       }
+      const advancedSplitFields: Array<
+        [keyof typeof splitConfig, unknown, (value: unknown) => unknown]
+      > = [
+        ['maxRetries', splitMaxRetries, Number],
+        ['retryDelay', splitRetryDelay, Number],
+        ['timeout', splitTimeout, Number],
+        ['allowNull', splitAllowNull, Boolean],
+        ['convertSingleValue', splitConvertSingleValue, Boolean],
+        ['batchSize', splitBatchSize, Number],
+      ];
+      for (const [field, formValue, coerce] of advancedSplitFields) {
+        if (formValue !== undefined && formValue !== null && formValue !== '') {
+          (splitConfig as any)[field] = coerce(formValue);
+        } else if (existingSplitConfig?.[field] !== undefined) {
+          (splitConfig as any)[field] = existingSplitConfig[field];
+        }
+      }
 
       // Add variables from splitVariablesFields
       if (
@@ -1083,7 +1221,13 @@ function cleanNodeData(steps: Record<string, any>) {
         (splitConfig.variables ||
           splitConfig.parallelism !== undefined ||
           splitConfig.sequential !== undefined ||
-          splitConfig.dontStopOnFailed !== undefined)
+          splitConfig.dontStopOnFailed !== undefined ||
+          splitConfig.maxRetries !== undefined ||
+          splitConfig.retryDelay !== undefined ||
+          splitConfig.timeout !== undefined ||
+          splitConfig.allowNull !== undefined ||
+          splitConfig.convertSingleValue !== undefined ||
+          splitConfig.batchSize !== undefined)
       ) {
         splitConfig.value = {
           valueType: 'reference',
@@ -1097,7 +1241,13 @@ function cleanNodeData(steps: Record<string, any>) {
         splitConfig.variables ||
         splitConfig.parallelism !== undefined ||
         splitConfig.sequential !== undefined ||
-        splitConfig.dontStopOnFailed !== undefined
+        splitConfig.dontStopOnFailed !== undefined ||
+        splitConfig.maxRetries !== undefined ||
+        splitConfig.retryDelay !== undefined ||
+        splitConfig.timeout !== undefined ||
+        splitConfig.allowNull !== undefined ||
+        splitConfig.convertSingleValue !== undefined ||
+        splitConfig.batchSize !== undefined
       ) {
         cleaned[id].config = splitConfig;
       }
@@ -1294,6 +1444,8 @@ function cleanNodeData(steps: Record<string, any>) {
         maxIterations?: number | null;
         temperature?: number | null;
         maxTokens?: number | null;
+        maxRetries?: number | null;
+        retryDelay?: number | null;
       } = {};
 
       if (Array.isArray(inputMapping)) {
@@ -1362,6 +1514,26 @@ function cleanNodeData(steps: Record<string, any>) {
         );
         if (maxTokensItem?.value !== undefined && maxTokensItem.value !== '') {
           aiAgentConfig.maxTokens = Number(maxTokensItem.value);
+        }
+
+        const maxRetriesItem = inputMapping.find(
+          (item: any) => item.type === 'maxRetries'
+        );
+        if (
+          maxRetriesItem?.value !== undefined &&
+          maxRetriesItem.value !== ''
+        ) {
+          aiAgentConfig.maxRetries = Number(maxRetriesItem.value);
+        }
+
+        const retryDelayItem = inputMapping.find(
+          (item: any) => item.type === 'retryDelay'
+        );
+        if (
+          retryDelayItem?.value !== undefined &&
+          retryDelayItem.value !== ''
+        ) {
+          aiAgentConfig.retryDelay = Number(retryDelayItem.value);
         }
       }
 
@@ -1466,6 +1638,37 @@ function cleanNodeData(steps: Record<string, any>) {
         );
         if (pollItem?.value !== undefined && pollItem.value !== '') {
           cleaned[id].pollIntervalMs = Number(pollItem.value);
+        }
+
+        const actionKeyItem = inputMapping.find(
+          (item: any) => item.type === 'actionKey'
+        );
+        const actionCorrelationItem = inputMapping.find(
+          (item: any) => item.type === 'actionCorrelation'
+        );
+        const actionContextItem = inputMapping.find(
+          (item: any) => item.type === 'actionContext'
+        );
+        const action: Record<string, unknown> = {};
+        if (actionKeyItem?.value) {
+          action.key = String(actionKeyItem.value);
+        }
+        const correlation = serializeMappingObject(
+          actionCorrelationItem?.value,
+          actionCorrelationItem?.valueType
+        );
+        if (correlation && Object.keys(correlation).length > 0) {
+          action.correlation = correlation;
+        }
+        const context = serializeMappingObject(
+          actionContextItem?.value,
+          actionContextItem?.valueType
+        );
+        if (context && Object.keys(context).length > 0) {
+          action.context = context;
+        }
+        if (Object.keys(action).length > 0) {
+          cleaned[id].action = action;
         }
       }
     }
@@ -1810,6 +2013,12 @@ function normalizeNodesAndEdges(
                 splitParallelism: config?.parallelism ?? 0,
                 splitSequential: config?.sequential ?? false,
                 splitDontStopOnFailed: config?.dontStopOnFailed ?? false,
+                splitMaxRetries: config?.maxRetries ?? undefined,
+                splitRetryDelay: config?.retryDelay ?? undefined,
+                splitTimeout: config?.timeout ?? undefined,
+                splitAllowNull: config?.allowNull ?? false,
+                splitConvertSingleValue: config?.convertSingleValue ?? false,
+                splitBatchSize: config?.batchSize ?? undefined,
               };
             })()
           : {}),
@@ -2005,6 +2214,30 @@ function normalizeNodesAndEdges(
                 });
               }
 
+              if (
+                config?.maxRetries !== undefined &&
+                config.maxRetries !== null
+              ) {
+                aiInputMapping.push({
+                  type: 'maxRetries',
+                  value: config.maxRetries,
+                  valueType: 'immediate',
+                  typeHint: 'integer',
+                });
+              }
+
+              if (
+                config?.retryDelay !== undefined &&
+                config.retryDelay !== null
+              ) {
+                aiInputMapping.push({
+                  type: 'retryDelay',
+                  value: config.retryDelay,
+                  valueType: 'immediate',
+                  typeHint: 'integer',
+                });
+              }
+
               // Memory config: deserialize config.memory into form fields
               if (config?.memory) {
                 aiInputMapping.push({
@@ -2104,6 +2337,26 @@ function normalizeNodesAndEdges(
               return { inputMapping: aiInputMapping };
             })()
           : {}),
+        // For Delay steps, parse durationMs into inputMapping format
+        ...((step.stepType as string) === 'Delay'
+          ? (() => {
+              const delayStep = data as any;
+              const duration = delayStep.durationMs;
+              return {
+                inputMapping: [
+                  {
+                    type: 'durationMs',
+                    value: duration?.value ?? '',
+                    valueType: duration?.valueType || 'immediate',
+                    typeHint: duration?.type || 'number',
+                    ...(duration?.default !== undefined
+                      ? { defaultValue: duration.default }
+                      : {}),
+                  },
+                ],
+              };
+            })()
+          : {}),
         // For WaitForSignal steps, parse top-level fields into inputMapping
         ...((step.stepType as string) === 'WaitForSignal'
           ? (() => {
@@ -2148,10 +2401,37 @@ function normalizeNodesAndEdges(
                   waitStep.pollIntervalMs !== undefined &&
                   waitStep.pollIntervalMs !== null
                     ? String(waitStep.pollIntervalMs)
-                    : '1000',
+                    : '',
                 valueType: 'immediate',
                 typeHint: 'number',
               });
+
+              if (waitStep.action?.key) {
+                waitInputMapping.push({
+                  type: 'actionKey',
+                  value: waitStep.action.key,
+                  valueType: 'immediate',
+                  typeHint: 'string',
+                });
+              }
+              if (waitStep.action?.correlation) {
+                waitInputMapping.push({
+                  type: 'actionCorrelation',
+                  value: convertCompositeToUIFormat(
+                    waitStep.action.correlation
+                  ),
+                  valueType: 'composite',
+                  typeHint: 'json',
+                });
+              }
+              if (waitStep.action?.context) {
+                waitInputMapping.push({
+                  type: 'actionContext',
+                  value: convertCompositeToUIFormat(waitStep.action.context),
+                  valueType: 'composite',
+                  typeHint: 'json',
+                });
+              }
 
               return { inputMapping: waitInputMapping };
             })()
@@ -2174,6 +2454,14 @@ function normalizeNodesAndEdges(
                   valueType: 'immediate',
                 },
               ];
+              if (logStep.context) {
+                logInputMapping.push({
+                  type: 'context',
+                  value: convertCompositeToUIFormat(logStep.context),
+                  typeHint: 'json',
+                  valueType: 'composite',
+                });
+              }
 
               return { inputMapping: logInputMapping };
             })()
@@ -2208,6 +2496,14 @@ function normalizeNodesAndEdges(
                   valueType: 'immediate',
                 },
               ];
+              if (errorStep.context) {
+                errorInputMapping.push({
+                  type: 'context',
+                  value: convertCompositeToUIFormat(errorStep.context),
+                  typeHint: 'json',
+                  valueType: 'composite',
+                });
+              }
 
               return { inputMapping: errorInputMapping };
             })()
@@ -2305,6 +2601,10 @@ function normalizeNodesAndEdges(
       source: edge.fromStep ?? '',
       target: edge.toStep ?? '',
       sourceHandle,
+      data: {
+        ...(edge.condition !== undefined ? { condition: edge.condition } : {}),
+        ...(edge.priority !== undefined ? { priority: edge.priority } : {}),
+      },
     });
   }
 

@@ -24,6 +24,10 @@ import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
+import { DelayStepField } from './DelayStepField';
+import { Input } from '@/shared/components/ui/input';
+import { Label } from '@/shared/components/ui/label';
+import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -119,6 +123,126 @@ function FormTabs() {
           <TestAgentInline />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+const DURABLE_STEP_TYPES = new Set([
+  'Agent',
+  'Split',
+  'EmbedWorkflow',
+  'Delay',
+  'AiAgent',
+]);
+
+const RETRY_STEP_TYPES = new Set(['Agent', 'EmbedWorkflow']);
+
+function StepAdvancedFields() {
+  const { activeTab } = useTabContext();
+  const form = useFormContext();
+  const stepType = useWatch({ name: 'stepType', control: form.control });
+  const breakpoint = useWatch({ name: 'breakpoint', control: form.control });
+  const durable = useWatch({ name: 'durable', control: form.control });
+  const maxRetries = useWatch({ name: 'maxRetries', control: form.control });
+  const retryDelay = useWatch({ name: 'retryDelay', control: form.control });
+  const timeout = useWatch({ name: 'timeout', control: form.control });
+
+  if (activeTab !== 'main' || !stepType || stepType === 'Start') {
+    return null;
+  }
+
+  const showDurable = DURABLE_STEP_TYPES.has(stepType);
+  const showRetries = RETRY_STEP_TYPES.has(stepType);
+
+  return (
+    <div className="space-y-4 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-0.5">
+          <Label className="text-sm">Breakpoint</Label>
+          <p className="text-xs text-muted-foreground">
+            Pause before this step when debugging.
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={breakpoint === true}
+          onCheckedChange={(checked) =>
+            form.setValue('breakpoint', checked, { shouldDirty: true })
+          }
+        />
+      </div>
+
+      {showDurable && (
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Durable</Label>
+            <p className="text-xs text-muted-foreground">
+              Keep this step suspendable and resumable.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={durable !== false}
+            onCheckedChange={(checked) =>
+              form.setValue('durable', checked, { shouldDirty: true })
+            }
+          />
+        </div>
+      )}
+
+      {showRetries && (
+        <div className="grid grid-cols-3 gap-3">
+          <div className="space-y-1">
+            <Label className="text-sm">Retries</Label>
+            <Input
+              type="number"
+              min={0}
+              value={maxRetries ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'maxRetries',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Retry delay (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={retryDelay ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'retryDelay',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Timeout (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={timeout ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'timeout',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -328,6 +452,10 @@ function InputMappingWrapper(config: Record<string, unknown>) {
     return <WhileStepField {...config} name={config.name as string} />;
   }
 
+  if (stepType === 'Delay') {
+    return <DelayStepField {...config} name={config.name as string} />;
+  }
+
   return (
     <div className="-my-3">
       <InputMappingField {...config} />
@@ -372,6 +500,14 @@ export const fieldsConfig = [
     renderComponent: () => <FormTabs />,
   },
   ...mainTabFieldsConfig,
+  {
+    type: 'custom',
+    label: '',
+    name: 'stepAdvanced',
+    initialValue: undefined,
+    colSpan: 'full',
+    renderComponent: () => <StepAdvancedFields />,
+  },
 ];
 
 export const schema = () =>
@@ -382,6 +518,12 @@ export const schema = () =>
       agentId: z.string().optional(),
       capabilityId: z.string().optional(),
       connectionId: z.string().optional(),
+      breakpoint: z.boolean().nullable().optional(),
+      durable: z.boolean().nullable().optional(),
+      timeout: z.any().optional(),
+      compensation: z.any().optional(),
+      onWait: z.any().optional(),
+      action: z.any().optional(),
       childWorkflowId: z.string().optional(),
       childVersion: z.string().optional(),
       embedWorkflowConfig: z.any().optional(), // UI-only field
@@ -536,6 +678,12 @@ export const schema = () =>
       splitParallelism: z.number().optional(),
       splitSequential: z.boolean().optional(),
       splitDontStopOnFailed: z.boolean().optional(),
+      splitMaxRetries: z.any().optional(),
+      splitRetryDelay: z.any().optional(),
+      splitTimeout: z.any().optional(),
+      splitAllowNull: z.boolean().optional(),
+      splitConvertSingleValue: z.boolean().optional(),
+      splitBatchSize: z.any().optional(),
       // Filter step condition (stored separately from inputMapping)
       filterCondition: z.any().optional(),
       // While step fields
@@ -596,6 +744,12 @@ export const initialValues: Partial<SchemaType> = {
   maxRetries: 1,
   retryDelay: 1000,
   retryStrategy: 'Linear',
+  breakpoint: undefined,
+  durable: undefined,
+  timeout: undefined,
+  compensation: undefined,
+  onWait: undefined,
+  action: undefined,
   inputSchema: undefined,
   inputSchemaFields: [],
   variablesFields: [],
@@ -610,6 +764,12 @@ export const initialValues: Partial<SchemaType> = {
   splitParallelism: 0,
   splitSequential: false,
   splitDontStopOnFailed: false,
+  splitMaxRetries: undefined,
+  splitRetryDelay: undefined,
+  splitTimeout: undefined,
+  splitAllowNull: false,
+  splitConvertSingleValue: false,
+  splitBatchSize: undefined,
   // GroupBy step fields
   groupByKey: '',
   groupByExpectedKeys: [],

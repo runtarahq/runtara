@@ -18,6 +18,7 @@ import {
 const SUPPORTED_TYPES: { label: string; value: string }[] = [
   { label: 'String', value: 'string' },
   { label: 'Number', value: 'number' },
+  { label: 'Integer', value: 'integer' },
   { label: 'Boolean', value: 'boolean' },
   { label: 'Object', value: 'object' },
   { label: 'Array', value: 'array' },
@@ -29,9 +30,59 @@ export type SchemaField = {
   type: string;
   required: boolean;
   description: string;
+  defaultValue?: any;
   enum?: string[];
   nullable?: boolean;
+  label?: string;
+  placeholder?: string;
+  order?: number;
+  format?: string;
+  min?: number;
+  max?: number;
+  pattern?: string;
+  properties?: SchemaField[];
+  visibleWhen?: {
+    field: string;
+    equals?: any;
+    notEquals?: any;
+  };
 };
+
+function formatFieldValue(value: any): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function parseDefaultValue(raw: string, type: string | undefined): any {
+  if (raw.trim() === '') return undefined;
+
+  if (type === 'number') {
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : raw;
+  }
+
+  if (type === 'integer') {
+    const value = parseInt(raw, 10);
+    return Number.isFinite(value) ? value : raw;
+  }
+
+  if (type === 'boolean') {
+    if (raw.toLowerCase() === 'true') return true;
+    if (raw.toLowerCase() === 'false') return false;
+    return raw;
+  }
+
+  if (type === 'object' || type === 'array') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+
+  return raw;
+}
 
 interface SchemaFieldsEditorProps {
   label: string;
@@ -110,7 +161,7 @@ export function SchemaFieldsEditor({
   const handleChange = (
     index: number,
     field: keyof SchemaField,
-    value: string | boolean
+    value: any
   ) => {
     const newFields = [...fields];
     newFields[index] = { ...newFields[index], [field]: value };
@@ -120,8 +171,8 @@ export function SchemaFieldsEditor({
   return (
     <div className="space-y-2">
       {!hideLabel && <Label className="text-sm font-medium">{label}</Label>}
-      <div className="border rounded-lg">
-        <table className="w-full">
+      <div className="border rounded-lg overflow-x-auto">
+        <table className="w-full min-w-[920px]">
           <thead>
             <tr className="border-b">
               <th className="text-left p-2 text-sm font-medium text-muted-foreground">
@@ -133,8 +184,17 @@ export function SchemaFieldsEditor({
               <th className="w-20 text-center p-2 text-sm font-medium text-muted-foreground">
                 Required
               </th>
+              <th className="w-20 text-center p-2 text-sm font-medium text-muted-foreground">
+                Nullable
+              </th>
               <th className="text-left p-2 text-sm font-medium text-muted-foreground">
                 Description
+              </th>
+              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+                Default
+              </th>
+              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+                Format
               </th>
               {showEnum && (
                 <th className="text-left p-2 text-sm font-medium text-muted-foreground">
@@ -211,6 +271,15 @@ export function SchemaFieldsEditor({
                       disabled={readOnly}
                     />
                   </td>
+                  <td className="w-20 text-center p-2 align-top">
+                    <Checkbox
+                      checked={!!field.nullable}
+                      onCheckedChange={(checked) =>
+                        handleChange(index, 'nullable', !!checked)
+                      }
+                      disabled={readOnly}
+                    />
+                  </td>
                   <td className="p-2 align-top">
                     <Input
                       value={field.description}
@@ -220,6 +289,36 @@ export function SchemaFieldsEditor({
                       placeholder="Field description"
                       disabled={readOnly}
                       className="text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
+                  </td>
+                  <td className="p-2 align-top">
+                    <Input
+                      value={formatFieldValue(field.defaultValue)}
+                      onChange={(e) =>
+                        handleChange(
+                          index,
+                          'defaultValue',
+                          parseDefaultValue(e.target.value, field.type)
+                        )
+                      }
+                      placeholder="Default"
+                      disabled={readOnly}
+                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
+                  </td>
+                  <td className="p-2 align-top">
+                    <Input
+                      value={field.format || ''}
+                      onChange={(e) =>
+                        handleChange(
+                          index,
+                          'format',
+                          e.target.value || undefined
+                        )
+                      }
+                      placeholder="date, email..."
+                      disabled={readOnly}
+                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   </td>
                   {showEnum && (
@@ -267,7 +366,7 @@ export function SchemaFieldsEditor({
             {fields.length === 0 && (
               <tr>
                 <td
-                  colSpan={(readOnly ? 4 : 5) + (showEnum ? 1 : 0)}
+                  colSpan={(readOnly ? 7 : 8) + (showEnum ? 1 : 0)}
                   className="p-4 text-center text-sm text-muted-foreground"
                 >
                   {emptyMessage}

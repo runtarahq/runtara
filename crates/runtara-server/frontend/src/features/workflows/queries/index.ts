@@ -7,6 +7,7 @@ import {
   ListStepTypesResponse,
   MoveWorkflowRequest,
   RenameFolderRequest,
+  MemoryTier,
   WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi.ts';
 import { executionGraphToReactFlow } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
@@ -205,18 +206,21 @@ export async function getWorkflowWorkflow(
 
   // Parse variables from API format to array format used by the UI
   // Variables are now inside executionGraph (moved from workflow root)
-  // API returns variables as an object: { varName: { type, value }, ... }
-  // UI expects: [{ name, value, type }, ...]
+  // API returns variables as an object: { varName: { type, value, description }, ... }
+  // UI expects: [{ name, value, type, description }, ...]
   const variablesObj = (executionGraph.variables || {}) as Record<
     string,
-    { type?: string; value?: unknown } | unknown
+    { type?: string; value?: unknown; description?: string | null } | unknown
   >;
   const variables = Object.entries(variablesObj).map(([name, val]) => {
-    const varObj = val as { type?: string; value?: unknown } | undefined;
+    const varObj = val as
+      | { type?: string; value?: unknown; description?: string | null }
+      | undefined;
     return {
       name,
       value: varObj?.value ?? val ?? '',
       type: varObj?.type ?? 'string',
+      description: varObj?.description ?? null,
     };
   });
 
@@ -230,6 +234,8 @@ export async function getWorkflowWorkflow(
 
   // Extract rateLimitBudgetMs from executionGraph
   const rateLimitBudgetMs = executionGraph.rateLimitBudgetMs;
+  const durable = executionGraph.durable;
+  const entryPoint = executionGraph.entryPoint;
 
   // Name and description are now inside executionGraph (moved from workflow root).
   // Prefer executionGraph values; fall back to legacy top-level fields so workflows
@@ -251,6 +257,10 @@ export async function getWorkflowWorkflow(
       outputSchemaFields,
       executionTimeoutSeconds,
       rateLimitBudgetMs,
+      durable,
+      entryPoint,
+      memoryTier: workflowData.memoryTier,
+      trackEvents: workflowData.trackEvents,
     },
     message: responseData?.message,
     success: responseData?.success,
@@ -262,14 +272,18 @@ export async function updateWorkflow(
   newWorkflow: {
     id: string;
     data: ExecutionGraphDto; // name and description are now inside the execution graph
+    memoryTier?: MemoryTier | null;
+    trackEvents?: boolean | null;
   }
 ) {
-  const { id, data } = newWorkflow;
+  const { id, data, memoryTier, trackEvents } = newWorkflow;
 
   const result = await RuntimeREST.api.updateWorkflowHandler(
     id,
     {
       executionGraph: data,
+      ...(memoryTier !== undefined ? { memoryTier } : {}),
+      ...(trackEvents !== undefined ? { trackEvents } : {}),
     },
     createAuthHeaders(token)
   );
