@@ -4646,6 +4646,341 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_cache_key_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg4;
+                    let result2 = T::ai_turn_cache_key(
+                        _rt::string_lift(bytes0),
+                        arg2 as u32,
+                        _rt::Vec::from_raw_parts(arg3.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_cache_key<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                        _ => {
+                            let l3 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l4 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l3, l4, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_snapshot_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i32,
+                    arg5: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let len1 = arg3;
+                    let result2 = T::ai_turn_snapshot(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
+                        arg4 as u32,
+                        _rt::bool_lift(arg5 as u8),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_snapshot<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_snapshot_part_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: i32,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_turn_snapshot_part(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                        arg2 as u32,
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_snapshot_part<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_snapshot_tool_calls_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_turn_snapshot_tool_calls(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<i32>() = _rt::as_i32(e);
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_snapshot_tool_calls<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_turn_snapshot_complete_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let result1 = T::ai_turn_snapshot_complete(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                    );
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (match e {
+                                true => 1,
+                                false => 0,
+                            }) as u8;
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_turn_snapshot_complete<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_ai_turn_output_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -6411,6 +6746,35 @@ pub mod exports {
                         index: u32,
                         tool_result: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Per-turn durability: the checkpoint key for one AiAgent loop turn —
+                    /// "{step-id}.turn.{iteration}", scoped by `variables._loop_indices` like
+                    /// breakpoint/agent cache keys.
+                    fn ai_turn_cache_key(
+                        step_id: _rt::String,
+                        iteration: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<_rt::String, _rt::String>;
+                    /// Per-turn durability: wrap the post-turn loop state
+                    /// ({state, pending, toolCalls, complete}) for the turn checkpoint.
+                    fn ai_turn_snapshot(
+                        state: _rt::Vec<u8>,
+                        pending: _rt::Vec<u8>,
+                        tool_calls: u32,
+                        complete: bool,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
+                    fn ai_turn_snapshot_part(
+                        snapshot: _rt::Vec<u8>,
+                        part: u32,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Per-turn durability: the snapshot's monotonic tool-call counter.
+                    fn ai_turn_snapshot_tool_calls(
+                        snapshot: _rt::Vec<u8>,
+                    ) -> Result<u32, _rt::String>;
+                    /// Per-turn durability: whether the snapshotted turn completed the loop.
+                    fn ai_turn_snapshot_complete(
+                        snapshot: _rt::Vec<u8>,
+                    ) -> Result<bool, _rt::String>;
                     /// Build the AiAgent step output context from a completed turn.
                     fn ai_turn_output(
                         agent_id: u32,
@@ -7183,6 +7547,60 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_ai_turn_add_result::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-cache-key")] unsafe
+                        extern "C" fn export_ai_turn_cache_key(arg0 : * mut u8, arg1 :
+                        usize, arg2 : i32, arg3 : * mut u8, arg4 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*::
+                        _export_ai_turn_cache_key_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-cache-key")]
+                        unsafe extern "C" fn _post_return_ai_turn_cache_key(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_cache_key::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot")] unsafe
+                        extern "C" fn export_ai_turn_snapshot(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize, arg4 : i32, arg5 : i32,) ->
+                        * mut u8 { unsafe { $($path_to_types)*::
+                        _export_ai_turn_snapshot_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot")]
+                        unsafe extern "C" fn _post_return_ai_turn_snapshot(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_snapshot::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-part")]
+                        unsafe extern "C" fn export_ai_turn_snapshot_part(arg0 : * mut
+                        u8, arg1 : usize, arg2 : i32,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_ai_turn_snapshot_part_cabi::<$ty >
+                        (arg0, arg1, arg2) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-part")]
+                        unsafe extern "C" fn _post_return_ai_turn_snapshot_part(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_snapshot_part::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-tool-calls")]
+                        unsafe extern "C" fn export_ai_turn_snapshot_tool_calls(arg0 : *
+                        mut u8, arg1 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*::
+                        _export_ai_turn_snapshot_tool_calls_cabi::<$ty > (arg0, arg1) } }
+                        #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-tool-calls")]
+                        unsafe extern "C" fn
+                        _post_return_ai_turn_snapshot_tool_calls(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_snapshot_tool_calls::<$ty > (arg0) } }
+                        #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-complete")]
+                        unsafe extern "C" fn export_ai_turn_snapshot_complete(arg0 : *
+                        mut u8, arg1 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_ai_turn_snapshot_complete_cabi::<$ty
+                        > (arg0, arg1) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-turn-snapshot-complete")]
+                        unsafe extern "C" fn _post_return_ai_turn_snapshot_complete(arg0
+                        : * mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_turn_snapshot_complete::<$ty > (arg0) } }
+                        #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#ai-turn-output")] unsafe
                         extern "C" fn export_ai_turn_output(arg0 : i32, arg1 : * mut u8,
                         arg2 : usize, arg3 : * mut u8, arg4 : usize,) -> * mut u8 {
@@ -7554,9 +7972,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4379] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x95!\x01A\x02\x01A\x02\
-\x01B\xa8\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4637] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x97#\x01A\x02\x01A\x02\
+\x01B\xb2\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -7619,28 +8037,33 @@ t\x01?\x01@\x01\x08turn-out\0\0\x08\x04\0\x13ai-turn-is-complete\x01@\x01@\x01\x
 turn-out\0\0\x0e\x04\0\x12ai-turn-tool-count\x01A\x01@\x02\x08turn-out\0\x05inde\
 xy\0\x05\x04\0\x11ai-turn-tool-args\x01B\x01@\x02\x08turn-out\0\x05indexy\0\x0e\x04\
 \0\x12ai-turn-tool-index\x01C\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0bt\
-ool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\x01@\x03\x08agent-idy\x06sou\
-rce\0\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01E\x01@\x01\x0bload-output\0\
-\0\x05\x04\0\x17ai-memory-initial-state\x01F\x01@\x02\x0cconversation\0\x0bfinal\
--state\0\0\x05\x04\0\x14ai-memory-save-input\x01G\x01@\x02\x05state\0\x0cmax-mes\
-sagesy\0\x05\x04\0\x19ai-memory-compact-sliding\x01H\x01@\x03\x04base\0\x05state\
-\0\x0cmax-messagesy\0\x05\x04\0\x12ai-summarize-input\x01I\x01@\x01\x10summarize\
--result\0\0\x05\x04\0\x13ai-summarize-output\x01J\x01@\x02\x08agent-idy\x05input\
-\0\0\x05\x04\0\x14agent-validate-input\x01K\x04\0\x16agent-connection-input\x01K\
-\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01L\x04\0\x15\
-agent-retry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\x04\
-codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0a\
-attributes\xcd\0\0\x05\x04\0\x10agent-error-info\x01N\x01j\x01\x02\x01s\x01@\x07\
-\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
-ms*\x0aattributes\xcd\0\0\xcf\0\x04\0\x16agent-retry-error-info\x01P\x01@\x08\x08\
-agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eret\
-ry-after-ms*\x0aattributes\xcd\0\0\x05\x04\0\x0bagent-error\x01Q\x01@\x02\x08age\
-nt-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01R\x01@\x03\x08age\
-nt-idy\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01S\x04\0\x10ste\
-p-debug-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/j\
-son@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\
-\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit\
--component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+ool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\x01@\x03\x07step-ids\x09iter\
+ationy\x06source\0\0\x0a\x04\0\x11ai-turn-cache-key\x01E\x01@\x04\x05state\0\x07\
+pending\0\x0atool-callsy\x08complete\x7f\0\x05\x04\0\x10ai-turn-snapshot\x01F\x01\
+@\x02\x08snapshot\0\x04party\0\x05\x04\0\x15ai-turn-snapshot-part\x01G\x01@\x01\x08\
+snapshot\0\0\x0e\x04\0\x1bai-turn-snapshot-tool-calls\x01H\x01@\x01\x08snapshot\0\
+\0\x08\x04\0\x19ai-turn-snapshot-complete\x01I\x01@\x03\x08agent-idy\x06source\0\
+\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01J\x01@\x01\x0bload-output\0\0\x05\
+\x04\0\x17ai-memory-initial-state\x01K\x01@\x02\x0cconversation\0\x0bfinal-state\
+\0\0\x05\x04\0\x14ai-memory-save-input\x01L\x01@\x02\x05state\0\x0cmax-messagesy\
+\0\x05\x04\0\x19ai-memory-compact-sliding\x01M\x01@\x03\x04base\0\x05state\0\x0c\
+max-messagesy\0\x05\x04\0\x12ai-summarize-input\x01N\x01@\x01\x10summarize-resul\
+t\0\0\x05\x04\0\x13ai-summarize-output\x01O\x01@\x02\x08agent-idy\x05input\0\0\x05\
+\x04\0\x14agent-validate-input\x01P\x04\0\x16agent-connection-input\x01P\x01@\x02\
+\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01Q\x04\0\x15agent-ret\
+ry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\x04codes\x07\
+messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattrib\
+utes\xd2\0\0\x05\x04\0\x10agent-error-info\x01S\x01j\x01\x02\x01s\x01@\x07\x04co\
+des\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0a\
+attributes\xd2\0\0\xd4\0\x04\0\x16agent-retry-error-info\x01U\x01@\x08\x08agent-\
+idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-aft\
+er-ms*\x0aattributes\xd2\0\0\x05\x04\0\x0bagent-error\x01V\x01@\x02\x08agent-idy\
+\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01W\x01@\x03\x08agent-idy\
+\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01X\x04\0\x10step-debu\
+g-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.\
+1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\
+\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compo\
+nent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

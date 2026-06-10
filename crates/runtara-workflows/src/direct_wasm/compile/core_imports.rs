@@ -106,6 +106,11 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_tool_args: Option<u32>,
     stdlib_ai_turn_tool_index: Option<u32>,
     stdlib_ai_turn_add_result: Option<u32>,
+    stdlib_ai_turn_cache_key: Option<u32>,
+    stdlib_ai_turn_snapshot: Option<u32>,
+    stdlib_ai_turn_snapshot_part: Option<u32>,
+    stdlib_ai_turn_snapshot_tool_calls: Option<u32>,
+    stdlib_ai_turn_snapshot_complete: Option<u32>,
     stdlib_ai_turn_output: Option<u32>,
     stdlib_ai_memory_initial_state: Option<u32>,
     stdlib_ai_memory_save_input: Option<u32>,
@@ -396,6 +401,26 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_turn_add_result,
                 "stdlib.ai-turn-add-result",
             )?,
+            stdlib_ai_turn_cache_key: require_import(
+                self.stdlib_ai_turn_cache_key,
+                "stdlib.ai-turn-cache-key",
+            )?,
+            stdlib_ai_turn_snapshot: require_import(
+                self.stdlib_ai_turn_snapshot,
+                "stdlib.ai-turn-snapshot",
+            )?,
+            stdlib_ai_turn_snapshot_part: require_import(
+                self.stdlib_ai_turn_snapshot_part,
+                "stdlib.ai-turn-snapshot-part",
+            )?,
+            stdlib_ai_turn_snapshot_tool_calls: require_import(
+                self.stdlib_ai_turn_snapshot_tool_calls,
+                "stdlib.ai-turn-snapshot-tool-calls",
+            )?,
+            stdlib_ai_turn_snapshot_complete: require_import(
+                self.stdlib_ai_turn_snapshot_complete,
+                "stdlib.ai-turn-snapshot-complete",
+            )?,
             stdlib_ai_turn_output: require_import(
                 self.stdlib_ai_turn_output,
                 "stdlib.ai-turn-output",
@@ -552,6 +577,11 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_tool_args: u32,
     pub(super) stdlib_ai_turn_tool_index: u32,
     pub(super) stdlib_ai_turn_add_result: u32,
+    pub(super) stdlib_ai_turn_cache_key: u32,
+    pub(super) stdlib_ai_turn_snapshot: u32,
+    pub(super) stdlib_ai_turn_snapshot_part: u32,
+    pub(super) stdlib_ai_turn_snapshot_tool_calls: u32,
+    pub(super) stdlib_ai_turn_snapshot_complete: u32,
     pub(super) stdlib_ai_turn_output: u32,
     pub(super) stdlib_ai_memory_initial_state: u32,
     pub(super) stdlib_ai_memory_save_input: u32,
@@ -827,6 +857,16 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_tool_index = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-add-result") {
         import_indices.stdlib_ai_turn_add_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-cache-key") {
+        import_indices.stdlib_ai_turn_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot") {
+        import_indices.stdlib_ai_turn_snapshot = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-part") {
+        import_indices.stdlib_ai_turn_snapshot_part = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-tool-calls") {
+        import_indices.stdlib_ai_turn_snapshot_tool_calls = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-complete") {
+        import_indices.stdlib_ai_turn_snapshot_complete = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-output") {
         import_indices.stdlib_ai_turn_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-memory-initial-state") {

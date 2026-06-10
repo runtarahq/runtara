@@ -374,6 +374,28 @@ interface json {
         index: u32,
         tool-result: list<u8>,
     ) -> result<list<u8>, string>;
+    // Per-turn durability: the checkpoint key for one AiAgent loop turn —
+    // "{step-id}.turn.{iteration}", scoped by `variables._loop_indices` like
+    // breakpoint/agent cache keys.
+    ai-turn-cache-key: func(
+        step-id: string,
+        iteration: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+    // Per-turn durability: wrap the post-turn loop state
+    // ({state, pending, toolCalls, complete}) for the turn checkpoint.
+    ai-turn-snapshot: func(
+        state: list<u8>,
+        pending: list<u8>,
+        tool-calls: u32,
+        complete: bool,
+    ) -> result<list<u8>, string>;
+    // Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
+    ai-turn-snapshot-part: func(snapshot: list<u8>, part: u32) -> result<list<u8>, string>;
+    // Per-turn durability: the snapshot's monotonic tool-call counter.
+    ai-turn-snapshot-tool-calls: func(snapshot: list<u8>) -> result<u32, string>;
+    // Per-turn durability: whether the snapshotted turn completed the loop.
+    ai-turn-snapshot-complete: func(snapshot: list<u8>) -> result<bool, string>;
     // Build the AiAgent step output context from a completed turn.
     ai-turn-output: func(
         agent-id: u32,

@@ -846,6 +846,37 @@ mod component {
             )
         }
 
+        fn ai_turn_cache_key(
+            step_id: String,
+            iteration: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_turn_cache_key(&step_id, iteration, &source)
+        }
+
+        fn ai_turn_snapshot(
+            state: Vec<u8>,
+            pending: Vec<u8>,
+            tool_calls: u32,
+            complete: bool,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot(
+                &state, &pending, tool_calls, complete,
+            )
+        }
+
+        fn ai_turn_snapshot_part(snapshot: Vec<u8>, part: u32) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_part(&snapshot, part)
+        }
+
+        fn ai_turn_snapshot_tool_calls(snapshot: Vec<u8>) -> Result<u32, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_tool_calls(&snapshot)
+        }
+
+        fn ai_turn_snapshot_complete(snapshot: Vec<u8>) -> Result<bool, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_complete(&snapshot)
+        }
+
         fn ai_turn_output(
             agent_id: u32,
             source: Vec<u8>,

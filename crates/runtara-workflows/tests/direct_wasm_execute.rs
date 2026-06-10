@@ -1739,6 +1739,149 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
     );
 }
 
+fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}},
+        {{"fromStep":"ai","toStep":"echo_tool","label":"echo"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","durable":{durable},"config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
+          "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
+          "provider":"openai",
+          "model":"gpt-4o"}}}},
+        "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{{}}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-04: each completed turn is checkpointed under {step}.turn.{n}.
+    // Run 1 completes the tool-call turn (turn 1: LLM + echo tool dispatch)
+    // and then dies on a provider error at turn 2 - a mid-loop crash.
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-durability",
+        &ai_agent_tool_loop_durable_graph_json(true),
+        br#"{}"#,
+        vec![llm_tool_call("echo", r#"{"value":42}"#), llm_http_500()],
+    );
+    assert!(
+        !crashed.status_success,
+        "run 1 must fail at the second turn"
+    );
+    assert_eq!(crashed.llm_requests.len(), 2, "turn 1 + failed turn 2");
+    // The capture stream includes the empty lookup PROBES as well as the
+    // saves; only non-empty states are real stored checkpoints.
+    let turn_checkpoints: Vec<(String, Vec<u8>)> = crashed
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.checkpoint_id.starts_with("ai.turn.") && !checkpoint.state.is_empty()
+        })
+        .map(|checkpoint| (checkpoint.checkpoint_id.clone(), checkpoint.state.clone()))
+        .collect();
+    assert!(
+        turn_checkpoints.iter().any(|(id, _)| id == "ai.turn.1"),
+        "turn 1 must be checkpointed before the crash: {:?}",
+        crashed
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+
+    // Run 2 (replay after the crash): the preloaded turn-1 snapshot restores
+    // the conversation + tool results WITHOUT a model call or tool dispatch;
+    // only the failed turn 2 runs live. Exactly ONE model call - turn 1 is
+    // not re-billed.
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-loop-durability",
+        &ai_agent_tool_loop_durable_graph_json(true),
+        br#"{}"#,
+        false,
+        turn_checkpoints,
+        vec![llm_ok("done after resume")],
+    );
+    assert!(
+        resumed.status_success,
+        "replay must complete; error: {:?}; events: {:?}; stderr: {}",
+        resumed.error_json,
+        resumed
+            .events
+            .iter()
+            .map(|event| &event.subtype)
+            .collect::<Vec<_>>(),
+        resumed.stderr
+    );
+    let output = resumed.output_json.expect("replay completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("done after resume"),
+        "{output}"
+    );
+    assert_eq!(
+        resumed.llm_requests.len(),
+        1,
+        "completed turn 1 must NOT be re-billed on replay"
+    );
+    // The replayed turn-2 request must carry turn 1's tool result in the
+    // conversation - the restored snapshot, not a fresh conversation.
+    let request_body = resumed.llm_requests[0].to_string();
+    assert!(
+        request_body.contains("42"),
+        "replayed turn must see turn 1's tool result: {request_body}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // durable:false opts the loop out of per-turn checkpoints entirely.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-non-durable",
+        &ai_agent_tool_loop_durable_graph_json(false),
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_ok("non-durable done"),
+        ],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    assert_eq!(result.llm_requests.len(), 2);
+    assert!(
+        !result
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id.starts_with("ai.turn.")),
+        "non-durable loop must not write turn checkpoints: {:?}",
+        result
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
     let Some(components_dir) = direct_e2e_components_dir() else {

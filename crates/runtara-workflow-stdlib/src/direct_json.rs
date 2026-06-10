@@ -1238,6 +1238,80 @@ impl DirectJsonManifest {
     }
 
     /// True when the turn output's `action` is `complete`.
+    /// Per-turn durability: the checkpoint key for one AiAgent loop turn —
+    /// `{step_id}.turn.{iteration}`, scoped by `variables._loop_indices` like
+    /// the breakpoint and agent cache keys, so Split/While-nested loops get
+    /// distinct keys per iteration scope.
+    pub fn ai_turn_cache_key(
+        step_id: &str,
+        iteration: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
+        let indices_suffix = wait_loop_indices_suffix(&source);
+        Ok(format!("{step_id}.turn.{iteration}{indices_suffix}"))
+    }
+
+    /// Per-turn durability: wrap the post-turn loop state for the turn
+    /// checkpoint. `state`/`pending` are the loop's JSON payloads; the
+    /// monotonic tool-call counter must survive replay because
+    /// WaitForSignal-tool signal ids embed it.
+    pub fn ai_turn_snapshot(
+        state: &[u8],
+        pending: &[u8],
+        tool_calls: u32,
+        complete: bool,
+    ) -> Result<Vec<u8>, String> {
+        let state: Value = serde_json::from_slice(state)
+            .map_err(|err| format!("failed to parse ai-turn snapshot state: {err}"))?;
+        let pending: Value = serde_json::from_slice(pending)
+            .map_err(|err| format!("failed to parse ai-turn snapshot pending: {err}"))?;
+        serde_json::to_vec(&serde_json::json!({
+            "state": state,
+            "pending": pending,
+            "toolCalls": tool_calls,
+            "complete": complete,
+        }))
+        .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
+    }
+
+    /// Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
+    pub fn ai_turn_snapshot_part(snapshot: &[u8], part: u32) -> Result<Vec<u8>, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        let value = match part {
+            0 => snapshot.get("state").cloned().unwrap_or(Value::Null),
+            1 => snapshot
+                .get("pending")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+            other => return Err(format!("unknown ai-turn snapshot part {other}")),
+        };
+        serde_json::to_vec(&value)
+            .map_err(|err| format!("failed to serialize ai-turn snapshot part: {err}"))
+    }
+
+    /// Per-turn durability: the snapshot's monotonic tool-call counter.
+    pub fn ai_turn_snapshot_tool_calls(snapshot: &[u8]) -> Result<u32, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        Ok(snapshot
+            .get("toolCalls")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32)
+    }
+
+    /// Per-turn durability: whether the snapshotted turn completed the loop.
+    pub fn ai_turn_snapshot_complete(snapshot: &[u8]) -> Result<bool, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        Ok(snapshot
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
     pub fn ai_turn_is_complete(turn_out: &[u8]) -> Result<bool, String> {
         let turn_out: Value = serde_json::from_slice(turn_out)
             .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
@@ -5320,6 +5394,56 @@ mod tests {
         let source = build_source(br#"{"flag":true}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn ai_turn_snapshot_round_trip_preserves_all_fields() {
+        let state = br#"{"action":"tools","chat_history":[{"role":"assistant"}],"iterations":1}"#;
+        let pending = br#"[{"tool_call_id":"call_1","content":"42"}]"#;
+
+        let snapshot = DirectJsonManifest::ai_turn_snapshot(state, pending, 7, false)
+            .expect("snapshot builds");
+
+        let restored_state =
+            DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 0).expect("state part");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored_state).unwrap(),
+            serde_json::from_slice::<Value>(state).unwrap()
+        );
+        let restored_pending =
+            DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 1).expect("pending part");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored_pending).unwrap(),
+            serde_json::from_slice::<Value>(pending).unwrap()
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_tool_calls(&snapshot).unwrap(),
+            7
+        );
+        assert!(!DirectJsonManifest::ai_turn_snapshot_complete(&snapshot).unwrap());
+
+        let complete =
+            DirectJsonManifest::ai_turn_snapshot(state, b"[]", 7, true).expect("complete snapshot");
+        assert!(DirectJsonManifest::ai_turn_snapshot_complete(&complete).unwrap());
+        assert!(DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 2).is_err());
+    }
+
+    #[test]
+    fn ai_turn_cache_key_scopes_loop_indices() {
+        let plain = DirectJsonManifest::ai_turn_cache_key("ai", 3, br#"{"variables":{}}"#)
+            .expect("plain key");
+        assert_eq!(plain, "ai.turn.3");
+
+        let scoped = DirectJsonManifest::ai_turn_cache_key(
+            "ai",
+            3,
+            br#"{"variables":{"_loop_indices":[2,5]}}"#,
+        )
+        .expect("scoped key");
+        assert!(
+            scoped.starts_with("ai.turn.3") && scoped != plain,
+            "loop-nested keys must differ from plain keys: {scoped}"
+        );
     }
 
     #[test]

@@ -1213,9 +1213,12 @@ pub struct AiAgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
 
-    /// Disable durability for this step when `Some(false)`. Skips checkpoint
-    /// on each tool call and LLM call inside this agent's loop. Ignored when
-    /// the enclosing workflow is already non-durable.
+    /// Disable durability for this step when `Some(false)`. Skips the
+    /// per-turn checkpoints inside the tool loop (each completed turn — LLM
+    /// response plus dispatched tool results — is snapshotted under
+    /// `{step}.turn.{n}` so a crash never re-runs finished turns) and the
+    /// invoke checkpoint on the single-shot path. Ignored when the enclosing
+    /// workflow is already non-durable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }

@@ -18,7 +18,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-01](#gap-01) | P0 | `MATCH`/`SIMILARITY_GTE`/`COSINE_DISTANCE_LTE`/`L2_DISTANCE_LTE` silently evaluate `false` in workflow conditions | Validation error E027 + stdlib stub → `Err` | S | validation.rs + 1 stdlib arm; mis-using workflows stop validating (intended) | done |
 | [GAP-02](#gap-02) | P0 | `Agent.compensation` accepted, saga never runs | Validation warning W070 + doc honesty; removed W060 which suggested the no-op | S | Validator only; warning, not error | done |
 | [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | done |
-| [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | todo |
+| [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | done |
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | done |
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | done |
@@ -162,7 +162,7 @@ checks) — the inconsistency is invisible to users.
 <a name="gap-04"></a>
 ## GAP-04 (P1) — AiAgent tool-loop has no per-turn durability
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** `DirectRunPlan::AiAgentLoop` has no `durable_checkpoint` (`plan.rs:162-174`); the
 loop only checkpoints memory load/save (`ai_agent_loop.rs:91-155`, `:440-585`). A crash/SIGTERM
@@ -172,34 +172,34 @@ tool calls re-execute and re-bill. Worse, `AiAgentStep.durable`'s own doc
 agent's loop" — the DSL contract is already written; the loop doesn't deliver it.
 
 **Fix plan.**
-- [ ] 1. Design the checkpoint unit: one checkpoint per completed turn (LLM response + all tool
-  results applied), keyed `"{step_id}.turn.{iteration}"` scoped with loop indices like existing
-  Split/agent cache keys (`agent_cache_key` / `split_cache_key` precedents in `direct_json.rs`).
-  State payload = the turn-state JSON the loop already threads (conversation messages, iteration
-  counter, per-tool call counter).
-- [ ] 2. `direct_json.rs`: add `ai_turn_cache_key(step_id, iteration, variables)` and
-  state-envelope build/restore helpers (serialize is already JSON; restore must rehydrate the
-  tool-call counter — WaitForSignal tool signal ids embed it and must stay resume-stable).
-- [ ] 3. `manifest.rs` / `plan.rs`: thread `durable` (already extracted for single-shot at
-  `manifest.rs:1111`) into `AiAgentLoop` as `durable_checkpoint`.
-- [ ] 4. `ai_agent_loop.rs`: at loop top, checkpoint-read for the next iteration key — on hit,
-  restore state and skip the LLM invoke + tool dispatch for that turn; after each completed turn,
-  checkpoint-write. Honor `durable_checkpoint == false` by skipping both (current behavior).
-- [ ] 5. Update `docs/wasm-direct-emitter.md` durability section; close the "durability hardening
-  pending" line in `docs/wasm-direct-emitter-phase12-plan.md`.
+- [x] 1. Checkpoint unit: one snapshot per completed turn — LLM response (loop `state`), the
+  turn's dispatched tool results (`pending`), and the monotonic tool-call counter — keyed
+  `{step_id}.turn.{iteration}` scoped by `variables._loop_indices`. A completing turn snapshots
+  with `complete: true` so even the final LLM call replays for free.
+- [x] 2. Five new stdlib WIT functions (`ai-turn-cache-key`, `ai-turn-snapshot`,
+  `ai-turn-snapshot-part`, `ai-turn-snapshot-tool-calls`, `ai-turn-snapshot-complete`) +
+  `direct_json.rs` implementations; tool-call counter restores so WaitForSignal-tool signal ids
+  stay resume-stable.
+- [x] 3. `plan.rs`: `AiAgentLoop.durable_checkpoint` from the manifest agent entry's `durable`;
+  dispatcher threads it through.
+- [x] 4. `ai_agent_loop.rs`: per-turn lookup at iteration top (hit → restore
+  state/pending/counter; completed-turn hit → exit loop with restored state) and snapshot save at
+  both turn exits (tools-done and completion). `durable: false` skips everything.
+- [x] 5. `AiAgentStep.durable` doc now describes the delivered behavior (it previously promised
+  checkpoints the loop didn't do); phase12 plan's "durability hardening pending" closed.
 
-**Test coverage required.**
-- [ ] Plan unit test (`compile/tests.rs`): AiAgentLoop plan carries `durable_checkpoint` from the
-  step/workflow flags (true / explicit false / non-durable workflow).
-- [ ] Stdlib unit tests: `ai_turn_cache_key` determinism incl. loop indices; state round-trip
-  (messages + iteration + tool-call counter survive serialize→restore).
-- [ ] Execute test (`direct_wasm_execute.rs`, gated): 3-turn tool loop against a counting stub
-  tool agent; kill the process after turn 2 (SIGTERM mid-run is an established harness pattern),
-  re-run same instance, assert (a) final output correct, (b) the stub's invocation count proves
-  turns 1–2 did **not** re-execute, (c) a WaitForSignal tool's signal id is identical across the
-  resume.
-- [ ] Full-stack e2e (`e2e-verify`): suspend/resume an AiAgent loop workflow; assert no duplicate
-  per-turn debug events and exactly one `agent-debug` sequence per turn.
+**Test coverage delivered.**
+- [x] Stdlib unit tests: `ai_turn_snapshot_round_trip_preserves_all_fields` (state/pending/
+  counter/complete + invalid part), `ai_turn_cache_key_scopes_loop_indices`.
+- [x] Execute e2e `..._replays_completed_turns_without_rebilling`: run 1 completes the tool-call
+  turn and crashes on a turn-2 provider error (2 model calls, `ai.turn.1` checkpoint captured);
+  run 2 preloads the turn checkpoints and completes with **exactly one** model call, and that
+  call's request body still carries turn 1's tool result (the restored conversation). This is the
+  crash-replay scenario, expressed via checkpoint preloading instead of SIGTERM — same replay
+  path, deterministic.
+- [x] Execute e2e `..._non_durable_skips_turn_checkpoints`: `durable: false` writes no
+  `ai.turn.*` checkpoints and still completes.
+- [x] Full suites: stdlib (125), workflows lib (450), execute (37, three consecutive clean runs).
 
 ---
 

@@ -168,6 +168,11 @@ pub(super) enum DirectRunPlan {
         agent_id: u32,
         agent_component_id: String,
         input_mapping_id: u32,
+        /// Per-turn durable checkpoints: each completed turn (LLM response +
+        /// dispatched tool results + tool-call counter) is snapshotted under
+        /// `{step}.turn.{n}` so a crash never re-runs (and re-bills) finished
+        /// turns. Honors AiAgentStep.durable / the workflow durable flag.
+        durable_checkpoint: bool,
         breakpoint: bool,
         max_iterations: u32,
         /// Tools in the same order as the advertised `tools` (so the capability's
@@ -991,6 +996,7 @@ fn step_run_plan_inner(
                 agent_id: agent.id,
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
+                durable_checkpoint: agent.durable,
                 breakpoint: step_breakpoint_enabled(graph, step),
                 max_iterations,
                 tools,
