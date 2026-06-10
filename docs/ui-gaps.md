@@ -276,7 +276,9 @@ Complexity/effort: S.
 
 ### 20. Split/While subgraph-level ExecutionGraph fields are dropped on save
 
-Status: Open. Severity: high.
+Status: Implemented. Severity: high.
+
+Resolution (2026-06-10): on load, the converter now captures all subgraph-level fields except `steps`/`executionPlan` (variables, input/output schema, name, description, notes, entryPoint, ...) into a UI-only `subgraphMeta` carrier on the container node; on save, the rebuilt subgraph is seeded from that carrier before child steps/edges are re-derived, and the carrier itself is stripped from the serialized step. Locked in by round-trip tests in `CustomNodes/utils.test.ts`.
 
 Description:
 `composeExecutionGraph` rebuilds Split/While subgraphs fresh from child nodes; subgraph-level `variables`, `inputSchema`, `outputSchema`, `name`, `description`, and `notes` authored via API/JSON are not carried through the rebuild and are silently destroyed by any UI save. (Split's `config`-level fields were fixed by finding 5; this is the nested `subgraph` ExecutionGraph itself.)

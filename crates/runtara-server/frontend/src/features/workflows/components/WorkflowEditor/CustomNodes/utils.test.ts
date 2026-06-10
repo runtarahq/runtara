@@ -1903,3 +1903,82 @@ describe('Workflow canvas auto-layout', () => {
     expect(splitSize.height).toBeGreaterThan(childBottom);
   });
 });
+
+describe('Subgraph-level ExecutionGraph field round-trip', () => {
+  it('preserves Split subgraph variables, schemas, and metadata through load→save', () => {
+    const graph = {
+      name: 'subgraph-meta-fixture',
+      entryPoint: 'split',
+      executionPlan: [],
+      steps: {
+        split: {
+          id: 'split',
+          stepType: 'Split',
+          config: {
+            value: { valueType: 'reference', value: 'data.items' },
+          },
+          subgraph: {
+            name: 'per-item',
+            description: 'runs once per item',
+            entryPoint: 'finish',
+            variables: {
+              threshold: { type: 'number', value: 5 },
+            },
+            inputSchema: { fields: [{ name: 'sku', type: 'string' }] },
+            outputSchema: { fields: [{ name: 'ok', type: 'boolean' }] },
+            steps: {
+              finish: {
+                id: 'finish',
+                stepType: 'Finish',
+                inputMapping: {
+                  ok: { valueType: 'immediate', value: true },
+                },
+              },
+            },
+            executionPlan: [],
+          },
+        },
+      },
+    };
+
+    const { nodes, edges } = executionGraphToReactFlow(graph as any);
+    const round = composeExecutionGraph(nodes, edges, { name: graph.name });
+    expect(round).not.toBeNull();
+
+    const split = (round!.steps as Record<string, any>)['split'];
+    expect(split).toBeDefined();
+    expect(split.subgraph).toBeDefined();
+    // Graph-level fields must survive the rebuild from child nodes.
+    expect(split.subgraph.name).toBe('per-item');
+    expect(split.subgraph.description).toBe('runs once per item');
+    expect(split.subgraph.variables).toEqual({
+      threshold: { type: 'number', value: 5 },
+    });
+    expect(split.subgraph.inputSchema).toEqual({
+      fields: [{ name: 'sku', type: 'string' }],
+    });
+    expect(split.subgraph.outputSchema).toEqual({
+      fields: [{ name: 'ok', type: 'boolean' }],
+    });
+    // Children are still rebuilt correctly.
+    expect(split.subgraph.steps.finish).toBeDefined();
+    expect(split.subgraph.steps.finish.stepType).toBe('Finish');
+    // The UI-only carrier must not leak into the saved step.
+    expect(split.subgraphMeta).toBeUndefined();
+    expect(split.subgraph.subgraphMeta).toBeUndefined();
+  });
+
+  it('does not invent subgraph fields for fresh containers', () => {
+    const container = makeLayoutNode('split', NODE_TYPES.ContainerNode);
+    const child = makeLayoutNode('inner', NODE_TYPES.BasicNode, 'split');
+    const round = composeExecutionGraph([container, child], [], {
+      name: 'fresh-split',
+    });
+    expect(round).not.toBeNull();
+    const split = (round!.steps as Record<string, any>)['split'];
+    expect(split.subgraph).toBeDefined();
+    expect(split.subgraph.name).toBeUndefined();
+    expect(split.subgraph.variables).toBeUndefined();
+    expect(split.subgraph.steps.inner).toBeDefined();
+  });
+});

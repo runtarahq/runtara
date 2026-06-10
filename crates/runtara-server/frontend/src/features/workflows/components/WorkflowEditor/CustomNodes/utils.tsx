@@ -275,7 +275,12 @@ export function composeExecutionGraph(
     if (stepType === 'Split' || stepType === 'While') {
       const containerStep = nodesMap.get(node.id);
       if (containerStep && !containerStep.subgraph) {
-        containerStep.subgraph = { steps: {} };
+        // Seed the rebuilt subgraph with the graph-level fields captured at
+        // load time (variables, schemas, name, description, notes, ...).
+        containerStep.subgraph = {
+          ...(containerStep.data?.subgraphMeta || {}),
+          steps: {},
+        };
       }
     }
   });
@@ -285,7 +290,9 @@ export function composeExecutionGraph(
       const parent = nodesMap.get(node.parentId);
       if (parent) {
         if (!parent.subgraph) {
-          parent.subgraph = {};
+          parent.subgraph = {
+            ...(parent.data?.subgraphMeta || {}),
+          };
           parent.subgraph.steps = {};
         }
         parent.subgraph.steps[node.id] = nodesMap.get(node.id);
@@ -584,6 +591,7 @@ function cleanNodeData(steps: Record<string, any>) {
       whileCondition,
       whileMaxIterations,
       whileTimeout,
+      subgraphMeta: _15,
       ...restData
     } = data;
     // Suppress unused variable warnings for destructured exclusions
@@ -601,6 +609,7 @@ function cleanNodeData(steps: Record<string, any>) {
     void _12;
     void _13;
     void _14;
+    void _15;
 
     if (subgraph) {
       data.subgraph = {
@@ -1761,6 +1770,23 @@ function normalizeNodesAndEdges(
   for (const [id, step] of Object.entries(steps)) {
     const { subgraph, ...data } = step;
     const { inputMapping = {} } = data;
+
+    // Preserve subgraph-level ExecutionGraph fields (variables, schemas,
+    // name, description, notes, entryPoint, ...). Child steps/edges become
+    // React Flow nodes and the subgraph is rebuilt from them on save, so
+    // anything not carried here would be silently dropped by a save.
+    if (subgraph) {
+      const {
+        steps: _subgraphSteps,
+        executionPlan: _subgraphPlan,
+        ...subgraphMeta
+      } = subgraph as Record<string, unknown>;
+      void _subgraphSteps;
+      void _subgraphPlan;
+      if (Object.keys(subgraphMeta).length > 0) {
+        (data as Record<string, unknown>).subgraphMeta = subgraphMeta;
+      }
+    }
 
     const nodeType = step.stepType
       ? STEP_TYPES[step.stepType] || NODE_TYPES.BasicNode
