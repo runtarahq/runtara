@@ -1,58 +1,35 @@
-import type { ExtendedAgent } from '@/features/workflows/queries';
+/**
+ * Step types the compiler supports `onError` routing on.
+ *
+ * Mirrors `on_error_route_shape_supported` in
+ * `crates/runtara-workflows/src/direct_wasm/support.rs`: Agent, EmbedWorkflow,
+ * Split, While, AiAgent and WaitForSignal steps may carry `onError` edges;
+ * every other step type is rejected by the direct compiler, so the editor must
+ * not offer an error route there. The backend aliases with spaces are included
+ * because loaded workflows may carry the display form of the step type.
+ */
+const STEP_TYPES_WITH_ERROR_ROUTING = new Set([
+  'Agent',
+  'AiAgent',
+  'AI Agent',
+  'EmbedWorkflow',
+  'Split',
+  'While',
+  'WaitForSignal',
+  'Wait For Signal',
+]);
 
 /**
- * Determines if a step can have error handlers based on its type and configuration.
+ * Determines if a step can have error handlers based on its type.
  *
- * @param stepType - The type of step (e.g., 'Agent', 'Create', 'Conditional')
- * @param agentId - The agent ID for Agent steps
- * @param capabilityId - The capability ID for Agent steps
- * @param agents - List of available agents with their capabilities
- * @returns true if the step can fail and should show an error handle
+ * Every Agent step can fail and accepts `onError` routing regardless of
+ * whether its capability declares `knownErrors` — the DSL/compiler accept
+ * `onError` edges on all Agent steps, so the editor offers the handler
+ * unconditionally for the compiler-supported step set.
+ *
+ * @param stepType - The type of step (e.g., 'Agent', 'AiAgent', 'Split')
+ * @returns true if the compiler supports `onError` routing on this step type
  */
-export function canStepHaveErrorHandler(
-  stepType: string,
-  agentId?: string,
-  capabilityId?: string,
-  agents?: ExtendedAgent[]
-): boolean {
-  // Steps that cannot have error handlers:
-  // - Finish/Start: workflow boundaries
-  // - Conditional/Switch: evaluation steps that cannot fail
-  // - Error: already an error handler, cannot have its own error handler
-  const stepsWithoutErrorHandlers = [
-    'Finish',
-    'Start',
-    'Conditional',
-    'Switch',
-    'Error',
-  ];
-  if (stepsWithoutErrorHandlers.includes(stepType)) {
-    return false;
-  }
-
-  // For Agent steps, check if the capability has knownErrors defined
-  if (stepType === 'Agent' && agentId && capabilityId && agents) {
-    const agent = agents.find(
-      (a) => a.id.toLowerCase() === agentId.toLowerCase()
-    );
-    if (!agent) {
-      // If agent not found, assume it can have errors (safer default)
-      return true;
-    }
-
-    const capability = agent.supportedCapabilities[capabilityId];
-    if (!capability) {
-      // If capability not found, assume it can have errors (safer default)
-      return true;
-    }
-
-    // Check if the capability has knownErrors defined
-    // If knownErrors array exists and has entries, show error handle
-    // If knownErrors is undefined or empty, don't show error handle
-    return !!(capability.knownErrors && capability.knownErrors.length > 0);
-  }
-
-  // For non-Agent steps that can fail (Create, Split, Combine, etc.)
-  // Always show error handle since we don't have capability-level granularity
-  return true;
+export function canStepHaveErrorHandler(stepType: string): boolean {
+  return STEP_TYPES_WITH_ERROR_ROUTING.has(stepType);
 }

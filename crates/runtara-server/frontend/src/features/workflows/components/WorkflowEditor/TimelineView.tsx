@@ -28,6 +28,7 @@ import {
   MemoryStick,
   Pause,
   PenLine,
+  Plug,
   Plus,
   Repeat,
   Settings2,
@@ -51,12 +52,7 @@ import { Textarea } from '@/shared/components/ui/textarea';
 import { cn } from '@/lib/utils.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
-import { useCustomQuery } from '@/shared/hooks/api';
-import { queryKeys } from '@/shared/queries/query-keys';
-import { getAgents, type ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
-import { useEntitlements } from '@/shared/hooks/useEntitlements';
-import { enabledAgentSet } from '@/shared/entitlements';
 import {
   type NodeExecutionStatus,
   useExecutionStore,
@@ -84,6 +80,8 @@ export type TimelineAddStepRequest = {
   directStep?: {
     stepType: string;
     name: string;
+    agentId?: string;
+    capabilityId?: string;
     inputMapping?: Record<string, unknown>[];
   };
   aiAgentTool?: boolean;
@@ -675,7 +673,8 @@ function compareByPosition(a: Node, b: Node): number {
   return getStepName(a).localeCompare(getStepName(b));
 }
 
-function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
+// Exported for tests.
+export function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
   const hiddenNodes = new Set<string>();
   const aiAgentNodes = nodes.filter(
     (node) => node.type === NODE_TYPES.AiAgentNode
@@ -683,10 +682,15 @@ function getHiddenNodeIds(nodes: Node[], edges: Edge[]): Set<string> {
 
   for (const agentNode of aiAgentNodes) {
     for (const edge of edges) {
+      // Tool / memory / mcp.<toolset> attachments render inline in the AI
+      // Agent card, so their targets are hidden from the timeline. `onError`
+      // is a normal error route (compiler: AiAgent error_plan) and must stay
+      // visible as a timeline branch.
       if (
         edge.source === agentNode.id &&
         edge.sourceHandle &&
-        edge.sourceHandle !== 'source'
+        edge.sourceHandle !== 'source' &&
+        edge.sourceHandle !== 'onError'
       ) {
         hiddenNodes.add(edge.target);
       }
@@ -1013,9 +1017,9 @@ function getOutgoingSourceHandles(item: TimelineItem): Set<string> {
   return new Set(item.outgoingEdges.map((edge) => getRouteSourceHandle(edge)));
 }
 
-function getTimelineRouteAddActions(
-  item: TimelineItem,
-  agents: ExtendedAgent[]
+// Exported for tests.
+export function getTimelineRouteAddActions(
+  item: TimelineItem
 ): TimelineRouteAddAction[] {
   const node = item.node;
   const sourceNodeId = node.id;
@@ -1065,20 +1069,7 @@ function getTimelineRouteAddActions(
     }
   }
 
-  if (
-    !isAiAgentStep(node) &&
-    !existingHandles.has('onError') &&
-    canStepHaveErrorHandler(
-      stepType,
-      typeof getStepData(node).agentId === 'string'
-        ? getStepData(node).agentId
-        : undefined,
-      typeof getStepData(node).capabilityId === 'string'
-        ? getStepData(node).capabilityId
-        : undefined,
-      agents
-    )
-  ) {
+  if (!existingHandles.has('onError') && canStepHaveErrorHandler(stepType)) {
     actions.push({
       key: 'onError',
       label: 'error',
@@ -1131,6 +1122,155 @@ function getTimelineRouteAddActions(
   return actions;
 }
 
+/**
+ * Creates the add-step request for an `mcp.<toolset>` edge from an AiAgent
+ * step. The target mirrors what the validator expects (validation.rs MCP edge
+ * rules): an Agent step whose agentId is "mcp".
+ * Exported for tests.
+ */
+export function createMcpToolsetAddRequest(
+  node: Node,
+  toolset: string
+): TimelineAddStepRequest {
+  return {
+    sourceNodeId: node.id,
+    sourceHandle: `mcp.${toolset}`,
+    parentId: node.parentId,
+    directStep: {
+      stepType: 'Agent',
+      name: `${toolset} MCP toolset`,
+      agentId: 'mcp',
+      capabilityId: 'mcp-tool-invoke',
+    },
+  };
+}
+
+function isMcpToolsetRequestForNode(
+  request: TimelineAddStepRequest | null | undefined,
+  nodeId: string
+): request is TimelineAddStepRequest {
+  return Boolean(
+    request &&
+      request.sourceNodeId === nodeId &&
+      typeof request.sourceHandle === 'string' &&
+      request.sourceHandle.startsWith('mcp.')
+  );
+}
+
+function TimelineAddMcpToolsetButton({
+  node,
+  onAddStep,
+}: {
+  node: Node;
+  onAddStep: (request: TimelineAddStepRequest) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [toolsetName, setToolsetName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  // Read all edges from the store: tool/memory/mcp targets are hidden from
+  // the timeline, so the item's scoped outgoingEdges miss them.
+  const edges = useWorkflowStore((state) => state.edges);
+  const stepName = getStepName(node);
+
+  const handleAdd = () => {
+    // Server rules (validation.rs AiAgentMcpEdge*): the suffix after "mcp."
+    // must be non-empty and unique per AiAgent step — no charset restriction.
+    const toolset = toolsetName.trim();
+    if (!toolset) {
+      setError('Toolset name is required');
+      return;
+    }
+    const duplicate = edges.some(
+      (edge) =>
+        edge.source === node.id && edge.sourceHandle === `mcp.${toolset}`
+    );
+    if (duplicate) {
+      setError(`Toolset "${toolset}" is already connected`);
+      return;
+    }
+
+    onAddStep(createMcpToolsetAddRequest(node, toolset));
+    setOpen(false);
+    setToolsetName('');
+    setError(null);
+  };
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) {
+          setToolsetName('');
+          setError(null);
+        }
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+          aria-label={`Add MCP toolset to ${stepName}`}
+          data-testid="timeline-add-mcp-toolset"
+          data-source-node-id={node.id}
+        >
+          <Plug className="size-3.5" aria-hidden="true" />
+          Add MCP toolset
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" side="bottom" className="w-72 space-y-3">
+        <div>
+          <p className="text-sm font-semibold text-foreground">MCP toolset</p>
+          <p className="text-xs text-muted-foreground">
+            Exposes {'<toolset>'}_search and {'<toolset>'}_invoke tools to the
+            agent via an mcp.{'<toolset>'} route.
+          </p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`mcp-toolset-name-${node.id}`}>Toolset name</Label>
+          <Input
+            id={`mcp-toolset-name-${node.id}`}
+            value={toolsetName}
+            onChange={(event) => {
+              setToolsetName(event.target.value);
+              setError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                handleAdd();
+              }
+            }}
+            placeholder="e.g. linear"
+            data-testid="timeline-mcp-toolset-name"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleAdd}
+            data-testid="timeline-mcp-toolset-confirm"
+          >
+            Add
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function TimelineRouteAddControls({
   item,
   depth,
@@ -1139,7 +1279,6 @@ function TimelineRouteAddControls({
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
-  agents,
 }: {
   item: TimelineItem;
   depth: number;
@@ -1148,19 +1287,27 @@ function TimelineRouteAddControls({
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
-  agents: ExtendedAgent[];
 }) {
   if (readOnly || debugInspectMode || !onAddStep) return null;
 
-  const actions = getTimelineRouteAddActions(item, agents);
-  if (actions.length === 0) return null;
+  const showMcpToolsetAction = isAiAgentStep(item.node);
+  const actions = getTimelineRouteAddActions(item);
+  if (actions.length === 0 && !showMcpToolsetAction) return null;
 
   const activeAction = actions.find((action) =>
     areTimelineAddRequestsEqual(action.request, activeAddStepRequest)
   );
+  const activeMcpRequest =
+    !activeAction &&
+    showMcpToolsetAction &&
+    isMcpToolsetRequestForNode(activeAddStepRequest, item.node.id)
+      ? activeAddStepRequest
+      : null;
   const inlineAddStep = activeAction
     ? renderInlineAddStep?.(activeAction.request)
-    : null;
+    : activeMcpRequest
+      ? renderInlineAddStep?.(activeMcpRequest)
+      : null;
 
   return (
     <div className="mt-2 space-y-2" style={{ marginLeft: depth * 24 + 40 }}>
@@ -1185,6 +1332,9 @@ function TimelineRouteAddControls({
             </Button>
           );
         })}
+        {showMcpToolsetAction && (
+          <TimelineAddMcpToolsetButton node={item.node} onAddStep={onAddStep} />
+        )}
       </div>
       {inlineAddStep && (
         <div className="overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
@@ -1321,7 +1471,6 @@ function TimelineItemList({
   dragController,
   routeController,
   endTargetNode,
-  agents,
 }: {
   items: TimelineItem[];
   depth: number;
@@ -1339,7 +1488,6 @@ function TimelineItemList({
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
   endTargetNode?: Node;
-  agents: ExtendedAgent[];
 }) {
   const canAdd = !readOnly && !debugInspectMode && Boolean(onAddStep);
 
@@ -1385,7 +1533,6 @@ function TimelineItemList({
               onAddStep={onAddStep}
               dragController={dragController}
               routeController={routeController}
-              agents={agents}
             />
             {canAdd && (
               <TimelineInsertionPoint
@@ -1607,7 +1754,6 @@ function BranchLaneGroups({
   onAddStep,
   dragController,
   routeController,
-  agents,
 }: {
   lanes: BranchLane[];
   sourceNode: Node;
@@ -1625,7 +1771,6 @@ function BranchLaneGroups({
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
-  agents: ExtendedAgent[];
 }) {
   if (lanes.length === 0) return null;
 
@@ -1775,7 +1920,6 @@ function BranchLaneGroups({
                 dragController={dragController}
                 routeController={routeController}
                 endTargetNode={lane.continuationNode}
-                agents={agents}
               />
               {lane.continuationNode && (
                 <LaneContinuationNode node={lane.continuationNode} />
@@ -1804,7 +1948,6 @@ function WorkflowTimelineItem({
   onAddStep,
   dragController,
   routeController,
-  agents,
 }: {
   item: TimelineItem;
   depth: number;
@@ -1821,7 +1964,6 @@ function WorkflowTimelineItem({
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
-  agents: ExtendedAgent[];
 }) {
   const selectedNodeId = useWorkflowStore((state) => state.selectedNodeId);
   const setSelectedNodeId = useWorkflowStore(
@@ -2044,7 +2186,6 @@ function WorkflowTimelineItem({
         activeAddStepRequest={activeAddStepRequest}
         renderInlineAddStep={renderInlineAddStep}
         onAddStep={onAddStep}
-        agents={agents}
       />
 
       <BranchLaneGroups
@@ -2064,7 +2205,6 @@ function WorkflowTimelineItem({
         onAddStep={onAddStep}
         dragController={dragController}
         routeController={routeController}
-        agents={agents}
       />
 
       {isContainer && isExpanded && (
@@ -2085,7 +2225,6 @@ function WorkflowTimelineItem({
             onAddStep={onAddStep}
             dragController={dragController}
             routeController={routeController}
-            agents={agents}
           />
         </div>
       )}
@@ -2117,24 +2256,6 @@ export function WorkflowTimelineView({
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
   const updateEdgeData = useWorkflowStore((state) => state.updateEdgeData);
-  // All `getAgents()` callers in the editor share the queryKeys.agents.all
-  // cache key, so they must pass the same entitlement filter — otherwise an
-  // un-filtered caller would poison the shared cache for everyone.
-  // `enabledAgentSet` returns `undefined` for the permissive fallback so
-  // the "no filter" path is preserved in `vite dev`/test contexts.
-  const entitlements = useEntitlements();
-  const enabledAgentIds = useMemo(
-    () => enabledAgentSet(entitlements),
-    [entitlements]
-  );
-  const agentsQuery = useCustomQuery({
-    queryKey: queryKeys.agents.all,
-    queryFn: (token: string) => getAgents(token, enabledAgentIds),
-    placeholderData: { agents: [] },
-  });
-  const agents =
-    (agentsQuery.data as { agents?: ExtendedAgent[] } | undefined)?.agents ??
-    [];
   const [expandedContainers, setExpandedContainers] = useState<
     Record<string, boolean>
   >({});
@@ -2487,7 +2608,6 @@ export function WorkflowTimelineView({
           onAddStep={onAddStep}
           dragController={dragController}
           routeController={routeController}
-          agents={agents}
         />
       </div>
     </div>

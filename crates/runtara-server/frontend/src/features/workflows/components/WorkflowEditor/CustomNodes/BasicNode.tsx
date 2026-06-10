@@ -377,19 +377,10 @@ function BasicNodeComponent({
   const isFinishStep = data.stepType === 'Finish';
   const isStartStep = data.stepType === 'Start';
 
-  // Determine if this step can have error handlers based on:
-  // 1. Step type (evaluation steps like Conditional/Switch cannot fail)
-  // 2. For Agent steps: whether the capability has knownErrors defined
-  const canFail = useMemo(() => {
-    const agents =
-      (agentsQuery.data as { agents: ExtendedAgent[] })?.agents || [];
-    return canStepHaveErrorHandler(
-      data.stepType,
-      data.agentId,
-      data.capabilityId,
-      agents
-    );
-  }, [data.stepType, data.agentId, data.capabilityId, agentsQuery.data]);
+  // Determine if this step can have error handlers based on its step type:
+  // only the compiler-supported onError set (Agent, AiAgent, EmbedWorkflow,
+  // Split, While, WaitForSignal) offers the error handle.
+  const canFail = canStepHaveErrorHandler(data.stepType);
 
   return (
     <>

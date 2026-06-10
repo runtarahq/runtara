@@ -587,7 +587,9 @@ function AiAgentNodeComponent({
           </div>
         </div>
 
-        {/* Only source (next) and target handles */}
+        {/* Source (next), target and onError handles. Tool/memory/mcp edges
+            stay hidden, but onError is a normal error route whose edge is
+            visible on the canvas and needs an anchor. */}
         <Handle
           id="source"
           type="source"
@@ -600,6 +602,13 @@ function AiAgentNodeComponent({
           id="target"
           position={Position.Left}
           className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          isConnectable={isConnectable && !isExecuting}
+        />
+        <Handle
+          id="onError"
+          type="source"
+          position={Position.Bottom}
+          className="!w-2 !h-2 !rounded-full !bg-destructive/40 !border-0"
           isConnectable={isConnectable && !isExecuting}
         />
       </BaseNode>

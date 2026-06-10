@@ -237,6 +237,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
           edge.source === nodeId &&
           edge.sourceHandle !== 'source' &&
           edge.sourceHandle !== 'memory' &&
+          // 'onError' is the error route, not a tool attachment — it is
+          // managed as a timeline/canvas branch like other error handlers.
+          edge.sourceHandle !== 'onError' &&
           edge.sourceHandle
       )
       .map((edge) => {

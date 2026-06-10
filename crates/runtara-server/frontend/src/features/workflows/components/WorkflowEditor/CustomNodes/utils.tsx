@@ -2325,7 +2325,8 @@ function normalizeNodesAndEdges(
               }
 
               // Build tools array from executionPlan edges with labels
-              // Filter out 'memory' label — it's not a tool
+              // Filter out 'memory' (memory provider) and 'onError' (error
+              // route) labels — they are not tools
               const toolNames = (executionPlan || [])
                 .filter(
                   (e) =>
@@ -2333,7 +2334,8 @@ function normalizeNodesAndEdges(
                     e.label &&
                     e.label !== 'next' &&
                     e.label !== 'default' &&
-                    e.label !== 'memory'
+                    e.label !== 'memory' &&
+                    e.label !== 'onError'
                 )
                 .map((e) => e.label as string);
 

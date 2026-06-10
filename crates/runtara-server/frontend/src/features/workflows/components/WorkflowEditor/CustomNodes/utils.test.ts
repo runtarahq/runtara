@@ -1982,3 +1982,132 @@ describe('Subgraph-level ExecutionGraph field round-trip', () => {
     expect(split.subgraph.steps.inner).toBeDefined();
   });
 });
+
+describe('AiAgent onError and mcp.<toolset> edge round-trip', () => {
+  /**
+   * AiAgent error routing (`onError` label) and MCP toolset edges
+   * (`mcp.<toolset>` label) are plain labelled edges in the DSL. The editor
+   * must load them back into edges with the matching sourceHandle and
+   * serialize them out unchanged — nothing may strip or rewrite the labels.
+   */
+  function makeAiAgentEdgeGraph(): ExecutionGraphDto & { entryPoint: string } {
+    return {
+      name: 'ai-agent-edge-fixture',
+      steps: {
+        ai: {
+          id: 'ai',
+          stepType: 'AiAgent',
+          name: 'Assistant',
+          connectionId: 'conn-1',
+          config: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            userPrompt: { valueType: 'immediate', value: 'hi' },
+          },
+        },
+        handler: {
+          id: 'handler',
+          stepType: 'Error',
+          name: 'Error handler',
+          inputMapping: [],
+        },
+        linear_mcp: {
+          id: 'linear_mcp',
+          stepType: 'Agent',
+          name: 'Linear MCP toolset',
+          agentId: 'mcp',
+          capabilityId: 'mcp-tool-invoke',
+          inputMapping: [],
+        },
+        finish: {
+          id: 'finish',
+          stepType: 'Finish',
+          name: 'Finish',
+          outputMapping: [],
+        },
+      } as any,
+      executionPlan: [
+        { fromStep: 'ai', toStep: 'finish', label: 'next' },
+        { fromStep: 'ai', toStep: 'handler', label: 'onError' },
+        { fromStep: 'ai', toStep: 'linear_mcp', label: 'mcp.linear' },
+      ] as any,
+      entryPoint: 'ai',
+    };
+  }
+
+  it('loads onError and mcp.<toolset> labels into matching sourceHandles', () => {
+    const { edges } = executionGraphToReactFlow(makeAiAgentEdgeGraph() as any);
+
+    const onErrorEdge = edges.find(
+      (edge) => edge.source === 'ai' && edge.sourceHandle === 'onError'
+    );
+    expect(onErrorEdge).toBeDefined();
+    expect(onErrorEdge!.target).toBe('handler');
+
+    const mcpEdge = edges.find(
+      (edge) => edge.source === 'ai' && edge.sourceHandle === 'mcp.linear'
+    );
+    expect(mcpEdge).toBeDefined();
+    expect(mcpEdge!.target).toBe('linear_mcp');
+  });
+
+  it('does not classify the onError route as an AiAgent tool on load', () => {
+    const { nodes } = executionGraphToReactFlow(makeAiAgentEdgeGraph() as any);
+    const aiNode = nodes.find((node) => node.id === 'ai');
+    expect(aiNode).toBeDefined();
+
+    const toolsField = ((aiNode!.data as any).inputMapping || []).find(
+      (item: any) => item.type === 'tools'
+    );
+    const toolNames: string[] = Array.isArray(toolsField?.value)
+      ? toolsField.value
+      : [];
+    expect(toolNames).not.toContain('onError');
+  });
+
+  it('round-trips onError and mcp.<toolset> edges through save', () => {
+    const { nodes, edges } = executionGraphToReactFlow(
+      makeAiAgentEdgeGraph() as any
+    );
+    const round = composeExecutionGraph(nodes, edges, {
+      name: 'ai-agent-edge-fixture',
+    });
+    expect(round).not.toBeNull();
+
+    const plan = (round!.executionPlan || []) as Array<{
+      fromStep: string;
+      toStep: string;
+      label?: string;
+    }>;
+
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'handler',
+        label: 'onError',
+      })
+    );
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'linear_mcp',
+        label: 'mcp.linear',
+      })
+    );
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'finish',
+        label: 'next',
+      })
+    );
+
+    // The loaded steps survive the round-trip too.
+    expect((round!.steps as Record<string, any>).handler.stepType).toBe(
+      'Error'
+    );
+    expect((round!.steps as Record<string, any>).linear_mcp.agentId).toBe(
+      'mcp'
+    );
+  });
+});

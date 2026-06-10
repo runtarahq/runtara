@@ -294,7 +294,9 @@ Complexity/effort: S to M.
 
 ### 21. onError routing coverage is narrower than the compiler
 
-Status: Open (Conditional onError condition editing partially fixed by finding 1). Severity: high.
+Status: Implemented. Severity: high.
+
+Resolution (2026-06-10): `canStepHaveErrorHandler` is now a pure allowlist mirroring the compiler's `on_error_route_shape_supported` (Agent, EmbedWorkflow, Split, While, AiAgent, WaitForSignal) — the knownErrors gate is gone, and step types the compiler rejects (Delay, Log, Filter, GroupBy, ...) no longer offer the action either. AiAgent onError edges are creatable from the timeline and no longer hidden (timeline, canvas, and auto-layout all reclassify `onError` away from tool/memory attachments; AiAgentNode gained an `onError` handle; the loaded tools list and the step editor's tool list exclude the error route). MCP toolset edges are authorable via an "Add MCP toolset" popover creating `mcp.<toolset>` edges to an `mcp`-agent step, validating exactly the server's rules (non-empty suffix, unique per AiAgent — no charset restriction, matching `validation.rs:4776`). Covered by new `TimelineView.test.ts` (9 tests) and round-trip tests in `CustomNodes/utils.test.ts`.
 
 Description:
 - Agent steps: the timeline offers the error-handler add action only when the capability metadata has `knownErrors`; the DSL/compiler accept `onError` edges on every Agent step regardless (`utils/step-error-support.ts` gate vs `validation.rs`).

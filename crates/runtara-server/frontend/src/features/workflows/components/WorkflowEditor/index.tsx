@@ -588,13 +588,16 @@ function WorkflowEditorContent({
     const aiAgentNodes = nodes.filter((n) => n.type === NODE_TYPES.AiAgentNode);
 
     for (const agentNode of aiAgentNodes) {
-      // Find edges from this AI Agent whose sourceHandle is a tool name or 'memory'
-      // (any handle that is NOT the standard 'source' output)
+      // Find edges from this AI Agent whose sourceHandle is a tool name,
+      // 'memory' or an mcp.<toolset> route (any handle that is NOT the
+      // standard 'source' output). 'onError' is a normal error route — the
+      // handler stays visible on the canvas like any other error branch.
       for (const edge of edges) {
         if (
           edge.source === agentNode.id &&
           edge.sourceHandle &&
-          edge.sourceHandle !== 'source'
+          edge.sourceHandle !== 'source' &&
+          edge.sourceHandle !== 'onError'
         ) {
           hiddenEdges.add(edge.id);
           hiddenNodes.add(edge.target);
@@ -1084,6 +1087,8 @@ function WorkflowEditorContent({
           ...form.initialValues,
           stepType: request.directStep.stepType,
           name: generateUniqueStepName(request.directStep.name, nodes),
+          agentId: request.directStep.agentId || '',
+          capabilityId: request.directStep.capabilityId || '',
           inputMapping: request.directStep.inputMapping || [],
         } as form.SchemaType;
         let finalPosition = position;

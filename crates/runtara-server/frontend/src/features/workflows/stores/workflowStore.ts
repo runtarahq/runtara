@@ -1757,10 +1757,13 @@ export const useWorkflowStore = create<WorkflowState>()(
           );
           for (const agentNode of aiAgentNodes) {
             for (const edge of state.edges) {
+              // 'onError' routes stay visible on the canvas (normal error
+              // branch), so they participate in layout like any other edge.
               if (
                 edge.source === agentNode.id &&
                 edge.sourceHandle &&
-                edge.sourceHandle !== 'source'
+                edge.sourceHandle !== 'source' &&
+                edge.sourceHandle !== 'onError'
               ) {
                 hiddenEdgeIds.add(edge.id);
                 hiddenNodeIds.add(edge.target);
