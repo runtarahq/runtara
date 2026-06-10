@@ -284,11 +284,13 @@ fn collect_graph_support_inner(
         if !graph.steps.contains_key(&edge.from_step) {
             continue;
         }
-        // An onError edge on an AiAgent is inert (never routed by the generated
-        // path); direct accepts it and leaves the handler dead, so it is not an
-        // unsupported routing shape.
+        // A tool-loop AiAgent's onError edge is inert (the handler is never
+        // lowered — tool errors feed back to the LLM), so its shape is not
+        // checked. A single-shot AiAgent's handler IS lowered live, so it
+        // falls through to the standard onError shape checks below (GAP-07).
         if edge.label.as_deref() == Some("onError")
             && matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_)))
+            && !ai_agent_is_single_shot(graph, &edge.from_step)
         {
             continue;
         }
@@ -745,36 +747,71 @@ fn supports_direct_control_step_inner(
                     reachable.insert(edge.to_step.clone());
                 }
             }
-            // An onError edge on an AiAgent is treated as inert by this gate:
-            // it marks the handler subgraph reachable + its edges used so the
-            // graph-wide reachable/used invariants hold, without
-            // support-checking its shape. NOTE the plan builder is stricter
-            // than this comment used to claim: for the single-shot
-            // (chat-completion) path it DOES lower the handler live
-            // (plan.rs builds `error_plan` from these edges), so an
-            // unsupported-shaped handler can pass this gate and only fail at
-            // plan build — tracked as GAP-07 in docs/gap-resolution.md. For
-            // the tool-loop path the handler is genuinely dead (tool errors
-            // feed back to the LLM; tracked as GAP-05).
-            for (index, edge) in graph.execution_plan.iter().enumerate() {
-                if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
-                    used_edges.insert(index);
-                    mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
+            // onError handling splits by lowering path (GAP-07):
+            //   - single-shot (chat-completion): plan.rs lowers the handler
+            //     LIVE via `error_plan`, so its shape must pass the standard
+            //     onError walk — a malformed handler is rejected here with a
+            //     per-step report instead of failing later at plan build.
+            //   - tool-loop (chat-turn): the handler is genuinely dead (tool
+            //     errors feed back to the LLM — GAP-05), so it is only marked
+            //     reachable/used without shape-checking.
+            if ai_agent_is_single_shot(graph, step_id) {
+                supports_normal_flow_step(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                ) && on_error_supported_or_inert(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                )
+            } else {
+                for (index, edge) in graph.execution_plan.iter().enumerate() {
+                    if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
+                        used_edges.insert(index);
+                        mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
+                    }
                 }
+                supports_normal_flow_step(
+                    graph,
+                    child_workflows,
+                    step_id,
+                    reachable,
+                    used_edges,
+                    stack,
+                    child_stack,
+                    include_on_error,
+                )
             }
-            supports_normal_flow_step(
-                graph,
-                child_workflows,
-                step_id,
-                reachable,
-                used_edges,
-                stack,
-                child_stack,
-                include_on_error,
-            )
         }
         _ => false,
     }
+}
+
+/// Whether an AiAgent step lowers to the single-shot `chat-completion` path:
+/// no tool, memory, or mcp.* edges (only normal-flow `next` and `onError`).
+/// Mirrors the manifest's capability selection, which picks `chat-completion`
+/// exactly when no such edges exist. Single-shot is the path whose `onError`
+/// handler IS lowered live (`plan.rs` builds `error_plan`), so the gate must
+/// shape-check it; the tool-loop handler stays inert (GAP-05).
+fn ai_agent_is_single_shot(graph: &ExecutionGraph, step_id: &str) -> bool {
+    !graph.execution_plan.iter().any(|edge| {
+        edge.from_step == step_id
+            && edge
+                .label
+                .as_deref()
+                .is_some_and(|label| label != "next" && label != "onError")
+    })
 }
 
 /// Mark a subgraph reachable and all its outgoing edges used WITHOUT
@@ -1193,6 +1230,11 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         Step::EmbedWorkflow(_) => {}
         Step::Split(step) if supports_split_step_baseline(step) => {}
         Step::While(step) if supports_while_step_baseline(step) => {}
+        // Single-shot AiAgent handlers are lowered live (plan.rs error_plan),
+        // so the shape rules apply to them like any Agent step. Tool-loop
+        // AiAgent never reaches this check (its onError edges are inert and
+        // skipped by the caller).
+        Step::AiAgent(_) if ai_agent_is_single_shot(graph, step_id) => {}
         _ => return false,
     };
 
@@ -3525,5 +3567,174 @@ mod handler_step_on_error_tests {
             "stale pre-tool-loop reason resurfaced: {}",
             feature.reason
         );
+    }
+    fn single_shot_ai_agent_graph(
+        handler_steps: serde_json::Value,
+        extra_edges: serde_json::Value,
+    ) -> ExecutionGraph {
+        let mut graph = serde_json::json!({
+            "steps": {
+                "ai": {
+                    "stepType": "AiAgent",
+                    "id": "ai",
+                    "connectionId": "conn-1",
+                    "config": {
+                        "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                        "userPrompt": {"valueType": "immediate", "value": "go"},
+                        "provider": "openai"
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        if let serde_json::Value::Object(handler_steps) = handler_steps {
+            for (id, step) in handler_steps {
+                graph["steps"][id] = step;
+            }
+        }
+        if let serde_json::Value::Array(extra_edges) = extra_edges {
+            for edge in extra_edges {
+                graph["executionPlan"].as_array_mut().unwrap().push(edge);
+            }
+        }
+        serde_json::from_value(graph).expect("graph parses")
+    }
+
+    #[test]
+    fn single_shot_ai_agent_well_formed_on_error_is_supported() {
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_finish", "label": "onError" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn single_shot_ai_agent_malformed_on_error_handler_is_rejected_at_gate() {
+        // GAP-07: the single-shot handler is lowered live, so its shape must
+        // be gate-checked. A Conditional with only a `true` edge cannot lower;
+        // before this fix the gate marked the handler "dead, any shape" and
+        // the defect only surfaced at plan build.
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_check": {
+                    "stepType": "Conditional",
+                    "id": "handler_check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    }
+                },
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_check", "label": "onError" },
+                { "fromStep": "handler_check", "toStep": "handler_finish", "label": "true" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(
+            !report.supported,
+            "malformed single-shot handler must be rejected at the gate"
+        );
+    }
+
+    #[test]
+    fn single_shot_ai_agent_two_default_on_error_edges_rejected() {
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_a": { "stepType": "Finish", "id": "handler_a" },
+                "handler_b": { "stepType": "Finish", "id": "handler_b" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_a", "label": "onError" },
+                { "fromStep": "ai", "toStep": "handler_b", "label": "onError" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "error-handler-edge"),
+            "{:?}",
+            report.unsupported
+        );
+    }
+
+    #[test]
+    fn tool_loop_ai_agent_on_error_stays_inert_any_shape() {
+        // Tool-loop handlers are genuinely dead (tool errors feed back to the
+        // LLM - GAP-05), so an arbitrary handler shape must keep passing.
+        let mut graph = serde_json::json!({
+            "steps": {
+                "ai": {
+                    "stepType": "AiAgent",
+                    "id": "ai",
+                    "connectionId": "conn-1",
+                    "config": {
+                        "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                        "userPrompt": {"valueType": "immediate", "value": "go"},
+                        "provider": "openai"
+                    }
+                },
+                "tool_agent": {
+                    "stepType": "Agent",
+                    "id": "tool_agent",
+                    "agentId": "utils",
+                    "capabilityId": "return-input",
+                    "inputMapping": {}
+                },
+                "handler_check": {
+                    "stepType": "Conditional",
+                    "id": "handler_check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    }
+                },
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" },
+                { "fromStep": "ai", "toStep": "tool_agent", "label": "echo" },
+                { "fromStep": "ai", "toStep": "handler_check", "label": "onError" },
+                { "fromStep": "handler_check", "toStep": "handler_finish", "label": "true" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        graph["steps"]["tool_agent"]["name"] = serde_json::Value::String("echo".to_string());
+        let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 }

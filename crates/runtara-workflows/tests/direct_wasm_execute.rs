@@ -1367,6 +1367,100 @@ fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
 }
 
 #[test]
+fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-07: a single-shot AiAgent's onError handler is lowered live, so the
+    // support gate must shape-check it. A handler whose Conditional lacks a
+    // `false` branch is rejected AT THE GATE with a per-feature report (it
+    // previously slipped through and died at plan build); the same workflow
+    // with a well-formed handler compiles and composes to a runnable wasm.
+    let malformed = r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"handler_check","label":"onError"},
+        {"fromStep":"handler_check","toStep":"handler_finish","label":"true"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"sys"},
+          "userPrompt":{"valueType":"immediate","value":"go"},
+          "provider":"openai"}},
+        "handler_check": {"id":"handler_check","stepType":"Conditional","condition":{
+          "type":"operation","op":"EQ","arguments":[
+            {"valueType":"immediate","value":1},
+            {"valueType":"immediate","value":1}]}},
+        "handler_finish": {"id":"handler_finish","stepType":"Finish"},
+        "finish": {"id":"finish","stepType":"Finish"}
+      }
+    }"##;
+    let graph: ExecutionGraph = serde_json::from_str(malformed).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let error = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "ai-gate-malformed-handler".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            connection_integration_ids: std::collections::HashMap::new(),
+        },
+        &components_dir,
+    )
+    .expect_err("malformed single-shot handler must fail at the gate");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not support this graph"),
+        "expected a gate Unsupported error, got: {message}"
+    );
+
+    let well_formed = r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"handler_finish","label":"onError"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"sys"},
+          "userPrompt":{"valueType":"immediate","value":"go"},
+          "provider":"openai"}},
+        "handler_finish": {"id":"handler_finish","stepType":"Finish"},
+        "finish": {"id":"finish","stepType":"Finish"}
+      }
+    }"##;
+    let graph: ExecutionGraph = serde_json::from_str(well_formed).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "ai-gate-well-formed-handler".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            connection_integration_ids: std::collections::HashMap::new(),
+        },
+        &components_dir,
+    )
+    .expect("well-formed single-shot handler must compile and compose");
+    assert!(
+        fs::metadata(&compiled.wasm_path)
+            .expect("composed wasm exists")
+            .len()
+            > 0
+    );
+}
+
+#[test]
 fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;

@@ -21,7 +21,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | todo |
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | todo |
-| [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | todo |
+| [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | done |
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
@@ -282,7 +282,7 @@ hardcoded (`dispatcher.rs:687-689`). A transient provider 429/500 fails the step
 <a name="gap-07"></a>
 ## GAP-07 (P1) — Gate/plan inconsistency on single-shot onError handlers
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** The gate marks every AiAgent onError handler dead and skips shape-checking it
 (`support.rs:748-760`), but the plan lowers the handler **live** for chat-completion steps
@@ -291,21 +291,23 @@ a raw `DirectCompileError` instead of a per-step support report (exactly the cas
 misdiagnosis the gate exists to prevent).
 
 **Fix plan.**
-- [ ] 1. `support.rs` AiAgent arm: when the step has **no tool/mcp edges** (single-shot path —
-  reuse the same edge classification as `supports_ai_agent_step_baseline`), run the standard
-  `on_error_supported_or_inert` walk over its onError edges instead of
-  `mark_dead_subgraph_reachable`. Keep inert handling for the tool-loop path *only until GAP-05
-  lands*, then delete the special case entirely.
-- [ ] 2. Correct the comment block at `support.rs:748-754` ("Direct does not lower the handler
-  either" is false for single-shot) — coordinate with GAP-11 so it's not done twice.
+- [x] 1. `support.rs`: new `ai_agent_is_single_shot` classifier (no edges labelled other than
+  next/onError — mirrors the manifest's chat-completion selection). Single-shot AiAgent now runs
+  the standard `on_error_supported_or_inert` walk; `on_error_route_shape_supported` accepts
+  single-shot AiAgent sources; the per-edge shape-check skip applies only to tool-loop AiAgent.
+  Tool-loop keeps inert handling until GAP-05.
+- [x] 2. Comment block corrected under GAP-11 (cross-referenced, not duplicated).
 
-**Test coverage required.**
-- [ ] Gate unit tests: single-shot AiAgent + handler whose subgraph contains an unsupported shape
-  → unsupported report names the handler step (not `execution-plan-routing` cascade); well-formed
-  handler → supported; tool-loop AiAgent + any-shape handler → still supported (until GAP-05).
-- [ ] Regression: all existing AiAgent fixtures still report supported.
-- [ ] Compile test: the previously-passing malformed-handler graph now fails at the gate with the
-  feature key, not at plan build.
+**Test coverage delivered.**
+- [x] Gate unit tests: `single_shot_ai_agent_well_formed_on_error_is_supported`,
+  `single_shot_ai_agent_malformed_on_error_handler_is_rejected_at_gate`,
+  `single_shot_ai_agent_two_default_on_error_edges_rejected` (error-handler-edge feature),
+  `tool_loop_ai_agent_on_error_stays_inert_any_shape`.
+- [x] Regression: full gate suite (86) green — all existing AiAgent fixtures still supported.
+- [x] E2E (compile tier): `direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler`
+  — the malformed-handler graph fails at the gate with the Unsupported report through the real
+  `compile_direct_workflow_composed` path, and the well-formed one compiles AND composes to a
+  non-empty `workflow.wasm`.
 
 ---
 
