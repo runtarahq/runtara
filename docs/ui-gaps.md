@@ -246,7 +246,9 @@ Complexity/effort: M.
 
 ### 18. Log/Error message value-mode selectors are no-ops masquerading as data binding
 
-Status: Open. Severity: high.
+Status: Implemented. Severity: high.
+
+Resolution (2026-06-10): `Log.message`, `Error.code`, and `Error.message` are now plain text inputs (no reference/template mode toggle), always saved as immediate values, with helper copy stating the text is emitted verbatim and pointing at the Context editor for dynamic values. Previously-saved literal path text is unaffected (the modes never resolved anything).
 
 Description:
 `Log.message`, `Error.code`, and `Error.message` are verbatim `String` fields in the DSL — no interpolation or reference resolution (`schema_types.rs:751-753`; runtime reads them with `as_str`). The forms render them with `MappingValueInput`, whose mode toggle offers reference and template modes; the serializer then stores the raw text. A user who "binds" an error message to `steps.x.outputs.reason` ships the literal path text to production logs. Dynamic data belongs in `context` (now editable per finding 8).

@@ -15,10 +15,7 @@ import {
 } from '@/shared/components/ui/select';
 import { Textarea } from '@/shared/components/ui/textarea';
 import { NodeFormContext } from './NodeFormContext';
-import {
-  MappingValueInput,
-  ValueMode,
-} from './InputMappingField/MappingValueInput';
+import { ValueMode } from './InputMappingField/MappingValueInput';
 
 type LogStepFieldProps = {
   name: string;
@@ -85,12 +82,6 @@ export function LogStepField({ name }: LogStepFieldProps) {
     }
   };
 
-  const getValueType = (fieldName: string) => {
-    const mapping = inputMapping || [];
-    const field = mapping.find((item: any) => item.type === fieldName);
-    return field?.valueType || 'immediate';
-  };
-
   const updateField = (
     fieldName: string,
     value: any,
@@ -147,16 +138,16 @@ export function LogStepField({ name }: LogStepFieldProps) {
       {/* Log Message */}
       <FormItem>
         <FormLabel>Message *</FormLabel>
-        <FormDescription>The log message to emit</FormDescription>
+        <FormDescription>
+          The log message is emitted verbatim — references and templates are
+          not resolved here. Put dynamic values in Context below.
+        </FormDescription>
         <FormControl>
-          <MappingValueInput
+          <Textarea
             value={getValue('message')}
-            onChange={(value) => updateField('message', value)}
-            valueType={getValueType('message') as ValueMode}
-            onValueTypeChange={(valueType) =>
-              updateField('message', getValue('message'), valueType)
+            onChange={(event) =>
+              updateField('message', event.target.value, 'immediate')
             }
-            fieldType="textarea"
             placeholder="Enter log message..."
           />
         </FormControl>
