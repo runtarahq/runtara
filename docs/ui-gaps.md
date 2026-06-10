@@ -450,7 +450,9 @@ Plan: extract a standalone `MappingObjectField` (key/value rows bound to a plain
 
 ### 30. Structured Agent compensation form
 
-Status: Planned (gated on finding 29's component). Effort: S.
+Status: Implemented. Effort: S.
+
+Resolution (2026-06-10): the compensation textarea in StepAdvancedFields is now a structured form matching the verified `CompensationConfig` shape (`schema_types.rs:417-432`): `compensationStep` as a Select over all graph steps (read from the workflowStore, since `previousSteps` covers only predecessors; a stored target missing from the graph renders as "(not in graph)" rather than blanking), `trigger` as a Select over the three documented string values (free string in the DSL — unknown loaded values preserved as dynamic options), `order` as a number input, and `compensationData` via MappingObjectField. The W070 warning-only copy stays, a collapsed "Edit as JSON" fallback remains, clearing reproduces the old `undefined` semantics exactly, and JSON-authored unknown keys are never destroyed client-side (serde rejects them server-side per `deny_unknown_fields`). 21 new tests; the serializer needed zero changes (compensation passes through verbatim for Agent steps).
 
 `Agent.compensation` is an advanced-JSON textarea (NodeFormItem.tsx:286) — acceptable while the runtime accepts-but-ignores compensation (W070), but cheap to do properly once 29 lands: `compensationStep` (picker over the current graph's steps), `compensationData` (MappingObjectField), `trigger` (enum select), `order` (number) — verify the exact `CompensationConfig` fields in schema_types.rs first. Keep the warning-only copy and the JSON fallback.
 
