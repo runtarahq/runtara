@@ -607,7 +607,10 @@ export const schema = () =>
       onWait: z.any().optional(),
       action: z.any().optional(),
       childWorkflowId: z.string().optional(),
-      childVersion: z.string().optional(),
+      // Pinned versions round-trip from the DSL as integers
+      // (ChildVersion::Specific); coerce so a loaded pin doesn't fail
+      // validation on a hidden field and silently dead-end the Save button.
+      childVersion: z.coerce.string().optional(),
       embedWorkflowConfig: z.any().optional(), // UI-only field
       condition: z.any().optional(), // Condition for Conditional steps
       inputMapping: z.array(

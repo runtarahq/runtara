@@ -336,7 +336,9 @@ Complexity/effort: S to M.
 
 ### 24. EmbedWorkflow residuals
 
-Status: Open. Severity: high (version), low (rest).
+Status: Partially implemented — the high-severity version pinning item is fixed; the low items (child schema metadata in the mapping editor, optional step name) remain open. Severity: high (version), low (rest).
+
+Resolution of the version item (2026-06-10): pinned versions round-trip from the DSL as integers (`ChildVersion::Specific`), but the node form's hidden `childVersion` field declared `z.string()`, so loading a pinned step made Save silently no-op ("Expected string, received number" on a field that renders no error). The schema now coerces to string, the selector normalizes numeric values, and a pin that is not in the fetched version list renders as an explicit "(not in version list)" option instead of a blank select.
 
 Description:
 Pinning `childVersion` to a specific integer (`ChildVersion::Specific`) is rejected by the form while the DSL/validator accept it (the selector offers only Latest/Current/listed versions, and free numeric entry fails form validation); child inputSchema field metadata (enum/default/etc.) only partially drives the embed mapping editor; the form requires a step name though the DSL allows unnamed EmbedWorkflow steps.
