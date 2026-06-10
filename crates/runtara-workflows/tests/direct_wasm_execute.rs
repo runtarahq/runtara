@@ -36,6 +36,7 @@ const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const AGENT_EDGE_CONDITION: &str = include_str!("fixtures/agent_edge_condition.json");
+const WAIT_TIMEOUT_ON_ERROR: &str = include_str!("fixtures/wait_timeout_on_error.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
@@ -866,6 +867,55 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
 
 #[allow(clippy::too_many_arguments)]
 fn run_direct_workflow_capture_full(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
+) -> CapturedRun {
+    let first = run_direct_workflow_capture_attempt(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints.clone(),
+        llm_script.clone(),
+        extra_env.clone(),
+    );
+    // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
+    // TCP listeners) a run occasionally dies before reaching the mock runtime
+    // at all: non-zero exit, EMPTY stderr, and zero captured traffic. That
+    // signature is infrastructure (spawn/connect), not workflow behavior —
+    // retry once so a 1-in-N-suites flake doesn't fail the suite. Real
+    // failures always leave stderr or a /failed capture and are NOT retried.
+    let infra_flake = !first.status_success
+        && first.stderr.trim().is_empty()
+        && first.output_json.is_none()
+        && first.error_json.is_none()
+        && first.events.is_empty()
+        && first.checkpoints.is_empty();
+    if !infra_flake {
+        return first;
+    }
+    eprintln!("retrying '{workflow_id}': wasmtime spawn/connect flake (empty stderr, no traffic)");
+    run_direct_workflow_capture_attempt(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        extra_env,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_attempt(
     components_dir: &Path,
     workflow_id: &str,
     graph_json: &str,
@@ -2017,6 +2067,39 @@ fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
             "input {input} routed wrong: {output}"
         );
     }
+}
+
+#[test]
+fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
+    // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
+    // which completes the workflow reading steps.__error.*.
+    let output = run_direct_workflow(
+        &components_dir,
+        "wait-timeout-on-error",
+        WAIT_TIMEOUT_ON_ERROR,
+        br#"{}"#,
+    );
+
+    assert_eq!(
+        output.get("handled").and_then(Value::as_bool),
+        Some(true),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("code").and_then(Value::as_str),
+        Some("WAIT_TIMEOUT"),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("category").and_then(Value::as_str),
+        Some("timeout"),
+        "{output}"
+    );
 }
 
 #[test]
