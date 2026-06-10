@@ -20,6 +20,7 @@ use super::agent_error::{
     emit_agent_invoke_capture_error_or_result, emit_agent_invoke_error_branch,
 };
 use super::agent_invoke::emit_agent_invoke;
+use super::debug::emit_step_breakpoint;
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
@@ -49,6 +50,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     agent_id: u32,
     agent_component_id: &str,
     input_mapping_id: u32,
+    breakpoint: bool,
     max_iterations: u32,
     tools: &[DirectAiToolPlan],
     memory: Option<&DirectAiMemoryPlan>,
@@ -66,6 +68,23 @@ pub(super) fn emit_ai_agent_loop_plan(
     workflow_log_kind: &DirectDataSegment,
     workflow_error_kind: &DirectDataSegment,
 ) {
+    // Pause before any loop work — matching every other step's
+    // "execution pauses before this step" breakpoint contract: the pause
+    // lands before memory load and before the first LLM call.
+    emit_step_breakpoint(
+        body,
+        indices,
+        static_data,
+        breakpoint,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
     let turn_invoke = indices
         .agent_invokes
         .get(agent_component_id)

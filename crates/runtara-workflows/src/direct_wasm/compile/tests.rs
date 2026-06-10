@@ -777,11 +777,11 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::AiAgent { breakpoint, .. }
+        | DirectRunPlan::AiAgentLoop { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
         DirectRunPlan::EdgeRoute { .. }
         | DirectRunPlan::Fanout { .. }
-        | DirectRunPlan::AiAgentLoop { .. }
         | DirectRunPlan::Join
         | DirectRunPlan::ImplicitFinish => None,
     }

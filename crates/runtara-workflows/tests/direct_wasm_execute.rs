@@ -851,6 +851,29 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
     llm_script: Vec<Value>,
 ) -> CapturedRun {
+    run_direct_workflow_capture_full(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_full(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
+) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed(
@@ -884,7 +907,8 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    let output = Command::new(wasmtime_binary())
+    let mut command = Command::new(wasmtime_binary());
+    command
         .arg("run")
         .arg("--wasi")
         .arg("http")
@@ -901,7 +925,11 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
         .arg("--env")
         .arg("RUNTARA_TENANT_ID=direct-wasm-execute")
         .arg("--env")
-        .arg("RUST_LOG=warn")
+        .arg("RUST_LOG=warn");
+    for (key, value) in &extra_env {
+        command.arg("--env").arg(format!("{key}={value}"));
+    }
+    let output = command
         .arg(&compiled.wasm_path)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -1575,6 +1603,139 @@ fn direct_wasm_execute_ai_agent_single_shot_default_does_not_retry() {
     assert!(
         message.contains("500") || message.contains("provider outage"),
         "unexpected failure payload: {message}"
+    );
+}
+
+fn ai_agent_tool_loop_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"echo_tool","label":"echo"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","breakpoint":true,"config":{
+          "systemPrompt":{"valueType":"immediate","value":"You call tools"},
+          "userPrompt":{"valueType":"immediate","value":"Use the echo tool"},
+          "provider":"openai",
+          "model":"gpt-4o"}},
+        "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
+    .to_string()
+}
+
+fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
+    serde_json::json!({
+        "status": 200,
+        "headers": {},
+        "body": {
+            "choices": [{"message": {"tool_calls": [{
+                "id": "call_1",
+                "function": {"name": tool_name, "arguments": arguments}
+            }]}}]
+        }
+    })
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-08: with debug mode on, a breakpoint on a tool-loop AiAgent pauses
+    // BEFORE any loop work - no memory load, no model call. The run exits
+    // cleanly without /completed or /failed, stores the breakpoint-hit
+    // checkpoint, and emits the breakpoint_hit event. The empty LLM script
+    // proves zero model calls (any call would fail loudly on script
+    // exhaustion).
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-breakpoint-pause",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        vec![("DEBUG_MODE".to_string(), "true".to_string())],
+    );
+
+    assert!(
+        result.status_success,
+        "breakpoint pause is a clean exit; stderr: {}",
+        result.stderr
+    );
+    assert!(result.output_json.is_none(), "paused run must not complete");
+    assert!(result.error_json.is_none(), "paused run must not fail");
+    assert_eq!(result.llm_requests.len(), 0, "paused before any model call");
+    assert!(
+        result
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id == "breakpoint::ai"),
+        "breakpoint-hit checkpoint must be stored: {:?}",
+        result
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| event.subtype == "breakpoint_hit"),
+        "breakpoint_hit event must be emitted: {:?}",
+        result.events.iter().map(|e| &e.subtype).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Resume: the breakpoint-hit checkpoint short-circuits the pause and the
+    // tool loop runs to completion - one tool-call turn against the echo
+    // tool, then a completing turn.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-breakpoint-resume",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        false,
+        vec![(
+            "breakpoint::ai".to_string(),
+            br#""breakpoint_hit""#.to_vec(),
+        )],
+        vec![
+            llm_tool_call("echo", r#"{"value":42}"#),
+            llm_ok("loop finished"),
+        ],
+        vec![("DEBUG_MODE".to_string(), "true".to_string())],
+    );
+
+    assert!(
+        result.status_success,
+        "resumed run should complete; stderr: {}",
+        result.stderr
+    );
+    let output = result.output_json.expect("resumed run completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("loop finished"),
+        "{output}"
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        2,
+        "tool-call turn + completing turn"
     );
 }
 

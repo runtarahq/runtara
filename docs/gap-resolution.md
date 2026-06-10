@@ -22,7 +22,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
 | [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | done |
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | done |
-| [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
+| [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | done |
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrote messages/comments/doc example + pin test | S | Text only; actively misleading today | done |
@@ -317,23 +317,26 @@ misdiagnosis the gate exists to prevent).
 <a name="gap-08"></a>
 ## GAP-08 (P2) — AiAgent tool-loop ignores `breakpoint`
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** `AiAgentStep.breakpoint` exists (`schema_types.rs:1188-1189`) and works for
 single-shot (`plan.rs:155`, `agent.rs:93-105`), but `AiAgentLoop` has no breakpoint field — debug
 mode cannot pause before a tool-loop step.
 
 **Fix plan.**
-- [ ] 1. `plan.rs`: add `breakpoint: bool` to `AiAgentLoop`, populate via
-  `step_breakpoint_enabled` like every other arm.
-- [ ] 2. `ai_agent_loop.rs`: emit the standard breakpoint pause (breakpoint_key/breakpoint_event
-  stdlib calls — the AiAgent arms exist since c7068a06) at loop entry, before memory load.
+- [x] 1. `plan.rs`: `breakpoint: bool` on `AiAgentLoop`, populated via `step_breakpoint_enabled`;
+  `compile/tests.rs` breakpoint helper now includes the variant.
+- [x] 2. `ai_agent_loop.rs`: `emit_step_breakpoint` at loop entry — before memory load and before
+  the first LLM call, matching every other step's "pauses before this step" contract.
 
-**Test coverage required.**
-- [ ] Plan unit test: breakpoint flag carried.
-- [ ] Execute test: debug-mode run with breakpoint on the loop step pauses before the first LLM
-  call (no provider invocation recorded), resume completes. Mirror the existing single-shot/Agent
-  breakpoint test pattern.
+**Test coverage delivered.**
+- [x] Execute e2e `..._breakpoint_pauses_before_first_llm_call`: DEBUG_MODE=true run exits cleanly
+  with no /completed, no /failed, **zero** LLM calls (empty stub script would fail loudly on any
+  call), the `breakpoint::ai` checkpoint stored, and the `breakpoint_hit` event emitted.
+- [x] Execute e2e `..._breakpoint_resumes_with_checkpoint`: preloading the breakpoint-hit
+  checkpoint short-circuits the pause and the tool loop runs to completion — one tool-call turn
+  dispatched through the real utils component, then a completing turn (exactly 2 model calls).
+- [x] Harness gained `extra_env` support (DEBUG_MODE knob). Full suites: lib (450), execute (35).
 
 ---
 

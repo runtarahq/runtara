@@ -168,6 +168,7 @@ pub(super) enum DirectRunPlan {
         agent_id: u32,
         agent_component_id: String,
         input_mapping_id: u32,
+        breakpoint: bool,
         max_iterations: u32,
         /// Tools in the same order as the advertised `tools` (so the capability's
         /// resolved tool index selects the right entry). Dispatched by index.
@@ -990,6 +991,7 @@ fn step_run_plan_inner(
                 agent_id: agent.id,
                 agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                 input_mapping_id: agent.input_mapping_id,
+                breakpoint: step_breakpoint_enabled(graph, step),
                 max_iterations,
                 tools,
                 memory,
