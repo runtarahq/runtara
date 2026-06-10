@@ -33,65 +33,6 @@ use crate::direct_wasm::{
 pub const TEMPLATE_MAJOR_VERSION: &str = env!("CARGO_PKG_VERSION_MAJOR");
 
 // ============================================================================
-// Side-effect detection (used by the server to mark workflows as non-pure)
-// ============================================================================
-
-const SIDE_EFFECT_OPERATIONS: &[(&str, &str)] = &[
-    // Utils operator - random/timing operations
-    ("utils", "random-double"),
-    ("utils", "random-array"),
-    ("utils", "get-current-unix-timestamp"),
-    ("utils", "get-current-iso-datetime"),
-    ("utils", "get-current-formatted-datetime"),
-    ("utils", "delay-in-ms"),
-    // HTTP operator - external network I/O
-    ("http", "http-request"),
-    // SFTP operator - external file I/O
-    ("sftp", "sftp-list-files"),
-    ("sftp", "sftp-download-file"),
-    ("sftp", "sftp-upload-file"),
-    ("sftp", "sftp-delete-file"),
-];
-
-/// Checks whether a workflow's `Agent` steps include any side-effecting
-/// operator+operation pair. Used by the server to mark instances accordingly.
-pub fn workflow_has_side_effects(workflow: &Value) -> bool {
-    let steps = match workflow.get("steps") {
-        Some(Value::Object(steps)) => steps,
-        _ => return false,
-    };
-
-    for (_step_id, step) in steps {
-        if let Some(Value::String(step_type)) = step.get("stepType")
-            && step_type != "Agent"
-        {
-            continue;
-        }
-
-        let operator_id = step
-            .get("operatorId")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase());
-        let operation_id = step
-            .get("operationId")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase());
-
-        if let (Some(operator), Some(operation)) = (operator_id, operation_id) {
-            for (side_effect_op, side_effect_operation) in SIDE_EFFECT_OPERATIONS {
-                if operator == side_effect_op.to_lowercase()
-                    && operation == side_effect_operation.to_lowercase()
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-// ============================================================================
 // Compilation input/output types
 // ============================================================================
 
@@ -247,8 +188,6 @@ pub struct NativeCompilationResult {
     /// workflows). Lets the frontend show how large the emitted output is
     /// for a given workflow.
     pub package_size: usize,
-    /// Whether the workflow has side effects (e.g., HTTP calls, external actions).
-    pub has_side_effects: bool,
     /// Child workflow dependencies.
     pub child_dependencies: Vec<ChildDependency>,
     /// Default variable values from the workflow definition.
@@ -283,8 +222,6 @@ pub fn compile_workflow_direct(
     } = input;
 
     let child_dependencies = child_dependencies_from_inputs(&child_workflows);
-    let graph_json = serde_json::to_value(&execution_graph).unwrap_or(Value::Null);
-    let has_side_effects = workflow_has_side_effects(&graph_json);
     let default_variables = serde_json::to_value(&execution_graph.variables).unwrap_or(Value::Null);
 
     report_progress(
@@ -321,7 +258,6 @@ pub fn compile_workflow_direct(
         binary_checksum: direct_result.wasm_checksum,
         build_dir: direct_result.build_dir,
         package_size,
-        has_side_effects,
         child_dependencies,
         default_variables,
         compiler_mode: WorkflowCompilerMode::DirectWasm,
@@ -386,40 +322,6 @@ fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn workflow_has_side_effects_empty_graph_is_pure() {
-        let workflow: Value = serde_json::json!({ "steps": {} });
-        assert!(!workflow_has_side_effects(&workflow));
-    }
-
-    #[test]
-    fn workflow_has_side_effects_http_request_is_impure() {
-        let workflow: Value = serde_json::json!({
-            "steps": {
-                "step1": {
-                    "stepType": "Agent",
-                    "operatorId": "http",
-                    "operationId": "http-request"
-                }
-            }
-        });
-        assert!(workflow_has_side_effects(&workflow));
-    }
-
-    #[test]
-    fn workflow_has_side_effects_transform_is_pure() {
-        let workflow: Value = serde_json::json!({
-            "steps": {
-                "step1": {
-                    "stepType": "Agent",
-                    "operatorId": "transform",
-                    "operationId": "map"
-                }
-            }
-        });
-        assert!(!workflow_has_side_effects(&workflow));
-    }
 
     #[test]
     fn template_major_version_matches_cargo() {

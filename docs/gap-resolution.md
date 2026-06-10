@@ -26,7 +26,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
 | [GAP-10](#gap-10) | P2 | `Split.parallelism`/`sequential` accepted, execution always sequential | Validation warning W073 + doc; removed misleading W032 | S | Validator + docs; real parallelism is a separate epic | done |
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrite messages/comments/doc example | S | Text only; actively misleading today | todo |
-| [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Delete (or fix field names if a consumer exists) | S | Public crate API removal | todo |
+| [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Deleted fn + table + result field (no reader anywhere; catalog metadata too unreliable to fix against) | S | Public crate API removal | done |
 | [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | todo |
 | [GAP-14](#gap-14) | P3 | `onError` sources limited to Agent/EmbedWorkflow/Split/While | Extend to Delay/WaitForSignal if demand appears | M | Gate widening | parked |
 
@@ -418,7 +418,7 @@ sequential — single-threaded WASM. Users tuning `parallelism: 8` get nothing.
 <a name="gap-12"></a>
 ## GAP-12 (P2) — `workflow_has_side_effects` is dead and broken
 
-**Status: todo** *(background-task chip `task_b009188a` already spawned)*
+**Status: done** (2026-06-10)
 
 **Problem.** Exported from `runtara-workflows` (`lib.rs:96`), zero callers in the workspace, and
 it reads `operatorId`/`operationId` step keys (`compile.rs:72-78`) that the current schema renamed
@@ -426,16 +426,25 @@ to `agentId`/`capabilityId` years ago (`deny_unknown_fields` means the old keys 
 — so it always returns `false`.
 
 **Fix plan.**
-- [ ] 1. Check for out-of-workspace consumers (published crate API).
-- [ ] 2. If unused: delete the function, `SIDE_EFFECT_OPERATIONS`, the `lib.rs` re-export, and its
-  stale-fixture unit tests. If a consumer exists: fix field names to `agentId`/`capabilityId`,
-  walk Split/While subgraphs (current version doesn't), and keep.
+- [x] 1. Consumer check corrected an audit claim: there IS an internal caller
+  (`compile_workflow_direct` populated `NativeCompilationResult.has_side_effects`), but **nothing
+  reads that field** — not the server's compilation service, not the environment, not the CLI.
+- [x] 1b. Evaluated the fix-instead-of-delete option (derive from the agent catalog's
+  per-capability `hasSideEffects`): rejected — the real generated meta.json declares
+  `hasSideEffects: false` for everything including `http:http-request`, so a catalog-driven
+  version would also return false-everywhere until agent metadata is curated (separate effort).
+- [x] 2. Deleted: `workflow_has_side_effects`, `SIDE_EFFECT_OPERATIONS`, the
+  `NativeCompilationResult.has_side_effects` field, its computation at the call site, the
+  `lib.rs` re-export, the three stale `operatorId`-fixture unit tests (which passed against the
+  broken implementation while production always got `false`), and the two server test-fixture
+  literals.
 
-**Test coverage required.**
-- [ ] If deleted: `cargo check --workspace` + grep guard (no references remain).
-- [ ] If fixed: unit tests with current-schema fixtures — http step → `true`, pure transform →
-  `false`, side-effecting agent inside a Split subgraph → `true` (new), old `operatorId` fixture
-  deleted.
+**Test coverage delivered.**
+- [x] `cargo check` clean for runtara-workflows + runtara-server; grep guard: zero references
+  remain in the workspace.
+- [x] E2E: full gated `direct_wasm_execute` suite (29 tests — real compile→compose→wasmtime
+  execution through `compile_workflow_direct`) green without the field; workflows lib suite (444)
+  green.
 
 ---
 

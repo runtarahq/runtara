@@ -920,7 +920,6 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
     );
     assert_eq!(compiled.binary_checksum.len(), 64);
     assert!(compiled.package_size > 0);
-    assert!(!compiled.has_side_effects);
     assert!(compiled.child_dependencies.is_empty());
     assert_eq!(compiled.default_variables, serde_json::json!({}));
     assert_eq!(compiled.compiler_mode, WorkflowCompilerMode::DirectWasm);
