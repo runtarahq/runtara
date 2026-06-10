@@ -218,7 +218,9 @@ These gaps were found by an independent multi-agent audit and re-verified agains
 
 ### 16. Condition-builder arguments are rewritten lossily on every save
 
-Status: Open. Severity: high.
+Status: Implemented. Severity: high.
+
+Resolution (2026-06-10): `convertConditionArguments` is now lossless and idempotent — reference arguments keep `type`/`default`, template and composite arguments pass through untouched, already-typed JSON immediates (boolean/number/array/null) are never stringified, and the editor's explicit immediate-type selector wins over inference (so `Boolean = true` saves a real boolean that matches at runtime). On the save path (`normalizeConditionExpression`, applied to Conditional/While/Filter), string IN/NOT_IN right-hand sides are parsed into real JSON arrays (JSON array syntax or comma-separated), turning previously dead conditions into working ones; the live editor path keeps strings so typing isn't disrupted, and the editor renders stored arrays/booleans/numbers correctly. Covered by new tests in `shared/utils/condition-type-conversion.test.ts`.
 
 Description:
 `normalizeConditionExpression` -> `convertConditionArguments` runs on every save for Conditional, While, and Filter conditions — including untouched steps (`CustomNodes/utils.tsx:532-543`, While `:1380-1382`, Filter `:1357-1364`, Conditional `:1066-1071`). The conversion (`shared/utils/condition-type-conversion.ts`):

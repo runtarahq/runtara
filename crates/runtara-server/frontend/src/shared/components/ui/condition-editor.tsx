@@ -77,10 +77,12 @@ const IMMEDIATE_TYPE_OPTIONS: { value: ImmediateValueType; label: string }[] = [
   { value: 'boolean', label: 'Boolean' },
 ];
 
-// Argument with value type metadata (for reference vs immediate values)
+// Argument with value type metadata (for reference vs immediate values).
+// `value` is typed JSON, not just string: stored definitions round-trip
+// booleans, numbers, and arrays (IN/NOT_IN lists) verbatim.
 export interface ConditionArgument {
   valueType: 'immediate' | 'reference';
-  value: string;
+  value: any;
   immediateType?: ImmediateValueType; // Type hint for immediate values
 }
 
@@ -230,12 +232,19 @@ const isConditionArgument = (arg: any): arg is ConditionArgument => {
   );
 };
 
-// Helper to get the display value from an argument
+// Helper to get the display value from an argument. Stored definitions carry
+// typed JSON immediates (boolean, number, array) — render them as text.
 const getArgumentDisplayValue = (
   arg: Condition | string | ConditionArgument
 ): string => {
   if (typeof arg === 'string') return arg;
-  if (isConditionArgument(arg)) return arg.value;
+  if (isConditionArgument(arg)) {
+    const value = arg.value as unknown;
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.join(', ');
+    if (value === null || value === undefined) return '';
+    return String(value);
+  }
   return ''; // For Condition, handled separately
 };
 
@@ -248,9 +257,17 @@ const getArgumentImmediateType = (
   }
   // Try to infer type from value
   if (typeof arg === 'string' || isConditionArgument(arg)) {
-    const value = typeof arg === 'string' ? arg : arg.value;
+    const value = typeof arg === 'string' ? arg : (arg.value as unknown);
+    if (typeof value === 'boolean') return 'boolean';
+    if (typeof value === 'number') return 'number';
     if (value === 'true' || value === 'false') return 'boolean';
-    if (!isNaN(Number(value)) && value !== '') return 'number';
+    if (
+      typeof value === 'string' &&
+      value !== '' &&
+      !isNaN(Number(value))
+    ) {
+      return 'number';
+    }
   }
   return 'string';
 };

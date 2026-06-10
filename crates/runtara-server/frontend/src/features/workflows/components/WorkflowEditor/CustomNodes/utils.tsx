@@ -545,7 +545,14 @@ function normalizeConditionExpression(condition: any): any {
   return {
     ...condition,
     type: condition.type || 'operation',
-    arguments: convertConditionArguments(condition.op, condition.arguments),
+    arguments: convertConditionArguments(
+      condition.op,
+      condition.arguments,
+      undefined,
+      // Save path: string IN/NOT_IN right-hand sides become real arrays
+      // (the runtime requires an array; a string RHS is a dead condition).
+      { parseInLists: true }
+    ),
   };
 }
 
