@@ -20,7 +20,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-03](#gap-03) | P0 | `Agent.timeout` / `EmbedWorkflow.timeout` parsed, never enforced | Validation warning W071 + doc honesty | S | Validator only; real enforcement is a separate epic | done |
 | [GAP-04](#gap-04) | P1 | AiAgent tool-loop has no per-turn checkpoint — crash re-runs and re-bills completed LLM turns; `durable` field doc promises otherwise | Checkpoint turn state per iteration | M | ai_agent_loop.rs + stdlib; strictly-better behavior | todo |
 | [GAP-05](#gap-05) | P1 | AiAgent tool-loop `onError` is dead — provider failures / max-iterations can't route to a handler | Lower loop-level failures into `error_plan` | M | support gate + loop emitter; decorative onError edges start firing on recompile | todo |
-| [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | todo |
+| [GAP-06](#gap-06) | P1 | Single-shot AiAgent `max_retries` hardcoded 0 | Add `maxRetries`/`retryDelay` to AiAgentConfig, wire existing retry machinery | S–M | DSL schema + manifest + frontend regen; default 0 keeps behavior | done |
 | [GAP-07](#gap-07) | P1 | Gate/plan inconsistency: single-shot onError handler lowered live but never shape-checked by the gate | Shape-check handler in the gate for the chat-completion path | S | support.rs only | done |
 | [GAP-08](#gap-08) | P2 | AiAgent tool-loop ignores `breakpoint` | Emit breakpoint pause at loop entry | S | ai_agent_loop.rs + plan field | todo |
 | [GAP-09](#gap-09) | P2 | `WaitForSignal.onWait` silently ignored when the step is an AiAgent tool | Validation warning W072 | S | Validator only | done |
@@ -250,32 +250,35 @@ exhaustion — terminate the workflow with no routing even when the user drew an
 <a name="gap-06"></a>
 ## GAP-06 (P1) — Single-shot AiAgent cannot retry
 
-**Status: todo**
+**Status: done** (2026-06-10)
 
 **Problem.** The single-shot path reuses the Agent emitter with `max_retries=0, retry_delay_ms=0`
 hardcoded (`dispatcher.rs:687-689`). A transient provider 429/500 fails the step immediately;
 `AiAgentConfig` has no retry fields to set.
 
 **Fix plan.**
-- [ ] 1. `schema_types.rs`: add `max_retries: Option<u32>` and `retry_delay: Option<u64>` to
-  `AiAgentConfig` (mirror `AgentStep` field names/serde). **Default 0** — do not inherit Agent's
-  default 3; silent retry of LLM calls re-bills tokens and must be opt-in.
-- [ ] 2. `manifest.rs` AiAgent lowering (`:983-1035`): thread both into the agent entry (the
-  manifest agent struct already carries retry for Agent steps).
-- [ ] 3. `plan.rs`/`dispatcher.rs`: replace the hardcoded zeros with the manifest values for the
-  chat-completion path. Scope note: per-turn retry inside the tool loop is **deferred** until
-  GAP-04 lands (retry × replay interaction); record that in code comment.
-- [ ] 4. Run `regen-frontend-api`; add the fields to the AiAgent step inspector.
-- [ ] 5. Confirm existing retry-hygiene warnings (`W030`/`W031` HighRetryCount/LongRetryDelay)
-  pick up the new fields; extend their walkers if they match on AgentStep only.
+- [x] 1. `schema_types.rs`: `maxRetries`/`retryDelay` added to `AiAgentConfig`, **default 0** —
+  LLM retries re-bill and are opt-in (doc comment says so).
+- [x] 2. `manifest.rs`: both threaded into the AiAgent `ai-tools` agent entry.
+- [x] 3. `plan.rs` carries `max_retries`/`retry_delay_ms` on `DirectRunPlan::AiAgent`;
+  `dispatcher.rs` passes them to `emit_agent_plan` instead of the hardcoded zeros (chat-completion
+  path reuses the full Agent retry machinery, incl. transient/permanent classification and durable
+  retry sleeps). Per-turn loop retry deferred until GAP-04 (noted in dispatcher comment).
+- [x] 4. `regen-frontend-api` run (offline `dump_openapi` variant) — `RuntaraRuntimeApi.ts` now
+  carries the fields; frontend `tsc --noEmit` clean. Step-inspector UI wiring is generated-types
+  driven; no manual frontend edits in scope.
+- [x] 5. W030/W031 retry-hygiene warnings extended to AiAgent configs in `validate_configuration`.
 
-**Test coverage required.**
-- [ ] DSL round-trip test: config with retries serializes/deserializes; absent fields default 0.
-- [ ] Manifest unit test: retry values land on the AiAgent agent entry.
-- [ ] Execute test: stub provider failing twice then succeeding — `maxRetries: 3` → completes,
-  retry events visible with the configured delay key; `maxRetries: 0` (default) → fails
-  immediately (regression guard on the default).
-- [ ] Validation test: absurd retry values trigger the existing W030/W031 warnings for AiAgent.
+**Test coverage delivered.**
+- [x] Manifest unit test `ai_agent_manifest_threads_retry_config` (also covers DSL deserialization
+  of the new camelCase fields end to end).
+- [x] **New hermetic LLM stub in the execute harness**: `RUNTARA_HTTP_PROXY_URL` points the
+  workflow's `call_agent()` proxy at the mock server; scripted `{status, headers, body}` envelopes
+  are served per model call and request envelopes are recorded on `CapturedRun.llm_requests`.
+- [x] Execute e2e: `..._completes_against_stub` (1 call, output threaded),
+  `..._retries_transient_provider_errors` (500, 500, success with maxRetries:3 → completes with
+  exactly 3 calls), `..._default_does_not_retry` (default fails on first 500 with exactly 1 call).
+- [x] Full suites: workflows lib (450), execute (33).
 
 ---
 

@@ -3012,6 +3012,29 @@ const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         match step {
+            Step::AiAgent(ai_step) => {
+                // Retry hygiene applies to LLM calls too (each retry re-bills).
+                if let Some(config) = ai_step.config.as_ref() {
+                    if let Some(max_retries) = config.max_retries
+                        && max_retries > MAX_RETRY_RECOMMENDED
+                    {
+                        result.warnings.push(ValidationWarning::HighRetryCount {
+                            step_id: step_id.clone(),
+                            max_retries,
+                            recommended_max: MAX_RETRY_RECOMMENDED,
+                        });
+                    }
+                    if let Some(retry_delay) = config.retry_delay
+                        && retry_delay > MAX_RETRY_DELAY_MS
+                    {
+                        result.warnings.push(ValidationWarning::LongRetryDelay {
+                            step_id: step_id.clone(),
+                            retry_delay_ms: retry_delay,
+                            recommended_max_ms: MAX_RETRY_DELAY_MS,
+                        });
+                    }
+                }
+            }
             Step::Agent(agent_step) => {
                 // Check retry count
                 if let Some(max_retries) = agent_step.max_retries
@@ -5372,6 +5395,8 @@ mod tests {
                 max_iterations: None,
                 temperature: None,
                 max_tokens: None,
+                max_retries: None,
+                retry_delay: None,
                 memory: None,
                 output_schema: None,
             }),

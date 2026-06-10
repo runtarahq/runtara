@@ -1274,6 +1274,19 @@ pub struct AiAgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
 
+    /// Maximum retry attempts for the LLM call (default: 0 — no retries).
+    ///
+    /// Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
+    /// because every retry re-bills the model call. Applies to the
+    /// single-shot (chat-completion) path; per-turn retry inside the tool
+    /// loop is deliberately deferred until per-turn durability lands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (default: 1000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
+
     /// Conversation memory configuration.
     /// Requires a "memory" labeled edge pointing to a memory provider Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]

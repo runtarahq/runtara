@@ -153,6 +153,10 @@ pub(super) enum DirectRunPlan {
         input_mapping_id: u32,
         durable_checkpoint: bool,
         breakpoint: bool,
+        /// Opt-in LLM-call retries (DSL default 0 — retries re-bill the
+        /// model call, unlike Agent steps' default of 3).
+        max_retries: u32,
+        retry_delay_ms: u64,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -806,6 +810,8 @@ fn step_run_plan_inner(
                     input_mapping_id: agent.input_mapping_id,
                     durable_checkpoint: agent.durable,
                     breakpoint: step_breakpoint_enabled(graph, step),
+                    max_retries: agent.max_retries.unwrap_or(0),
+                    retry_delay_ms: agent.retry_delay.unwrap_or(1_000),
                     next_plan: Box::new(next_plan),
                     error_plan,
                 });

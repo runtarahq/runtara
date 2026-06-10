@@ -664,14 +664,17 @@ pub(super) fn emit_run_plan_mapping(
             input_mapping_id,
             durable_checkpoint,
             breakpoint,
+            max_retries,
+            retry_delay_ms,
             next_plan,
             error_plan,
         } => {
-            // Single-shot AiAgent reuses the Agent invoke/checkpoint path (it is
-            // an invoke of `ai_tools`/`chat-completion`); only the output
+            // Single-shot AiAgent reuses the Agent invoke/checkpoint/retry path
+            // (it is an invoke of `ai_tools`/`chat-completion`); only the output
             // transform differs (`ai-agent-output` builds the
-            // `{response, iterations, toolCalls}` envelope). No retry/rate-limit
-            // in this slice.
+            // `{response, iterations, toolCalls}` envelope). Retries are opt-in
+            // via config.maxRetries (plan default 0 — LLM calls re-bill); no
+            // rate-limit budget (ai-tools is not catalog-rate-limited).
             emit_agent_plan(
                 body,
                 indices,
@@ -684,8 +687,8 @@ pub(super) fn emit_run_plan_mapping(
                 *input_mapping_id,
                 *durable_checkpoint,
                 *breakpoint,
-                0,
-                0,
+                *max_retries,
+                *retry_delay_ms,
                 0,
                 next_plan,
                 error_plan.as_ref(),

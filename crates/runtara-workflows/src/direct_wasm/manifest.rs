@@ -1116,8 +1116,10 @@ fn step_manifest(
                 ),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
-                max_retries: None,
-                retry_delay: None,
+                // Retries are opt-in for AiAgent (default 0 — LLM calls
+                // re-bill); the plan applies them on the single-shot path.
+                max_retries: step.config.as_ref().and_then(|config| config.max_retries),
+                retry_delay: step.config.as_ref().and_then(|config| config.retry_delay),
                 timeout: None,
             });
             // Conversation memory: record the provider agent's load-memory and
@@ -1978,5 +1980,38 @@ mod tests {
             parseable >= 40,
             "expected broad fixture coverage, got {parseable}"
         );
+    }
+    #[test]
+    fn ai_agent_manifest_threads_retry_config() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {"fromStep":"ai","toStep":"finish","label":"next"}
+              ],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                  "systemPrompt":{"valueType":"immediate","value":"sys"},
+                  "userPrompt":{"valueType":"immediate","value":"go"},
+                  "provider":"openai",
+                  "maxRetries":3,
+                  "retryDelay":10
+                }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "ai")
+            .expect("ai agent entry");
+        assert_eq!(agent.capability_id, "chat-completion");
+        assert_eq!(agent.max_retries, Some(3));
+        assert_eq!(agent.retry_delay, Some(10));
     }
 }

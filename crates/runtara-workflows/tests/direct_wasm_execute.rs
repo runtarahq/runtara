@@ -242,6 +242,8 @@ struct CapturedRun {
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
     checkpoints: Vec<CheckpointRequest>,
+    /// LLM-proxy request envelopes the workflow sent (one per model call).
+    llm_requests: Vec<Value>,
     status_success: bool,
     stderr: String,
 }
@@ -258,6 +260,12 @@ enum CapturedMessage {
 #[derive(Debug, Default)]
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Scripted LLM-proxy responses, served front-to-back to POST /llm-proxy.
+    /// Each entry is the proxy envelope `{status, headers, body}` the
+    /// workflow's `call_agent()` will deserialize into an HttpResponse.
+    llm_responses: Mutex<Vec<Value>>,
+    /// Proxy request envelopes received on POST /llm-proxy, in order.
+    llm_requests: Mutex<Vec<Value>>,
 }
 
 fn e2e_enabled() -> bool {
@@ -463,6 +471,34 @@ fn route(
 
     if method == "GET" && path == "/health" {
         return (200, serde_json::json!({"ok": true}));
+    }
+
+    // Hermetic LLM stub: `call_agent()` forwards provider requests here when
+    // RUNTARA_HTTP_PROXY_URL points at the mock server. Pop the next scripted
+    // proxy envelope; running out of script is a test bug, surfaced as 599
+    // so the workflow fails loudly instead of hanging on `{success: true}`.
+    if method == "POST" && path == "/llm-proxy" {
+        let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        server_state
+            .llm_requests
+            .lock()
+            .expect("llm_requests lock")
+            .push(envelope);
+        let mut responses = server_state
+            .llm_responses
+            .lock()
+            .expect("llm_responses lock");
+        if responses.is_empty() {
+            return (
+                200,
+                serde_json::json!({
+                    "status": 599,
+                    "headers": {},
+                    "body": {"error": "llm stub script exhausted"}
+                }),
+            );
+        }
+        return (200, responses.remove(0));
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -780,9 +816,32 @@ fn run_direct_workflow_capture(
         workflow_input,
         track_events,
         Vec::new(),
+        Vec::new(),
     )
 }
 
+/// Run a workflow whose AiAgent steps call the scripted LLM stub. Each script
+/// entry is a proxy envelope `{status, headers, body}` served in order to the
+/// workflow's model calls; the returned run carries the recorded requests.
+fn run_direct_workflow_with_llm_script(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    llm_script: Vec<Value>,
+) -> CapturedRun {
+    run_direct_workflow_capture_with_preloaded_checkpoints(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+        Vec::new(),
+        llm_script,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_direct_workflow_capture_with_preloaded_checkpoints(
     components_dir: &Path,
     workflow_id: &str,
@@ -790,6 +849,7 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     workflow_input: &[u8],
     track_events: bool,
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -817,7 +877,10 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_state = Arc::new(ServerState {
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+        llm_responses: Mutex::new(llm_script),
+        llm_requests: Mutex::new(Vec::new()),
     });
+    let server_state_for_assertions = server_state.clone();
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
@@ -829,6 +892,8 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
         .arg("inherit-network")
         .arg("--env")
         .arg(format!("RUNTARA_HTTP_URL=http://{addr}"))
+        .arg("--env")
+        .arg(format!("RUNTARA_HTTP_PROXY_URL=http://{addr}/llm-proxy"))
         .arg("--env")
         .arg(format!("RUNTARA_SERVER_ADDR={addr}"))
         .arg("--env")
@@ -861,12 +926,18 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
             CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
         }
     }
+    let llm_requests = server_state_for_assertions
+        .llm_requests
+        .lock()
+        .expect("llm_requests lock")
+        .clone();
     CapturedRun {
         output_json,
         error_json,
         events,
         sleeps,
         checkpoints,
+        llm_requests,
         status_success: output.status.success(),
         stderr: stderr.into_owned(),
     }
@@ -1366,6 +1437,147 @@ fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
     );
 }
 
+fn single_shot_ai_agent_graph_json(retry_config: &str) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You are a test stub caller"}},
+          "userPrompt":{{"valueType":"immediate","value":"Say hello"}},
+          "provider":"openai",
+          "model":"gpt-4o"{retry_config}}}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+fn llm_ok(content: &str) -> Value {
+    serde_json::json!({
+        "status": 200,
+        "headers": {},
+        "body": {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }
+    })
+}
+
+fn llm_http_500() -> Value {
+    serde_json::json!({
+        "status": 500,
+        "headers": {},
+        "body": {"error": {"message": "stubbed provider outage"}}
+    })
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Baseline for the hermetic LLM stub: a single-shot AiAgent drives one
+    // chat-completion through the proxy and finishes with the stubbed text.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-stub",
+        &single_shot_ai_agent_graph_json(""),
+        br#"{}"#,
+        vec![llm_ok("hello from stub")],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    let output = result.output_json.expect("workflow completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello from stub"),
+        "{output}"
+    );
+    assert_eq!(result.llm_requests.len(), 1, "exactly one model call");
+    // The proxy envelope carries the OpenAI-shaped request.
+    let request = &result.llm_requests[0];
+    assert_eq!(
+        request.get("url").and_then(Value::as_str),
+        Some("/v1/chat/completions"),
+        "{request}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-06: config.maxRetries drives the existing agent retry machinery for
+    // the chat-completion invoke. Two stubbed HTTP 500s (transient) are
+    // retried; the third call succeeds.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-retries",
+        &single_shot_ai_agent_graph_json(r#","maxRetries":3,"retryDelay":10"#),
+        br#"{}"#,
+        vec![llm_http_500(), llm_http_500(), llm_ok("recovered")],
+    );
+
+    assert!(
+        result.status_success,
+        "retried workflow should complete; stderr: {}",
+        result.stderr
+    );
+    let output = result
+        .output_json
+        .expect("workflow completes after retries");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("recovered"),
+        "{output}"
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        3,
+        "two failed attempts + one success"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_default_does_not_retry() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Default stays 0 retries: re-billing an LLM call is opt-in. The first
+    // stubbed 500 fails the workflow; the scripted success is never consumed.
+    let result = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-single-shot-no-retries",
+        &single_shot_ai_agent_graph_json(""),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        vec![llm_http_500(), llm_ok("never reached")],
+    );
+
+    assert!(
+        !result.status_success,
+        "default must fail on the first provider error"
+    );
+    assert_eq!(result.llm_requests.len(), 1, "no retry call may happen");
+    let error = result.error_json.expect("failure is posted");
+    let message = error.to_string();
+    assert!(
+        message.contains("500") || message.contains("provider outage"),
+        "unexpected failure payload: {message}"
+    );
+}
+
 #[test]
 fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
     let Some(components_dir) = direct_e2e_components_dir() else {
@@ -1655,6 +1867,7 @@ fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
         br#"{"value":"fresh-agent"}"#,
         false,
         vec![(checkpoint_id.clone(), br#""cached-agent""#.to_vec())],
+        Vec::new(),
     );
 
     assert!(
