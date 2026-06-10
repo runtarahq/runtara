@@ -123,6 +123,9 @@ pub(super) enum DirectRunPlan {
         breakpoint: bool,
         on_wait_plan: Option<Box<DirectRunPlan>>,
         next_plan: Box<DirectRunPlan>,
+        /// Timeout-expiry routing (GAP-14): when the wait deadline passes, the
+        /// WAIT_TIMEOUT error dispatches here instead of failing the workflow.
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     Log {
         step_id: String,
@@ -726,6 +729,11 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 on_wait_plan: on_wait_plan.map(Box::new),
                 next_plan: Box::new(next_plan),
+                error_plan: if include_on_error {
+                    on_error_plan(graph, child_workflows, step_id, stack)?
+                } else {
+                    None
+                },
             })
         }
         "Log" => {

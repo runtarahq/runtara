@@ -291,7 +291,7 @@ fn collect_graph_support_inner(
         };
         if edge.condition.is_some() && !condition_route_supported {
             let reason = if edge.label.as_deref() == Some("onError") {
-                "direct emitter supports onError edge conditions only for Agent, EmbedWorkflow, Split, and While sources with at most one default fallback"
+                "direct emitter supports onError edge conditions only for Agent, AiAgent, EmbedWorkflow, Split, While, and WaitForSignal sources with at most one default fallback"
             } else {
                 "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
             };
@@ -317,7 +317,7 @@ fn collect_graph_support_inner(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "direct onError routing currently supports Agent, EmbedWorkflow, Split, and While sources with at most one default handler".to_string(),
+                reason: "direct onError routing currently supports Agent, AiAgent, EmbedWorkflow, Split, While, and WaitForSignal sources with at most one default handler".to_string(),
             });
         }
     }
@@ -656,6 +656,15 @@ fn supports_direct_control_step_inner(
             if supports_wait_for_signal_step_baseline(step, child_workflows) =>
         {
             supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && on_error_supported_or_inert(
                 graph,
                 child_workflows,
                 step_id,
@@ -1192,6 +1201,13 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         // AiAgent handlers (single-shot AND tool loop) are lowered live, so
         // the shape rules apply to them like any Agent step.
         Step::AiAgent(_) => {}
+        // WaitForSignal failures (timeout expiry) route to the handler
+        // (GAP-14).
+        Step::WaitForSignal(step)
+            if supports_wait_for_signal_step_baseline(
+                step,
+                &DirectSupportChildWorkflows::default(),
+            ) => {}
         _ => return false,
     };
 
@@ -3814,5 +3830,16 @@ mod handler_step_on_error_tests {
             !report.supported,
             "two unconditioned defaults must stay rejected"
         );
+    }
+    #[test]
+    fn wait_for_signal_on_error_is_supported() {
+        // GAP-14: a WaitForSignal timeout routes to its onError handler.
+        let graph: ExecutionGraph = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wait_timeout_on_error.json"
+        ))
+        .expect("fixture parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 }

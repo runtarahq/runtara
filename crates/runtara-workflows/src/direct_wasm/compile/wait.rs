@@ -18,6 +18,7 @@ use super::abi::{
     emit_retptr_error_or_return, load_retptr_list, load_retptr_option_list, push_retptr_arg,
     push_retptr_i64_load, push_retptr_u8_load, push_segment_args, return_if_retptr_error,
 };
+use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -25,13 +26,14 @@ use super::split::emit_split_append_error_payload_and_continue;
 use super::{
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_TAG_OFFSET,
     DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
-    DIRECT_WAIT_DEADLINE_MS_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL,
-    DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
+    DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+    DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL, DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL,
+    DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
     DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
-    emit_runtime_fail_return,
+    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 /// Lower a WaitForSignal target used as an AiAgent tool: emit the external-input
@@ -197,6 +199,7 @@ pub(super) fn emit_wait_for_signal_plan(
     breakpoint: bool,
     on_wait_plan: Option<&DirectRunPlan>,
     next_plan: &DirectRunPlan,
+    error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
     data_len_local: u32,
     steps_ptr_local: u32,
@@ -392,12 +395,26 @@ pub(super) fn emit_wait_for_signal_plan(
     emit_wait_timeout_check(
         body,
         indices,
+        static_data,
+        track_events,
+        variables,
+        step_id,
         step_id_segment,
         route_ptr_local,
         route_len_local,
         output_ptr_local,
         output_len_local,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        error_plan,
         failure_target,
+        handled_target,
     );
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
@@ -623,12 +640,26 @@ fn emit_wait_on_wait_plan(
 fn emit_wait_timeout_check(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: DirectVariables<'_>,
+    step_id: &str,
     step_id_segment: &DirectDataSegment,
     signal_id_ptr_local: u32,
     signal_id_len_local: u32,
     error_ptr_local: u32,
     error_len_local: u32,
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+    error_plan: Option<&DirectErrorRoutePlan>,
     failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -644,10 +675,56 @@ fn emit_wait_timeout_check(
     body.instruction(&Instruction::LocalGet(signal_id_len_local));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_error));
+    // Routed handlers get the structured envelope (steps.__error.code etc.);
+    // the plain-string message stays the /failed payload for parity.
+    if error_plan.is_some() {
+        body.instruction(&Instruction::Call(
+            indices.stdlib_wait_timeout_error_envelope,
+        ));
+    } else {
+        body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_error));
+    }
     return_if_retptr_error(body);
     load_retptr_list(body, error_ptr_local, error_len_local);
-    if let Some(failure_target) = failure_target {
+    if error_plan.is_some() {
+        // GAP-14: route the WAIT_TIMEOUT error to the step's onError handler.
+        // The steps context is still the parent's at this point (the wait has
+        // stored nothing yet), so the error routes against it directly. The
+        // signal id (route scratch) is dead on this terminal path; the error
+        // is stashed in the shared step-error locals so the route dispatch
+        // can use the error/output pairs as scratch. The timeout site sits 4
+        // blocks deep ($outer/$poll plus the two timeout Ifs), so rejoining
+        // handlers and split collectors nest by 4.
+        body.instruction(&Instruction::LocalGet(error_ptr_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(error_len_local));
+        body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_LEN_LOCAL));
+        emit_agent_error_route_or_fail(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            step_id,
+            DIRECT_STEP_ERROR_PTR_LOCAL,
+            DIRECT_STEP_ERROR_LEN_LOCAL,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            error_ptr_local,
+            error_len_local,
+            signal_id_ptr_local,
+            signal_id_len_local,
+            error_plan,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            failure_target.map(|target| target.nested(4)),
+            handled_target.map(|target| target.nested(4)),
+        );
+    } else if let Some(failure_target) = failure_target {
         emit_split_append_error_payload_and_continue(
             body,
             indices,

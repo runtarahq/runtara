@@ -551,6 +551,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             on_wait_plan,
             next_plan,
+            error_plan,
         } => {
             emit_wait_for_signal_plan(
                 body,
@@ -562,6 +563,7 @@ pub(super) fn emit_run_plan_mapping(
                 *breakpoint,
                 on_wait_plan.as_deref(),
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,

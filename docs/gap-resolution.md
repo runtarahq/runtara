@@ -28,7 +28,7 @@ Effort: **S** = hours · **M** = 1–3 days · **L** = week+ · **XL** = archite
 | [GAP-11](#gap-11) | P2 | Stale diagnostics: AiAgent rejection says "single-shot only"; comments reference deleted fallback compiler; ErrorStep doc shows `${}` interpolation that doesn't exist | Rewrote messages/comments/doc example + pin test | S | Text only; actively misleading today | done |
 | [GAP-12](#gap-12) | P2 | `workflow_has_side_effects` exported, uncalled, reads field names that no longer exist (always `false`) | Deleted fn + table + result field (no reader anywhere; catalog metadata too unreliable to fix against) | S | Public crate API removal | done |
 | [GAP-13](#gap-13) | P3 | Conditioned normal-flow edges only allowed from Filter/GroupBy/Log/value-Switch sources | Extend `EdgeRoute` gate to Agent/Delay/WaitForSignal sources | M | Gate widening — only accepts more graphs | done |
-| [GAP-14](#gap-14) | P3 | `onError` sources limited to Agent/EmbedWorkflow/Split/While | Extend to Delay/WaitForSignal if demand appears | M | Gate widening | parked |
+| [GAP-14](#gap-14) | P3 | `onError` sources limited to Agent/EmbedWorkflow/Split/While | WaitForSignal timeout now routes to onError (structured WAIT_TIMEOUT envelope) | M | Gate widening | done |
 
 ### Cross-cutting facts (read before picking up any item)
 
@@ -503,7 +503,8 @@ with `edge-condition`, although the `EdgeRoute` plan machinery is source-agnosti
 <a name="gap-14"></a>
 ## GAP-14 (P3) — `onError` sources limited to Agent/EmbedWorkflow/Split/While
 
-**Status: parked** *(needs a demand signal before investing)*
+**Status: done** (2026-06-10) — activated and scoped to WaitForSignal, the one source with a
+real use case (timeout → handler).
 
 **Problem.** `on_error_route_shape_supported` (`support.rs:1178-1200`) only accepts onError edges
 from Agent, EmbedWorkflow, Split, While. A Delay or WaitForSignal failure (e.g. wait timeout)
@@ -511,18 +512,31 @@ cannot route to a handler — the workflow fails outright. Workaround exists: wa
 modeled with `timeout` + downstream checks, and GroupBy/Filter failures are deterministic data
 errors better fixed upstream.
 
-**Fix plan (when activated).**
-- [ ] 1. Decide target sources from real demand (candidate: WaitForSignal timeout → onError is
-  the only one with a plausible use case).
-- [ ] 2. Extend the source match + per-step failure-target plumbing
-  (`DirectFailureTarget`), mirroring the While onError lowering.
-- [ ] 3. Update the gate reason strings (both `edge-condition` and `error-handler-edge` texts
-  enumerate the allowed sources).
+**Fix plan (delivered).**
+- [x] 1. Scoped to **WaitForSignal timeout routing** (the plausible case named at parking time).
+  GroupBy/Filter/Delay sources remain excluded — deterministic data errors are better fixed
+  upstream, and no demand exists.
+- [x] 2. Gate: the WaitForSignal walk consumes onError edges via `on_error_supported_or_inert`;
+  `on_error_route_shape_supported` accepts WaitForSignal (and, from GAP-05, AiAgent) sources;
+  both onError reason strings updated to enumerate the full source list.
+- [x] 3. Plan/dispatcher: `WaitForSignal.error_plan` built via `on_error_plan` and threaded to
+  `emit_wait_for_signal_plan`.
+- [x] 4. Emitter: on deadline expiry with a handler present, the error routes through the shared
+  `emit_agent_error_route_or_fail` machinery at the timeout site (the steps context is still the
+  parent's there, so no capture block is needed; targets nest by 4 for the poll/timeout blocks).
+- [x] 5. New stdlib WIT fn `wait-timeout-error-envelope` returns the structured
+  `{code: WAIT_TIMEOUT, message, category: timeout, severity: error}` for routed handlers so
+  `steps.__error.*` references resolve; the plain-string variant stays the /failed payload for
+  parity with the generated path (pinned by the existing test).
 
-**Test coverage required (when activated).**
-- [ ] Gate unit tests per new source; execute test modeled on the `wait_for_signal_direct_timeout`
-  fixture but with an onError handler consuming `steps.__error.code == "WAIT_TIMEOUT"` (or the
-  actual emitted code — pin it in the test).
+**Test coverage delivered.**
+- [x] Gate test `wait_for_signal_on_error_is_supported` (fixture).
+- [x] New fixture `tests/fixtures/wait_timeout_on_error.json` (1ms deadline + handler reading
+  `steps.__error.code` / `.category`).
+- [x] Execute e2e `direct_wasm_execute_wait_timeout_routes_to_on_error`: a real WASM run expires
+  the deadline and completes via the handler with `code == "WAIT_TIMEOUT"`,
+  `category == "timeout"`.
+- [x] Full suites: stdlib (127), workflows lib (455), execute (41).
 
 ---
 

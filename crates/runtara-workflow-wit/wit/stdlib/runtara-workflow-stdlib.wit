@@ -228,6 +228,16 @@ interface json {
         timeout-ms: u64,
     ) -> result<list<u8>, string>;
 
+    // Structured WAIT_TIMEOUT envelope for onError routing (GAP-14): the
+    // plain-string variant above stays the /failed payload for parity; routed
+    // handlers need {code, message, category, severity} so steps.__error.*
+    // references resolve.
+    wait-timeout-error-envelope: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+
     wait-on-wait-variables: func(
         step-id: string,
         instance-id: string,

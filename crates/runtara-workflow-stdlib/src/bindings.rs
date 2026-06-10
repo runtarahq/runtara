@@ -2797,6 +2797,85 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_wait_timeout_error_envelope_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i64,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let result2 = T::wait_timeout_error_envelope(
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        arg4 as u64,
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(e) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec5 = (e.into_bytes()).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_wait_timeout_error_envelope<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_wait_on_wait_variables_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -6610,6 +6689,15 @@ pub mod exports {
                         signal_id: _rt::String,
                         timeout_ms: u64,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Structured WAIT_TIMEOUT envelope for onError routing (GAP-14): the
+                    /// plain-string variant above stays the /failed payload for parity; routed
+                    /// handlers need {code, message, category, severity} so steps.__error.*
+                    /// references resolve.
+                    fn wait_timeout_error_envelope(
+                        step_id: _rt::String,
+                        signal_id: _rt::String,
+                        timeout_ms: u64,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn wait_on_wait_variables(
                         step_id: _rt::String,
                         instance_id: _rt::String,
@@ -7270,6 +7358,18 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_wait_timeout_error::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#wait-timeout-error-envelope")]
+                        unsafe extern "C" fn export_wait_timeout_error_envelope(arg0 : *
+                        mut u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : i64,)
+                        -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_wait_timeout_error_envelope_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3, arg4) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#wait-timeout-error-envelope")]
+                        unsafe extern "C" fn
+                        _post_return_wait_timeout_error_envelope(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*::
+                        __post_return_wait_timeout_error_envelope::<$ty > (arg0) } }
+                        #[unsafe (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#wait-on-wait-variables")]
                         unsafe extern "C" fn export_wait_on_wait_variables(arg0 : * mut
                         u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8,
@@ -7972,9 +8072,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4637] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x97#\x01A\x02\x01A\x02\
-\x01B\xb2\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4669] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb7#\x01A\x02\x01A\x02\
+\x01B\xb3\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -8012,58 +8112,58 @@ delay\x01&\x01@\x02\x07step-ids\x06source\0\0\x0a\x04\0\x0ebreakpoint-key\x01'\x
 tep-ids\x0binstance-ids\x06source\0\0\x0a\x04\0\x0ewait-signal-id\x01)\x01kw\x01\
 j\x01*\x01s\x01@\x02\x07step-ids\x06source\0\0+\x04\0\x0fwait-timeout-ms\x01,\x01\
 @\x03\x07step-ids\x09signal-ids\x0atimeout-msw\0\x05\x04\0\x12wait-timeout-error\
-\x01-\x01@\x04\x07step-ids\x0binstance-ids\x09signal-ids\x06source\0\0\x05\x04\0\
-\x16wait-on-wait-variables\x01.\x01@\x02\x07step-ids\x05error\0\0\x05\x04\0\x12w\
-ait-on-wait-error\x01/\x01@\x01\x07step-ids\0$\x04\0\x15wait-poll-interval-ms\x01\
-0\x01@\x03\x07step-ids\x09signal-ids\x06source\0\0\x05\x04\0\x0await-event\x011\x01\
-@\x04\x07step-ids\x09signal-ids\x0atimeout-ms*\x06source\0\0\x05\x04\0\x10wait-d\
-ebug-start\x012\x01@\x04\x07step-ids\x09signal-ids\x0esignal-payload\0\x06source\
-\0\0\x05\x04\0\x0bwait-output\x013\x01@\x05\x07step-ids\x0binstance-ids\x05label\
-s\x0ccall-countery\x06source\0\0\x0a\x04\0\x16ai-wait-tool-signal-id\x014\x01@\x01\
-\x0esignal-payload\0\0\x05\x04\0\x13ai-wait-tool-result\x015\x04\0\x18embed-work\
-flow-cache-key\x01(\x01@\x03\x07step-ids\x06source\0\x0bchild-input\0\0\x05\x04\0\
-\x18embed-workflow-variables\x016\x01@\x03\x07step-ids\x06source\0\x0cchild-outp\
-ut\0\0\x05\x04\0\x15embed-workflow-result\x017\x01@\x03\x07step-ids\x06source\0\x0b\
-step-result\0\0\x05\x04\0!embed-workflow-output-from-result\x018\x01@\x02\x07ste\
-p-ids\x0bchild-error\0\0\x05\x04\0\x14embed-workflow-error\x019\x01@\x02\x0dchec\
-kpoint-ids\x0eattempt-numbery\0\x05\x04\0\x0fretry-sleep-key\x01:\x01@\x05\x0eat\
-tempt-numbery\x0etotal-attemptsy\x0dbase-delay-msw\x0cmax-delay-msw\x0eretry-aft\
-er-ms*\0$\x04\0\x0eretry-delay-ms\x01;\x01@\x01\x05error\0\0\x08\x04\0\x18workfl\
-ow-error-retryable\x01<\x04\0\x1bworkflow-error-rate-limited\x01<\x01@\x01\x05er\
-ror\0\0+\x04\0\x1dworkflow-error-retry-after-ms\x01=\x01@\x03\x08agent-idy\x06so\
-urce\0\x06output\0\0\x05\x04\0\x0cagent-output\x01>\x04\0\x0fai-agent-output\x01\
->\x01@\x03\x04base\0\x08turn-out\0\x07pending\0\0\x05\x04\0\x12ai-turn-next-inpu\
-t\x01?\x01@\x01\x08turn-out\0\0\x08\x04\0\x13ai-turn-is-complete\x01@\x01@\x01\x08\
-turn-out\0\0\x0e\x04\0\x12ai-turn-tool-count\x01A\x01@\x02\x08turn-out\0\x05inde\
-xy\0\x05\x04\0\x11ai-turn-tool-args\x01B\x01@\x02\x08turn-out\0\x05indexy\0\x0e\x04\
-\0\x12ai-turn-tool-index\x01C\x01@\x04\x07pending\0\x08turn-out\0\x05indexy\x0bt\
-ool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\x01@\x03\x07step-ids\x09iter\
-ationy\x06source\0\0\x0a\x04\0\x11ai-turn-cache-key\x01E\x01@\x04\x05state\0\x07\
-pending\0\x0atool-callsy\x08complete\x7f\0\x05\x04\0\x10ai-turn-snapshot\x01F\x01\
-@\x02\x08snapshot\0\x04party\0\x05\x04\0\x15ai-turn-snapshot-part\x01G\x01@\x01\x08\
-snapshot\0\0\x0e\x04\0\x1bai-turn-snapshot-tool-calls\x01H\x01@\x01\x08snapshot\0\
-\0\x08\x04\0\x19ai-turn-snapshot-complete\x01I\x01@\x03\x08agent-idy\x06source\0\
-\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01J\x01@\x01\x0bload-output\0\0\x05\
-\x04\0\x17ai-memory-initial-state\x01K\x01@\x02\x0cconversation\0\x0bfinal-state\
-\0\0\x05\x04\0\x14ai-memory-save-input\x01L\x01@\x02\x05state\0\x0cmax-messagesy\
-\0\x05\x04\0\x19ai-memory-compact-sliding\x01M\x01@\x03\x04base\0\x05state\0\x0c\
-max-messagesy\0\x05\x04\0\x12ai-summarize-input\x01N\x01@\x01\x10summarize-resul\
-t\0\0\x05\x04\0\x13ai-summarize-output\x01O\x01@\x02\x08agent-idy\x05input\0\0\x05\
-\x04\0\x14agent-validate-input\x01P\x04\0\x16agent-connection-input\x01P\x01@\x02\
-\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01Q\x04\0\x15agent-ret\
-ry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\x04codes\x07\
-messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattrib\
-utes\xd2\0\0\x05\x04\0\x10agent-error-info\x01S\x01j\x01\x02\x01s\x01@\x07\x04co\
-des\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0a\
-attributes\xd2\0\0\xd4\0\x04\0\x16agent-retry-error-info\x01U\x01@\x08\x08agent-\
-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-aft\
-er-ms*\x0aattributes\xd2\0\0\x05\x04\0\x0bagent-error\x01V\x01@\x02\x08agent-idy\
-\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01W\x01@\x03\x08agent-idy\
-\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01X\x04\0\x10step-debu\
-g-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.\
-1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\
-\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compo\
-nent\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+\x01-\x04\0\x1bwait-timeout-error-envelope\x01-\x01@\x04\x07step-ids\x0binstance\
+-ids\x09signal-ids\x06source\0\0\x05\x04\0\x16wait-on-wait-variables\x01.\x01@\x02\
+\x07step-ids\x05error\0\0\x05\x04\0\x12wait-on-wait-error\x01/\x01@\x01\x07step-\
+ids\0$\x04\0\x15wait-poll-interval-ms\x010\x01@\x03\x07step-ids\x09signal-ids\x06\
+source\0\0\x05\x04\0\x0await-event\x011\x01@\x04\x07step-ids\x09signal-ids\x0ati\
+meout-ms*\x06source\0\0\x05\x04\0\x10wait-debug-start\x012\x01@\x04\x07step-ids\x09\
+signal-ids\x0esignal-payload\0\x06source\0\0\x05\x04\0\x0bwait-output\x013\x01@\x05\
+\x07step-ids\x0binstance-ids\x05labels\x0ccall-countery\x06source\0\0\x0a\x04\0\x16\
+ai-wait-tool-signal-id\x014\x01@\x01\x0esignal-payload\0\0\x05\x04\0\x13ai-wait-\
+tool-result\x015\x04\0\x18embed-workflow-cache-key\x01(\x01@\x03\x07step-ids\x06\
+source\0\x0bchild-input\0\0\x05\x04\0\x18embed-workflow-variables\x016\x01@\x03\x07\
+step-ids\x06source\0\x0cchild-output\0\0\x05\x04\0\x15embed-workflow-result\x017\
+\x01@\x03\x07step-ids\x06source\0\x0bstep-result\0\0\x05\x04\0!embed-workflow-ou\
+tput-from-result\x018\x01@\x02\x07step-ids\x0bchild-error\0\0\x05\x04\0\x14embed\
+-workflow-error\x019\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x0f\
+retry-sleep-key\x01:\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-dela\
+y-msw\x0cmax-delay-msw\x0eretry-after-ms*\0$\x04\0\x0eretry-delay-ms\x01;\x01@\x01\
+\x05error\0\0\x08\x04\0\x18workflow-error-retryable\x01<\x04\0\x1bworkflow-error\
+-rate-limited\x01<\x01@\x01\x05error\0\0+\x04\0\x1dworkflow-error-retry-after-ms\
+\x01=\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\x0cagent-output\x01\
+>\x04\0\x0fai-agent-output\x01>\x01@\x03\x04base\0\x08turn-out\0\x07pending\0\0\x05\
+\x04\0\x12ai-turn-next-input\x01?\x01@\x01\x08turn-out\0\0\x08\x04\0\x13ai-turn-\
+is-complete\x01@\x01@\x01\x08turn-out\0\0\x0e\x04\0\x12ai-turn-tool-count\x01A\x01\
+@\x02\x08turn-out\0\x05indexy\0\x05\x04\0\x11ai-turn-tool-args\x01B\x01@\x02\x08\
+turn-out\0\x05indexy\0\x0e\x04\0\x12ai-turn-tool-index\x01C\x01@\x04\x07pending\0\
+\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\
+\x01@\x03\x07step-ids\x09iterationy\x06source\0\0\x0a\x04\0\x11ai-turn-cache-key\
+\x01E\x01@\x04\x05state\0\x07pending\0\x0atool-callsy\x08complete\x7f\0\x05\x04\0\
+\x10ai-turn-snapshot\x01F\x01@\x02\x08snapshot\0\x04party\0\x05\x04\0\x15ai-turn\
+-snapshot-part\x01G\x01@\x01\x08snapshot\0\0\x0e\x04\0\x1bai-turn-snapshot-tool-\
+calls\x01H\x01@\x01\x08snapshot\0\0\x08\x04\0\x19ai-turn-snapshot-complete\x01I\x01\
+@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01J\x01\
+@\x01\x0bload-output\0\0\x05\x04\0\x17ai-memory-initial-state\x01K\x01@\x02\x0cc\
+onversation\0\x0bfinal-state\0\0\x05\x04\0\x14ai-memory-save-input\x01L\x01@\x02\
+\x05state\0\x0cmax-messagesy\0\x05\x04\0\x19ai-memory-compact-sliding\x01M\x01@\x03\
+\x04base\0\x05state\0\x0cmax-messagesy\0\x05\x04\0\x12ai-summarize-input\x01N\x01\
+@\x01\x10summarize-result\0\0\x05\x04\0\x13ai-summarize-output\x01O\x01@\x02\x08\
+agent-idy\x05input\0\0\x05\x04\0\x14agent-validate-input\x01P\x04\0\x16agent-con\
+nection-input\x01P\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-\
+key\x01Q\x04\0\x15agent-retry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01\
+ks\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0er\
+etry-after-ms*\x0aattributes\xd2\0\0\x05\x04\0\x10agent-error-info\x01S\x01j\x01\
+\x02\x01s\x01@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\
+\x0eretry-after-ms*\x0aattributes\xd2\0\0\xd4\0\x04\0\x16agent-retry-error-info\x01\
+U\x01@\x08\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retrya\
+ble\x7f\x0eretry-after-ms*\x0aattributes\xd2\0\0\x05\x04\0\x0bagent-error\x01V\x01\
+@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01W\x01\
+@\x03\x08agent-idy\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01X\x04\
+\0\x10step-debug-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow\
+-stdlib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\
+\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\
+\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

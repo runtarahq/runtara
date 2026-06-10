@@ -888,6 +888,28 @@ impl DirectJsonManifest {
         .into_bytes())
     }
 
+    /// Structured WAIT_TIMEOUT envelope for onError routing (GAP-14). The
+    /// plain-string `wait_timeout_error` stays the /failed payload for parity
+    /// with the generated path; routed handlers need a structured envelope so
+    /// `steps.__error.code` / `.category` references resolve.
+    pub fn wait_timeout_error_envelope(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, String> {
+        self.wait_step(step_id)?;
+        serde_json::to_vec(&serde_json::json!({
+            "code": "WAIT_TIMEOUT",
+            "message": format!(
+                "WaitForSignal step '{step_id}' timed out after {timeout_ms}ms waiting for signal '{signal_id}'"
+            ),
+            "category": "timeout",
+            "severity": "error",
+        }))
+        .map_err(|err| format!("failed to serialize wait-timeout envelope: {err}"))
+    }
+
     /// Build generated-code-compatible inputs for a WaitForSignal `onWait` graph.
     pub fn wait_on_wait_variables(
         &self,
