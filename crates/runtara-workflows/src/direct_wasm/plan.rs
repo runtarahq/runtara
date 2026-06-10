@@ -23,6 +23,9 @@
 //! deliberately mirrors the generated compiler so both accept the same graphs and
 //! execute them identically (A/B parity).
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use super::error::DirectCompileError;
 use super::manifest::{
     DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectDelayManifest, DirectEdgeManifest,
@@ -389,7 +392,16 @@ fn step_run_plan(
     step_id: &str,
     stack: &mut Vec<String>,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, true, None, step_id)
+    step_run_plan_inner(
+        graph,
+        child_workflows,
+        step_id,
+        stack,
+        true,
+        None,
+        step_id,
+        &mut DirectRegionOrderCache::new(),
+    )
 }
 
 fn step_run_plan_without_on_error(
@@ -397,8 +409,18 @@ fn step_run_plan_without_on_error(
     child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
     stack: &mut Vec<String>,
+    orders: &mut DirectRegionOrderCache,
 ) -> Result<DirectRunPlan, DirectCompileError> {
-    step_run_plan_inner(graph, child_workflows, step_id, stack, false, None, step_id)
+    step_run_plan_inner(
+        graph,
+        child_workflows,
+        step_id,
+        stack,
+        false,
+        None,
+        step_id,
+        orders,
+    )
 }
 
 fn step_breakpoint_enabled(graph: &DirectGraphManifest, step: &DirectStepManifest) -> bool {
@@ -410,6 +432,7 @@ fn step_breakpoint_enabled(graph: &DirectGraphManifest, step: &DirectStepManifes
             .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_run_plan_inner(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -424,6 +447,8 @@ fn step_run_plan_inner(
     // a branch target, a merge continuation, or an onError handler). Steps follow
     // the region's topological order, which linearizes fan-out and joins.
     region_root: &str,
+    // Memoized region orders for `graph`, shared across the whole plan build.
+    orders: &mut DirectRegionOrderCache,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     if stop_at == Some(step_id) {
         return Ok(DirectRunPlan::Join);
@@ -456,6 +481,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::Filter {
@@ -502,6 +528,7 @@ fn step_run_plan_inner(
                         include_on_error,
                         branch_stop,
                         &target,
+                        orders,
                     )?;
                     branches.push(DirectSwitchRoutePlan {
                         label,
@@ -517,6 +544,7 @@ fn step_run_plan_inner(
                     include_on_error,
                     branch_stop,
                     &default_target,
+                    orders,
                 )?;
                 let merge_plan = match &merge {
                     Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -527,6 +555,7 @@ fn step_run_plan_inner(
                         include_on_error,
                         stop_at,
                         merge_step,
+                        orders,
                     )?)),
                     None => None,
                 };
@@ -549,6 +578,7 @@ fn step_run_plan_inner(
                     include_on_error,
                     stop_at,
                     region_root,
+                    orders,
                 )?;
 
                 Ok(DirectRunPlan::SwitchValue {
@@ -569,6 +599,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::GroupBy {
@@ -596,9 +627,10 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
             let error_plan = if include_on_error {
-                on_error_plan(graph, child_workflows, step_id, stack)?
+                on_error_plan(graph, child_workflows, step_id, stack, orders)?
             } else {
                 None
             };
@@ -634,9 +666,10 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
             let error_plan = if include_on_error {
-                on_error_plan(graph, child_workflows, step_id, stack)?
+                on_error_plan(graph, child_workflows, step_id, stack, orders)?
             } else {
                 None
             };
@@ -667,9 +700,10 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
             let error_plan = if include_on_error {
-                on_error_plan(graph, child_workflows, step_id, stack)?
+                on_error_plan(graph, child_workflows, step_id, stack, orders)?
             } else {
                 None
             };
@@ -701,6 +735,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::Delay {
@@ -730,6 +765,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::WaitForSignal {
@@ -738,7 +774,7 @@ fn step_run_plan_inner(
                 on_wait_plan: on_wait_plan.map(Box::new),
                 next_plan: Box::new(next_plan),
                 error_plan: if include_on_error {
-                    on_error_plan(graph, child_workflows, step_id, stack)?
+                    on_error_plan(graph, child_workflows, step_id, stack, orders)?
                 } else {
                     None
                 },
@@ -754,6 +790,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::Log {
@@ -777,9 +814,10 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
             let error_plan = if include_on_error {
-                on_error_plan(graph, child_workflows, step_id, stack)?
+                on_error_plan(graph, child_workflows, step_id, stack, orders)?
             } else {
                 None
             };
@@ -826,9 +864,10 @@ fn step_run_plan_inner(
                     include_on_error,
                     stop_at,
                     region_root,
+                    orders,
                 )?;
                 let error_plan = if include_on_error {
-                    on_error_plan(graph, child_workflows, step_id, stack)?
+                    on_error_plan(graph, child_workflows, step_id, stack, orders)?
                 } else {
                     None
                 };
@@ -1013,6 +1052,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
 
             Ok(DirectRunPlan::AiAgentLoop {
@@ -1027,7 +1067,7 @@ fn step_run_plan_inner(
                 memory,
                 next_plan: Box::new(next_plan),
                 error_plan: if include_on_error {
-                    on_error_plan(graph, child_workflows, step_id, stack)?
+                    on_error_plan(graph, child_workflows, step_id, stack, orders)?
                 } else {
                     None
                 },
@@ -1076,6 +1116,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 branch_stop,
                 &true_step,
+                orders,
             )?;
             let false_plan = step_run_plan_inner(
                 graph,
@@ -1085,6 +1126,7 @@ fn step_run_plan_inner(
                 include_on_error,
                 branch_stop,
                 &false_step,
+                orders,
             )?;
             let merge_plan = match &merge {
                 Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -1095,6 +1137,7 @@ fn step_run_plan_inner(
                     include_on_error,
                     stop_at,
                     merge_step,
+                    orders,
                 )?)),
                 None => None,
             };
@@ -1145,7 +1188,9 @@ fn direct_has_conditioned_normal_flow_edges(graph: &DirectGraphManifest, step_id
 /// which the parent emits as the shared continuation. The order linearizes
 /// fan-out (a step with multiple unconditional successors) and the joins it
 /// creates so each step is emitted exactly once, in dependency order — the same
-/// sequential execution the generated path produces.
+/// sequential execution the generated path produces. Each call is O(V*E); plan
+/// construction goes through `DirectRegionOrderCache` so a region's order is
+/// computed once per graph rather than once per planned step.
 pub(super) fn direct_execution_order(
     graph: &DirectGraphManifest,
     root: &str,
@@ -1235,6 +1280,41 @@ pub(super) fn direct_execution_order(
     order
 }
 
+/// Memoized `direct_execution_order` results, keyed by `(region_root, stop_at)`.
+/// Plan construction asks for a region's order once per step it plans
+/// (`topo_successor`); recomputing the O(V*E) discovery + Kahn pass each time
+/// made plan construction O(n^3) in chain length. One cache lives for the
+/// duration of a single `step_run_plan` call and never crosses graphs:
+/// Split/While/EmbedWorkflow subgraphs are separate `DirectGraphManifest`
+/// instances planned through their own `step_run_plan` (fresh cache) calls.
+struct DirectRegionOrderCache {
+    orders: HashMap<(String, Option<String>), Rc<Vec<String>>>,
+}
+
+impl DirectRegionOrderCache {
+    fn new() -> Self {
+        Self {
+            orders: HashMap::new(),
+        }
+    }
+
+    /// The topological order of the region rooted at `root` (stopping at
+    /// `stop_at`), computed on first use. `graph` must be the graph this cache
+    /// was created for.
+    fn region_order(
+        &mut self,
+        graph: &DirectGraphManifest,
+        root: &str,
+        stop_at: Option<&str>,
+    ) -> Rc<Vec<String>> {
+        Rc::clone(
+            self.orders
+                .entry((root.to_string(), stop_at.map(str::to_string)))
+                .or_insert_with(|| Rc::new(direct_execution_order(graph, root, stop_at))),
+        )
+    }
+}
+
 /// The next step to run after `from_step` within its region — the step
 /// immediately after it in the region's topological order. `None` when
 /// `from_step` ends the region (its remaining edges, if any, exit to `stop_at`).
@@ -1243,12 +1323,14 @@ fn topo_successor(
     region_root: &str,
     stop_at: Option<&str>,
     from_step: &str,
+    orders: &mut DirectRegionOrderCache,
 ) -> Option<String> {
-    let order = direct_execution_order(graph, region_root, stop_at);
+    let order = orders.region_order(graph, region_root, stop_at);
     let position = order.iter().position(|step| step == from_step)?;
     order.get(position + 1).cloned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn normal_flow_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -1257,6 +1339,7 @@ fn normal_flow_plan(
     include_on_error: bool,
     stop_at: Option<&str>,
     region_root: &str,
+    orders: &mut DirectRegionOrderCache,
 ) -> Result<DirectRunPlan, DirectCompileError> {
     let edges = normal_flow_edges(graph, from_step);
 
@@ -1284,7 +1367,7 @@ fn normal_flow_plan(
             // region (or exit to the enclosing merge). A region with two
             // terminals is an ambiguous multi-exit graph; validation rejects
             // it, guard here so we never mis-emit one.
-            let region = direct_execution_order(graph, region_root, stop_at);
+            let region = orders.region_order(graph, region_root, stop_at);
             let hard_terminals = region
                 .iter()
                 .filter(|step_id| normal_flow_edges(graph, step_id).is_empty())
@@ -1295,7 +1378,7 @@ fn normal_flow_plan(
                 )));
             }
         }
-        if let Some(next) = topo_successor(graph, region_root, stop_at, from_step) {
+        if let Some(next) = topo_successor(graph, region_root, stop_at, from_step, orders) {
             stack.push(from_step.to_string());
             let next_plan = step_run_plan_inner(
                 graph,
@@ -1305,6 +1388,7 @@ fn normal_flow_plan(
                 include_on_error,
                 stop_at,
                 region_root,
+                orders,
             )?;
             stack.pop();
             return Ok(next_plan);
@@ -1390,6 +1474,7 @@ fn normal_flow_plan(
                 include_on_error,
                 branch_stop,
                 &edge.to_step,
+                orders,
             )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
@@ -1405,6 +1490,7 @@ fn normal_flow_plan(
         include_on_error,
         branch_stop,
         &default_edge.to_step,
+        orders,
     )?;
     let merge_plan = match &merge {
         Some(merge_step) => Some(Box::new(step_run_plan_inner(
@@ -1415,6 +1501,7 @@ fn normal_flow_plan(
             include_on_error,
             stop_at,
             merge_step,
+            orders,
         )?)),
         None => None,
     };
@@ -1501,6 +1588,7 @@ fn on_error_plan(
     child_workflows: &[DirectChildWorkflowGraphManifest],
     from_step: &str,
     stack: &mut Vec<String>,
+    orders: &mut DirectRegionOrderCache,
 ) -> Result<Option<DirectErrorRoutePlan>, DirectCompileError> {
     let edges = on_error_edges(graph, from_step);
     if edges.is_empty() {
@@ -1549,8 +1637,13 @@ fn on_error_plan(
                     "missing onError condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan =
-                step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack)?;
+            let plan = step_run_plan_without_on_error(
+                graph,
+                child_workflows,
+                &edge.to_step,
+                stack,
+                orders,
+            )?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
@@ -1558,7 +1651,9 @@ fn on_error_plan(
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
     let default_plan = default_edge
-        .map(|edge| step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack))
+        .map(|edge| {
+            step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack, orders)
+        })
         .transpose()?
         .map(Box::new);
     stack.pop();

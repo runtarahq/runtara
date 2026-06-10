@@ -1027,11 +1027,12 @@ fn direct_compile_long_chain_compiles_from_small_stack_caller() {
     // Run-plan build, emit, and the run-plan drop all recurse with chain
     // length; before the dedicated compile thread a chain this long overflowed
     // the caller's 2 MiB stack in debug builds and aborted the process
-    // (release builds died between 400 and 800 chained steps). Kept at 300 —
-    // 3x the debug overflow threshold — because plan construction recomputes
-    // region orders per step (O(n^3) in chain length), so longer chains make
-    // this test disproportionately slow.
-    let chain_len = 300usize;
+    // (release builds died between 400 and 800 chained steps). 600 steps is 6x
+    // the debug overflow threshold — affordable since plan construction
+    // memoizes region orders (`DirectRegionOrderCache`) instead of recomputing
+    // them per step, which was O(n^3) in chain length and made this length
+    // take ~16s in debug.
+    let chain_len = 600usize;
     let mut steps = serde_json::Map::new();
     let mut plan = Vec::new();
     for i in 0..chain_len {
