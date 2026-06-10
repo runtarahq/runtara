@@ -434,9 +434,50 @@ Add an optional id (rename with reference-rewrite) affordance; add `metadata` to
 
 Complexity/effort: S (DSL fields), M (id rename).
 
+## Planned Findings: JSON-Only Editing Surfaces (29-33)
+
+Findings 1-28 made every DSL field authorable and lossless, but seven surfaces still edit raw JSON. These are parity-complete, UX-incomplete. Plan prepared 2026-06-10; not yet implemented. Suggested order: 29 → 30 → 31 → 32 → 33 (29 unlocks 30; the rest are independent).
+
+### 29. Shared mapping-object editor for InputMapping-shaped JSON textareas
+
+Status: Planned. Effort: M (component) + S per swap.
+
+Four fields are `InputMapping` objects (name → MappingValue) edited as JSON textareas: `Log.context` (LogStepField.tsx:184), `Error.context` (ErrorStepField.tsx:263), `WaitForSignal.action.correlation` and `.context` (WaitForSignalStepField.tsx:325/346). The structured editor they need already exists — `SimpleInputMappingEditor`/`MappingValueInput` (all four value modes, reference picker, fallback defaults) — but is coupled to the node form's `inputMapping` field array.
+
+Plan: extract a standalone `MappingObjectField` (key/value rows bound to a plain object value, add/remove rows, full MappingValueInput per row) from the existing components, then replace the four textareas. Serializers are unaffected (the textareas already parse to the same object shape). Round-trip tests per field; keep a collapsed "edit as JSON" escape hatch initially.
+
+### 30. Structured Agent compensation form
+
+Status: Planned (gated on finding 29's component). Effort: S.
+
+`Agent.compensation` is an advanced-JSON textarea (NodeFormItem.tsx:286) — acceptable while the runtime accepts-but-ignores compensation (W070), but cheap to do properly once 29 lands: `compensationStep` (picker over the current graph's steps), `compensationData` (MappingObjectField), `trigger` (enum select), `order` (number) — verify the exact `CompensationConfig` fields in schema_types.rs first. Keep the warning-only copy and the JSON fallback.
+
+### 31. Structured controls in the schema advanced dialog
+
+Status: Planned. Effort: M.
+
+`AdvancedSchemaFieldDialog` (SchemaFieldsEditor.tsx) edits `items`, `properties`, `visibleWhen`, and validation/display metadata as JSON. Plan: dedicated controls in three tiers — (a) trivial typed inputs for label/placeholder/order/format/min/max/pattern; (b) `items` as an element-type select with recursion into object elements; (c) `properties` as a nested (recursive) SchemaFieldsEditor and `visibleWhen` as field/operator/value rows (verify its exact shape in schema_types.rs). The JSON dialog remains only for unknown extension keys. The parser/builder are already lossless (finding 9), so this is purely form work.
+
+### 32. Schema-aware CRON static inputs
+
+Status: Planned. Effort: M.
+
+The CRON "Static inputs (JSON)" textarea (finding 27) should render the selected workflow's input schema as a form. `WorkflowExecuteDialog` already does exactly this (`parseSchema` + `renderField`, WorkflowExecuteDialog.tsx:189/387) — extract that renderer into a shared component, fetch the workflow's inputSchema from the trigger form's `workflowId`, and produce the `{"data": {...}}` envelope, with an optional variables-overrides section. Keep the JSON textarea as an advanced toggle for envelopes that don't match the schema. Watch the feature boundary (triggers importing from workflows): move the renderer to `shared/` or follow the repo's existing cross-feature import pattern.
+
+### 33. Visual onWait editing via the container machinery
+
+Status: Planned. Effort: L.
+
+`WaitForSignal.onWait` is a full nested ExecutionGraph edited as a JSON textarea (WaitForSignalStepField.tsx:367). Rather than a modal sub-editor (the editor store and serializer are global), reuse the Split/While container path end-to-end:
+- Load: extend `normalizeNodesAndEdges`'s container keying (utils.tsx:275) so a WaitForSignal step with `onWait` explodes it into child nodes with `parentId`, like a subgraph; graph-level fields ride the existing `subgraphMeta` carrier (finding 20).
+- Save: `composeExecutionGraph` writes the rebuilt graph to `step.onWait` (not `step.subgraph`) for WaitForSignal containers.
+- Timeline/canvas: extend `isScopeStepType` (TimelineView.tsx:229) and ContainerNode rendering; add an "Add on-wait flow" affordance on WaitForSignal steps without one; inject `variables._signal_id` into reference suggestions inside the scope.
+- The validator already recurses into onWait (condition rules, scope vars), so no backend work.
+Risks: node-type switching on onWait presence (React Flow node identity), and the JSON editor fighting the container — make the container the single source of truth once a step has onWait, demote the JSON editor to read-only/removed. Round-trip tests for onWait-with-meta; this is the one finding that most needs the browser/e2e pass.
+
 ## Recommended Follow-Up
 
-Findings 1-28 are implemented. What remains open, in suggested order:
+Findings 1-28 are implemented; findings 29-33 above are the planned JSON-only-surface work. What else remains open, in suggested order:
 
 1. Browser/e2e verification pass: all fixes in findings 16-28 are verified by unit/round-trip tests and typecheck only — exercise the new affordances (condition picker custom paths, parallel branch/join/delete-route, AiAgent error routes + memory removal, Switch default controls, CRON inputs, step-id rename) against a running stack.
 2. Discovery surfaces still API-only (finding 27): a workflow-actions browser (list/submit open actions) and an embed dependency/dependents viewer.
