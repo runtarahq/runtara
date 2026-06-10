@@ -1,0 +1,1490 @@
+{
+  "name": "topology_control",
+  "description": "Topology control: identical graph shape to the row_classify subgraph inside the failing case (same step ids, same edges, same Conditional/Switch placements, same fan-out topology). Every Agent step is replaced with utils:get-current-iso-datetime with inputMapping: {}; Conditional uses an immediate EQ check that returns false; Switch uses an immediate default. This deploys and runs successfully \u2014 embed_query and pick_first_emb DO fire, all 45 unique steps emit step_debug_end events. Proves the scheduler handles the topology fine; the failing case bug is in inputMapping content, not graph shape.",
+  "entryPoint": "error",
+  "executionPlan": [
+    {
+      "fromStep": "extract_sku",
+      "label": "next",
+      "toStep": "extract_cat"
+    },
+    {
+      "fromStep": "extract_cat",
+      "label": "next",
+      "toStep": "extract_desc"
+    },
+    {
+      "fromStep": "embed_query",
+      "label": "next",
+      "toStep": "pick_first_emb"
+    },
+    {
+      "fromStep": "pick_first_emb",
+      "label": "next",
+      "toStep": "fts_query"
+    },
+    {
+      "fromStep": "derive_codes",
+      "label": "next",
+      "toStep": "parse_codes"
+    },
+    {
+      "fromStep": "parse_codes",
+      "label": "next",
+      "toStep": "lookup_tpp"
+    },
+    {
+      "fromStep": "lookup_tpp",
+      "label": "next",
+      "toStep": "decide"
+    },
+    {
+      "fromStep": "decide",
+      "label": "next",
+      "toStep": "extract_tpp_inst"
+    },
+    {
+      "fromStep": "persist",
+      "label": "next",
+      "toStep": "m1"
+    },
+    {
+      "fromStep": "m1",
+      "label": "next",
+      "toStep": "m2"
+    },
+    {
+      "fromStep": "m2",
+      "label": "next",
+      "toStep": "m3"
+    },
+    {
+      "fromStep": "m3",
+      "label": "next",
+      "toStep": "m4"
+    },
+    {
+      "fromStep": "m4",
+      "label": "next",
+      "toStep": "m5"
+    },
+    {
+      "fromStep": "m5",
+      "label": "next",
+      "toStep": "m6"
+    },
+    {
+      "fromStep": "m6",
+      "label": "next",
+      "toStep": "m7"
+    },
+    {
+      "fromStep": "m7",
+      "label": "next",
+      "toStep": "m8"
+    },
+    {
+      "fromStep": "m8",
+      "label": "next",
+      "toStep": "m9"
+    },
+    {
+      "fromStep": "m9",
+      "label": "next",
+      "toStep": "m10"
+    },
+    {
+      "fromStep": "m10",
+      "label": "next",
+      "toStep": "m11"
+    },
+    {
+      "fromStep": "extract_match",
+      "label": "next",
+      "toStep": "parse_match"
+    },
+    {
+      "fromStep": "retr_vec",
+      "label": "next",
+      "toStep": "extract_match"
+    },
+    {
+      "fromStep": "retr_fts",
+      "label": "next",
+      "toStep": "extract_match"
+    },
+    {
+      "fromStep": "retr_trgm",
+      "label": "next",
+      "toStep": "extract_match"
+    },
+    {
+      "fromStep": "retr_vec",
+      "label": "next",
+      "toStep": "build_prompt"
+    },
+    {
+      "fromStep": "build_prompt",
+      "label": "next",
+      "toStep": "judge"
+    },
+    {
+      "fromStep": "parse_match",
+      "label": "next",
+      "toStep": "final_pick"
+    },
+    {
+      "fromStep": "judge",
+      "label": "next",
+      "toStep": "final_pick"
+    },
+    {
+      "fromStep": "final_pick",
+      "label": "next",
+      "toStep": "parse_final"
+    },
+    {
+      "fromStep": "parse_final",
+      "label": "next",
+      "toStep": "derive_codes"
+    },
+    {
+      "fromStep": "extract_tpp_inst",
+      "label": "next",
+      "toStep": "derive_tpp_uuid"
+    },
+    {
+      "fromStep": "derive_tpp_uuid",
+      "label": "next",
+      "toStep": "parse_tpp_uuid"
+    },
+    {
+      "fromStep": "parse_tpp_uuid",
+      "label": "next",
+      "toStep": "lookup_tpp_node"
+    },
+    {
+      "fromStep": "lookup_tpp_node",
+      "label": "next",
+      "toStep": "build_paths"
+    },
+    {
+      "fromStep": "build_paths",
+      "label": "next",
+      "toStep": "parse_paths"
+    },
+    {
+      "fromStep": "m11",
+      "label": "next",
+      "toStep": "m12"
+    },
+    {
+      "fromStep": "m12",
+      "label": "next",
+      "toStep": "m13"
+    },
+    {
+      "fromStep": "m13",
+      "label": "next",
+      "toStep": "m14"
+    },
+    {
+      "fromStep": "m14",
+      "label": "next",
+      "toStep": "m15"
+    },
+    {
+      "fromStep": "extract_desc",
+      "label": "next",
+      "toStep": "extract_vendor_raw"
+    },
+    {
+      "fromStep": "lookup_alias",
+      "label": "next",
+      "toStep": "extract_resolved_vid"
+    },
+    {
+      "fromStep": "lookup_alias",
+      "label": "next",
+      "toStep": "extract_resolved_vnorm"
+    },
+    {
+      "fromStep": "extract_resolved_vid",
+      "label": "next",
+      "toStep": "lookup_vendor_master"
+    },
+    {
+      "fromStep": "m15",
+      "label": "next",
+      "toStep": "m16"
+    },
+    {
+      "fromStep": "m16",
+      "label": "next",
+      "toStep": "m17"
+    },
+    {
+      "fromStep": "extract_vendor_raw",
+      "label": "next",
+      "toStep": "lookup_alias"
+    },
+    {
+      "fromStep": "extract_resolved_vid",
+      "label": "next",
+      "toStep": "extract_resolved_vnorm"
+    },
+    {
+      "fromStep": "extract_resolved_vnorm",
+      "label": "next",
+      "toStep": "lookup_vendor_master"
+    },
+    {
+      "fromStep": "lookup_vendor_master",
+      "label": "next",
+      "toStep": "normalize_sku"
+    },
+    {
+      "fromStep": "normalize_sku",
+      "label": "next",
+      "toStep": "lookup_sku_map"
+    },
+    {
+      "fromStep": "lookup_sku_map",
+      "label": "next",
+      "toStep": "cond_sku_hit"
+    },
+    {
+      "fromStep": "cond_sku_hit",
+      "label": "true",
+      "toStep": "persist_from_cache"
+    },
+    {
+      "fromStep": "persist_from_cache",
+      "label": "next",
+      "toStep": "bump_cache"
+    },
+    {
+      "fromStep": "parse_paths",
+      "label": "next",
+      "toStep": "persist"
+    },
+    {
+      "fromStep": "mh1",
+      "label": "next",
+      "toStep": "mh2"
+    },
+    {
+      "fromStep": "mh2",
+      "label": "next",
+      "toStep": "mh3"
+    },
+    {
+      "fromStep": "mh3",
+      "label": "next",
+      "toStep": "mh4"
+    },
+    {
+      "fromStep": "mh4",
+      "label": "next",
+      "toStep": "mh5"
+    },
+    {
+      "fromStep": "mh5",
+      "label": "next",
+      "toStep": "mh6"
+    },
+    {
+      "fromStep": "mh6",
+      "label": "next",
+      "toStep": "mh7"
+    },
+    {
+      "fromStep": "mh7",
+      "label": "next",
+      "toStep": "mh8"
+    },
+    {
+      "fromStep": "mh8",
+      "label": "next",
+      "toStep": "mh9"
+    },
+    {
+      "fromStep": "mh9",
+      "label": "next",
+      "toStep": "mh10"
+    },
+    {
+      "fromStep": "switch_pick",
+      "label": "next",
+      "toStep": "row_finish"
+    },
+    {
+      "fromStep": "fts_query",
+      "label": "next",
+      "toStep": "build_vec_score"
+    },
+    {
+      "fromStep": "build_vec_score",
+      "label": "next",
+      "toStep": "parse_vec_score"
+    },
+    {
+      "fromStep": "parse_vec_score",
+      "label": "next",
+      "toStep": "retr_vec"
+    },
+    {
+      "fromStep": "retr_fts",
+      "label": "next",
+      "toStep": "build_prompt"
+    },
+    {
+      "fromStep": "retr_trgm",
+      "label": "next",
+      "toStep": "build_prompt"
+    },
+    {
+      "fromStep": "pick_first_emb",
+      "label": "next",
+      "toStep": "retr_fts"
+    },
+    {
+      "fromStep": "pick_first_emb",
+      "label": "next",
+      "toStep": "retr_trgm"
+    },
+    {
+      "fromStep": "build_combined_prompt",
+      "label": "next",
+      "toStep": "derive_profile"
+    },
+    {
+      "fromStep": "derive_profile",
+      "label": "next",
+      "toStep": "fts_query"
+    },
+    {
+      "fromStep": "derive_profile",
+      "label": "next",
+      "toStep": "retr_trgm"
+    },
+    {
+      "fromStep": "derive_profile",
+      "label": "next",
+      "toStep": "build_prompt"
+    },
+    {
+      "fromStep": "cond_sku_hit",
+      "label": "false",
+      "toStep": "miss_gate"
+    },
+    {
+      "fromStep": "miss_gate",
+      "label": "next",
+      "toStep": "build_combined_prompt"
+    },
+    {
+      "fromStep": "miss_gate",
+      "label": "next",
+      "toStep": "embed_query"
+    },
+    {
+      "fromStep": "bump_cache",
+      "label": "next",
+      "toStep": "lookup_cached_unspsc"
+    },
+    {
+      "fromStep": "lookup_cached_unspsc",
+      "label": "next",
+      "toStep": "mh1"
+    },
+    {
+      "fromStep": "mh10",
+      "label": "next",
+      "toStep": "mh11"
+    },
+    {
+      "fromStep": "mh11",
+      "label": "next",
+      "toStep": "mh12"
+    },
+    {
+      "fromStep": "mh12",
+      "label": "next",
+      "toStep": "mh13"
+    },
+    {
+      "fromStep": "mh13",
+      "label": "next",
+      "toStep": "mh14"
+    },
+    {
+      "fromStep": "mh14",
+      "label": "next",
+      "toStep": "mh15"
+    },
+    {
+      "fromStep": "mh15",
+      "label": "next",
+      "toStep": "mh16"
+    },
+    {
+      "fromStep": "mh16",
+      "label": "next",
+      "toStep": "mh17"
+    },
+    {
+      "fromStep": "extract_desc",
+      "label": "next",
+      "toStep": "extract_quantity"
+    },
+    {
+      "fromStep": "extract_quantity",
+      "label": "next",
+      "toStep": "extract_price"
+    },
+    {
+      "fromStep": "extract_price",
+      "label": "next",
+      "toStep": "extract_vendor_raw"
+    },
+    {
+      "fromStep": "extract_price",
+      "label": "next",
+      "toStep": "clean_price"
+    },
+    {
+      "fromStep": "clean_price",
+      "label": "next",
+      "toStep": "extract_vendor_raw"
+    },
+    {
+      "fromStep": "clean_price",
+      "label": "next",
+      "toStep": "extract_extended_cost"
+    },
+    {
+      "fromStep": "extract_extended_cost",
+      "label": "next",
+      "toStep": "clean_extended_cost"
+    },
+    {
+      "fromStep": "clean_extended_cost",
+      "label": "next",
+      "toStep": "to_qty_json"
+    },
+    {
+      "fromStep": "to_qty_json",
+      "label": "next",
+      "toStep": "to_price_json"
+    },
+    {
+      "fromStep": "to_price_json",
+      "label": "next",
+      "toStep": "to_ext_json"
+    },
+    {
+      "fromStep": "to_ext_json",
+      "label": "next",
+      "toStep": "parse_qty"
+    },
+    {
+      "fromStep": "parse_qty",
+      "label": "next",
+      "toStep": "parse_price"
+    },
+    {
+      "fromStep": "parse_price",
+      "label": "next",
+      "toStep": "parse_ext"
+    },
+    {
+      "fromStep": "parse_ext",
+      "label": "next",
+      "toStep": "extract_vendor_raw"
+    },
+    {
+      "fromStep": "err1",
+      "toStep": "err2"
+    },
+    {
+      "fromStep": "err2",
+      "toStep": "err3"
+    },
+    {
+      "fromStep": "err3",
+      "toStep": "err4"
+    },
+    {
+      "fromStep": "err4",
+      "toStep": "err5"
+    },
+    {
+      "fromStep": "err5",
+      "toStep": "err6"
+    },
+    {
+      "fromStep": "err6",
+      "toStep": "err7"
+    },
+    {
+      "fromStep": "err7",
+      "toStep": "err8"
+    },
+    {
+      "fromStep": "err8",
+      "toStep": "err9"
+    },
+    {
+      "fromStep": "err9",
+      "toStep": "err10"
+    },
+    {
+      "fromStep": "err10",
+      "toStep": "err11"
+    },
+    {
+      "fromStep": "err11",
+      "toStep": "err12"
+    },
+    {
+      "fromStep": "err12",
+      "toStep": "err13"
+    },
+    {
+      "fromStep": "err13",
+      "toStep": "err14"
+    },
+    {
+      "fromStep": "err14",
+      "toStep": "err15"
+    },
+    {
+      "fromStep": "err15",
+      "toStep": "err16"
+    },
+    {
+      "fromStep": "err16",
+      "toStep": "err17"
+    },
+    {
+      "fromStep": "m17",
+      "toStep": "m18"
+    },
+    {
+      "fromStep": "m18",
+      "toStep": "switch_pick"
+    },
+    {
+      "fromStep": "mh17",
+      "toStep": "mh18"
+    },
+    {
+      "fromStep": "mh18",
+      "toStep": "switch_pick"
+    },
+    {
+      "fromStep": "err17",
+      "toStep": "err18"
+    },
+    {
+      "fromStep": "err18",
+      "toStep": "err_persist"
+    },
+    {
+      "fromStep": "err_persist",
+      "toStep": "row_finish_error"
+    },
+    {
+      "fromStep": "err_persist",
+      "label": "onError",
+      "toStep": "row_finish_error"
+    },
+    {
+      "fromStep": "to_qty_json",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "to_price_json",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "to_ext_json",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "parse_qty",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "parse_price",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "parse_ext",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "derive_profile",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "embed_query",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "retr_vec",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "retr_fts",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "retr_trgm",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "judge",
+      "label": "onError",
+      "toStep": "capture_row_err"
+    },
+    {
+      "fromStep": "capture_row_err",
+      "toStep": "err1"
+    },
+    {
+      "fromStep": "error",
+      "toStep": "extract_sku"
+    }
+  ],
+  "steps": {
+    "build_combined_prompt": {
+      "id": "build_combined_prompt",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "build_paths": {
+      "id": "build_paths",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "build_prompt": {
+      "id": "build_prompt",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "build_vec_score": {
+      "id": "build_vec_score",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "bump_cache": {
+      "id": "bump_cache",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "capture_row_err": {
+      "id": "capture_row_err",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "clean_extended_cost": {
+      "id": "clean_extended_cost",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "clean_price": {
+      "id": "clean_price",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "cond_sku_hit": {
+      "id": "cond_sku_hit",
+      "stepType": "Conditional",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "value": "x",
+            "valueType": "immediate"
+          },
+          {
+            "value": "y",
+            "valueType": "immediate"
+          }
+        ]
+      }
+    },
+    "decide": {
+      "id": "decide",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "derive_codes": {
+      "id": "derive_codes",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "derive_profile": {
+      "id": "derive_profile",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "derive_tpp_uuid": {
+      "id": "derive_tpp_uuid",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "embed_query": {
+      "id": "embed_query",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err1": {
+      "id": "err1",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err10": {
+      "id": "err10",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err11": {
+      "id": "err11",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err12": {
+      "id": "err12",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err13": {
+      "id": "err13",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err14": {
+      "id": "err14",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err15": {
+      "id": "err15",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err16": {
+      "id": "err16",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err17": {
+      "id": "err17",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err18": {
+      "id": "err18",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err2": {
+      "id": "err2",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err3": {
+      "id": "err3",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err4": {
+      "id": "err4",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err5": {
+      "id": "err5",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err6": {
+      "id": "err6",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err7": {
+      "id": "err7",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err8": {
+      "id": "err8",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err9": {
+      "id": "err9",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "err_persist": {
+      "id": "err_persist",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "error": {
+      "id": "error",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_cat": {
+      "id": "extract_cat",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_desc": {
+      "id": "extract_desc",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_extended_cost": {
+      "id": "extract_extended_cost",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_match": {
+      "id": "extract_match",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_price": {
+      "id": "extract_price",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_quantity": {
+      "id": "extract_quantity",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_resolved_vid": {
+      "id": "extract_resolved_vid",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_resolved_vnorm": {
+      "id": "extract_resolved_vnorm",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_sku": {
+      "id": "extract_sku",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_tpp_inst": {
+      "id": "extract_tpp_inst",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "extract_vendor_raw": {
+      "id": "extract_vendor_raw",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "final_pick": {
+      "id": "final_pick",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "fts_query": {
+      "id": "fts_query",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "judge": {
+      "id": "judge",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_alias": {
+      "id": "lookup_alias",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_cached_unspsc": {
+      "id": "lookup_cached_unspsc",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_sku_map": {
+      "id": "lookup_sku_map",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_tpp": {
+      "id": "lookup_tpp",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_tpp_node": {
+      "id": "lookup_tpp_node",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "lookup_vendor_master": {
+      "id": "lookup_vendor_master",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m1": {
+      "id": "m1",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m10": {
+      "id": "m10",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m11": {
+      "id": "m11",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m12": {
+      "id": "m12",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m13": {
+      "id": "m13",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m14": {
+      "id": "m14",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m15": {
+      "id": "m15",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m16": {
+      "id": "m16",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m17": {
+      "id": "m17",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m18": {
+      "id": "m18",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m2": {
+      "id": "m2",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m3": {
+      "id": "m3",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m4": {
+      "id": "m4",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m5": {
+      "id": "m5",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m6": {
+      "id": "m6",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m7": {
+      "id": "m7",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m8": {
+      "id": "m8",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "m9": {
+      "id": "m9",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh1": {
+      "id": "mh1",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh10": {
+      "id": "mh10",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh11": {
+      "id": "mh11",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh12": {
+      "id": "mh12",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh13": {
+      "id": "mh13",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh14": {
+      "id": "mh14",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh15": {
+      "id": "mh15",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh16": {
+      "id": "mh16",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh17": {
+      "id": "mh17",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh18": {
+      "id": "mh18",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh2": {
+      "id": "mh2",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh3": {
+      "id": "mh3",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh4": {
+      "id": "mh4",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh5": {
+      "id": "mh5",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh6": {
+      "id": "mh6",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh7": {
+      "id": "mh7",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh8": {
+      "id": "mh8",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "mh9": {
+      "id": "mh9",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "miss_gate": {
+      "id": "miss_gate",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "normalize_sku": {
+      "id": "normalize_sku",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_codes": {
+      "id": "parse_codes",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_ext": {
+      "id": "parse_ext",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_final": {
+      "id": "parse_final",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_match": {
+      "id": "parse_match",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_paths": {
+      "id": "parse_paths",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_price": {
+      "id": "parse_price",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_qty": {
+      "id": "parse_qty",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_tpp_uuid": {
+      "id": "parse_tpp_uuid",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "parse_vec_score": {
+      "id": "parse_vec_score",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "persist": {
+      "id": "persist",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "persist_from_cache": {
+      "id": "persist_from_cache",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "pick_first_emb": {
+      "id": "pick_first_emb",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "retr_fts": {
+      "id": "retr_fts",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "retr_trgm": {
+      "id": "retr_trgm",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "retr_vec": {
+      "id": "retr_vec",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "row_finish": {
+      "id": "row_finish",
+      "stepType": "Finish",
+      "inputMapping": {
+        "x": {
+          "value": "ok",
+          "valueType": "immediate"
+        }
+      }
+    },
+    "row_finish_error": {
+      "id": "row_finish_error",
+      "stepType": "Finish",
+      "inputMapping": {
+        "x": {
+          "value": "ok",
+          "valueType": "immediate"
+        }
+      }
+    },
+    "switch_pick": {
+      "id": "switch_pick",
+      "stepType": "Switch",
+      "config": {
+        "value": {
+          "value": "x",
+          "valueType": "immediate"
+        },
+        "cases": [],
+        "default": {
+          "value": "y",
+          "valueType": "immediate"
+        }
+      }
+    },
+    "to_ext_json": {
+      "id": "to_ext_json",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "to_price_json": {
+      "id": "to_price_json",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    },
+    "to_qty_json": {
+      "id": "to_qty_json",
+      "stepType": "Agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {}
+    }
+  }
+}
