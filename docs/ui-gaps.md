@@ -22,17 +22,21 @@ This document captures gaps between the workflow DSL/platform and what users can
 
 ## Implementation Status
 
-Follow-up implementation on 2026-06-10 addressed the highest-risk timeline save/load losses: graph/root metadata, variable descriptions, entry point preservation, edge condition/priority preservation, Delay authoring, Split advanced config, common breakpoint/durable controls, AiAgent retry config, Log/Error context, WaitForSignal action metadata, and richer schema columns. Remaining larger parity work is primarily authoring UX for edge conditions/priorities, nested `onWait` editing, full advanced schema modeling, and replacing the stale HTTP step metadata fallback with generated metadata.
+Follow-up implementation on 2026-06-10 addressed the highest-risk timeline save/load losses: graph/root metadata, variable descriptions, entry point preservation, edge condition/priority preservation, Delay authoring, Split advanced config, common breakpoint/durable controls, AiAgent retry config, Log/Error context, WaitForSignal action metadata, and richer schema columns.
+
+Second follow-up implementation on 2026-06-10 added timeline route editing for execution-plan edge `condition` and `priority`, added advanced JSON editing for `WaitForSignal.onWait`, and replaced the stale workflow step metadata endpoint with registry-derived metadata. Remaining larger parity work is primarily full visual nested `onWait` graph editing, full advanced schema modeling, more complete MappingValue authoring across specialized source fields, and clearer UX for accepted-but-warning Agent/EmbedWorkflow timeout and compensation fields.
 
 ## Findings
 
-### 1. Edge conditions and priorities are not editable or preserved
+### 1. Edge conditions and priorities needed timeline authoring
+
+Status: Implemented for non-Conditional timeline routes on 2026-06-10. Conditions and priorities are preserved in React Flow edge data, exposed through route settings on branch lanes and sequential transitions, and serialized back to `executionPlan`. Conditional true/false branches intentionally do not expose edge-level condition/priority because the platform ignores those fields for `Conditional` step outgoing edges.
 
 Description:
-The DSL supports `executionPlan[].condition` and `executionPlan[].priority` for conditional routing, default fallback routing, prioritized edges, and conditional `onError` recovery. The timeline currently exposes only edge labels such as `next`, `true`, `false`, `default`, `onError`, switch route labels, and AI tool labels. The shared serializer emits only `fromStep`, `toStep`, and `label`; load also maps only labels back to timeline handles. A workflow authored through DSL or MCP with edge conditions/priorities can lose those fields after timeline save.
+The DSL supports `executionPlan[].condition` and `executionPlan[].priority` for conditional routing, default fallback routing, prioritized edges, and conditional `onError` recovery. The timeline originally exposed only edge labels such as `next`, `true`, `false`, `default`, `onError`, switch route labels, and AI tool labels. Workflows authored through DSL or MCP with edge conditions/priorities therefore needed an explicit timeline authoring surface, not just passive serializer preservation.
 
 Proposed change:
-Add a timeline edge/route configuration model that supports optional condition and priority per outgoing route. Persist these fields in React Flow edge data, timeline route state, `executionGraphToReactFlow`, and `composeExecutionGraph`. Add UI affordances for route conditions on normal fanout and `onError` fanout, with validation messages surfaced before save. Add round-trip tests using edge-condition and priority fixtures.
+Add a timeline edge/route configuration model that supports optional condition and priority per outgoing route. Persist these fields in React Flow edge data, timeline route state, `executionGraphToReactFlow`, and `composeExecutionGraph`. Add UI affordances for route conditions on normal fanout and `onError` fanout, with validation messages surfaced before save. Add round-trip and store tests using edge-condition and priority fixtures. Future polish can replace the JSON editor with a richer condition builder that remains lossless for imported DSL.
 
 Complexity/effort: L.
 
@@ -56,13 +60,15 @@ Decide which wrapper fields are version metadata versus graph DSL fields in the 
 
 Complexity/effort: M to L, depending on backend/API changes required for wrapper fields.
 
-### 4. WaitForSignal `onWait` and `action` are not editable or preserved
+### 4. WaitForSignal `onWait` and `action` needed advanced editing
+
+Status: Partially implemented on 2026-06-10. `action.key`, `action.correlation`, `action.context`, and `onWait` are editable from advanced WaitForSignal settings, and round-trip tests cover `action`, absent `pollIntervalMs`, and `onWait` preservation. Full nested timeline editing for the `onWait` graph remains open.
 
 Description:
-The DSL supports `WaitForSignal.onWait`, `timeoutMs`, `pollIntervalMs`, `responseSchema`, and `action`. Timeline UI edits only response schema, timeout, and poll interval. The serializer rebuilds only those fields, so `onWait` subgraphs and `action` metadata can be dropped after save. There is also a subtle default-materialization risk where missing `pollIntervalMs` can become an explicit default after form edit.
+The DSL supports `WaitForSignal.onWait`, `timeoutMs`, `pollIntervalMs`, `responseSchema`, and `action`. Timeline UI originally edited only response schema, timeout, and poll interval. `onWait` was passively preserved through node data but had no editing surface, and `action` metadata needed explicit advanced controls. There was also a subtle default-materialization risk where missing `pollIntervalMs` could become an explicit default after form edit.
 
 Proposed change:
-Add WaitForSignal advanced settings for `action.key`, `action.correlation`, and `action.context`. For `onWait`, either support nested timeline editing for the wait subgraph or preserve/import it as a read-only advanced block until nested editing is available. Add tests for `onWait`, `action`, and absent `pollIntervalMs` round-trip behavior.
+Add WaitForSignal advanced settings for `action.key`, `action.correlation`, and `action.context`. For `onWait`, either support nested timeline editing for the wait subgraph or preserve/import it as a JSON advanced block until nested editing is available. Add tests for `onWait`, `action`, and absent `pollIntervalMs` round-trip behavior.
 
 Complexity/effort: L.
 
@@ -158,8 +164,10 @@ Complexity/effort: M.
 
 ### 14. Static HTTP step metadata fallback is stale
 
+Status: Implemented on 2026-06-10 for the stale `/api/runtime/metadata/workflow/step-types` endpoint. The main timeline step picker path already used WASM metadata with a registry-backed `/api/runtime/steps` fallback; the separate metadata endpoint now also derives from the DSL registry.
+
 Description:
-The frontend prefers WASM step metadata, which comes from Rust step registration. If WASM metadata fails, the HTTP fallback is hardcoded and missing newer steps. This can produce inconsistent step picker availability between normal and fallback paths.
+The frontend prefers WASM step metadata, which comes from Rust step registration. If WASM metadata fails, the step picker uses `/api/runtime/steps`, which is registry-backed. A separate HTTP metadata endpoint was still hardcoded and missing newer steps, creating inconsistent API/platform metadata for tools or future callers.
 
 Proposed change:
 Generate the HTTP metadata endpoint from the same Rust step metadata registry used by WASM, or remove the stale hardcoded list. Add a test asserting HTTP and WASM metadata contain the same step IDs.
@@ -178,8 +186,7 @@ Complexity/effort: M.
 
 ## Recommended Sequence
 
-1. Fix lossy persistence first: edge `condition`/`priority`, WaitForSignal `onWait`/`action`, Split advanced config, AiAgent retries, Log/Error context, variable descriptions.
-2. Add missing authoring support for Delay and common breakpoint/durable controls.
-3. Normalize workflow metadata import/export/save behavior.
-4. Expand schema editing after the high-risk lossy round-trips are covered.
-5. Add parity tests using existing runtime fixtures for every field the timeline should preserve.
+1. Finish deeper editors for fields that are now preserved through JSON or partial controls: nested `WaitForSignal.onWait`, full schema metadata, and MappingValue authoring in specialized source fields.
+2. Normalize workflow metadata import/export/save behavior and add broader import/export round-trip tests.
+3. Clarify Agent/EmbedWorkflow timeout and compensation UX so accepted-but-warning fields are not presented as reliably enforced runtime controls.
+4. Add parity fixtures using existing runtime examples for every field the timeline should preserve.

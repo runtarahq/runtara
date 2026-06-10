@@ -1095,6 +1095,42 @@ describe('Backend DSL serialization', () => {
     expect(step).not.toHaveProperty('pollIntervalMs');
   });
 
+  it('round-trips WaitForSignal onWait graph', () => {
+    const onWait = {
+      entryPoint: 'notify',
+      steps: {
+        notify: {
+          id: 'notify',
+          stepType: 'Log',
+          message: 'waiting for approval',
+          level: 'info',
+        },
+        done: {
+          id: 'done',
+          stepType: 'Finish',
+          outputs: {},
+        },
+      },
+      executionPlan: [
+        {
+          fromStep: 'notify',
+          toStep: 'done',
+          label: 'next',
+        },
+      ],
+    };
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      onWait,
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.onWait).toEqual(onWait);
+  });
+
   it('round-trips Log context metadata', () => {
     const graph = makeGraph({
       id: 'log',

@@ -29,6 +29,8 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
   const { nodeId } = useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [onWaitText, setOnWaitText] = useState('');
+  const [onWaitError, setOnWaitError] = useState<string | null>(null);
 
   // Initialize default inputMapping entries for new nodes
   useEffect(() => {
@@ -58,6 +60,13 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
         },
       ]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepType, nodeId]);
+
+  useEffect(() => {
+    const currentOnWait = form.getValues('onWait');
+    setOnWaitText(currentOnWait ? JSON.stringify(currentOnWait, null, 2) : '');
+    setOnWaitError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepType, nodeId]);
 
@@ -144,6 +153,38 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
           },
         ],
         { shouldDirty: true, shouldTouch: true, shouldValidate: true }
+      );
+    }
+  };
+
+  const updateOnWait = (value: string) => {
+    setOnWaitText(value);
+
+    if (!value.trim()) {
+      setOnWaitError(null);
+      form.setValue('onWait', undefined, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+      });
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setOnWaitError('onWait must be an execution graph object.');
+        return;
+      }
+      setOnWaitError(null);
+      form.setValue('onWait', parsed, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+      });
+    } catch (error) {
+      setOnWaitError(
+        error instanceof Error ? error.message : 'Invalid JSON object.'
       );
     }
   };
@@ -297,6 +338,26 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                   className="min-h-24 font-mono text-sm"
                 />
               </FormControl>
+            </FormItem>
+
+            <FormItem>
+              <FormLabel>On Wait Graph</FormLabel>
+              <FormDescription>
+                Optional execution graph that runs before the workflow suspends.
+              </FormDescription>
+              <FormControl>
+                <Textarea
+                  value={onWaitText}
+                  onChange={(event) => updateOnWait(event.target.value)}
+                  placeholder='{"steps": {}, "executionPlan": []}'
+                  className="min-h-32 font-mono text-sm"
+                />
+              </FormControl>
+              {onWaitError && (
+                <p className="text-xs font-medium text-destructive">
+                  {onWaitError}
+                </p>
+              )}
             </FormItem>
           </div>
         )}

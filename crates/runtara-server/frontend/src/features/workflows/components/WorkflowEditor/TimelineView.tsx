@@ -4,6 +4,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -29,6 +30,7 @@ import {
   PenLine,
   Plus,
   Repeat,
+  Settings2,
   Split,
   Workflow,
   XCircle,
@@ -38,6 +40,14 @@ import {
 
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
+import { Input } from '@/shared/components/ui/input';
+import { Label } from '@/shared/components/ui/label';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/shared/components/ui/popover';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { cn } from '@/lib/utils.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
@@ -143,6 +153,10 @@ type TimelineRouteController = {
     nodeId: string,
     caseIndex: number,
     direction: 'up' | 'down'
+  ) => void;
+  onUpdateRouteData: (
+    edgeId: string,
+    updates: { condition?: unknown; priority?: number }
   ) => void;
 };
 
@@ -1216,12 +1230,18 @@ function TimelineInsertionPoint({
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
+  routeEdge,
+  routeSettingsDisabled,
+  routeController,
 }: {
   request: TimelineAddStepRequest | null;
   depth: number;
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
+  routeEdge?: Edge;
+  routeSettingsDisabled?: boolean;
+  routeController?: TimelineRouteController;
 }) {
   if (!request || !onAddStep) return null;
 
@@ -1267,6 +1287,15 @@ function TimelineInsertionPoint({
         <Plus className="size-3.5" aria-hidden="true" />
         Add step
       </Button>
+      {routeEdge && routeController && (
+        <TimelineRouteSettings
+          edge={routeEdge}
+          label={getEdgeLabel(routeEdge)}
+          disabled={routeSettingsDisabled}
+          className="mt-0"
+          onUpdateRouteData={routeController.onUpdateRouteData}
+        />
+      )}
       <span
         className="h-px flex-1 border-t border-dashed border-border"
         aria-hidden="true"
@@ -1323,45 +1352,241 @@ function TimelineItemList({
           activeAddStepRequest={activeAddStepRequest}
           renderInlineAddStep={renderInlineAddStep}
           onAddStep={onAddStep}
+          routeController={routeController}
         />
       )}
-      {items.map((item, index) => (
-        <Fragment key={item.node.id}>
-          <WorkflowTimelineItem
-            item={item}
-            depth={depth}
-            listContext={listContext}
-            readOnly={readOnly}
-            debugInspectMode={debugInspectMode}
-            expandedContainers={expandedContainers}
-            onToggleContainer={onToggleContainer}
-            onEditNode={onEditNode}
-            editingNodeId={editingNodeId}
-            renderInlineEditor={renderInlineEditor}
-            activeAddStepRequest={activeAddStepRequest}
-            renderInlineAddStep={renderInlineAddStep}
-            onAddStep={onAddStep}
-            dragController={dragController}
-            routeController={routeController}
-            agents={agents}
-          />
-          {canAdd && (
-            <TimelineInsertionPoint
-              request={createInsertionRequest(
-                items,
-                index + 1,
-                listContext,
-                endTargetNode
-              )}
+      {items.map((item, index) => {
+        const directTargetNode = items[index + 1]?.node ?? endTargetNode;
+        const routeEdge = directTargetNode
+          ? item.outgoingEdges.find(
+              (edge) => edge.target === directTargetNode.id
+            )
+          : undefined;
+        const routeSettingsDisabled =
+          readOnly ||
+          debugInspectMode ||
+          getStepType(item.node) === 'Conditional';
+
+        return (
+          <Fragment key={item.node.id}>
+            <WorkflowTimelineItem
+              item={item}
               depth={depth}
+              listContext={listContext}
+              readOnly={readOnly}
+              debugInspectMode={debugInspectMode}
+              expandedContainers={expandedContainers}
+              onToggleContainer={onToggleContainer}
+              onEditNode={onEditNode}
+              editingNodeId={editingNodeId}
+              renderInlineEditor={renderInlineEditor}
               activeAddStepRequest={activeAddStepRequest}
               renderInlineAddStep={renderInlineAddStep}
               onAddStep={onAddStep}
+              dragController={dragController}
+              routeController={routeController}
+              agents={agents}
             />
-          )}
-        </Fragment>
-      ))}
+            {canAdd && (
+              <TimelineInsertionPoint
+                request={createInsertionRequest(
+                  items,
+                  index + 1,
+                  listContext,
+                  endTargetNode
+                )}
+                depth={depth}
+                activeAddStepRequest={activeAddStepRequest}
+                renderInlineAddStep={renderInlineAddStep}
+                onAddStep={onAddStep}
+                routeEdge={routeEdge}
+                routeSettingsDisabled={routeSettingsDisabled}
+                routeController={routeController}
+              />
+            )}
+          </Fragment>
+        );
+      })}
     </div>
+  );
+}
+
+function getRouteCondition(edge: Edge): unknown {
+  return (edge.data as { condition?: unknown } | undefined)?.condition;
+}
+
+function getRoutePriority(edge: Edge): number | undefined {
+  const priority = (edge.data as { priority?: unknown } | undefined)?.priority;
+  return typeof priority === 'number' && Number.isFinite(priority)
+    ? priority
+    : undefined;
+}
+
+function formatRouteCondition(condition: unknown): string {
+  if (condition === undefined) return '';
+  return JSON.stringify(condition, null, 2);
+}
+
+function parseRouteCondition(
+  value: string
+): { ok: true; condition: unknown } | { ok: false; message: string } {
+  if (!value.trim()) {
+    return { ok: true, condition: undefined };
+  }
+
+  try {
+    return { ok: true, condition: JSON.parse(value) };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : 'Invalid JSON',
+    };
+  }
+}
+
+function parseRoutePriority(
+  value: string
+): { ok: true; priority: number | undefined } | { ok: false; message: string } {
+  if (!value.trim()) {
+    return { ok: true, priority: undefined };
+  }
+
+  const priority = Number(value);
+  if (!Number.isFinite(priority)) {
+    return { ok: false, message: 'Priority must be a number.' };
+  }
+
+  return { ok: true, priority };
+}
+
+function TimelineRouteSettings({
+  edge,
+  label,
+  disabled,
+  className,
+  onUpdateRouteData,
+}: {
+  edge: Edge;
+  label: string;
+  disabled?: boolean;
+  className?: string;
+  onUpdateRouteData: TimelineRouteController['onUpdateRouteData'];
+}) {
+  const [open, setOpen] = useState(false);
+  const [conditionText, setConditionText] = useState('');
+  const [priorityText, setPriorityText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const hasMetadata =
+    getRouteCondition(edge) !== undefined ||
+    getRoutePriority(edge) !== undefined;
+
+  useEffect(() => {
+    setConditionText(formatRouteCondition(getRouteCondition(edge)));
+    setPriorityText(
+      getRoutePriority(edge) !== undefined ? String(getRoutePriority(edge)) : ''
+    );
+    setError(null);
+  }, [edge.id, edge.data]);
+
+  const handleApply = () => {
+    const conditionResult = parseRouteCondition(conditionText);
+    if (!conditionResult.ok) {
+      setError(`Condition JSON: ${conditionResult.message}`);
+      return;
+    }
+
+    const priorityResult = parseRoutePriority(priorityText);
+    if (!priorityResult.ok) {
+      setError(priorityResult.message);
+      return;
+    }
+
+    onUpdateRouteData(edge.id, {
+      condition: conditionResult.condition,
+      priority: priorityResult.priority,
+    });
+    setError(null);
+    setOpen(false);
+  };
+
+  const handleClear = () => {
+    setConditionText('');
+    setPriorityText('');
+    setError(null);
+    onUpdateRouteData(edge.id, {
+      condition: undefined,
+      priority: undefined,
+    });
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={cn(
+            'ml-0.5 mt-1 size-6 rounded-sm bg-background text-muted-foreground',
+            hasMetadata && 'text-primary',
+            className
+          )}
+          disabled={disabled}
+          aria-label={`Edit ${label} route condition and priority`}
+          title="Route condition and priority"
+        >
+          <Settings2 className="size-3.5" aria-hidden="true" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="right"
+        className="w-[24rem] space-y-4"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div>
+          <p className="text-sm font-semibold text-foreground">
+            Route Settings
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {label} route from {edge.source} to {edge.target}
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor={`route-priority-${edge.id}`}>Priority</Label>
+          <Input
+            id={`route-priority-${edge.id}`}
+            type="number"
+            inputMode="numeric"
+            value={priorityText}
+            onChange={(event) => setPriorityText(event.target.value)}
+            placeholder="Optional"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor={`route-condition-${edge.id}`}>Condition JSON</Label>
+          <Textarea
+            id={`route-condition-${edge.id}`}
+            value={conditionText}
+            onChange={(event) => setConditionText(event.target.value)}
+            placeholder='{"type": "operation", "op": "EQ", "arguments": ["data.status", "ready"]}'
+            className="min-h-32 font-mono text-xs"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={handleClear}>
+            Clear
+          </Button>
+          <Button type="button" size="sm" onClick={handleApply}>
+            Apply
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -1515,6 +1740,14 @@ function BranchLaneGroups({
                     <ArrowDown className="size-3" aria-hidden="true" />
                   </Button>
                 </div>
+              )}
+              {sourceStepType !== 'Conditional' && (
+                <TimelineRouteSettings
+                  edge={lane.edge}
+                  label={edgeLabel}
+                  disabled={routeControlsDisabled}
+                  onUpdateRouteData={routeController.onUpdateRouteData}
+                />
               )}
             </div>
             <div className="relative min-w-0 space-y-2 pb-2">
@@ -1883,6 +2116,7 @@ export function WorkflowTimelineView({
     (state) => state.flipConditionalBranches
   );
   const moveSwitchCase = useWorkflowStore((state) => state.moveSwitchCase);
+  const updateEdgeData = useWorkflowStore((state) => state.updateEdgeData);
   // All `getAgents()` callers in the editor share the queryKeys.agents.all
   // cache key, so they must pass the same entitlement filter — otherwise an
   // un-filtered caller would poison the shared cache for everyone.
@@ -2158,8 +2392,9 @@ export function WorkflowTimelineView({
       onFlipConditionalBranches: flipConditionalBranches,
       onMoveSwitchCase: (nodeId, caseIndex, direction) =>
         moveSwitchCase({ nodeId, caseIndex, direction }),
+      onUpdateRouteData: (edgeId, updates) => updateEdgeData(edgeId, updates),
     }),
-    [flipConditionalBranches, moveSwitchCase]
+    [flipConditionalBranches, moveSwitchCase, updateEdgeData]
   );
 
   const rootListContext = useMemo(

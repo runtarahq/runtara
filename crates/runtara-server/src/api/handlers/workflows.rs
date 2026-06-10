@@ -2066,8 +2066,8 @@ pub async fn validate_graph_handler(
 
 /// List all supported step types
 ///
-/// Returns hardcoded metadata about available step types.
-/// No database or external dependencies - just static data.
+/// Returns registry-backed metadata about available step types.
+/// No database or external dependencies - just static DSL metadata.
 #[utoipa::path(
     get,
     path = "/api/runtime/steps",

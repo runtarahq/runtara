@@ -25,205 +25,30 @@ pub struct NotImplementedResponse {
     )
 )]
 pub async fn get_workflow_step_types_handler() -> (StatusCode, Json<Value>) {
-    // Return available step types based on the compiler's supported types
-    let step_types = vec![
+    let mut step_types = vec![json!({
+        "type": "Start",
+        "name": "Start",
+        "description": "Entry point - receives workflow inputs",
+        "category": "control",
+        "schema": null
+    })];
+
+    step_types.extend(runtara_dsl::agent_meta::get_all_step_types().map(|meta| {
+        let step_schema = (meta.schema_fn)();
         json!({
-            "type": "Start",
-            "name": "Start",
-            "description": "Entry point that initializes workflow with input data",
-            "category": "control",
-            "icon": "play-circle",
-            "inputSchema": {
-                "data": {
-                    "type": "json",
-                    "description": "Initial data for workflow (optional, defaults to workflow.inputs.data)",
-                    "required": false
-                },
-                "variables": {
-                    "type": "json",
-                    "description": "Initial variables for workflow (optional, defaults to workflow.inputs.variables)",
-                    "required": false
-                }
-            },
-            "outputSchema": {
-                "data": {
-                    "type": "json",
-                    "description": "Initialized data"
-                },
-                "variables": {
-                    "type": "json",
-                    "description": "Initialized variables"
-                },
-                "status": {
-                    "type": "text",
-                    "description": "Status of initialization"
-                }
-            }
-        }),
-        json!({
-            "type": "Finish",
-            "name": "Finish",
-            "description": "Final step that returns workflow outputs",
-            "category": "control",
-            "icon": "stop-circle",
-            "inputSchema": {
-                "outputs": {
-                    "type": "json",
-                    "description": "The output structure to return (mapped from previous steps)",
-                    "required": true
-                }
-            },
-            "outputSchema": {
-                "description": "Returns the mapped outputs directly (not wrapped)"
-            }
-        }),
-        json!({
-            "type": "Conditional",
-            "name": "Conditional",
-            "description": "Conditional branching based on expression evaluation",
-            "category": "control",
-            "icon": "git-branch",
-            "hasConditions": true,
-            "inputSchema": {
-                "condition.expression.op": {
-                    "type": "text",
-                    "description": "Comparison operator (EQ, NE, GT, LT, GTE, LTE, IN, CONTAINS, AND, OR, NOT, IS_DEFINED)",
-                    "required": true,
-                    "enum": ["EQ", "NE", "GT", "LT", "GTE", "LTE", "IN", "CONTAINS", "AND", "OR", "NOT", "IS_DEFINED"]
-                },
-                "condition.expression.arguments[N]": {
-                    "type": "any",
-                    "description": "Arguments for the operator (N = 0, 1, 2, ...)",
-                    "required": true
-                }
-            },
-            "outputSchema": {
-                "description": "Boolean result of condition evaluation (true/false)"
-            }
-        }),
-        json!({
-            "type": "Switch",
-            "name": "Switch",
-            "description": "Match a value against multiple cases and return corresponding output. Supports exact matching, array membership (IN), and range comparisons.",
-            "category": "control",
-            "icon": "git-branch",
-            "inputSchema": {
-                "value": {
-                    "type": "text | int | double | boolean | json",
-                    "description": "The value to match against cases",
-                    "required": true
-                },
-                "cases": {
-                    "type": "json",
-                    "description": "Array of case objects with matchType, match value, and output",
-                    "required": true,
-                    "structure": {
-                        "matchType": {
-                            "type": "text",
-                            "description": "Type of match to perform",
-                            "required": true,
-                            "enum": ["exact", "in", "gt", "gte", "lt", "lte", "between", "range"],
-                            "details": {
-                                "exact": "Equality check (match: primitive value)",
-                                "in": "Value in array (match: array of values)",
-                                "gt": "Greater than (match: number or string)",
-                                "gte": "Greater than or equal (match: number or string)",
-                                "lt": "Less than (match: number or string)",
-                                "lte": "Less than or equal (match: number or string)",
-                                "between": "Inclusive range (match: [min, max] array)",
-                                "range": "Custom range with operators (match: {gte?, gt?, lte?, lt?} object)"
-                            }
-                        },
-                        "match": {
-                            "type": "any",
-                            "description": "Value(s) to match against. Shape depends on matchType"
-                        },
-                        "output": {
-                            "type": "json",
-                            "description": "Object to return when this case matches"
-                        }
-                    },
-                    "examples": [
-                        {"matchType": "exact", "match": "US", "output": {"zone": "NA"}},
-                        {"matchType": "in", "match": ["DE", "FR", "IT"], "output": {"zone": "EU"}},
-                        {"matchType": "between", "match": [100, 500], "output": {"tier": "mid"}},
-                        {"matchType": "gte", "match": 1000, "output": {"tier": "premium"}},
-                        {"matchType": "range", "match": {"gte": 0, "lt": 100}, "output": {"tier": "basic"}}
-                    ]
-                },
-                "default": {
-                    "type": "json",
-                    "description": "Fallback output when no cases match",
-                    "required": true
-                }
-            },
-            "outputSchema": {
-                "outputs": {
-                    "type": "json",
-                    "description": "The output object from the first matching case (or default)"
-                }
-            }
-        }),
-        json!({
-            "type": "Agent",
-            "name": "Agent / Operator",
-            "description": "Execute an operator function",
-            "category": "operation",
-            "icon": "settings",
-            "requiresOperator": true,
-            "inputSchema": {
-                "description": "Input schema depends on the specific operator and operation",
-                "dynamic": true
-            },
-            "outputSchema": {
-                "description": "Output schema depends on the specific operator and operation",
-                "dynamic": true
-            }
-        }),
-        json!({
-            "type": "Split",
-            "name": "Split",
-            "description": "Iterate over array elements and execute subgraph for each",
-            "category": "control",
-            "icon": "repeat",
-            "hasIterator": true,
-            "inputSchema": {
-                "array": {
-                    "type": "json",
-                    "description": "The array to iterate over",
-                    "required": true
-                },
-                "subgraph": {
-                    "type": "json",
-                    "description": "The subgraph definition to execute for each element",
-                    "required": true
-                }
-            },
-            "outputSchema": {
-                "outputs": {
-                    "type": "json",
-                    "description": "Array of outputs from each iteration"
-                }
-            }
-        }),
-        json!({
-            "type": "EmbedWorkflow",
-            "name": "Start Workflow",
-            "description": "Start a sub-workflow execution",
-            "category": "control",
-            "icon": "play",
-            "inputSchema": {
-                "description": "Inputs for the sub-workflow (mapped from parent workflow)",
-                "dynamic": true
-            },
-            "outputSchema": {
-                "result": {
-                    "type": "text",
-                    "description": "Result from sub-workflow execution"
-                }
-            }
-        }),
-    ];
+            "type": meta.id,
+            "name": meta.display_name,
+            "description": meta.description,
+            "category": meta.category,
+            "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null)
+        })
+    }));
+
+    step_types.sort_by(|a, b| {
+        let a_type = a.get("type").and_then(Value::as_str).unwrap_or("");
+        let b_type = b.get("type").and_then(Value::as_str).unwrap_or("");
+        a_type.cmp(b_type)
+    });
 
     let response = json!({
         "success": true,
@@ -268,5 +93,34 @@ pub async fn get_llm_models_handler(
                 "models": []
             })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn workflow_step_metadata_uses_registered_step_types() {
+        let (status, Json(body)) = get_workflow_step_types_handler().await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let step_types = body["stepTypes"]
+            .as_array()
+            .expect("stepTypes should be an array");
+        let ids: HashSet<&str> = step_types
+            .iter()
+            .filter_map(|step| step.get("type").and_then(Value::as_str))
+            .collect();
+
+        let mut expected_ids: HashSet<&str> = HashSet::from(["Start"]);
+        expected_ids.extend(runtara_dsl::agent_meta::get_all_step_types().map(|meta| meta.id));
+
+        assert_eq!(ids, expected_ids);
+        assert!(ids.contains("Delay"));
+        assert!(ids.contains("WaitForSignal"));
+        assert_eq!(body["count"].as_u64(), Some(step_types.len() as u64));
     }
 }

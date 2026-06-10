@@ -225,6 +225,7 @@ interface WorkflowState {
   addEdges: (
     edges: Array<{ from: string; to: string; label?: string }>
   ) => void;
+  updateEdgeData: (edgeId: string, updates: Record<string, unknown>) => void;
   removeEdge: (from: string, to: string, label?: string) => void;
   insertNodeBetween: (
     sourceNodeId: string,
@@ -654,6 +655,29 @@ export const useWorkflowStore = create<WorkflowState>()(
             state.edges.push(newEdge);
           }
 
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
+        }),
+
+      updateEdgeData: (edgeId, updates) =>
+        set((state) => {
+          const edge = state.edges.find((candidate) => candidate.id === edgeId);
+          if (!edge) return;
+
+          const nextData: Record<string, unknown> = {
+            ...((edge.data as Record<string, unknown> | undefined) ?? {}),
+          };
+
+          for (const [key, value] of Object.entries(updates)) {
+            if (value === undefined) {
+              delete nextData[key];
+            } else {
+              nextData[key] = value;
+            }
+          }
+
+          edge.data = Object.keys(nextData).length > 0 ? nextData : undefined;
           state.isDirty = true;
           state.isStructurallyDirty = true;
           state.saveToHistory();
