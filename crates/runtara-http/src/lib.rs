@@ -192,6 +192,11 @@ impl RequestBuilder {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"))
             .map(|(_, v)| v.clone());
+        let ai_provider = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-ai-provider"))
+            .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
         let clean_headers: Vec<(String, String)> = self
@@ -219,6 +224,7 @@ impl RequestBuilder {
             "body": body_json,
             "body_raw": body_raw,
             "connection_id": connection_id,
+            "ai_provider": ai_provider,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
         });
 

@@ -7,9 +7,8 @@
 //! the canonical two-pointer form writes the capability-id and input `(ptr, len)`
 //! plus a tagged connection sub-struct into a fixed args struct in linear memory
 //! and calls with a pointer to it; other shapes push the args directly on the
-//! stack. Connection metadata is written as a tagged struct carrying the
-//! connection/integration id (never the secrets) — the host resolves the real
-//! params from the id at call time.
+//! stack. Connection metadata is written as a tagged struct carrying only the
+//! connection id (never secrets or provider/integration metadata).
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 use wit_parser::abi::WasmType;
@@ -84,20 +83,12 @@ fn emit_agent_connection_args(
         DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET,
         connection_id.len_i32(),
     );
-    let (integration_ptr, integration_len) = static_data
-        .agent_integration_id(agent_id)
-        .map(|segment| (segment.offset, segment.len_i32()))
-        .unwrap_or((static_data.agent_empty_integration_id.offset, 0));
     store_i32_at(
         body,
         DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET,
-        integration_ptr,
+        static_data.agent_empty_integration_id.offset,
     );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET,
-        integration_len,
-    );
+    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET, 0);
     store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET, 0);
     store_i32_at(
         body,

@@ -47,10 +47,18 @@ type AiProvider = 'openai' | 'bedrock';
 const PROVIDER_OPTIONS: Array<{
   value: AiProvider;
   label: string;
-  integrationId: string;
+  compatibleIntegrationIds: string[];
 }> = [
-  { value: 'openai', label: 'OpenAI', integrationId: 'openai_api_key' },
-  { value: 'bedrock', label: 'AWS Bedrock', integrationId: 'aws_credentials' },
+  {
+    value: 'openai',
+    label: 'OpenAI',
+    compatibleIntegrationIds: ['openai_api_key'],
+  },
+  {
+    value: 'bedrock',
+    label: 'AWS Bedrock',
+    compatibleIntegrationIds: ['aws_credentials'],
+  },
 ];
 
 interface ModelOption {
@@ -172,15 +180,15 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
   const llmConnections = useMemo(() => {
     const allConnections = connectionsQuery.data ?? [];
-    const expectedIntegrationId = PROVIDER_OPTIONS.find(
+    const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
       (option) => option.value === selectedProvider
-    )?.integrationId;
-    if (!expectedIntegrationId) return [];
+    )?.compatibleIntegrationIds;
+    if (!compatibleIntegrationIds) return [];
     return allConnections.filter(
       (conn: any) =>
         conn.integrationId &&
         LLM_INTEGRATION_IDS.has(conn.integrationId) &&
-        conn.integrationId === expectedIntegrationId
+        compatibleIntegrationIds.includes(conn.integrationId)
     );
   }, [connectionsQuery.data, selectedProvider]);
 
@@ -668,13 +676,15 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             const provider = value as AiProvider;
             updateField('provider', provider);
             updateField('model', '');
-            const expectedIntegrationId = PROVIDER_OPTIONS.find(
+            const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
               (option) => option.value === provider
-            )?.integrationId;
+            )?.compatibleIntegrationIds;
             if (
               connectionId &&
               selectedConnectionIntegrationId &&
-              selectedConnectionIntegrationId !== expectedIntegrationId
+              !compatibleIntegrationIds?.includes(
+                selectedConnectionIntegrationId
+              )
             ) {
               form.setValue('connectionId', '', {
                 shouldDirty: true,

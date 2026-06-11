@@ -105,6 +105,7 @@ impl CompletionModel for OpenAICompletionModel {
                 .http
                 .request("POST", "/v1/chat/completions")
                 .header("X-Runtara-Connection-Id", &self.client.connection_id)
+                .header("X-Runtara-Ai-Provider", crate::provider::PROVIDER_OPENAI)
                 .header("Content-Type", "application/json")
                 .body_json(&body)
                 .call_agent()

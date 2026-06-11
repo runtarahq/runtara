@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -266,13 +265,6 @@ pub struct CompilationService {
     /// `runtara:compilation:progress:*` for the frontend's progress UI.
     /// `None` (e.g. CLI / Valkey-disabled paths) is a no-op.
     redis_manager: Option<ConnectionManager>,
-    /// Optional connections facade used to pre-resolve each agent step's
-    /// `connection_id` → `integration_id` mapping at compile time. Baked into
-    /// the synthetic `_connection` literal by `emit_connection_fetch` so
-    /// component-backed agents that dispatch on `integration_id` (e.g.
-    /// `ai-tools::text-completion`) see a populated value rather than the
-    /// empty stub the workflow runner cannot fill in from inside the WASM.
-    connections_facade: Option<Arc<runtara_connections::ConnectionsFacade>>,
     /// Direct WASM compiler settings (component directory). Direct compilation
     /// is the only path; a missing component directory fails the compile.
     direct_compilation: DirectCompilationSettings,
@@ -290,24 +282,10 @@ impl CompilationService {
             runtime_client,
             agent_catalog: None,
             redis_manager: None,
-            connections_facade: None,
             direct_compilation: DirectCompilationSettings {
                 components_dir: None,
             },
         }
-    }
-
-    /// Plug in the connections facade so the compile pipeline can pre-resolve
-    /// each agent step's `connection_id → integration_id` and bake it into the
-    /// generated workflow binary. Without it, the map is empty and component
-    /// agents that dispatch on `integration_id` fall back to the empty-string
-    /// behavior (broken for `ai-tools`, irrelevant for everything else).
-    pub fn with_connections_facade(
-        mut self,
-        facade: Arc<runtara_connections::ConnectionsFacade>,
-    ) -> Self {
-        self.connections_facade = Some(facade);
-        self
     }
 
     /// Plug in the runtime agent catalog. Wired up at server boot from the
@@ -425,15 +403,6 @@ impl CompilationService {
             "compile: step 3 completed - child workflows loaded"
         );
 
-        // 3a. Pre-resolve connection_id → integration_id for every Agent /
-        // AiAgent step that references a connection. The codegen bakes the
-        // resulting value into the synthetic `_connection` literal so
-        // component-backed agents that dispatch on integration_id (e.g.
-        // `ai-tools::text-completion`) see it without an in-WASM HTTP fetch.
-        let connection_integration_ids = self
-            .resolve_connection_integration_ids(tenant_id, &execution_graph, &child_workflows)
-            .await;
-
         // Set up the sync→async progress bridge. The inner compile pipeline
         // runs in `spawn_blocking` and can't `.await` Redis writes directly,
         // so it fires events through a channel that a tokio task drains and
@@ -470,7 +439,6 @@ impl CompilationService {
             track_events,
             child_workflows,
             connection_service_url: self.connection_service_url.clone(),
-            connection_integration_ids,
             // When configured, the compile uses the runtime catalog from
             // the component dispatcher so the compiled view of agents
             // matches what the runtime can actually invoke.
@@ -854,93 +822,6 @@ impl CompilationService {
         }
 
         Ok(child_workflows)
-    }
-
-    /// Walk the parent graph and every child graph for Agent / AiAgent steps
-    /// that reference a connection, then look up each connection's
-    /// `integration_id` via the connections facade. Returns
-    /// `connection_id -> integration_id` for every row that exists and has a
-    /// non-empty `integration_id`. Missing rows / NULL columns are silently
-    /// omitted: the codegen falls back to the empty-string behavior, which is
-    /// only broken for component agents that dispatch on integration_id —
-    /// and those are explicit fix candidates anyway.
-    ///
-    /// No-op when `connections_facade` isn't wired in (CLI / test paths).
-    async fn resolve_connection_integration_ids(
-        &self,
-        tenant_id: &str,
-        execution_graph: &runtara_dsl::ExecutionGraph,
-        child_workflows: &[ChildWorkflowInput],
-    ) -> HashMap<String, String> {
-        let facade = match &self.connections_facade {
-            Some(f) => f,
-            None => return HashMap::new(),
-        };
-
-        let mut connection_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        Self::collect_connection_ids(execution_graph, &mut connection_ids);
-        for child in child_workflows {
-            Self::collect_connection_ids(&child.execution_graph, &mut connection_ids);
-        }
-
-        let mut out = HashMap::with_capacity(connection_ids.len());
-        for conn_id in connection_ids {
-            match facade.get_connection(&conn_id, tenant_id).await {
-                Ok(Some(dto)) => {
-                    if let Some(int_id) = dto.integration_id.filter(|s| !s.is_empty()) {
-                        out.insert(conn_id, int_id);
-                    }
-                }
-                Ok(None) => {
-                    debug!(
-                        connection_id = %conn_id,
-                        tenant_id = %tenant_id,
-                        "compile: connection referenced by step is missing; \
-                         integration_id will fall back to empty string"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        connection_id = %conn_id,
-                        tenant_id = %tenant_id,
-                        error = %e,
-                        "compile: failed to load connection for integration_id pre-resolution; \
-                         continuing with empty fallback"
-                    );
-                }
-            }
-        }
-        out
-    }
-
-    /// Push every `connection_id` referenced by Agent / AiAgent steps in the
-    /// graph into `out`. Steps without a connection_id (or step kinds that
-    /// don't take one) are skipped.
-    fn collect_connection_ids(
-        graph: &runtara_dsl::ExecutionGraph,
-        out: &mut std::collections::HashSet<String>,
-    ) {
-        for step in graph.steps.values() {
-            match step {
-                runtara_dsl::Step::Agent(agent) => {
-                    if let Some(ref id) = agent.connection_id {
-                        out.insert(id.clone());
-                    }
-                }
-                runtara_dsl::Step::AiAgent(ai) => {
-                    if let Some(ref id) = ai.connection_id {
-                        out.insert(id.clone());
-                    }
-                }
-                // Recurse into subgraphs so agent steps nested inside loops /
-                // splits are covered too (EmbedWorkflow children are walked
-                // separately by the caller via `child_workflows`).
-                runtara_dsl::Step::Split(s) => Self::collect_connection_ids(&s.subgraph, out),
-                runtara_dsl::Step::While(w) => Self::collect_connection_ids(&w.subgraph, out),
-                _ => {}
-            }
-        }
     }
 
     /// Register a compiled binary with runtara-environment using streaming upload

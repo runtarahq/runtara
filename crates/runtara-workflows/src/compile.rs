@@ -15,7 +15,6 @@
 //! existing image. Bumping the major version (e.g. 5 → 6) invalidates every
 //! workflow on its next deploy; minor / patch bumps don't recompile.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -100,15 +99,6 @@ pub struct CompilationInput {
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: `GET {url}/{tenant_id}/{connection_id}`.
     pub connection_service_url: Option<String>,
-    /// Pre-resolved `connection_id -> integration_id` map for every agent step
-    /// in the graph. Component-backed agents (e.g. `ai-tools`) dispatch on
-    /// `integration_id` and the workflow runner can't fetch it from inside the
-    /// WASM module; the compile pipeline looks it up once via the connections
-    /// repository and bakes the result into the synthetic `_connection`
-    /// literal emitted by `emit_connection_fetch`. Entries are optional —
-    /// missing connections fall back to the empty-string behavior, which is
-    /// fine for agents that don't dispatch on integration_id.
-    pub connection_integration_ids: HashMap<String, String>,
     /// Runtime agent metadata catalog. Optional so callers that haven't
     /// migrated yet keep working — `None` falls back to building one from
     /// the statically-linked `runtara_agents::registry`. Production code
@@ -141,10 +131,6 @@ impl std::fmt::Debug for CompilationInput {
             .field("track_events", &self.track_events)
             .field("child_workflows", &self.child_workflows)
             .field("connection_service_url", &self.connection_service_url)
-            .field(
-                "connection_integration_ids",
-                &self.connection_integration_ids,
-            )
             .field("agent_catalog", &self.agent_catalog)
             .field("progress_callback", &self.progress_callback.is_some())
             .finish()
@@ -218,7 +204,6 @@ pub fn compile_workflow_direct(
         connection_service_url: _,
         agent_catalog,
         progress_callback,
-        connection_integration_ids,
     } = input;
 
     let child_dependencies = child_dependencies_from_inputs(&child_workflows);
@@ -238,7 +223,6 @@ pub fn compile_workflow_direct(
         output_dir: options.output_dir,
         track_events,
         agent_catalog,
-        connection_integration_ids,
     })
     .map_err(direct_compile_error_to_io)?;
 
@@ -373,7 +357,6 @@ mod tests {
                 connection_service_url: None,
                 agent_catalog: None,
                 progress_callback: None,
-                connection_integration_ids: std::collections::HashMap::new(),
             },
             DirectWorkflowCompileOptions {
                 output_dir: output_dir.clone(),

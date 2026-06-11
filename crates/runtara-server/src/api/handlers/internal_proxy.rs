@@ -49,6 +49,11 @@ pub struct ProxyRequest {
     /// Connection ID — when set, credentials are injected and base URL is resolved
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Explicit AI provider requested by the caller. When present, the proxy
+    /// verifies the connection's integration is compatible before credentials
+    /// are applied to the outgoing request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_provider: Option<String>,
     /// Request timeout in milliseconds (default: 30 000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -112,6 +117,11 @@ pub async fn execute_proxy_request(
             })?;
 
         let integration_id = conn.integration_id.as_deref().unwrap_or("");
+        ensure_ai_provider_connection_compatible(
+            request.ai_provider.as_deref(),
+            connection_id,
+            integration_id,
+        )?;
         let params = conn
             .connection_parameters
             .as_ref()
@@ -424,6 +434,32 @@ pub async fn execute_proxy_request(
 // Helpers
 // ============================================================================
 
+fn ensure_ai_provider_connection_compatible(
+    provider: Option<&str>,
+    connection_id: &str,
+    integration_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(provider) = provider else {
+        return Ok(());
+    };
+    if runtara_ai::provider::provider_supports_integration(provider, integration_id) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "AI_PROVIDER_CONNECTION_MISMATCH",
+            "message": format!(
+                "AI provider '{}' is not compatible with connection '{}' integration '{}'",
+                provider, connection_id, integration_id
+            ),
+            "provider": provider,
+            "connection_id": connection_id,
+            "integration_id": integration_id
+        })),
+    ))
+}
+
 /// Extract tenant_id from X-Org-Id header (no JWT validation)
 fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
     headers
@@ -572,5 +608,45 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 (unique local)
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_provider_connection_mismatch_is_rejected_before_proxying() {
+        let err = ensure_ai_provider_connection_compatible(
+            Some(runtara_ai::provider::PROVIDER_OPENAI),
+            "conn-aws",
+            "aws_credentials",
+        )
+        .expect_err("provider mismatch should fail");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let body = err.1.0;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("AI_PROVIDER_CONNECTION_MISMATCH")
+        );
+        assert_eq!(
+            body.get("provider").and_then(Value::as_str),
+            Some(runtara_ai::provider::PROVIDER_OPENAI)
+        );
+        assert_eq!(
+            body.get("integration_id").and_then(Value::as_str),
+            Some("aws_credentials")
+        );
+    }
+
+    #[test]
+    fn ai_provider_connection_match_is_allowed() {
+        ensure_ai_provider_connection_compatible(
+            Some(runtara_ai::provider::PROVIDER_BEDROCK),
+            "conn-aws",
+            "aws_credentials",
+        )
+        .expect("provider match should pass");
     }
 }

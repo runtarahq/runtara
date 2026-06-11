@@ -1007,7 +1007,6 @@ fn run_direct_workflow_capture_attempt(
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         components_dir,
     )
@@ -1117,7 +1116,6 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         DirectWorkflowCompileOptions {
             output_dir: temp.path().to_path_buf(),
@@ -1187,7 +1185,6 @@ fn direct_compile_measures_json_to_ready_bundle_latency() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct emit succeeds");
     let emit_elapsed = emit_start.elapsed();
@@ -1707,6 +1704,11 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
     assert_eq!(
         request.get("url").and_then(Value::as_str),
         Some("/v1/chat/completions"),
+        "{request}"
+    );
+    assert_eq!(
+        request.get("ai_provider").and_then(Value::as_str),
+        Some("openai"),
         "{request}"
     );
 }
@@ -2267,7 +2269,6 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         &components_dir,
     )
@@ -2305,7 +2306,6 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         &components_dir,
     )

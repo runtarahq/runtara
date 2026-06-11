@@ -8,6 +8,12 @@
 use crate::providers::{bedrock, openai};
 use serde_json::{Value, json};
 
+pub const PROVIDER_OPENAI: &str = "openai";
+pub const PROVIDER_BEDROCK: &str = "bedrock";
+
+const OPENAI_COMPATIBLE_INTEGRATIONS: &[&str] = &["openai_api_key"];
+const BEDROCK_COMPATIBLE_INTEGRATIONS: &[&str] = &["aws_credentials"];
+
 /// Errors that can occur during provider creation.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -17,6 +23,22 @@ pub enum ProviderError {
     MissingApiKey,
     #[error("Unsupported LLM provider: {0}")]
     UnsupportedProvider(String),
+}
+
+/// Return the connection integration ids compatible with an explicit AI provider.
+pub fn compatible_integration_ids_for_provider(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        PROVIDER_OPENAI => Some(OPENAI_COMPATIBLE_INTEGRATIONS),
+        PROVIDER_BEDROCK => Some(BEDROCK_COMPATIBLE_INTEGRATIONS),
+        _ => None,
+    }
+}
+
+/// True when `integration_id` is accepted for the explicit AI provider.
+pub fn provider_supports_integration(provider: &str, integration_id: &str) -> bool {
+    compatible_integration_ids_for_provider(provider)
+        .map(|ids| ids.contains(&integration_id))
+        .unwrap_or(false)
 }
 
 /// Create an OpenAI completion model from connection parameters.
@@ -79,7 +101,7 @@ pub fn create_openai_model_with_connection(
 /// best-effort via prompt instructions).
 pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Option<Value> {
     match integration_id {
-        "openai" | "openai_api_key" => Some(json!({
+        PROVIDER_OPENAI | "openai_api_key" => Some(json!({
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -95,7 +117,7 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
                 "schema": json_schema
             }
         })),
-        "bedrock" | "aws_credentials" => Some(json!({
+        PROVIDER_BEDROCK | "aws_credentials" => Some(json!({
             "outputConfig": {
                 "textFormat": {
                     "type": "json_schema",
@@ -140,14 +162,14 @@ pub fn create_completion_model_with_connection(
     connection_id: Option<&str>,
 ) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
     match integration_id {
-        "bedrock" | "aws_credentials" => {
+        PROVIDER_BEDROCK | "aws_credentials" => {
             let conn_id = connection_id
                 .filter(|id| !id.is_empty())
                 .ok_or(ProviderError::MissingConnection)?;
             let m = bedrock::Client::from_connection_id(conn_id).completion_model(model);
             Ok(Box::new(m))
         }
-        "openai" | "openai_api_key" => {
+        PROVIDER_OPENAI | "openai_api_key" => {
             let m = create_openai_model_with_connection(parameters, model, connection_id)?;
             Ok(Box::new(m))
         }
@@ -161,8 +183,25 @@ mod tests {
 
     #[test]
     fn bedrock_structured_output_uses_converse_shape() {
-        let params =
-            structured_output_params("bedrock", json!({"type": "object"})).expect("bedrock params");
+        let params = structured_output_params(PROVIDER_BEDROCK, json!({"type": "object"}))
+            .expect("bedrock params");
         assert_eq!(params["outputConfig"]["textFormat"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn provider_compatibility_maps_provider_to_connection_integrations() {
+        assert!(provider_supports_integration(
+            PROVIDER_OPENAI,
+            "openai_api_key"
+        ));
+        assert!(provider_supports_integration(
+            PROVIDER_BEDROCK,
+            "aws_credentials"
+        ));
+        assert!(!provider_supports_integration(
+            PROVIDER_OPENAI,
+            "aws_credentials"
+        ));
+        assert!(compatible_integration_ids_for_provider("unknown").is_none());
     }
 }

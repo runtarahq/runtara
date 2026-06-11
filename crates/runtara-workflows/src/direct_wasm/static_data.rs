@@ -134,11 +134,6 @@ pub(super) struct DirectCoreStaticData {
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
-    /// Per-agent pre-resolved `integration_id` (keyed by manifest agent id),
-    /// baked from the compile pipeline's `connection_id -> integration_id` map.
-    /// Absent for agents with no connection or no resolved integration id, which
-    /// fall back to `agent_empty_integration_id`.
-    agent_integration_ids: BTreeMap<u32, DirectDataSegment>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -151,15 +146,7 @@ impl DirectCoreStaticData {
         variables_json: &[u8],
         steps_json: &[u8],
     ) -> Result<Self, DirectCompileError> {
-        // Test/internal entry: no pre-resolved connection integration ids.
-        Self::new_with_child_workflows(
-            graph,
-            &[],
-            manifest_json,
-            variables_json,
-            steps_json,
-            &std::collections::HashMap::new(),
-        )
+        Self::new_with_child_workflows(graph, &[], manifest_json, variables_json, steps_json)
     }
 
     pub(super) fn new_with_child_workflows(
@@ -168,7 +155,6 @@ impl DirectCoreStaticData {
         manifest_json: &[u8],
         variables_json: &[u8],
         steps_json: &[u8],
-        connection_integration_ids: &std::collections::HashMap<String, String>,
     ) -> Result<Self, DirectCompileError> {
         let mut offset = DIRECT_STATIC_DATA_OFFSET;
         let manifest = DirectDataSegment::new(offset, manifest_json);
@@ -271,14 +257,11 @@ impl DirectCoreStaticData {
 
         let mut agent_capability_ids = BTreeMap::new();
         let mut agent_connection_ids = BTreeMap::new();
-        let mut agent_integration_ids = BTreeMap::new();
         collect_static_agent_data(
             graph,
             &mut offset,
             &mut agent_capability_ids,
             &mut agent_connection_ids,
-            &mut agent_integration_ids,
-            connection_integration_ids,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
@@ -286,8 +269,6 @@ impl DirectCoreStaticData {
                 &mut offset,
                 &mut agent_capability_ids,
                 &mut agent_connection_ids,
-                &mut agent_integration_ids,
-                connection_integration_ids,
             )?;
         }
 
@@ -313,7 +294,6 @@ impl DirectCoreStaticData {
             step_ids,
             agent_capability_ids,
             agent_connection_ids,
-            agent_integration_ids,
             heap_base: offset,
             memory_min_pages,
         })
@@ -340,10 +320,6 @@ impl DirectCoreStaticData {
         self.agent_connection_ids.get(&agent_id)
     }
 
-    pub(super) fn agent_integration_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
-        self.agent_integration_ids.get(&agent_id)
-    }
-
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
         let mut segments = vec![
             &self.manifest,
@@ -367,7 +343,6 @@ impl DirectCoreStaticData {
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());
         segments.extend(self.agent_connection_ids.values());
-        segments.extend(self.agent_integration_ids.values());
         segments
     }
 }
@@ -407,8 +382,6 @@ fn collect_static_agent_data(
     offset: &mut i32,
     agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
-    agent_integration_ids: &mut BTreeMap<u32, DirectDataSegment>,
-    connection_integration_ids: &std::collections::HashMap<String, String>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
@@ -419,20 +392,6 @@ fn collect_static_agent_data(
             let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
             *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
             agent_connection_ids.insert(agent.id, segment);
-
-            // Pre-resolved integration_id for this agent's connection, baked so
-            // component-backed agents (e.g. ai-tools) dispatch on it. Mirrors the
-            // generated path's `_connection.integration_id`; skipped when the
-            // pipeline didn't resolve a (non-empty) integration_id, leaving the
-            // empty-string fallback in `emit_agent_connection_args`.
-            if let Some(integration_id) = connection_integration_ids
-                .get(connection_id)
-                .filter(|value| !value.is_empty())
-            {
-                let segment = DirectDataSegment::new(*offset, integration_id.as_bytes());
-                *offset = align_i32(checked_offset_add(*offset, integration_id.len())?, 16);
-                agent_integration_ids.insert(agent.id, segment);
-            }
         }
     }
     for step in &graph.steps {
@@ -442,8 +401,6 @@ fn collect_static_agent_data(
                 offset,
                 agent_capability_ids,
                 agent_connection_ids,
-                agent_integration_ids,
-                connection_integration_ids,
             )?;
         }
     }
@@ -555,45 +512,6 @@ mod tests {
         assert!(static_data.agent_connection_id(2).is_none());
         assert_eq!(static_data.memory_min_pages, 1);
         assert_eq!(static_data.heap_base % 16, 0);
-    }
-
-    #[test]
-    fn static_data_bakes_resolved_agent_integration_ids() {
-        let root = graph(
-            "done",
-            vec![step("done", "Finish", vec![])],
-            vec![
-                agent_manifest(1, "cap-a", Some("conn-1")),
-                agent_manifest(2, "cap-b", Some("conn-2")),
-                agent_manifest(3, "cap-c", None),
-            ],
-        );
-        let mut connection_integration_ids = std::collections::HashMap::new();
-        // conn-1 resolves to a non-empty integration id; conn-2 resolves to an
-        // empty string (treated as unresolved); conn-3's agent has no connection.
-        connection_integration_ids.insert("conn-1".to_string(), "openai".to_string());
-        connection_integration_ids.insert("conn-2".to_string(), String::new());
-
-        let static_data = DirectCoreStaticData::new_with_child_workflows(
-            &root,
-            &[],
-            b"manifest",
-            b"{\"v\":1}",
-            DIRECT_EMPTY_STEPS_CONTEXT,
-            &connection_integration_ids,
-        )
-        .expect("static data");
-
-        assert_eq!(
-            static_data
-                .agent_integration_id(1)
-                .expect("resolved integration")
-                .data,
-            b"openai"
-        );
-        // Empty resolved value and missing connection both fall back to none.
-        assert!(static_data.agent_integration_id(2).is_none());
-        assert!(static_data.agent_integration_id(3).is_none());
     }
 
     #[test]

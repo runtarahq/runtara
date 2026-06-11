@@ -25,7 +25,6 @@
 //!
 //! The completeness guard at the end fails if any fixture file went unvisited.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -75,7 +74,6 @@ fn emit(graph: ExecutionGraph) -> Result<PathBuf, String> {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: HashMap::new(),
     })
     .map_err(|e| e.to_string())?;
     if !result.support_report.supported {
