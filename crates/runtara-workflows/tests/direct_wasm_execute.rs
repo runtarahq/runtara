@@ -1027,43 +1027,32 @@ fn run_direct_workflow_capture_attempt(
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    let mut command = Command::new(wasmtime_binary());
-    command
-        .arg("run")
-        .arg("--wasi")
-        .arg("http")
-        .arg("--wasi")
-        .arg("inherit-network")
-        .arg("--env")
-        .arg(format!("RUNTARA_HTTP_URL=http://{addr}"))
-        .arg("--env")
-        .arg(format!("RUNTARA_HTTP_PROXY_URL=http://{addr}/llm-proxy"))
-        // Keep object-model traffic hermetic: its default base URL points at
-        // a live local environment (127.0.0.1:7002); route it to the mock,
-        // whose generic `{"success": true}` fallback answers internal calls.
-        .arg("--env")
-        .arg(format!(
-            "RUNTARA_OBJECT_MODEL_URL=http://{addr}/object-model"
-        ))
-        .arg("--env")
-        .arg(format!("RUNTARA_SERVER_ADDR={addr}"))
-        .arg("--env")
-        .arg(format!("RUNTARA_INSTANCE_ID={workflow_id}"))
-        .arg("--env")
-        .arg("RUNTARA_TENANT_ID=direct-wasm-execute")
-        .arg("--env")
-        .arg("RUST_LOG=warn");
-    for (key, value) in &extra_env {
-        command.arg("--env").arg(format!("{key}={value}"));
-    }
-    let output = command
-        .arg(&compiled.wasm_path)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .expect("spawn wasmtime");
+    // Env contract shared by both execution paths. The object-model URL keeps
+    // that traffic hermetic: its default base URL points at a live local
+    // environment (127.0.0.1:7002); route it to the mock, whose generic
+    // `{"success": true}` fallback answers internal calls.
+    let mut env_pairs: Vec<(String, String)> = vec![
+        ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
+        (
+            "RUNTARA_HTTP_PROXY_URL".into(),
+            format!("http://{addr}/llm-proxy"),
+        ),
+        (
+            "RUNTARA_OBJECT_MODEL_URL".into(),
+            format!("http://{addr}/object-model"),
+        ),
+        ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
+        ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
+        ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
+        ("RUST_LOG".into(), "warn".into()),
+    ];
+    env_pairs.extend(extra_env.iter().cloned());
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (status_success, stderr) = if embedded_executor_mode() {
+        execute_via_embedded(&compiled.wasm_path, &env_pairs)
+    } else {
+        execute_via_cli(&compiled.wasm_path, &env_pairs)
+    };
     let _ = stop_tx.send(());
     let _ = server_handle.join();
 
@@ -1093,8 +1082,69 @@ fn run_direct_workflow_capture_attempt(
         sleeps,
         checkpoints,
         llm_requests,
-        status_success: output.status.success(),
-        stderr: stderr.into_owned(),
+        status_success,
+        stderr,
+    }
+}
+
+/// Battery-wide executor selection: `RUNTARA_DIRECT_WASM_EXECUTOR=embedded`
+/// routes every capture-based test through the in-process WorkflowExecutor
+/// instead of the wasmtime CLI. Run the suite once per mode for A/B parity.
+fn embedded_executor_mode() -> bool {
+    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() == Ok("embedded")
+}
+
+/// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.
+fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
+    let mut command = Command::new(wasmtime_binary());
+    command
+        .arg("run")
+        .arg("--wasi")
+        .arg("http")
+        .arg("--wasi")
+        .arg("inherit-network");
+    for (key, value) in env_pairs {
+        command.arg("--env").arg(format!("{key}={value}"));
+    }
+    let output = command
+        .arg(wasm_path)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .expect("spawn wasmtime");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Embedded path: same component, same env, executed in-process.
+fn execute_via_embedded(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load(wasm_path)
+            .await
+            .expect("load composed workflow component");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: env_pairs.iter().cloned().collect(),
+                    stderr: None,
+                    timeout: Duration::from_secs(300),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                },
+            )
+            .await
+    });
+    match result.exit {
+        runtara_component_host::WorkflowExit::Completed => (true, String::new()),
+        runtara_component_host::WorkflowExit::GuestError => (false, String::new()),
+        runtara_component_host::WorkflowExit::Failed { reason } => (false, reason),
+        other => (false, format!("embedded run interrupted: {other:?}")),
     }
 }
 
