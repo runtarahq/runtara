@@ -14,7 +14,6 @@ use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::fs;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
@@ -285,56 +284,14 @@ impl WasmRunner {
         tenant_id: &str,
         runtara_core_addr: &str,
         checkpoint_id: Option<&str>,
-        run_dir: &Path,
     ) -> HashMap<String, String> {
-        let mut env = HashMap::new();
-        env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
-        env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        // Suppress verbose tracing in WASM workflows to reduce stderr output.
-        env.insert("RUST_LOG".to_string(), "warn".to_string());
-        env.insert(
-            "RUNTARA_HTTP_URL".to_string(),
-            format!("http://{}", runtara_core_addr),
-        );
-        env.insert(
-            "RUNTARA_SERVER_ADDR".to_string(),
-            runtara_core_addr.to_string(),
-        );
-
-        if self.config.skip_cert_verification {
-            env.insert(
-                "RUNTARA_SKIP_CERT_VERIFICATION".to_string(),
-                "true".to_string(),
-            );
-        }
-        if let Some(cp_id) = checkpoint_id {
-            env.insert("RUNTARA_CHECKPOINT_ID".to_string(), cp_id.to_string());
-        }
-        if let Some(ref url) = self.config.connection_service_url {
-            env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
-        }
-
-        // Forward SDK backend selection and HTTP URL if set in host environment.
-        if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
-            env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
-        }
-        if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
-            env.insert("RUNTARA_HTTP_URL".to_string(), url);
-        }
-        if let Ok(port) = std::env::var("RUNTARA_CORE_HTTP_PORT") {
-            env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
-        }
-
-        // RUNTARA_HTTP_PROXY_URL, RUNTARA_OBJECT_MODEL_URL, RUNTARA_AGENT_SERVICE_URL
-        // and RUNTARA_TENANT_ID now arrive via LaunchOptions.env (populated by
-        // the caller from its typed config) and are merged into `env` by the
-        // caller of build_env. The runner no longer reads them from its own
-        // process environment.
-
-        // Store the host run_dir path for reference (not visible to guest)
-        let _ = run_dir;
-
-        env
+        super::common::build_env(
+            &self.config,
+            instance_id,
+            tenant_id,
+            runtara_core_addr,
+            checkpoint_id,
+        )
     }
 
     /// Build the wasmtime command with all flags.
@@ -369,10 +326,7 @@ impl WasmRunner {
 
     /// Create run directory for stderr capture.
     async fn ensure_run_dir(&self, tenant_id: &str, instance_id: &str) -> Result<()> {
-        let run_dir = self.run_dir(tenant_id, instance_id);
-        fs::create_dir_all(&run_dir).await?;
-        debug!(instance_id = %instance_id, "Run directory created");
-        Ok(())
+        super::common::ensure_run_dir(&self.config.data_dir, tenant_id, instance_id).await
     }
 
     /// Load output from runtara-core persistence.
@@ -380,74 +334,17 @@ impl WasmRunner {
     /// The SDK reports completion/failure to runtara-core via HTTP during execution.
     /// By the time the process exits, the instance record is already persisted.
     async fn load_output(&self, instance_id: &str) -> Result<Value> {
-        match self.persistence.get_instance(instance_id).await {
-            Ok(Some(inst)) => match inst.status.as_str() {
-                "completed" => {
-                    if let Some(output_bytes) = inst.output {
-                        serde_json::from_slice(&output_bytes).map_err(|e| {
-                            RunnerError::Other(format!("Failed to parse output: {}", e))
-                        })
-                    } else {
-                        Ok(Value::Null)
-                    }
-                }
-                "failed" => {
-                    let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
-                    Err(RunnerError::Other(error))
-                }
-                "cancelled" => Err(RunnerError::Cancelled),
-                status => Err(RunnerError::Other(format!(
-                    "Unexpected instance status after exit: {}",
-                    status
-                ))),
-            },
-            Ok(None) => Err(RunnerError::OutputNotFound(instance_id.to_string())),
-            Err(e) => Err(RunnerError::Other(format!(
-                "Failed to query instance status: {}",
-                e
-            ))),
-        }
+        super::common::load_output(self.persistence.as_ref(), instance_id).await
     }
 
     /// Load stderr from log file for diagnostics.
     async fn load_stderr(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
-        let stderr_path = self.run_dir(tenant_id, instance_id).join("stderr.log");
-        if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
-            let stderr_trimmed = stderr_content.trim();
-            if !stderr_trimmed.is_empty() {
-                let lines: Vec<&str> = stderr_trimmed
-                    .lines()
-                    .filter(|line| {
-                        let line_lower = line.to_lowercase();
-                        !line_lower.contains("warning:")
-                            && !line_lower.starts_with("at ")
-                            && !line.trim().is_empty()
-                    })
-                    .take(10)
-                    .collect();
-
-                if !lines.is_empty() {
-                    let preview = lines.join("\n");
-                    let truncated = if preview.len() > 2000 {
-                        format!("{}...", &preview[..2000])
-                    } else {
-                        preview
-                    };
-                    return Some(truncated);
-                }
-            }
-        }
-
-        None
+        super::common::load_stderr(&self.config.data_dir, tenant_id, instance_id).await
     }
 
     /// Get the run directory for an instance.
     fn run_dir(&self, tenant_id: &str, instance_id: &str) -> PathBuf {
-        self.config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
+        super::common::run_dir(&self.config.data_dir, tenant_id, instance_id)
     }
 
     /// Run wasmtime process and wait for exit with timeout and cancellation.
@@ -682,15 +579,12 @@ impl Runner for WasmRunner {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
 
-        let run_dir = self.run_dir(&options.tenant_id, &options.instance_id);
-
         // Build environment variables
         let mut env = self.build_env(
             &options.instance_id,
             &options.tenant_id,
             &options.runtara_core_addr,
             options.checkpoint_id.as_deref(),
-            &run_dir,
         );
         env.extend(options.env.clone());
 
@@ -769,7 +663,6 @@ impl Runner for WasmRunner {
             &options.tenant_id,
             &options.runtara_core_addr,
             options.checkpoint_id.as_deref(),
-            &run_dir,
         );
         env.extend(options.env.clone());
 

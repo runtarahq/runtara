@@ -4,10 +4,13 @@
 //!
 //! This module is moved from runtara-core.
 
+mod common;
+pub mod embedded;
 pub mod mock;
 mod traits;
 pub mod wasm;
 
+pub use embedded::EmbeddedWasmRunner;
 pub use mock::MockRunner;
 pub use traits::*;
 pub use wasm::{WasmRunner, WasmRunnerConfig};

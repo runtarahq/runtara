@@ -4641,6 +4641,7 @@ dependencies = [
  "nix",
  "percent-encoding",
  "runtara-agents",
+ "runtara-component-host",
  "runtara-core",
  "runtara-dsl",
  "runtara-workflows",
@@ -4656,6 +4657,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wat",
 ]
 
 [[package]]
