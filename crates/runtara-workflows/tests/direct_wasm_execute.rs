@@ -774,8 +774,8 @@ fn direct_e2e_components_dir() -> Option<PathBuf> {
         eprintln!("SKIP: wac not installed.");
         return None;
     }
-    if !wasmtime_installed() {
-        eprintln!("SKIP: wasmtime not installed.");
+    if !embedded_executor_mode() && !wasmtime_installed() {
+        eprintln!("SKIP: RUNTARA_DIRECT_WASM_EXECUTOR=cli but wasmtime is not installed.");
         return None;
     }
     let components_dir = shared_components_dir()?;
@@ -1087,11 +1087,12 @@ fn run_direct_workflow_capture_attempt(
     }
 }
 
-/// Battery-wide executor selection: `RUNTARA_DIRECT_WASM_EXECUTOR=embedded`
-/// routes every capture-based test through the in-process WorkflowExecutor
-/// instead of the wasmtime CLI. Run the suite once per mode for A/B parity.
+/// Battery-wide executor selection. The in-process WorkflowExecutor is the
+/// default (it is the only production runner); `RUNTARA_DIRECT_WASM_EXECUTOR=cli`
+/// opts into the reference wasmtime CLI for A/B cross-checks of the composed
+/// component against the upstream runtime.
 fn embedded_executor_mode() -> bool {
-    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() == Ok("embedded")
+    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() != Ok("cli")
 }
 
 /// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.

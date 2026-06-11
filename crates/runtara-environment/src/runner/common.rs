@@ -1,14 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Helpers shared by the workflow runners (CLI process and embedded).
+//! Workflow runner configuration and contract helpers.
 //!
-//! Both runners speak the exact same contract to the guest (env vars) and to
-//! the rest of the platform (output read from runtara-core persistence,
-//! stderr read from the per-run log file) — extracting these keeps the two
-//! implementations bit-for-bit compatible where it matters.
+//! The guest-facing contract (env vars) and platform-facing contract (output
+//! read from runtara-core persistence, stderr in the per-run log file) live
+//! here, separate from the execution engine, so any future runner (e.g. a
+//! self-exec process runner) inherits them unchanged.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::fs;
@@ -17,11 +18,58 @@ use tracing::debug;
 use runtara_core::persistence::Persistence;
 
 use super::traits::{Result, RunnerError};
-use super::wasm::WasmRunnerConfig;
+
+/// Configuration shared by workflow runners.
+#[derive(Clone, Debug)]
+pub struct WorkflowRunnerConfig {
+    /// Data directory for per-run state (stderr capture).
+    pub data_dir: PathBuf,
+    /// Default execution timeout.
+    pub default_timeout: Duration,
+    /// Skip TLS certificate verification (passed to instances).
+    pub skip_cert_verification: bool,
+    /// Connection service URL for fetching credentials at runtime (passed to instances).
+    pub connection_service_url: Option<String>,
+}
+
+impl WorkflowRunnerConfig {
+    /// Create configuration from environment variables.
+    ///
+    /// - `DATA_DIR`: data directory for instance I/O (default: `.data`).
+    /// - `EXECUTION_TIMEOUT_SECS`: default execution timeout in seconds (default: 300).
+    /// - `RUNTARA_SKIP_CERT_VERIFICATION`: skip TLS cert verification (default: false).
+    /// - `RUNTARA_CONNECTION_SERVICE_URL`: connection service URL (optional).
+    pub fn from_env() -> Self {
+        let data_dir_raw =
+            PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+        let data_dir = if data_dir_raw.is_absolute() {
+            data_dir_raw
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&data_dir_raw))
+                .unwrap_or(data_dir_raw)
+        };
+
+        Self {
+            data_dir,
+            default_timeout: Duration::from_secs(
+                std::env::var("EXECUTION_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(300),
+            ),
+            skip_cert_verification: std::env::var("RUNTARA_SKIP_CERT_VERIFICATION")
+                .ok()
+                .map(|v| crate::config::parse_bool_lenient(&v))
+                .unwrap_or(false),
+            connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL").ok(),
+        }
+    }
+}
 
 /// Build the environment variables every workflow instance receives.
 pub(crate) fn build_env(
-    config: &WasmRunnerConfig,
+    config: &WorkflowRunnerConfig,
     instance_id: &str,
     tenant_id: &str,
     runtara_core_addr: &str,

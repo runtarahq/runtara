@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence, SqlitePersistence};
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, WasmRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, WorkflowRunnerConfig,
 };
 
 /// `wasi:cli/run` returning ok — the embedded analogue of exit code 0.
@@ -71,8 +71,7 @@ async fn harness() -> Harness {
             .await
             .expect("sqlite persistence"),
     );
-    let config = WasmRunnerConfig {
-        wasmtime_path: PathBuf::from("unused-in-embedded-mode"),
+    let config = WorkflowRunnerConfig {
         data_dir: dir.path().join("data"),
         default_timeout: Duration::from_secs(30),
         skip_cert_verification: false,

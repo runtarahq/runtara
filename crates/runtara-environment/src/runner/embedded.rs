@@ -3,21 +3,20 @@
 //! Embedded (in-process) workflow runner.
 //!
 //! Executes composed workflow components through
-//! `runtara-component-host::WorkflowExecutor` instead of spawning the
-//! `wasmtime` CLI. Same guest contract as [`super::wasm::WasmRunner`] — env
-//! vars from [`super::common::build_env`], output read from runtara-core
-//! persistence, stderr in the per-run `stderr.log` — but no process per
-//! instance: each run is a tokio task with its own wasmtime `Store`.
+//! `runtara-component-host::WorkflowExecutor` — env vars from
+//! [`super::common::build_env`], output read from runtara-core persistence,
+//! stderr in the per-run `stderr.log`. No process per instance: each run is
+//! a tokio task with its own wasmtime `Store`.
 //!
-//! Consequences vs the process runner:
-//! - `RunnerHandle.spawned_pid` is `None`. Startup recovery already treats
-//!   pid-less registry entries as dead, which is exactly right here: an
-//!   in-process instance cannot survive a server restart, and resumes go
-//!   through the durable checkpoint path.
+//! Semantics (vs the retired wasmtime-CLI process runner):
+//! - `RunnerHandle.spawned_pid` is `None`. Startup recovery treats pid-less
+//!   registry entries as dead, which is exactly right here: an in-process
+//!   instance cannot survive a server restart, and resumes go through the
+//!   durable checkpoint path.
 //! - `stop()` raises a cancel flag; the executor's epoch/watchdog rings end
-//!   the run within ~one tick (100 ms) instead of SIGKILL-immediate.
+//!   the run within ~one tick (100 ms).
 //! - Memory metrics come from the store's resource limiter (exact guest
-//!   linear-memory peak) instead of RSS sampling; CPU metrics are absent.
+//!   linear-memory peak); CPU metrics are absent.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -33,12 +32,11 @@ use runtara_component_host::{
 };
 use runtara_core::persistence::Persistence;
 
-use super::common;
+use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
     RunnerHandle,
 };
-use super::wasm::WasmRunnerConfig;
 
 /// Per-instance bookkeeping for detached runs.
 struct InstanceTask {
@@ -51,7 +49,7 @@ type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
 
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
-    config: WasmRunnerConfig,
+    config: WorkflowRunnerConfig,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
@@ -60,10 +58,7 @@ pub struct EmbeddedWasmRunner {
 
 impl EmbeddedWasmRunner {
     /// Build the runner with its own engine + epoch ticker.
-    ///
-    /// `config.wasmtime_path` is unused — kept so both runners share one
-    /// config shape and `from_env()`.
-    pub fn new(config: WasmRunnerConfig, persistence: Arc<dyn Persistence>) -> Result<Self> {
+    pub fn new(config: WorkflowRunnerConfig, persistence: Arc<dyn Persistence>) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())
             .map_err(|e| RunnerError::Other(format!("build wasmtime engine: {e:#}")))?;
         spawn_epoch_ticker(Arc::clone(&engine));
