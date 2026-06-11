@@ -1638,6 +1638,165 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-tool debug-end payload: {err}"))
     }
 
+    /// Build a `step_debug_start` payload for an AiAgent conversation-memory
+    /// phase (load/save/compaction), mirroring the generated compiler's
+    /// synthetic memory steps. Phases: 0 = load, 1 = save, 2 = sliding-window
+    /// compaction, 3 = summarize compaction. The compaction phases return an
+    /// empty payload when the history is at/below `max_messages` — the caller
+    /// skips the event, matching the generated "only when exceeded" gate.
+    pub fn ai_memory_debug_start(
+        &self,
+        agent_id: u32,
+        phase: u32,
+        conversation: &[u8],
+        state: &[u8],
+        max_messages: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-memory-debug source: {err}"))?;
+        let phase = AiMemoryDebugPhase::from_code(phase)?;
+        let step = self.ai_memory_step(agent_id, phase)?;
+        let conversation_id = ai_memory_conversation_id(conversation)?;
+        let history = ai_memory_chat_history(state)?;
+
+        let inputs = match phase {
+            AiMemoryDebugPhase::Load => serde_json::json!({
+                "conversation_id": conversation_id,
+            }),
+            AiMemoryDebugPhase::Save => serde_json::json!({
+                "conversation_id": conversation_id,
+                "message_count": history.len(),
+            }),
+            AiMemoryDebugPhase::CompactSliding | AiMemoryDebugPhase::CompactSummarize => {
+                if history.len() <= max_messages as usize {
+                    return Ok(Vec::new());
+                }
+                let excess = history.len() - max_messages as usize;
+                let excess_key = match phase {
+                    AiMemoryDebugPhase::CompactSliding => "messages_to_drop",
+                    _ => "messages_to_compact",
+                };
+                let mut inputs = serde_json::json!({
+                    "strategy": phase.strategy(),
+                    "messages_before": history.len(),
+                    "max_messages": max_messages,
+                    "conversation_id": conversation_id,
+                });
+                if let Some(map) = inputs.as_object_mut() {
+                    map.insert(excess_key.to_string(), Value::from(excess));
+                }
+                inputs
+            }
+        };
+
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step.id.clone(), timestamp);
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert("inputs".to_string(), inputs);
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-memory debug-start payload: {err}"))
+    }
+
+    /// Build the matching `step_debug_end` payload for an AiAgent memory
+    /// phase. `state` is the post-phase loop state; `prior_state` is the
+    /// pre-compaction state (an empty object for load/save).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_memory_debug_end(
+        &self,
+        agent_id: u32,
+        phase: u32,
+        conversation: &[u8],
+        state: &[u8],
+        prior_state: &[u8],
+        max_messages: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-memory-debug source: {err}"))?;
+        let phase = AiMemoryDebugPhase::from_code(phase)?;
+        let step = self.ai_memory_step(agent_id, phase)?;
+        let conversation_id = ai_memory_conversation_id(conversation)?;
+        let history = ai_memory_chat_history(state)?;
+
+        let outputs = match phase {
+            // Load/save end events carry raw outputs (not the step output
+            // envelope), with truncated message previews — like the generated
+            // loop. Failures take the agent-error branch and fail the step, so
+            // an end event always reports success.
+            AiMemoryDebugPhase::Load | AiMemoryDebugPhase::Save => {
+                let previews: Vec<Value> = history.iter().map(ai_memory_message_preview).collect();
+                serde_json::json!({
+                    "success": true,
+                    "conversation_id": conversation_id,
+                    "message_count": history.len(),
+                    "messages": previews,
+                })
+            }
+            AiMemoryDebugPhase::CompactSliding | AiMemoryDebugPhase::CompactSummarize => {
+                let before = ai_memory_chat_history(prior_state)?;
+                if before.len() <= max_messages as usize {
+                    return Ok(Vec::new());
+                }
+                let excess = before.len() - max_messages as usize;
+                let details = match phase {
+                    AiMemoryDebugPhase::CompactSliding => serde_json::json!({
+                        "strategy": phase.strategy(),
+                        "success": true,
+                        "messages_before": before.len(),
+                        "messages_after": history.len(),
+                        "messages_dropped": excess,
+                    }),
+                    _ => serde_json::json!({
+                        "strategy": phase.strategy(),
+                        "success": true,
+                        "messages_before": before.len(),
+                        "messages_after": history.len(),
+                        "messages_compacted": excess,
+                        "summary": ai_memory_compaction_summary(&history),
+                    }),
+                };
+                step_output_envelope(&step, details, None)
+            }
+        };
+
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(&step.id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert("outputs".to_string(), outputs);
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-memory debug-end payload: {err}"))
+    }
+
+    /// The synthetic step identity for an AiAgent memory phase.
+    fn ai_memory_step(
+        &self,
+        agent_id: u32,
+        phase: AiMemoryDebugPhase,
+    ) -> Result<DirectJsonStep, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        Ok(DirectJsonStep {
+            id: format!("{}{}", agent.step_id, phase.id_suffix()),
+            step_type: phase.step_type().to_string(),
+            name: Some(phase.step_name().to_string()),
+            body: Value::Null,
+        })
+    }
+
     /// The synthetic step identity for the `index`-th tool call of a turn,
     /// plus the call's tool name and arguments.
     fn ai_tool_call_step(
@@ -3753,6 +3912,139 @@ fn debug_event_base(
         Value::Number(serde_json::Number::from(timestamp_ms)),
     );
     payload
+}
+
+/// An AiAgent conversation-memory phase whose debug events surface as a
+/// synthetic step, mirroring the generated compiler (which used the
+/// `.memory_load`/`.memory_save`/`.memory.compact` id suffixes verbatim).
+#[derive(Clone, Copy, PartialEq)]
+enum AiMemoryDebugPhase {
+    Load,
+    Save,
+    CompactSliding,
+    CompactSummarize,
+}
+
+impl AiMemoryDebugPhase {
+    fn from_code(code: u32) -> Result<Self, String> {
+        match code {
+            0 => Ok(Self::Load),
+            1 => Ok(Self::Save),
+            2 => Ok(Self::CompactSliding),
+            3 => Ok(Self::CompactSummarize),
+            other => Err(format!("unknown ai-memory debug phase {other}")),
+        }
+    }
+
+    fn id_suffix(self) -> &'static str {
+        match self {
+            Self::Load => ".memory_load",
+            Self::Save => ".memory_save",
+            Self::CompactSliding | Self::CompactSummarize => ".memory.compact",
+        }
+    }
+
+    fn step_name(self) -> &'static str {
+        match self {
+            Self::Load => "Memory: Load",
+            Self::Save => "Memory: Save",
+            Self::CompactSliding => "Memory: Sliding Window",
+            Self::CompactSummarize => "Memory: Summarize",
+        }
+    }
+
+    fn step_type(self) -> &'static str {
+        match self {
+            Self::Load => "AiAgentMemoryLoad",
+            Self::Save => "AiAgentMemorySave",
+            Self::CompactSliding | Self::CompactSummarize => "AiAgentMemoryCompaction",
+        }
+    }
+
+    fn strategy(self) -> &'static str {
+        match self {
+            Self::CompactSliding => "sliding_window",
+            Self::CompactSummarize => "summarize",
+            _ => "",
+        }
+    }
+}
+
+/// The resolved conversation object's id (string, or null when absent).
+fn ai_memory_conversation_id(conversation: &[u8]) -> Result<Value, String> {
+    let conversation: Value = serde_json::from_slice(conversation)
+        .map_err(|err| format!("failed to parse ai-memory conversation: {err}"))?;
+    Ok(conversation
+        .get("conversation_id")
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+/// The loop state's chat history (empty when absent).
+fn ai_memory_chat_history(state: &[u8]) -> Result<Vec<Value>, String> {
+    let state: Value = serde_json::from_slice(state)
+        .map_err(|err| format!("failed to parse ai-memory state: {err}"))?;
+    Ok(state
+        .get("chat_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// A `{role, preview}` entry for one serialized chat message, with the
+/// preview truncated to ~200 chars — the generated loop's debug-event shape.
+fn ai_memory_message_preview(message: &Value) -> Value {
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("?");
+    let parts: Vec<String> = match message.get("content") {
+        Some(Value::Array(items)) => items.iter().filter_map(ai_memory_content_preview).collect(),
+        Some(single) => ai_memory_content_preview(single).into_iter().collect(),
+        None => Vec::new(),
+    };
+    let preview = parts.join(" ");
+    let truncated = if preview.chars().count() > 200 {
+        let cut: String = preview.chars().take(200).collect();
+        format!("{cut}...")
+    } else {
+        preview
+    };
+    serde_json::json!({ "role": role, "preview": truncated })
+}
+
+/// Preview one content part: text verbatim, tool results/calls as markers.
+fn ai_memory_content_preview(part: &Value) -> Option<String> {
+    if let Some(text) = part.get("text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if part.get("type").and_then(Value::as_str) == Some("tool_result") {
+        let id = part.get("id").and_then(Value::as_str).unwrap_or("?");
+        return Some(format!("[tool_result:{id}]"));
+    }
+    if let Some(name) = part
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+    {
+        return Some(format!("[tool_call:{name}]"));
+    }
+    None
+}
+
+/// Extract the summary text the summarize-memory capability prepended as the
+/// first history message (`[Previous conversation summary]: …`).
+fn ai_memory_compaction_summary(history: &[Value]) -> Value {
+    const MARKER: &str = "[Previous conversation summary]: ";
+    history
+        .first()
+        .and_then(|message| match message.get("content") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str)),
+            Some(single) => single.get("text").and_then(Value::as_str),
+            None => None,
+        })
+        .and_then(|text| text.strip_prefix(MARKER))
+        .map(|summary| Value::String(summary.to_string()))
+        .unwrap_or(Value::Null)
 }
 
 fn switch_debug_inputs(config: &Value, source: &Value) -> Result<Value, String> {
@@ -8063,6 +8355,174 @@ mod tests {
             .expect("tool debug end with raw result");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["outputs"]["result"], json!("plain text"));
+    }
+
+    #[test]
+    fn ai_memory_debug_payloads_match_generated_shape() {
+        // The memory load/save/compaction phases must surface as synthetic
+        // AiAgentMemory* steps with the generated compiler's payload shapes,
+        // and the compaction phases must skip (empty payload) below the
+        // threshold.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": {}
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-turn",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let conversation = serde_json::to_vec(&json!({ "conversation_id": "conv-42" })).unwrap();
+        let state = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi there" }] },
+                { "role": "assistant", "content": [{ "id": "c1", "function": { "name": "echo", "arguments": {} } }] },
+                { "role": "user", "content": [{ "type": "tool_result", "id": "c1", "content": [] }] }
+            ],
+            "iterations": 1,
+            "tool_call_log": []
+        }))
+        .unwrap();
+        let empty = b"{}".to_vec();
+
+        // Load: start carries the conversation id; end carries count + previews.
+        let start = manifest
+            .ai_memory_debug_start(0, 0, &conversation, &empty, 0, &source)
+            .expect("load debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory_load"));
+        assert_eq!(start["step_name"], json!("Memory: Load"));
+        assert_eq!(start["step_type"], json!("AiAgentMemoryLoad"));
+        assert_eq!(start["inputs"], json!({ "conversation_id": "conv-42" }));
+
+        let end = manifest
+            .ai_memory_debug_end(0, 0, &conversation, &state, &empty, 0, &source)
+            .expect("load debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["success"], json!(true));
+        assert_eq!(end["outputs"]["message_count"], json!(3));
+        assert_eq!(
+            end["outputs"]["messages"][0],
+            json!({ "role": "user", "preview": "hi there" })
+        );
+        assert_eq!(
+            end["outputs"]["messages"][1],
+            json!({ "role": "assistant", "preview": "[tool_call:echo]" })
+        );
+        assert_eq!(
+            end["outputs"]["messages"][2],
+            json!({ "role": "user", "preview": "[tool_result:c1]" })
+        );
+
+        // Save: start carries the message count too.
+        let start = manifest
+            .ai_memory_debug_start(0, 1, &conversation, &state, 0, &source)
+            .expect("save debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory_save"));
+        assert_eq!(start["step_type"], json!("AiAgentMemorySave"));
+        assert_eq!(
+            start["inputs"],
+            json!({ "conversation_id": "conv-42", "message_count": 3 })
+        );
+
+        // Sliding-window compaction over the threshold: legacy id/name/fields.
+        let compacted = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi there" }] }
+            ]
+        }))
+        .unwrap();
+        let start = manifest
+            .ai_memory_debug_start(0, 2, &conversation, &state, 1, &source)
+            .expect("compact debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory.compact"));
+        assert_eq!(start["step_name"], json!("Memory: Sliding Window"));
+        assert_eq!(start["step_type"], json!("AiAgentMemoryCompaction"));
+        assert_eq!(
+            start["inputs"],
+            json!({
+                "strategy": "sliding_window",
+                "messages_before": 3,
+                "messages_to_drop": 2,
+                "max_messages": 1,
+                "conversation_id": "conv-42"
+            })
+        );
+        let end = manifest
+            .ai_memory_debug_end(0, 2, &conversation, &compacted, &state, 1, &source)
+            .expect("compact debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgentMemoryCompaction"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "strategy": "sliding_window",
+                "success": true,
+                "messages_before": 3,
+                "messages_after": 1,
+                "messages_dropped": 2
+            })
+        );
+
+        // Below the threshold both compaction payloads are empty (event skipped).
+        let skipped = manifest
+            .ai_memory_debug_start(0, 2, &conversation, &state, 50, &source)
+            .expect("below-threshold start");
+        assert!(skipped.is_empty());
+        let skipped = manifest
+            .ai_memory_debug_end(0, 2, &conversation, &state, &state, 50, &source)
+            .expect("below-threshold end");
+        assert!(skipped.is_empty());
+
+        // Summarize compaction surfaces the prepended summary message.
+        let summarized = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "[Previous conversation summary]: user said hi" }] },
+                { "role": "user", "content": [{ "type": "tool_result", "id": "c1", "content": [] }] }
+            ]
+        }))
+        .unwrap();
+        let end = manifest
+            .ai_memory_debug_end(0, 3, &conversation, &summarized, &state, 2, &source)
+            .expect("summarize debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["step_name"], json!("Memory: Summarize"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "strategy": "summarize",
+                "success": true,
+                "messages_before": 3,
+                "messages_after": 2,
+                "messages_compacted": 1,
+                "summary": "user said hi"
+            })
+        );
     }
 
     #[test]

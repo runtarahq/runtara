@@ -955,6 +955,56 @@ mod component {
             })
         }
 
+        fn ai_memory_debug_start(
+            agent_id: u32,
+            phase: u32,
+            conversation: Vec<u8>,
+            state: Vec<u8>,
+            max_messages: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_memory_debug_start(
+                    agent_id,
+                    phase,
+                    &conversation,
+                    &state,
+                    max_messages,
+                    &source,
+                )
+            })
+        }
+
+        fn ai_memory_debug_end(
+            agent_id: u32,
+            phase: u32,
+            conversation: Vec<u8>,
+            state: Vec<u8>,
+            prior_state: Vec<u8>,
+            max_messages: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_memory_debug_end(
+                    agent_id,
+                    phase,
+                    &conversation,
+                    &state,
+                    &prior_state,
+                    max_messages,
+                    &source,
+                )
+            })
+        }
+
         fn ai_memory_initial_state(load_output: Vec<u8>) -> Result<Vec<u8>, String> {
             direct_json::DirectJsonManifest::ai_memory_initial_state(&load_output)
         }

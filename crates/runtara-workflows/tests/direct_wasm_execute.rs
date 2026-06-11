@@ -1038,6 +1038,13 @@ fn run_direct_workflow_capture_attempt(
         .arg(format!("RUNTARA_HTTP_URL=http://{addr}"))
         .arg("--env")
         .arg(format!("RUNTARA_HTTP_PROXY_URL=http://{addr}/llm-proxy"))
+        // Keep object-model traffic hermetic: its default base URL points at
+        // a live local environment (127.0.0.1:7002); route it to the mock,
+        // whose generic `{"success": true}` fallback answers internal calls.
+        .arg("--env")
+        .arg(format!(
+            "RUNTARA_OBJECT_MODEL_URL=http://{addr}/object-model"
+        ))
         .arg("--env")
         .arg(format!("RUNTARA_SERVER_ADDR={addr}"))
         .arg("--env")
@@ -2092,6 +2099,152 @@ fn direct_wasm_execute_ai_agent_tool_loop_with_next_edge_emits_debug_events() {
     assert!(
         event_keys.contains(&("step_debug_start".to_string(), "finish".to_string())),
         "Finish step events present: {event_keys:?}"
+    );
+}
+
+fn ai_agent_memory_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"mem","label":"memory"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You chat"},
+          "userPrompt":{"valueType":"immediate","value":"Say hello"},
+          "provider":"openai",
+          "model":"gpt-4o",
+          "memory":{
+            "conversationId":{"valueType":"immediate","value":"conv-42"},
+            "compaction":{"maxMessages":1}
+          }}},
+        "mem": {"id":"mem","stepType":"Agent","name":"Memory","agentId":"object-model",
+          "capabilityId":"load-memory","connectionId":"conn-1","inputMapping":{}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
+    .to_string()
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_memory_emits_debug_events() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Conversation memory phases must surface as synthetic AiAgentMemory*
+    // steps like the generated compiler: load before the loop, sliding-window
+    // compaction (maxMessages 1 < the 2-message history, so it fires) and
+    // save after. The object-model provider's HTTP calls hit the mock's
+    // generic `{"success": true}` fallback — an empty stored conversation.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-memory-events",
+        &ai_agent_memory_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![llm_ok("hello there")],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should complete; stderr: {}; error: {:?}; events: {:?}; llm calls: {}",
+        result.stderr,
+        result.error_json,
+        result
+            .events
+            .iter()
+            .map(|e| (
+                e.subtype.clone(),
+                e.payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string()
+            ))
+            .collect::<Vec<_>>(),
+        result.llm_requests.len(),
+    );
+    let output = result.output_json.expect("run completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello there"),
+        "{output}"
+    );
+
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+    for step_id in ["ai.memory_load", "ai.memory.compact", "ai.memory_save"] {
+        for subtype in ["step_debug_start", "step_debug_end"] {
+            assert!(
+                event_keys.contains(&(subtype.to_string(), step_id.to_string())),
+                "missing {subtype} for {step_id}: {event_keys:?}"
+            );
+        }
+    }
+
+    let find_end = |step_id: &str| {
+        result
+            .events
+            .iter()
+            .find(|event| {
+                event.subtype == "step_debug_end"
+                    && event.payload_json.get("step_id").and_then(Value::as_str) == Some(step_id)
+            })
+            .unwrap_or_else(|| panic!("missing debug end for {step_id}"))
+    };
+
+    // Load: the mock has no stored conversation — empty history.
+    let load_end = find_end("ai.memory_load");
+    assert_eq!(
+        load_end.payload_json["step_type"],
+        serde_json::json!("AiAgentMemoryLoad")
+    );
+    assert_eq!(
+        load_end.payload_json["outputs"]["message_count"],
+        serde_json::json!(0)
+    );
+
+    // Compaction: the turn leaves [user, assistant]; maxMessages 1 drops one.
+    let compact_end = find_end("ai.memory.compact");
+    assert_eq!(
+        compact_end.payload_json["outputs"]["outputs"],
+        serde_json::json!({
+            "strategy": "sliding_window",
+            "success": true,
+            "messages_before": 2,
+            "messages_after": 1,
+            "messages_dropped": 1
+        })
+    );
+
+    // Save: the compacted single-message history is persisted.
+    let save_end = find_end("ai.memory_save");
+    assert_eq!(
+        save_end.payload_json["outputs"]["success"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        save_end.payload_json["outputs"]["message_count"],
+        serde_json::json!(1)
     );
 }
 

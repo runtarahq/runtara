@@ -115,6 +115,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_output: Option<u32>,
     stdlib_ai_tool_debug_start: Option<u32>,
     stdlib_ai_tool_debug_end: Option<u32>,
+    stdlib_ai_memory_debug_start: Option<u32>,
+    stdlib_ai_memory_debug_end: Option<u32>,
     stdlib_ai_memory_initial_state: Option<u32>,
     stdlib_ai_memory_save_input: Option<u32>,
     stdlib_ai_memory_compact_sliding: Option<u32>,
@@ -440,6 +442,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_tool_debug_end,
                 "stdlib.ai-tool-debug-end",
             )?,
+            stdlib_ai_memory_debug_start: require_import(
+                self.stdlib_ai_memory_debug_start,
+                "stdlib.ai-memory-debug-start",
+            )?,
+            stdlib_ai_memory_debug_end: require_import(
+                self.stdlib_ai_memory_debug_end,
+                "stdlib.ai-memory-debug-end",
+            )?,
             stdlib_ai_memory_initial_state: require_import(
                 self.stdlib_ai_memory_initial_state,
                 "stdlib.ai-memory-initial-state",
@@ -601,6 +611,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_output: u32,
     pub(super) stdlib_ai_tool_debug_start: u32,
     pub(super) stdlib_ai_tool_debug_end: u32,
+    pub(super) stdlib_ai_memory_debug_start: u32,
+    pub(super) stdlib_ai_memory_debug_end: u32,
     pub(super) stdlib_ai_memory_initial_state: u32,
     pub(super) stdlib_ai_memory_save_input: u32,
     pub(super) stdlib_ai_memory_compact_sliding: u32,
@@ -893,6 +905,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_tool_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-tool-debug-end") {
         import_indices.stdlib_ai_tool_debug_end = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-memory-debug-start") {
+        import_indices.stdlib_ai_memory_debug_start = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-memory-debug-end") {
+        import_indices.stdlib_ai_memory_debug_end = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-memory-initial-state") {
         import_indices.stdlib_ai_memory_initial_state = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-memory-save-input") {

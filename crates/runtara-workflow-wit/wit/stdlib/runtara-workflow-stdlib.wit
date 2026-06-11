@@ -435,6 +435,32 @@ interface json {
         tool-result: list<u8>,
         source: list<u8>,
     ) -> result<list<u8>, string>;
+    // Debug payloads for the AiAgent conversation-memory phases, as synthetic
+    // AiAgentMemoryLoad/Save/Compaction steps mirroring the generated
+    // compiler. phase: 0 = load, 1 = save, 2 = sliding-window compaction,
+    // 3 = summarize compaction. The compaction phases return an EMPTY payload
+    // when the history is at/below the threshold — the emitter skips the
+    // event, matching the generated "only when exceeded" gate.
+    ai-memory-debug-start: func(
+        agent-id: u32,
+        phase: u32,
+        conversation: list<u8>,
+        state: list<u8>,
+        max-messages: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // The matching step-debug-end payload. `state` is the post-phase loop
+    // state; `prior-state` is the pre-compaction state (empty object for
+    // load/save).
+    ai-memory-debug-end: func(
+        agent-id: u32,
+        phase: u32,
+        conversation: list<u8>,
+        state: list<u8>,
+        prior-state: list<u8>,
+        max-messages: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
     // Build the initial loop state from a load-memory result (loaded
     // conversation becomes the starting chat history).
     ai-memory-initial-state: func(load-output: list<u8>) -> result<list<u8>, string>;

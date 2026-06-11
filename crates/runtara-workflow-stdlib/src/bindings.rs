@@ -5303,6 +5303,180 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_memory_debug_start_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: i32,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: i32,
+                    arg7: *mut u8,
+                    arg8: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg3;
+                    let len1 = arg5;
+                    let len2 = arg8;
+                    let result3 = T::ai_memory_debug_start(
+                        arg0 as u32,
+                        arg1 as u32,
+                        _rt::Vec::from_raw_parts(arg2.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg4.cast(), len1, len1),
+                        arg6 as u32,
+                        _rt::Vec::from_raw_parts(arg7.cast(), len2, len2),
+                    );
+                    let ptr4 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result3 {
+                        Ok(e) => {
+                            *ptr4.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec5 = (e).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr4
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr4
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr4.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec6 = (e.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr4
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr4
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                    };
+                    ptr4
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_memory_debug_start<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_ai_memory_debug_end_cabi<T: Guest>(
+                    arg0: i32,
+                    arg1: i32,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                    arg6: *mut u8,
+                    arg7: usize,
+                    arg8: i32,
+                    arg9: *mut u8,
+                    arg10: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg3;
+                    let len1 = arg5;
+                    let len2 = arg7;
+                    let len3 = arg10;
+                    let result4 = T::ai_memory_debug_end(
+                        arg0 as u32,
+                        arg1 as u32,
+                        _rt::Vec::from_raw_parts(arg2.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg4.cast(), len1, len1),
+                        _rt::Vec::from_raw_parts(arg6.cast(), len2, len2),
+                        arg8 as u32,
+                        _rt::Vec::from_raw_parts(arg9.cast(), len3, len3),
+                    );
+                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result4 {
+                        Ok(e) => {
+                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec6 = (e).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec7 = (e.into_bytes()).into_boxed_slice();
+                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                            let len7 = vec7.len();
+                            ::core::mem::forget(vec7);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len7;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr7.cast_mut();
+                        }
+                    };
+                    ptr5
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_ai_memory_debug_end<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_ai_memory_initial_state_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -7060,6 +7234,32 @@ pub mod exports {
                         tool_result: _rt::Vec<u8>,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Debug payloads for the AiAgent conversation-memory phases, as synthetic
+                    /// AiAgentMemoryLoad/Save/Compaction steps mirroring the generated
+                    /// compiler. phase: 0 = load, 1 = save, 2 = sliding-window compaction,
+                    /// 3 = summarize compaction. The compaction phases return an EMPTY payload
+                    /// when the history is at/below the threshold — the emitter skips the
+                    /// event, matching the generated "only when exceeded" gate.
+                    fn ai_memory_debug_start(
+                        agent_id: u32,
+                        phase: u32,
+                        conversation: _rt::Vec<u8>,
+                        state: _rt::Vec<u8>,
+                        max_messages: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// The matching step-debug-end payload. `state` is the post-phase loop
+                    /// state; `prior-state` is the pre-compaction state (empty object for
+                    /// load/save).
+                    fn ai_memory_debug_end(
+                        agent_id: u32,
+                        phase: u32,
+                        conversation: _rt::Vec<u8>,
+                        state: _rt::Vec<u8>,
+                        prior_state: _rt::Vec<u8>,
+                        max_messages: u32,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     /// Build the initial loop state from a load-memory result (loaded
                     /// conversation becomes the starting chat history).
                     fn ai_memory_initial_state(
@@ -7926,6 +8126,31 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_ai_tool_debug_end::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-memory-debug-start")]
+                        unsafe extern "C" fn export_ai_memory_debug_start(arg0 : i32,
+                        arg1 : i32, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5
+                        : usize, arg6 : i32, arg7 : * mut u8, arg8 : usize,) -> * mut u8
+                        { unsafe { $($path_to_types)*::
+                        _export_ai_memory_debug_start_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5, arg6, arg7, arg8) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-memory-debug-start")]
+                        unsafe extern "C" fn _post_return_ai_memory_debug_start(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_memory_debug_start::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#ai-memory-debug-end")] unsafe
+                        extern "C" fn export_ai_memory_debug_end(arg0 : i32, arg1 : i32,
+                        arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,
+                        arg6 : * mut u8, arg7 : usize, arg8 : i32, arg9 : * mut u8, arg10
+                        : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_ai_memory_debug_end_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4, arg5, arg6, arg7, arg8, arg9, arg10) } } #[unsafe
+                        (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#ai-memory-debug-end")]
+                        unsafe extern "C" fn _post_return_ai_memory_debug_end(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_ai_memory_debug_end::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#ai-memory-initial-state")]
                         unsafe extern "C" fn export_ai_memory_initial_state(arg0 : * mut
                         u8, arg1 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
@@ -8287,9 +8512,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4858] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xf4$\x01A\x02\x01A\x02\
-\x01B\xb7\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5051] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb5&\x01A\x02\x01A\x02\
+\x01B\xbb\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
 teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
@@ -8362,27 +8587,30 @@ calls\x01H\x01@\x01\x08snapshot\0\0\x08\x04\0\x19ai-turn-snapshot-complete\x01I\
 @\x06\x08agent-idy\x08turn-out\0\x05indexy\x09iterationy\x0ccall-countery\x06sou\
 rce\0\0\x05\x04\0\x13ai-tool-debug-start\x01K\x01@\x07\x08agent-idy\x08turn-out\0\
 \x05indexy\x09iterationy\x0ccall-countery\x0btool-result\0\x06source\0\0\x05\x04\
-\0\x11ai-tool-debug-end\x01L\x01@\x01\x0bload-output\0\0\x05\x04\0\x17ai-memory-\
-initial-state\x01M\x01@\x02\x0cconversation\0\x0bfinal-state\0\0\x05\x04\0\x14ai\
--memory-save-input\x01N\x01@\x02\x05state\0\x0cmax-messagesy\0\x05\x04\0\x19ai-m\
-emory-compact-sliding\x01O\x01@\x03\x04base\0\x05state\0\x0cmax-messagesy\0\x05\x04\
-\0\x12ai-summarize-input\x01P\x01@\x01\x10summarize-result\0\0\x05\x04\0\x13ai-s\
-ummarize-output\x01Q\x01@\x02\x08agent-idy\x05input\0\0\x05\x04\0\x14agent-valid\
-ate-input\x01R\x04\0\x16agent-connection-input\x01R\x01@\x02\x08agent-idy\x06sou\
-rce\0\0\x05\x04\0\x0fagent-cache-key\x01S\x04\0\x15agent-retry-sleep-key\x01:\x04\
-\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\x04codes\x07messages\x08categorys\
-\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xd4\0\0\x05\x04\0\
-\x10agent-error-info\x01U\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08cat\
-egorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xd4\0\0\xd6\
-\0\x04\0\x16agent-retry-error-info\x01W\x01@\x08\x08agent-idy\x04codes\x07messag\
-es\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms*\x0aattributes\xd4\
-\0\0\x05\x04\0\x0bagent-error\x01X\x01@\x02\x08agent-idy\x0aerror-info\0\0\x05\x04\
-\0\x15agent-error-from-info\x01Y\x01@\x03\x08agent-idy\x06source\0\x05error\0\0\x05\
-\x04\0\x11agent-debug-error\x01Z\x04\0\x10step-debug-start\x01(\x04\0\x0estep-de\
-bug-end\x01(\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:workf\
-low-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0\
-G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bindge\
-n-rust\x060.41.0";
+\0\x11ai-tool-debug-end\x01L\x01@\x06\x08agent-idy\x05phasey\x0cconversation\0\x05\
+state\0\x0cmax-messagesy\x06source\0\0\x05\x04\0\x15ai-memory-debug-start\x01M\x01\
+@\x07\x08agent-idy\x05phasey\x0cconversation\0\x05state\0\x0bprior-state\0\x0cma\
+x-messagesy\x06source\0\0\x05\x04\0\x13ai-memory-debug-end\x01N\x01@\x01\x0bload\
+-output\0\0\x05\x04\0\x17ai-memory-initial-state\x01O\x01@\x02\x0cconversation\0\
+\x0bfinal-state\0\0\x05\x04\0\x14ai-memory-save-input\x01P\x01@\x02\x05state\0\x0c\
+max-messagesy\0\x05\x04\0\x19ai-memory-compact-sliding\x01Q\x01@\x03\x04base\0\x05\
+state\0\x0cmax-messagesy\0\x05\x04\0\x12ai-summarize-input\x01R\x01@\x01\x10summ\
+arize-result\0\0\x05\x04\0\x13ai-summarize-output\x01S\x01@\x02\x08agent-idy\x05\
+input\0\0\x05\x04\0\x14agent-validate-input\x01T\x04\0\x16agent-connection-input\
+\x01T\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01U\x04\0\
+\x15agent-retry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\
+\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
+ms*\x0aattributes\xd6\0\0\x05\x04\0\x10agent-error-info\x01W\x01j\x01\x02\x01s\x01\
+@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-a\
+fter-ms*\x0aattributes\xd6\0\0\xd8\0\x04\0\x16agent-retry-error-info\x01Y\x01@\x08\
+\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
+retry-after-ms*\x0aattributes\xd6\0\0\x05\x04\0\x0bagent-error\x01Z\x01@\x02\x08\
+agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01[\x01@\x03\x08\
+agent-idy\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\\\x04\0\x10\
+step-debug-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdli\
+b/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\
+\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
+wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

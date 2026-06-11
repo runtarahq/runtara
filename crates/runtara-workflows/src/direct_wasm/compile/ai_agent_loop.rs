@@ -21,7 +21,10 @@ use super::agent_error::{
 };
 use super::agent_invoke::emit_agent_invoke;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::{emit_ai_tool_debug_event, emit_step_breakpoint, emit_step_debug_event};
+use super::debug::{
+    emit_ai_memory_debug_event, emit_ai_tool_debug_event, emit_step_breakpoint,
+    emit_step_debug_event,
+};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
@@ -42,6 +45,12 @@ use crate::direct_wasm::plan::{
     DirectAiMemoryPlan, DirectAiToolPlan, DirectErrorRoutePlan, DirectFailureTarget,
     DirectHandledTarget,
 };
+
+// Stdlib `ai-memory-debug-*` phase encoding (see runtara-workflow-stdlib.wit).
+const AI_MEMORY_DEBUG_PHASE_LOAD: u32 = 0;
+const AI_MEMORY_DEBUG_PHASE_SAVE: u32 = 1;
+const AI_MEMORY_DEBUG_PHASE_COMPACT_SLIDING: u32 = 2;
+const AI_MEMORY_DEBUG_PHASE_COMPACT_SUMMARIZE: u32 = 3;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_ai_agent_loop_plan(
@@ -145,6 +154,25 @@ pub(super) fn emit_ai_agent_loop_plan(
             DIRECT_AI_CONV_LEN_LOCAL,
             None,
         );
+        // Memory-load debug-start ({step}.memory_load), like the generated loop.
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            AI_MEMORY_DEBUG_PHASE_LOAD,
+            true,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            None,
+            None,
+            0,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        );
         // load_output = invoke load-memory(conversation)
         let load_invoke = indices
             .agent_invokes
@@ -198,6 +226,25 @@ pub(super) fn emit_ai_agent_loop_plan(
         body.instruction(&Instruction::Call(indices.stdlib_ai_memory_initial_state));
         emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
         load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+        // Memory-load debug-end with the loaded history's count + previews.
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            AI_MEMORY_DEBUG_PHASE_LOAD,
+            false,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            Some((DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+            None,
+            0,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        );
     } else {
         set_segment(
             body,
@@ -691,6 +738,38 @@ pub(super) fn emit_ai_agent_loop_plan(
 
     // Conversation memory: save the final conversation history.
     if let Some(memory) = memory {
+        let compact_phase = if memory.summarize.is_some() {
+            AI_MEMORY_DEBUG_PHASE_COMPACT_SUMMARIZE
+        } else {
+            AI_MEMORY_DEBUG_PHASE_COMPACT_SLIDING
+        };
+        // Stash the pre-compaction state (its buffer stays valid) so the
+        // debug-end can report before/after counts; TOOL_ARGS is free here.
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
+        // Compaction debug-start ({step}.memory.compact); the stdlib returns
+        // an empty payload below the threshold and the event is skipped —
+        // matching the generated "only when exceeded" gate.
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            compact_phase,
+            true,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            Some((DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+            None,
+            memory.max_messages,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
         // Compaction before save. Generated always compacts when memory is
         // configured (default window 50).
         if let Some(summarize) = memory.summarize.as_ref() {
@@ -775,6 +854,47 @@ pub(super) fn emit_ai_agent_loop_plan(
             load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
         }
 
+        // Compaction debug-end with before/after counts (and the summary for
+        // the summarize strategy); skipped below the threshold like the start.
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            compact_phase,
+            false,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            Some((DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+            Some((DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL)),
+            memory.max_messages,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
+
+        // Memory-save debug-start ({step}.memory_save).
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            AI_MEMORY_DEBUG_PHASE_SAVE,
+            true,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            Some((DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+            None,
+            0,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
+
         // save_input = ai-memory-save-input(conversation, final_state)
         body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_AI_CONV_LEN_LOCAL));
@@ -833,6 +953,25 @@ pub(super) fn emit_ai_agent_loop_plan(
             body,
             DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
             DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        );
+        // Memory-save debug-end (failures took the agent-error branch above).
+        emit_ai_memory_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            AI_MEMORY_DEBUG_PHASE_SAVE,
+            false,
+            DIRECT_AI_CONV_PTR_LOCAL,
+            DIRECT_AI_CONV_LEN_LOCAL,
+            Some((DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+            None,
+            0,
+            source_ptr_local,
+            source_len_local,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
         );
     }
 
