@@ -1480,8 +1480,11 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
 // Capability: load_memory / save_memory
 // ============================================================================
 
-const MEMORY_SCHEMA_NAME: &str = "_ai_conversation_memory";
-const MEMORY_TABLE_NAME: &str = "_ai_conversation_memory";
+// No leading underscore: table/schema identifiers must start with a
+// lowercase letter (object-store `validate_identifier`); the legacy `_`-prefixed
+// name failed creation, so no environment ever stored data under it.
+const MEMORY_SCHEMA_NAME: &str = "ai_conversation_memory";
+const MEMORY_TABLE_NAME: &str = "ai_conversation_memory";
 
 /// Ensure the conversation memory schema exists (mirrors legacy
 /// `ensure_memory_schema`). GET the schema first; create it on 404 / missing.
@@ -1495,7 +1498,7 @@ fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
         return Ok(());
     }
 
-    http_post(
+    let create_resp = http_post(
         "/schemas",
         json!({
             "name": MEMORY_SCHEMA_NAME,
@@ -1511,6 +1514,19 @@ fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
         }),
         connection_id,
     )?;
+
+    // A failed creation otherwise surfaces later as a confusing
+    // "Schema not found" on the next query — fail here with the real reason.
+    if !create_resp["success"].as_bool().unwrap_or(false) {
+        return Err(AgentError::permanent(
+            "OBJECT_MODEL_MEMORY_SCHEMA_ERROR",
+            format!(
+                "Failed to create conversation-memory schema: {}",
+                create_resp["error"].as_str().unwrap_or("unknown error")
+            ),
+        )
+        .with_attr("integration", "OBJECT_MODEL"));
+    }
 
     Ok(())
 }
