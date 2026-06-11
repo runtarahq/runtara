@@ -627,16 +627,24 @@ async fn permissions_handler() -> Json<serde_json::Value> {
 /// The role is read from the per-tenant Valkey `member:{sub}` entry (attached to
 /// [`AuthContext`] by the auth middleware) — **never** from the JWT, which doesn't carry it.
 /// `permissions` lists only what the caller may do (its role's non-`Deny` grants), with the
-/// access level (`allow`/`own`) so the SPA can show/hide controls. `role`/`permissions` are
-/// empty when membership enforcement isn't active (e.g. `local`/`trust_proxy` modes).
-/// See Phase 5 and `docs/security/user-management-contracts.md`.
+/// access level (`allow`/`own`) so the SPA can show/hide controls. In `local`/`trust_proxy`
+/// modes the caller acts as Owner, minus `user_management:access`: that UI-only capability
+/// links to the managed control plane, which self-hosted deployments don't have.
+/// See `docs/security/user-management-contracts.md`.
 async fn me_handler(
     axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
 ) -> Json<serde_json::Value> {
     let permissions = match auth.role {
         Some(role) => {
+            // `local` and `trust_proxy` authenticate outside runtara (or not at all) and
+            // report `Unauthenticated`; only real JWT/API-key callers can reach the
+            // user-management surface behind the gateway.
+            let self_hosted = auth.auth_method == crate::auth::AuthMethod::Unauthenticated;
             let mut m = serde_json::Map::new();
             for (perm, access) in role.grants() {
+                if self_hosted && *perm == crate::authz::Permission::UserManagementAccess {
+                    continue;
+                }
                 if !matches!(access, crate::authz::Access::Deny) {
                     m.insert(
                         perm.as_str().to_string(),
