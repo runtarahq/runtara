@@ -8,7 +8,7 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::api::handlers::api_keys::ApiKey;
-use crate::auth::{AuthContext, AuthMethod, AuthState, MembershipPolicy};
+use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
 use crate::authz::Role;
 use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
 
@@ -139,6 +139,17 @@ async fn enforce_api_key_membership(
     api_key: &ApiKey,
     ctx: &mut AuthContext,
 ) -> Result<(), Response> {
+    // Self-hosted modes (`local` / `trust_proxy`) run without the control plane that
+    // writes the Valkey membership contract, so there is no `member:{sub}` entry to
+    // inherit a role from. Keys act as the tenant operator — mirroring the provider
+    // path for these modes — and the lookup is skipped regardless of the membership
+    // policy, so `required` stays safe to enable everywhere. DB-side validation
+    // (hash, expiry, `is_revoked`) has already run.
+    if auth_state.provider.kind() != AuthProviderKind::Oidc {
+        ctx.role = Some(Role::Owner);
+        return Ok(());
+    }
+
     if auth_state.membership_policy == MembershipPolicy::Disabled {
         return Ok(());
     }
@@ -409,19 +420,45 @@ mod tests {
 
     use super::*;
     use crate::auth::providers::LocalProvider;
-    use crate::auth::{AuthProvider, MembershipPolicy};
+    use crate::auth::{AuthError, AuthProvider, MembershipPolicy};
 
-    fn state(policy: MembershipPolicy, valkey: Option<redis::aio::ConnectionManager>) -> AuthState {
+    /// An `AuthProviderKind::Oidc` stub: membership enforcement keys the self-hosted
+    /// bypass off the provider kind, so tests exercising the Valkey contract need an
+    /// OIDC-kind provider. `authenticate` is never reached in these tests.
+    struct OidcKindStub;
+
+    #[async_trait::async_trait]
+    impl AuthProvider for OidcKindStub {
+        async fn authenticate(
+            &self,
+            _headers: &axum::http::HeaderMap,
+        ) -> Result<AuthContext, AuthError> {
+            Err(AuthError::InvalidToken)
+        }
+
+        fn kind(&self) -> AuthProviderKind {
+            AuthProviderKind::Oidc
+        }
+    }
+
+    fn state_with_provider(
+        provider: Arc<dyn AuthProvider>,
+        policy: MembershipPolicy,
+        valkey: Option<redis::aio::ConnectionManager>,
+    ) -> AuthState {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/runtara_test_unused")
             .expect("lazy pool never connects in these tests");
-        let provider = Arc::new(LocalProvider::new("tenant".to_string())) as Arc<dyn AuthProvider>;
         AuthState {
             provider,
             pool,
             valkey,
             membership_policy: policy,
         }
+    }
+
+    fn state(policy: MembershipPolicy, valkey: Option<redis::aio::ConnectionManager>) -> AuthState {
+        state_with_provider(Arc::new(OidcKindStub), policy, valkey)
     }
 
     fn jwt_ctx(user_id: &str, jti: Option<&str>) -> AuthContext {
@@ -572,6 +609,23 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn api_key_self_hosted_mode_acts_as_owner_even_under_required() {
+        // `local`/`trust_proxy` deployments have no control plane writing the Valkey
+        // membership contract; keys must keep working under `required` (no Valkey
+        // configured here — the lookup must not even be attempted) and act as Owner.
+        let key = api_key_row("operator", Some("jti-1"));
+        let mut ctx = api_key_context(&key);
+        let local = Arc::new(LocalProvider::new("tenant".to_string())) as Arc<dyn AuthProvider>;
+        let st = state_with_provider(local, MembershipPolicy::Required, None);
+        assert!(
+            enforce_api_key_membership(&st, &key, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.role, Some(Role::Owner));
     }
 
     // --- Live Valkey round-trips (skip cleanly without VALKEY_HOST) ---

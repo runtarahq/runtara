@@ -250,6 +250,8 @@ Notes:
   "User Management" link in the runtara SPA that points at the smo-management control plane.
   No runtara route enforces it — it appears in `GET /api/runtime/me` purely so the SPA knows
   whether to show the link. The actual user-management actions are enforced by smo-management.
+  In self-hosted modes (`local` / `trust_proxy`) the caller acts as Owner but `/me` **omits**
+  this capability: there is no control plane to link to, so the SPA hides the entry.
 - **Agent capability execution** (`/agents/{name}/capabilities/{id}/execute` and
   `/test`) is gated as `workflow:execute` — it runs host-mediated I/O, possibly with a
   connection's stored credentials, so Viewers are denied.

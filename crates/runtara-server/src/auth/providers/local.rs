@@ -17,11 +17,13 @@ pub struct LocalProvider {
     /// only its own API keys) can be exercised by switching this between runs. Inert in
     /// production, which never uses this provider (it runs `oidc`).
     user_id: String,
-    /// Dev-only role override from `RUNTARA_DEV_ROLE` (owner/admin/member/viewer). Lets local
-    /// runs exercise role-based behavior — `/me` reports it and, with
-    /// `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`, the authz middleware enforces it. Inert in
-    /// production, which never uses this provider (it runs `oidc`).
-    dev_role: Option<Role>,
+    /// Caller role. Defaults to [`Role::Owner`] — the single local user is the tenant
+    /// operator, so authorization stays permissive even under
+    /// `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`. `RUNTARA_DEV_ROLE`
+    /// (owner/admin/member/viewer) overrides it so local runs can exercise role-based
+    /// behavior — `/me` reports it and, with the `required` policy, the authz middleware
+    /// enforces it. Inert in production, which never uses this provider (it runs `oidc`).
+    role: Role,
 }
 
 impl LocalProvider {
@@ -31,13 +33,14 @@ impl LocalProvider {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "local".to_string());
-        let dev_role = std::env::var("RUNTARA_DEV_ROLE")
+        let role = std::env::var("RUNTARA_DEV_ROLE")
             .ok()
-            .and_then(|s| Role::from_wire(s.trim()));
+            .and_then(|s| Role::from_wire(s.trim()))
+            .unwrap_or(Role::Owner);
         Self {
             tenant_id,
             user_id,
-            dev_role,
+            role,
         }
     }
 }
@@ -50,7 +53,7 @@ impl AuthProvider for LocalProvider {
             self.user_id.clone(),
             AuthMethod::Unauthenticated,
         );
-        ctx.role = self.dev_role;
+        ctx.role = Some(self.role);
         Ok(ctx)
     }
 
@@ -70,6 +73,11 @@ mod tests {
         assert_eq!(ctx.org_id, "org_123");
         assert_eq!(ctx.user_id, "local");
         assert_eq!(ctx.auth_method, AuthMethod::Unauthenticated);
+        assert_eq!(
+            ctx.role,
+            Some(Role::Owner),
+            "the single local user is the tenant operator unless RUNTARA_DEV_ROLE overrides"
+        );
     }
 
     #[tokio::test]

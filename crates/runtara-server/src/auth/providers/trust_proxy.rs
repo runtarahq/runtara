@@ -5,6 +5,7 @@ use crate::auth::{
     AuthContext, AuthMethod,
     provider::{AuthError, AuthProvider, AuthProviderKind},
 };
+use crate::authz::Role;
 
 /// `AUTH_PROVIDER=trust_proxy` — a reverse proxy has already authenticated the request
 /// and forwards the end-user identity in a configurable header (default
@@ -36,11 +37,14 @@ impl AuthProvider for TrustProxyProvider {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "proxy".to_string());
 
-        Ok(AuthContext::new(
-            self.tenant_id.clone(),
-            user_id,
-            AuthMethod::Unauthenticated,
-        ))
+        let mut ctx =
+            AuthContext::new(self.tenant_id.clone(), user_id, AuthMethod::Unauthenticated);
+        // Self-hosted deployments have no control plane writing per-tenant membership,
+        // so there is no role to look up: everyone the proxy lets through is the tenant
+        // operator. Owner keeps the authorization gates permissive even under
+        // `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`.
+        ctx.role = Some(Role::Owner);
+        Ok(ctx)
     }
 
     fn kind(&self) -> AuthProviderKind {
@@ -61,6 +65,11 @@ mod tests {
         assert_eq!(ctx.user_id, "alice");
         assert_eq!(ctx.org_id, "org_123");
         assert_eq!(ctx.auth_method, AuthMethod::Unauthenticated);
+        assert_eq!(
+            ctx.role,
+            Some(Role::Owner),
+            "proxy-authenticated callers act as the tenant operator"
+        );
     }
 
     #[tokio::test]
