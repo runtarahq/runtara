@@ -113,6 +113,10 @@ impl DirectJsonManifest {
         if mapping.purpose == "finish.inputMapping" {
             output = unwrap_finish_outputs(output);
         }
+        if mapping.purpose == "agent.inputMapping" {
+            resolve_nested_references(&mut output, &source);
+            output = unwrap_top_level_immediate_envelopes(output);
+        }
         serde_json::to_vec(&output)
             .map_err(|err| format!("failed to serialize mapping output: {err}"))
     }
@@ -4693,6 +4697,163 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
     }
 }
 
+/// Resolve `{valueType: "reference", value: "<path>"}` envelopes buried inside
+/// agent input payloads — e.g. `ConditionExpression` arguments or score
+/// expressions nested in an immediate `condition` value.
+///
+/// Two positions intentionally stay as references because their string value
+/// names an Object Model column rather than a workflow path:
+/// - argument 0 of field-based condition operators (`EQ`, `IN`, ...);
+/// - unqualified references inside `fn` call arguments (e.g. `SIMILARITY`).
+///
+/// Resolved references are rewritten as `{valueType: "immediate", value: X}`
+/// rather than the bare value: condition arguments are typed at the agent
+/// boundary as untagged `MappingValue` shapes, so a bare scalar there fails
+/// deserialization. [`unwrap_top_level_immediate_envelopes`] strips exactly
+/// one wrapper per top-level field so primitive-typed agent inputs still see
+/// their bare value.
+fn resolve_nested_references(value: &mut Value, source: &Value) {
+    match value {
+        Value::Object(map) => {
+            if is_reference_envelope(map) {
+                let resolved = apply_reference(map, source).unwrap_or(Value::Null);
+                let mut wrapped = Map::with_capacity(2);
+                wrapped.insert("valueType".to_string(), Value::String("immediate".into()));
+                wrapped.insert("value".to_string(), resolved);
+                *value = Value::Object(wrapped);
+                if let Value::Object(map) = value
+                    && let Some(inner) = map.get_mut("value")
+                {
+                    resolve_nested_references(inner, source);
+                }
+                return;
+            }
+
+            let is_immediate_envelope = matches!(
+                map.get("valueType"),
+                Some(Value::String(s)) if s == "immediate"
+            );
+            if is_immediate_envelope {
+                if let Some(inner) = map.get_mut("value") {
+                    resolve_nested_references(inner, source);
+                }
+                return;
+            }
+
+            if map.get("fn").and_then(Value::as_str).is_some()
+                && let Some(args) = map.get_mut("arguments").and_then(Value::as_array_mut)
+            {
+                for arg in args.iter_mut() {
+                    if arg
+                        .as_object()
+                        .is_some_and(is_unqualified_reference_envelope)
+                    {
+                        continue;
+                    }
+                    resolve_nested_references(arg, source);
+                }
+                return;
+            }
+
+            let condition_op = map.get("op").and_then(Value::as_str).map(str::to_owned);
+            if let Some(op) = condition_op.as_deref()
+                && let Some(args) = map.get_mut("arguments").and_then(Value::as_array_mut)
+            {
+                for (index, arg) in args.iter_mut().enumerate() {
+                    if index == 0
+                        && is_field_argument_operator(op)
+                        && arg.as_object().is_some_and(is_reference_envelope)
+                    {
+                        continue;
+                    }
+                    resolve_nested_references(arg, source);
+                }
+                return;
+            }
+
+            for child in map.values_mut() {
+                resolve_nested_references(child, source);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                resolve_nested_references(item, source);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip a single `{valueType: "immediate", value: X}` envelope from each
+/// top-level field. Pairs with [`resolve_nested_references`]: the resolver
+/// wraps resolved references as immediates, so a top-level field that was a
+/// reference nested directly inside an immediate would otherwise reach the
+/// agent still wrapped. Nested wrappers deeper in the payload survive intact.
+fn unwrap_top_level_immediate_envelopes(mut value: Value) -> Value {
+    if let Value::Object(map) = &mut value {
+        for child in map.values_mut() {
+            let Value::Object(child_map) = child else {
+                continue;
+            };
+            let is_immediate = matches!(
+                child_map.get("valueType"),
+                Some(Value::String(s)) if s == "immediate"
+            );
+            if !is_immediate {
+                continue;
+            }
+            if let Some(inner) = child_map.remove("value") {
+                *child = inner;
+            }
+        }
+    }
+    value
+}
+
+fn is_reference_envelope(map: &Map<String, Value>) -> bool {
+    matches!(
+        map.get("valueType"),
+        Some(Value::String(s)) if s == "reference"
+    ) && matches!(map.get("value"), Some(Value::String(_)))
+}
+
+fn is_unqualified_reference_envelope(map: &Map<String, Value>) -> bool {
+    let Some(path) = map.get("value").and_then(Value::as_str) else {
+        return false;
+    };
+    is_reference_envelope(map) && !is_qualified_workflow_path(path)
+}
+
+fn is_qualified_workflow_path(path: &str) -> bool {
+    matches!(
+        path.split('.').next(),
+        Some("data" | "variables" | "workflow" | "steps" | "loop" | "item")
+    )
+}
+
+fn is_field_argument_operator(op: &str) -> bool {
+    matches!(
+        op.to_ascii_uppercase().as_str(),
+        "EQ" | "NE"
+            | "GT"
+            | "GTE"
+            | "LT"
+            | "LTE"
+            | "STARTS_WITH"
+            | "ENDS_WITH"
+            | "CONTAINS"
+            | "IN"
+            | "NOT_IN"
+            | "IS_DEFINED"
+            | "IS_EMPTY"
+            | "IS_NOT_EMPTY"
+            | "SIMILARITY_GTE"
+            | "MATCH"
+            | "COSINE_DISTANCE_LTE"
+            | "L2_DISTANCE_LTE"
+    )
+}
+
 fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Value {
     match type_hint {
         Some("string") => match value {
@@ -5817,6 +5978,153 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn agent_mapping_resolves_refs_nested_in_condition_payload() {
+        // Regression (direct-wasm migration): references buried inside an
+        // immediate condition payload — e.g. object-model query-instances
+        // loading an instance back by the id a previous step produced — must
+        // resolve against workflow scope like the generated compiler's
+        // resolve_nested_references pass did. Without it the agent receives
+        // the literal path string and the query silently matches nothing.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "schema_name": { "valueType": "immediate", "value": "Invoice" },
+            "condition": { "valueType": "immediate", "value": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    { "valueType": "reference", "value": "id" },
+                    { "valueType": "reference", "value": "steps.create.outputs.id" }
+                ]
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(
+            b"{}",
+            b"{}",
+            br#"{"create":{"outputs":{"id":"5f0c9c2e-7e2b-4d27-9c0a-1a2b3c4d5e6f"}}}"#,
+        )
+        .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output,
+            json!({
+                "schema_name": "Invoice",
+                "condition": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        // Field-position references name Object Model columns,
+                        // not workflow paths, so they stay references.
+                        { "valueType": "reference", "value": "id" },
+                        {
+                            "valueType": "immediate",
+                            "value": "5f0c9c2e-7e2b-4d27-9c0a-1a2b3c4d5e6f"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn agent_mapping_keeps_immediate_condition_literals_intact() {
+        let condition = json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "id" },
+                { "valueType": "immediate", "value": "literal-uuid" }
+            ]
+        });
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "condition": { "valueType": "immediate", "value": condition }
+        })))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "condition": condition }));
+    }
+
+    #[test]
+    fn agent_mapping_score_expression_keeps_column_refs() {
+        // `fn` call arguments mix Object Model column refs (unqualified) and
+        // workflow refs (qualified); only the latter resolve.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "score_expression": { "valueType": "immediate", "value": {
+                "alias": "sim",
+                "expression": { "fn": "SIMILARITY", "arguments": [
+                    { "valueType": "reference", "value": "commodity_title" },
+                    { "valueType": "reference", "value": "data.customer_category" }
+                ]}
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"customer_category":"leather wallet"}"#, b"{}", b"{}")
+            .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output["score_expression"]["expression"]["arguments"],
+            json!([
+                { "valueType": "reference", "value": "commodity_title" },
+                { "valueType": "immediate", "value": "leather wallet" }
+            ])
+        );
+    }
+
+    #[test]
+    fn agent_mapping_unwraps_top_level_ref_inside_immediate() {
+        // A reference nested directly inside a top-level immediate gets
+        // resolved + wrapped by the nested pass; the top-level unwrap strips
+        // that single envelope so primitive-typed agent inputs see the bare
+        // value (matches the generated compiler's
+        // unwrap_top_level_immediate_envelopes).
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "name": { "valueType": "immediate", "value": {
+                "valueType": "reference", "value": "data.name"
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"name":"Ada"}"#, b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "name": "Ada" }));
+    }
+
+    #[test]
+    fn finish_mapping_leaves_nested_ref_envelopes_alone() {
+        // The nested-reference pass is an agent-boundary behavior; other
+        // mapping purposes pass immediate payloads through verbatim.
+        let payload = json!({
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "id" },
+                { "valueType": "reference", "value": "steps.create.outputs.id" }
+            ]
+        });
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "result": { "valueType": "immediate", "value": payload }
+        })))
+        .expect("manifest");
+        let source =
+            build_source(b"{}", b"{}", br#"{"create":{"outputs":{"id":"abc"}}}"#).expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "result": payload }));
     }
 
     #[test]

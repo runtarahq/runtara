@@ -79,8 +79,10 @@ pub fn agent_decision(
     snapshot: &EntitlementSnapshot,
     module_id: &str,
 ) -> Result<(), EntitlementDenial> {
+    // Registered dispatcher modules are kebab-canonical; DSL graphs may still
+    // carry legacy snake_case agent ids ("object_model").
     snapshot
-        .require_agent(module_id)
+        .require_agent(&runtara_dsl::agent_meta::canonical_agent_id(module_id))
         .map_err(EntitlementDenial::from)
 }
 
@@ -468,6 +470,24 @@ mod tests {
         let snap = snapshot_with(None, None);
         assert!(agent_decision(&snap, "http").is_ok());
         assert!(agent_decision(&snap, "csv").is_ok());
+    }
+
+    #[test]
+    fn agent_decision_folds_snake_case_ids_to_kebab() {
+        // Registered dispatcher modules are kebab-canonical
+        // ("object-model"), but DSL graphs may carry legacy snake_case ids
+        // ("object_model"). The decision must fold before matching, or
+        // every legacy workflow gets a spurious AGENT_NOT_ENABLED.
+        let snap = EntitlementSnapshot::parse_entitlements(
+            "tenant-test",
+            None,
+            None,
+            None,
+            &parse_agents(&["object-model"]),
+        )
+        .expect("snapshot parses");
+        assert!(agent_decision(&snap, "object_model").is_ok());
+        assert!(agent_decision(&snap, "object-model").is_ok());
     }
 
     #[test]
