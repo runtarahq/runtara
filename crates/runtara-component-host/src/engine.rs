@@ -43,15 +43,18 @@ pub fn build_engine(cfg: &EngineConfig) -> Result<Arc<Engine>> {
     Ok(Arc::new(Engine::new(&c)?))
 }
 
-/// Spawn the epoch ticker for the given engine. Ticks every 100 ms; a per-call
-/// deadline of N is then "N × 100 ms" of wall-clock budget. Call once per
-/// engine at process startup.
+/// Duration of one epoch tick as driven by [`spawn_epoch_ticker`]. A deadline
+/// of N ticks is "N × `EPOCH_TICK`" of wall-clock budget.
+pub const EPOCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Spawn the epoch ticker for the given engine. Ticks every [`EPOCH_TICK`];
+/// call once per engine at process startup.
 pub fn spawn_epoch_ticker(engine: Arc<Engine>) {
     std::thread::Builder::new()
         .name("runtara-wasmtime-epoch".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(EPOCH_TICK);
                 engine.increment_epoch();
             }
         })

@@ -39,10 +39,16 @@ anyhow = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1"
+# Already a transitive dep via wasmtime-wasi; declared for the workflow
+# executor's select!/sleep/spawn_blocking and the component-cache mutex.
+tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# Tests author minimal components in WAT; the `wat` feature lets
+# `Component::from_file` parse text-format components.
+wasmtime = { version = "44", default-features = false, features = ["wat"] }
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.

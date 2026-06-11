@@ -3421,3 +3421,224 @@ fn fixture_execution_smoke_battery() {
         failures.join("\n"),
     );
 }
+
+// ===========================================================================
+// Embedded execution — runtara-component-host's WorkflowExecutor instead of
+// the wasmtime CLI process. Same in-process compile path, same hermetic core
+// stub; proves the composed component behaves identically under the embedded
+// engine before the runner migration switches over to it.
+// ===========================================================================
+
+fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
+    static EXECUTOR: std::sync::OnceLock<runtara_component_host::WorkflowExecutor> =
+        std::sync::OnceLock::new();
+    EXECUTOR.get_or_init(|| {
+        let engine =
+            runtara_component_host::build_engine(&runtara_component_host::EngineConfig::default())
+                .expect("build embedded engine");
+        runtara_component_host::spawn_epoch_ticker(Arc::clone(&engine));
+        runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor")
+    })
+}
+
+fn run_direct_workflow_embedded(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> CapturedRun {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        components_dir,
+    )
+    .expect("direct composed compile");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+    let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let input_arc = Arc::new(workflow_input.to_vec());
+    let server_state = Arc::new(ServerState::default());
+    let server_state_for_assertions = server_state.clone();
+    let server_handle =
+        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
+
+    // Same env contract the CLI variant passes via --env flags.
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
+    env.insert(
+        "RUNTARA_HTTP_PROXY_URL".to_string(),
+        format!("http://{addr}/llm-proxy"),
+    );
+    env.insert(
+        "RUNTARA_OBJECT_MODEL_URL".to_string(),
+        format!("http://{addr}/object-model"),
+    );
+    env.insert("RUNTARA_SERVER_ADDR".to_string(), addr.to_string());
+    env.insert("RUNTARA_INSTANCE_ID".to_string(), workflow_id.to_string());
+    env.insert(
+        "RUNTARA_TENANT_ID".to_string(),
+        "direct-wasm-execute".to_string(),
+    );
+    env.insert("RUST_LOG".to_string(), "warn".to_string());
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load(&compiled.wasm_path)
+            .await
+            .expect("load composed workflow component");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(120),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                },
+            )
+            .await
+    });
+
+    let _ = stop_tx.send(());
+    let _ = server_handle.join();
+
+    let mut output_json = None;
+    let mut error_json = None;
+    let mut events = Vec::new();
+    let mut sleeps = Vec::new();
+    let mut checkpoints = Vec::new();
+    for message in capture_rx.try_iter() {
+        match message {
+            CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
+            CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
+            CapturedMessage::Event(event) => events.push(event),
+            CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
+            CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
+        }
+    }
+    let llm_requests = server_state_for_assertions
+        .llm_requests
+        .lock()
+        .expect("llm_requests lock")
+        .clone();
+    let stderr = match &result.exit {
+        runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
+        _ => String::new(),
+    };
+    CapturedRun {
+        output_json,
+        error_json,
+        events,
+        sleeps,
+        checkpoints,
+        llm_requests,
+        status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
+        stderr,
+    }
+}
+
+#[test]
+fn embedded_execute_finish_passthrough_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let captured = run_direct_workflow_embedded(
+        &components_dir,
+        "embedded-finish-passthrough",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"direct-finish"}"#,
+    );
+
+    assert!(
+        captured.status_success,
+        "embedded run failed: {}",
+        captured.stderr
+    );
+    assert_eq!(
+        captured.output_json,
+        Some(serde_json::json!({ "result": "direct-finish" }))
+    );
+    assert!(captured.error_json.is_none());
+}
+
+#[test]
+fn embedded_execute_error_workflow_reports_failure() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let captured = run_direct_workflow_embedded(
+        &components_dir,
+        "embedded-error",
+        ERROR_DIRECT_SIMPLE,
+        br#"{"requestId":"req-123"}"#,
+    );
+
+    assert!(
+        !captured.status_success,
+        "Error workflow must surface a failed run result"
+    );
+    assert!(
+        captured.output_json.is_none(),
+        "Error workflow must not POST /completed"
+    );
+    assert_eq!(
+        captured.error_json,
+        Some(serde_json::json!({
+            "stepId": "fail",
+            "stepName": "Fail Fast",
+            "category": "permanent",
+            "code": "DIRECT_FAILURE",
+            "message": "Direct workflow failure",
+            "severity": "critical",
+            "context": {
+                "requestId": "req-123",
+                "reason": "fixture"
+            }
+        }))
+    );
+}
+
+#[test]
+fn embedded_execute_is_repeatable_across_runs() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Two full runs back to back: each gets a fresh Store from the shared
+    // executor, so state must not leak between instances.
+    for round in 0..2 {
+        let captured = run_direct_workflow_embedded(
+            &components_dir,
+            &format!("embedded-repeat-{round}"),
+            SIMPLE_PASSTHROUGH,
+            br#"{"input":"direct-finish"}"#,
+        );
+        assert!(
+            captured.status_success,
+            "round {round} failed: {}",
+            captured.stderr
+        );
+        assert_eq!(
+            captured.output_json,
+            Some(serde_json::json!({ "result": "direct-finish" })),
+            "round {round} output mismatch"
+        );
+    }
+}
