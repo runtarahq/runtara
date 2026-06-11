@@ -17,35 +17,34 @@ pub use wasm::{WasmRunner, WasmRunnerConfig};
 
 /// Build the workflow runner selected by `RUNTARA_RUNNER`.
 ///
-/// - `wasm` / `wasmtime` / unset → CLI process runner (default)
-/// - `embedded` / `wasm-embedded` → in-process embedded wasmtime engine
+/// - `embedded` / `wasm-embedded` / unset → in-process embedded wasmtime
+///   engine (default)
+/// - `wasm` / `wasmtime` → CLI process runner; needs a `wasmtime` binary
+///   (`WASMTIME_PATH`), kept as an escape hatch
 ///
-/// Unknown values warn and fall back to the default, preserving the
-/// historical behavior of this knob.
+/// Unknown values warn and fall back to the default.
 pub fn runner_from_env(
     persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
     let requested = std::env::var("RUNTARA_RUNNER").unwrap_or_default();
     match requested.to_ascii_lowercase().as_str() {
-        "embedded" | "wasm-embedded" => {
+        "wasm" | "wasmtime" => Ok(std::sync::Arc::new(WasmRunner::new(
+            WasmRunnerConfig::from_env(),
+            persistence,
+        ))),
+        "" | "embedded" | "wasm-embedded" => {
             let runner = EmbeddedWasmRunner::new(WasmRunnerConfig::from_env(), persistence)?;
             tracing::info!("Using EmbeddedWasmRunner (in-process wasmtime) for workflow execution");
             Ok(std::sync::Arc::new(runner))
         }
-        "" | "wasm" | "wasmtime" => Ok(std::sync::Arc::new(WasmRunner::new(
-            WasmRunnerConfig::from_env(),
-            persistence,
-        ))),
         other => {
             tracing::warn!(
                 requested = %other,
-                "RUNTARA_RUNNER value not recognized (expected wasm | wasmtime | embedded); \
-                 using the wasmtime CLI runner"
+                "RUNTARA_RUNNER value not recognized (expected embedded | wasm | wasmtime); \
+                 using the embedded runner"
             );
-            Ok(std::sync::Arc::new(WasmRunner::new(
-                WasmRunnerConfig::from_env(),
-                persistence,
-            )))
+            let runner = EmbeddedWasmRunner::new(WasmRunnerConfig::from_env(), persistence)?;
+            Ok(std::sync::Arc::new(runner))
         }
     }
 }
