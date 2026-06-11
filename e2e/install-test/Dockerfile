@@ -25,7 +25,6 @@ RUN if [ "$INSTALL_SOURCE" = "local" ] && [ -f /tmp/install.sh ]; then \
 
 ENV PATH="/root/.runtara/toolchain/bin:/root/.runtara/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/root/.runtara/toolchain/lib"
-ENV WASMTIME_PATH="/root/.runtara/bin/wasmtime"
 ENV RUNTARA_AGENT_COMPONENTS_DIR="/root/.runtara/agents"
 ENV RUNTARA_COMPILE_SOURCE_DIR="/root/.runtara/compile-src"
 

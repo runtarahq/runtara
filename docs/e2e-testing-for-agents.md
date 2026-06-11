@@ -20,7 +20,7 @@ embedded WASM runner and Postgres.
   `runtara-dev-postgres` container is fine — e2e uses its own databases.
 - `wasm32-wasip2` Rust target (`rustup target add wasm32-wasip2`) — for building
   the agent components (below), not for compiling workflows.
-- `wasmtime` CLI (`curl https://wasmtime.dev/install.sh -sSf | bash`)
+- `wasmtime` CLI — only for the opt-in CLI reference mode of the direct execute battery (`RUNTARA_DIRECT_WASM_EXECUTOR=cli`); the server executes workflows with an embedded engine
 - `cargo-component` (`cargo install cargo-component --locked`) — used by
   `scripts/build-agent-components.sh` to build the agent/shared components.
 - Pre-built agent components staged at `target/wasm32-wasip2/release/` — run

@@ -23,7 +23,6 @@
 #   - rustup with the version from rust-toolchain.toml installed
 #   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
 #   - cargo-component (installed by this script) for building components
-#   - curl (for downloading wasmtime if not cached)
 
 set -euo pipefail
 
@@ -36,7 +35,6 @@ cd "$ROOT_DIR"
 
 SKIP_BUILD=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
-WASMTIME_VERSION="43.0.0"
 # cargo-component: subcommand used to build the agent + shared workflow
 # components at bundle-build time. No prebuilt binaries upstream — installed
 # via `cargo install` into a per-version cache dir during bundle build.
@@ -51,7 +49,6 @@ while [[ $# -gt 0 ]]; do
         --skip-build)      SKIP_BUILD=1; shift ;;
         --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)    OUTPUT_DIR="${1#*=}"; shift ;;
-        --wasmtime-version) WASMTIME_VERSION="$2"; shift 2 ;;
         --version)         RUNTARA_VERSION_OVERRIDE="$2"; shift 2 ;;
         --version=*)       RUNTARA_VERSION_OVERRIDE="${1#*=}"; shift ;;
         *)                 echo "Unknown option: $1" >&2; exit 1 ;;
@@ -116,7 +113,6 @@ resolve_versions() {
     info "Stamped version: ${RUNTARA_STAMP_VERSION} (reported in binary/UI)"
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
-    info "Wasmtime version: ${WASMTIME_VERSION}"
     info "cargo-component: ${CARGO_COMPONENT_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
 }
@@ -183,39 +179,6 @@ build_stdlib() {
 
     step "Building workflow stdlib (host proc-macros)"
     cargo build -p runtara-workflow-stdlib --release
-}
-
-# ─── Download wasmtime ───────────────────────────────────────────────────────
-
-download_wasmtime() {
-    step "Fetching Wasmtime ${WASMTIME_VERSION}"
-
-    mkdir -p "$DOWNLOAD_CACHE"
-
-    local wt_arch
-    case "$ARCH" in
-        x86_64)  wt_arch="x86_64" ;;
-        aarch64) wt_arch="aarch64" ;;
-    esac
-
-    local wt_os
-    case "$OS" in
-        linux)  wt_os="linux" ;;
-        darwin) wt_os="macos" ;;
-    esac
-
-    local tarball="wasmtime-v${WASMTIME_VERSION}-${wt_arch}-${wt_os}.tar.xz"
-    local url="https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${tarball}"
-    local cached="${DOWNLOAD_CACHE}/${tarball}"
-
-    if [ -f "$cached" ]; then
-        info "Using cached ${tarball}"
-    else
-        info "Downloading ${tarball}"
-        curl -fSL -o "$cached" "$url"
-    fi
-
-    WASMTIME_TARBALL="$cached"
 }
 
 # ─── Install cargo-component into a versioned cache ─────────────────────────
@@ -302,25 +265,6 @@ assemble_bundle() {
     cp "${TARGET_DIR}/release/runtara-server" "$bundle/bin/"
     strip "$bundle/bin/runtara-server" 2>/dev/null || warn "strip failed (non-critical)"
 
-    # ── Wasmtime binary ──
-    info "Extracting wasmtime binary"
-    local wt_arch
-    case "$ARCH" in
-        x86_64)  wt_arch="x86_64" ;;
-        aarch64) wt_arch="aarch64" ;;
-    esac
-    local wt_os
-    case "$OS" in
-        linux)  wt_os="linux" ;;
-        darwin) wt_os="macos" ;;
-    esac
-
-    local wt_dir="wasmtime-v${WASMTIME_VERSION}-${wt_arch}-${wt_os}"
-    local tmp_wt="$(mktemp -d)"
-    tar -xJf "$WASMTIME_TARBALL" -C "$tmp_wt"
-    cp "$tmp_wt/$wt_dir/wasmtime" "$bundle/bin/"
-    rm -rf "$tmp_wt"
-
     # ── Agent components ──
     # Each of the 23 component agents ships as a .wasm + sibling .meta.json
     # pair. At server boot, RUNTARA_AGENT_COMPONENTS_DIR points at this
@@ -384,7 +328,6 @@ assemble_bundle() {
   "runtara_version": "${RUNTARA_STAMP_VERSION}",
   "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
-  "wasmtime_version": "${WASMTIME_VERSION}",
   "cargo_component_version": "${CARGO_COMPONENT_VERSION}",
   "agent_component_count": ${wasm_count},
   "workflow_shared_component_count": ${workflow_component_count},
@@ -440,7 +383,6 @@ main() {
     build_frontend
     build_server
     build_stdlib
-    download_wasmtime
     install_cargo_component
     build_agent_components
     assemble_bundle

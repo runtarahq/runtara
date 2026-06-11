@@ -408,8 +408,8 @@ fn shared_components_dir() -> Option<PathBuf> {
     }
 }
 
-/// Mirror `WasmRunner::from_env`: honor `WASMTIME_PATH`, then
-/// `~/.wasmtime/bin/wasmtime`, then PATH.
+/// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
+/// then `~/.wasmtime/bin/wasmtime`, then PATH.
 fn wasmtime_binary() -> PathBuf {
     if let Ok(path) = std::env::var("WASMTIME_PATH") {
         return PathBuf::from(path);

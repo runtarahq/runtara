@@ -25,7 +25,7 @@ Per the `always-e2e-verify` rule, **finish the loop**: compile → register → 
 
 - Postgres 14+ running (the dev `runtara-dev-postgres` container is fine; e2e uses its own DBs — step 3)
 - `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
-- `wasmtime` CLI: `curl https://wasmtime.dev/install.sh -sSf | bash`
+- `wasmtime` CLI — only needed for `RUNTARA_DIRECT_WASM_EXECUTOR=cli` reference runs; workflow execution is embedded in the server
 - `cargo-component`: `cargo install cargo-component --locked`
 - `wac-cli`: `cargo install wac-cli --locked`
 

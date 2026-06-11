@@ -77,14 +77,14 @@ jobs:
         run: cargo install wasm-pack --version 0.13.1 --locked
 
       # build-bundle.sh installs cargo-component (~5 min cold, used to build
-      # the agent/shared components) and downloads wasmtime into this directory
-      # keyed by version. Cache it so re-runs of the release matrix amortize the
-      # install. Cache key includes pinned versions so any version bump invalidates.
+      # the agent/shared components) into this directory keyed by version.
+      # Cache it so re-runs of the release matrix amortize the install. Cache
+      # key includes the pinned version so any version bump invalidates.
       - name: Cache bundle build dependencies
         uses: actions/cache@v4
         with:
           path: ~/.cache/runtara-bundle-build
-          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-wasmtime-43.0.0-locked
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-locked
 
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
@@ -202,7 +202,6 @@ jobs:
         run: |
           mkdir -p "$DATA_DIR"
           export PATH="${RUNTARA_BUNDLE_DIR}/bin:${PATH}"
-          export WASMTIME_PATH="${RUNTARA_BUNDLE_DIR}/bin/wasmtime"
           # Without this the dispatcher silently falls through to the
           # static-registry path and the smoke test never exercises the
           # bundled .wasm + .meta.json pairs.
@@ -385,8 +384,9 @@ jobs:
   #
   # Repackages the already-built, smoke-tested linux bundles into an OCI image
   # published to ghcr.io/<owner>/runtara. Each arch is built natively (the
-  # bundle embeds arch-specific wasmtime + prebuilt WASM components), pushed
-  # by digest, then merged into one multi-arch manifest by `docker-merge`.
+  # bundle's runtara-server binary is arch-specific; workflow execution is
+  # embedded in it), pushed by digest, then merged into one multi-arch
+  # manifest by `docker-merge`.
   docker:
     name: Build Docker Image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
