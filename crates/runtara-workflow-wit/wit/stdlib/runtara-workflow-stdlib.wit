@@ -412,6 +412,29 @@ interface json {
         source: list<u8>,
         turn-out: list<u8>,
     ) -> result<list<u8>, string>;
+    // Build the step-debug-start payload for one dispatched tool call: a
+    // synthetic "{ai-step}.tool.{name}.{call}" step of type AiAgentToolCall,
+    // mirroring the generated loop so tool calls appear in the step trace.
+    // call-counter is the loop's 0-based monotonic counter; the visible
+    // call number is 1-based.
+    ai-tool-debug-start: func(
+        agent-id: u32,
+        turn-out: list<u8>,
+        index: u32,
+        iteration: u32,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // The matching step-debug-end payload carrying the dispatched result.
+    ai-tool-debug-end: func(
+        agent-id: u32,
+        turn-out: list<u8>,
+        index: u32,
+        iteration: u32,
+        call-counter: u32,
+        tool-result: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
     // Build the initial loop state from a load-memory result (loaded
     // conversation becomes the starting chat history).
     ai-memory-initial-state: func(load-output: list<u8>) -> result<list<u8>, string>;

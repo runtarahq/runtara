@@ -1550,6 +1550,131 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize AiAgent steps context: {err}"))
     }
 
+    /// Build a `step_debug_start` payload for one dispatched AiAgent tool call.
+    ///
+    /// Mirrors the generated loop's synthetic tool-call step: id
+    /// `{ai_step}.tool.{name}.{call_number}`, name `Tool: {name}`, type
+    /// `AiAgentToolCall`, inputs `{tool_name, arguments, iteration,
+    /// call_number}`. `call_counter` is the loop's 0-based monotonic counter;
+    /// the visible call number is 1-based.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_tool_debug_start(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        iteration: u32,
+        call_counter: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-tool-debug source: {err}"))?;
+        let (step, tool_name, arguments) =
+            self.ai_tool_call_step(agent_id, turn_out, index, call_counter)?;
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step.id.clone(), timestamp);
+
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert(
+            "inputs".to_string(),
+            serde_json::json!({
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "iteration": iteration,
+                "call_number": call_counter + 1,
+            }),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-tool debug-start payload: {err}"))
+    }
+
+    /// Build the matching `step_debug_end` payload for a dispatched AiAgent
+    /// tool call, with the result wrapped in the legacy output envelope
+    /// `{tool_name, result, iteration, call_number}`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_tool_debug_end(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        iteration: u32,
+        call_counter: u32,
+        tool_result: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-tool-debug source: {err}"))?;
+        let (step, tool_name, _arguments) =
+            self.ai_tool_call_step(agent_id, turn_out, index, call_counter)?;
+        let result: Value = serde_json::from_slice(tool_result)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(tool_result).into_owned()));
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(&step.id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        let outputs = step_output_envelope(
+            &step,
+            serde_json::json!({
+                "tool_name": tool_name,
+                "result": result,
+                "iteration": iteration,
+                "call_number": call_counter + 1,
+            }),
+            None,
+        );
+        payload.insert("outputs".to_string(), outputs);
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-tool debug-end payload: {err}"))
+    }
+
+    /// The synthetic step identity for the `index`-th tool call of a turn,
+    /// plus the call's tool name and arguments.
+    fn ai_tool_call_step(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        call_counter: u32,
+    ) -> Result<(DirectJsonStep, String, Value), String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let call = turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .and_then(|calls| calls.get(index as usize));
+        let tool_name = call
+            .and_then(|call| call.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let arguments = call
+            .and_then(|call| call.get("arguments"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let step = DirectJsonStep {
+            id: format!("{}.tool.{}.{}", agent.step_id, tool_name, call_counter + 1),
+            step_type: "AiAgentToolCall".to_string(),
+            name: Some(format!("Tool: {tool_name}")),
+            body: Value::Null,
+        };
+        Ok((step, tool_name, arguments))
+    }
+
     /// Validate resolved Agent inputs and return a generated-code-compatible
     /// validation error string when required fields are missing/null.
     pub fn agent_validate_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
@@ -7845,6 +7970,99 @@ mod tests {
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
         assert_eq!(end["outputs"]["outputs"]["response"], json!("Hello!"));
+    }
+
+    #[test]
+    fn ai_tool_debug_payloads_match_generated_shape() {
+        // Tool calls dispatched by the AiAgent loop must surface as synthetic
+        // `{step}.tool.{name}.{call}` steps of type AiAgentToolCall, matching
+        // the generated compiler's per-tool-call debug events.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": {}
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-turn",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let turn_out = serde_json::to_vec(&json!({
+            "action": "tools",
+            "tool_calls": [{
+                "tool_call_id": "call_1",
+                "name": "echo",
+                "tool_index": 0,
+                "arguments": { "value": 42 }
+            }]
+        }))
+        .expect("turn out");
+
+        let start = manifest
+            .ai_tool_debug_start(0, &turn_out, 0, 1, 0, &source)
+            .expect("tool debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.tool.echo.1"));
+        assert_eq!(start["step_name"], json!("Tool: echo"));
+        assert_eq!(start["step_type"], json!("AiAgentToolCall"));
+        assert_eq!(
+            start["inputs"],
+            json!({
+                "tool_name": "echo",
+                "arguments": { "value": 42 },
+                "iteration": 1,
+                "call_number": 1
+            })
+        );
+
+        let end = manifest
+            .ai_tool_debug_end(0, &turn_out, 0, 1, 0, br#"{"echoed":42}"#, &source)
+            .expect("tool debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["step_id"], json!("agent.tool.echo.1"));
+        assert_eq!(end["step_type"], json!("AiAgentToolCall"));
+        assert_eq!(end["outputs"]["stepId"], json!("agent.tool.echo.1"));
+        assert_eq!(end["outputs"]["stepName"], json!("Tool: echo"));
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgentToolCall"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "tool_name": "echo",
+                "result": { "echoed": 42 },
+                "iteration": 1,
+                "call_number": 1
+            })
+        );
+        assert!(end["duration_ms"].is_number());
+
+        // A non-JSON tool result (raw bytes) is wrapped as a string.
+        let end = manifest
+            .ai_tool_debug_end(0, &turn_out, 0, 1, 0, b"plain text", &source)
+            .expect("tool debug end with raw result");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["outputs"]["result"], json!("plain text"));
     }
 
     #[test]

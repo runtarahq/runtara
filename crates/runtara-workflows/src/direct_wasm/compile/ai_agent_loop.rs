@@ -21,7 +21,7 @@ use super::agent_error::{
 };
 use super::agent_invoke::emit_agent_invoke;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::emit_step_breakpoint;
+use super::debug::{emit_ai_tool_debug_event, emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
@@ -89,6 +89,21 @@ pub(super) fn emit_ai_agent_loop_plan(
         source_len_local,
         output_ptr_local,
         output_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
+
+    // Step debug-start for the AiAgent itself (the stdlib resolves the input
+    // mapping into the event's inputs) — matching the single-shot path.
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        true,
+        step_id,
+        source_ptr_local,
+        source_len_local,
         route_ptr_local,
         route_len_local,
     );
@@ -454,6 +469,28 @@ pub(super) fn emit_ai_agent_loop_plan(
     push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_MATCH_LOCAL));
 
+    // Step debug-start for this tool call — the synthetic
+    // `{step}.tool.{name}.{call}` step, matching the generated loop. The
+    // TURN_INPUT scratch is free during dispatch (last used to build the
+    // chat-turn input, reused for snapshots after).
+    emit_ai_tool_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        DIRECT_AI_TURN_OUT_PTR_LOCAL,
+        DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        DIRECT_AI_TOOL_IDX_LOCAL,
+        DIRECT_AI_ITER_LOCAL,
+        DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
+        None,
+        source_ptr_local,
+        source_len_local,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
+
     // Default the tool result to an empty list so an unknown tool index is a
     // benign no-op (the model gets an empty result).
     set_segment(
@@ -549,6 +586,29 @@ pub(super) fn emit_ai_agent_loop_plan(
         }
         body.instruction(&Instruction::End);
     }
+
+    // Step debug-end for this tool call, carrying the dispatched result (or
+    // the error envelope a failed tool feeds back to the model).
+    emit_ai_tool_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        agent_id,
+        DIRECT_AI_TURN_OUT_PTR_LOCAL,
+        DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        DIRECT_AI_TOOL_IDX_LOCAL,
+        DIRECT_AI_ITER_LOCAL,
+        DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
+        Some((
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+        )),
+        source_ptr_local,
+        source_len_local,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
 
     // pending = ai-turn-add-result(pending, turn_out, idx, tool_result)
     body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));
@@ -798,6 +858,21 @@ pub(super) fn emit_ai_agent_loop_plan(
         source_ptr_local,
         source_len_local,
         None,
+    );
+
+    // Step debug-end for the AiAgent: the rebuilt source now carries the
+    // `{response, iterations, toolCalls}` envelope under `steps.{id}`.
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
     );
 
     emit_run_plan_mapping(

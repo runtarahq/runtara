@@ -1914,6 +1914,187 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
     );
 }
 
+fn ai_agent_tool_only_no_next_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"echo_tool","label":"echo"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You call tools"},
+          "userPrompt":{"valueType":"immediate","value":"List all tools you have"},
+          "provider":"openai",
+          "model":"gpt-4o"}},
+        "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{}}
+      }
+    }"##
+    .to_string()
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_without_next_edge_runs_loop() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Regression: a tool-loop AiAgent whose ONLY outgoing edge is the tool
+    // edge (no "next" edge, no Finish step) ran the loop but emitted no step
+    // events at all — the UI showed the step as never executed. Mirrors a
+    // UI-authored workflow where the agent is terminal.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-no-next",
+        &ai_agent_tool_only_no_next_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![
+            llm_tool_call("echo", r#"{"value":42}"#),
+            llm_ok("loop finished"),
+        ],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should not crash; stderr: {}",
+        result.stderr
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        2,
+        "tool-call turn + completing turn; events: {:?}, stderr: {}",
+        result.events.iter().map(|e| &e.subtype).collect::<Vec<_>>(),
+        result.stderr
+    );
+
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+
+    // The AiAgent step itself emits paired debug events.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai".to_string())),
+        "AI step must emit step_debug_start: {event_keys:?}"
+    );
+    assert!(
+        event_keys.contains(&("step_debug_end".to_string(), "ai".to_string())),
+        "AI step must emit step_debug_end: {event_keys:?}"
+    );
+
+    // The dispatched tool call appears as a synthetic AiAgentToolCall step,
+    // matching the generated compiler's "{step}.tool.{name}.{call}" events.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai.tool.echo.1".to_string())),
+        "tool call must emit step_debug_start: {event_keys:?}"
+    );
+    let tool_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str)
+                    == Some("ai.tool.echo.1")
+        })
+        .expect("tool call must emit step_debug_end");
+    assert_eq!(
+        tool_end.payload_json["step_type"],
+        serde_json::json!("AiAgentToolCall")
+    );
+    assert_eq!(
+        tool_end.payload_json["outputs"]["outputs"]["tool_name"],
+        serde_json::json!("echo")
+    );
+
+    // The AI step's debug-end carries the legacy {response, iterations,
+    // toolCalls} envelope.
+    let ai_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str) == Some("ai")
+        })
+        .expect("AI step debug end");
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["response"],
+        serde_json::json!("loop finished")
+    );
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["toolCalls"][0]["tool_name"],
+        serde_json::json!("echo")
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_with_next_edge_emits_debug_events() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Control for the no-next-edge case: same tool loop with a "next" edge
+    // and Finish, trackEvents on.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-with-next-events",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![llm_ok("loop finished")],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should not crash; stderr: {}",
+        result.stderr
+    );
+    assert_eq!(result.llm_requests.len(), 1, "model called once");
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai".to_string())),
+        "AI step itself must emit step_debug_start: {event_keys:?}"
+    );
+    assert!(
+        event_keys.contains(&("step_debug_end".to_string(), "ai".to_string())),
+        "AI step itself must emit step_debug_end: {event_keys:?}"
+    );
+    // The Finish step's events still follow the AI step's.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "finish".to_string())),
+        "Finish step events present: {event_keys:?}"
+    );
+}
+
 fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
     format!(
         r##"{{

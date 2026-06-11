@@ -68,6 +68,69 @@ pub(super) fn emit_step_debug_event(
     emit_fail_if_retptr_error_inplace(body, indices);
 }
 
+/// Emit a step-debug event for one dispatched AiAgent tool call: the stdlib
+/// builds the synthetic `{ai-step}.tool.{name}.{call}` payload from the turn
+/// output, then the runtime records it as a `step_debug_start`/`step_debug_end`
+/// custom event — mirroring the generated loop's per-tool-call events. For the
+/// end event, pass the dispatched result locals; the start event omits them.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_ai_tool_debug_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    turn_out_ptr_local: u32,
+    turn_out_len_local: u32,
+    tool_idx_local: u32,
+    iter_local: u32,
+    call_counter_local: u32,
+    result_locals: Option<(u32, u32)>,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(turn_out_ptr_local));
+    body.instruction(&Instruction::LocalGet(turn_out_len_local));
+    body.instruction(&Instruction::LocalGet(tool_idx_local));
+    body.instruction(&Instruction::LocalGet(iter_local));
+    body.instruction(&Instruction::LocalGet(call_counter_local));
+    if let Some((result_ptr_local, result_len_local)) = result_locals {
+        body.instruction(&Instruction::LocalGet(result_ptr_local));
+        body.instruction(&Instruction::LocalGet(result_len_local));
+    }
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(if result_locals.is_some() {
+        indices.stdlib_ai_tool_debug_end
+    } else {
+        indices.stdlib_ai_tool_debug_start
+    }));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, scratch_ptr_local, scratch_len_local);
+
+    push_segment_args(
+        body,
+        if result_locals.is_some() {
+            &static_data.step_debug_end_kind
+        } else {
+            &static_data.step_debug_start_kind
+        },
+    );
+    body.instruction(&Instruction::LocalGet(scratch_ptr_local));
+    body.instruction(&Instruction::LocalGet(scratch_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    emit_fail_if_retptr_error_inplace(body, indices);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_wait_debug_start_event(
     body: &mut WasmFunction,
