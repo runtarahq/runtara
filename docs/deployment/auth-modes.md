@@ -33,7 +33,7 @@ Backwards-compatible with the previous RUNTARA behaviour.
 | `OAUTH2_AUDIENCE` | no | If set, validated against the `aud` claim on API routes. |
 | `OAUTH2_MCP_AUDIENCE` | no | Same, but for MCP routes. |
 | `RUNTARA_AUTH_REQUIRE_JTI` | no | When `true`, reject any JWT lacking a `jti` claim. Defaults to `false` for backwards compatibility; flip to `true` once the Auth0 Action emits `jti` on every token, since `jti` is the key the revocation denylist relies on. See [`../security/user-management-contracts.md`](../security/user-management-contracts.md). |
-| `RUNTARA_AUTH_MEMBERSHIP_POLICY` | no | `disabled` \| `logging` \| `required` — how the per-tenant Valkey membership/revocation lookup is treated. Default: `logging` for `oidc` when Valkey is configured, else `disabled`. `required` fails requests closed on missing membership, revoked token, or unreachable Valkey. |
+| `RUNTARA_AUTH_MEMBERSHIP_POLICY` | no | `disabled` \| `logging` \| `required` — how the per-tenant Valkey membership/revocation lookup is treated. Default: `disabled` in every mode — enforcement (including `logging`'s shadow-denial warns) is strictly opt-in per tenant. `logging` looks up and logs would-be denials without blocking; `required` fails requests closed on missing membership, revoked token, or unreachable Valkey. |
 
 `RUNTARA_AUTH_REQUIRE_JTI` and `RUNTARA_AUTH_MEMBERSHIP_POLICY` only have effect in `oidc` mode. In `local` and `trust_proxy` modes there is no membership store to consult — every caller acts as the tenant Owner (see below) — so both vars are inert and safe to leave set (or default to their strictest values) across mixed fleets.
 

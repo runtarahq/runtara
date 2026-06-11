@@ -91,8 +91,9 @@ impl AuthMethod {
 /// How runtara treats the per-tenant Valkey membership/revocation lookup.
 ///
 /// One env var (`RUNTARA_AUTH_MEMBERSHIP_POLICY=disabled|logging|required`) is the only
-/// switch; the rollout moves it `Disabled` → `Logging` → `Required`. The auth middleware
-/// consumes it; [`AuthState`] carries the policy and the Valkey handle.
+/// switch; the rollout moves it `Disabled` (the default everywhere) → `Logging` →
+/// `Required`, per tenant, explicitly. The auth middleware consumes it; [`AuthState`]
+/// carries the policy and the Valkey handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MembershipPolicy {
     /// No Valkey lookup at all — `local` mode, or dev with no Valkey configured.
@@ -106,12 +107,11 @@ pub enum MembershipPolicy {
 
 impl MembershipPolicy {
     /// Resolve the policy. An explicit `RUNTARA_AUTH_MEMBERSHIP_POLICY` always wins;
-    /// otherwise the default is derived from the auth mode and whether Valkey is configured.
-    ///
-    /// Defaults: `oidc` with Valkey → `Logging` (non-blocking until an operator opts into
-    /// `Required`); `oidc` without Valkey, `local`, and `trust_proxy` → `Disabled`.
-    /// Panics on an unrecognized explicit value — a typo'd security policy must fail fast,
-    /// not silently fall back.
+    /// otherwise the default is `Disabled` in every mode: a deploy with no extra
+    /// configuration must stay quiet — no per-request Valkey lookups, no shadow-denial
+    /// logs — until an operator explicitly opts a tenant into the `logging` → `required`
+    /// rollout. Panics on an unrecognized explicit value — a typo'd security policy must
+    /// fail fast, not silently fall back.
     pub fn from_env(kind: AuthProviderKind, valkey_configured: bool) -> Self {
         match std::env::var("RUNTARA_AUTH_MEMBERSHIP_POLICY")
             .ok()
@@ -127,6 +127,15 @@ impl MembershipPolicy {
         }
     }
 
+    /// The default when `RUNTARA_AUTH_MEMBERSHIP_POLICY` is unset: `Disabled`, regardless of
+    /// mode or Valkey availability. The parameters are kept so the signature documents what
+    /// the default deliberately does NOT depend on (an earlier draft derived `Logging` from
+    /// `oidc`+Valkey, which made a config-free deploy emit a shadow-denial warn on every
+    /// request).
+    fn default_for(_kind: AuthProviderKind, _valkey_configured: bool) -> Self {
+        MembershipPolicy::Disabled
+    }
+
     /// Parse an explicit policy string. `None` for an unrecognized value.
     fn parse(s: &str) -> Option<Self> {
         match s {
@@ -134,16 +143,6 @@ impl MembershipPolicy {
             "logging" => Some(MembershipPolicy::Logging),
             "required" => Some(MembershipPolicy::Required),
             _ => None,
-        }
-    }
-
-    /// The default when `RUNTARA_AUTH_MEMBERSHIP_POLICY` is unset.
-    fn default_for(kind: AuthProviderKind, valkey_configured: bool) -> Self {
-        match kind {
-            AuthProviderKind::Oidc if valkey_configured => MembershipPolicy::Logging,
-            AuthProviderKind::Oidc | AuthProviderKind::Local | AuthProviderKind::TrustProxy => {
-                MembershipPolicy::Disabled
-            }
         }
     }
 
@@ -236,16 +235,13 @@ mod tests {
     #[test]
     fn default_policy_per_mode() {
         use AuthProviderKind::{Local, Oidc, TrustProxy};
-        use MembershipPolicy::{Disabled, Logging};
+        use MembershipPolicy::Disabled;
 
-        // OIDC only defaults to a live lookup when Valkey is actually configured.
-        assert_eq!(MembershipPolicy::default_for(Oidc, true), Logging);
-        assert_eq!(MembershipPolicy::default_for(Oidc, false), Disabled);
-
-        // Unauthenticated-style modes never look up membership by default, Valkey or not.
-        assert_eq!(MembershipPolicy::default_for(Local, true), Disabled);
-        assert_eq!(MembershipPolicy::default_for(Local, false), Disabled);
-        assert_eq!(MembershipPolicy::default_for(TrustProxy, true), Disabled);
-        assert_eq!(MembershipPolicy::default_for(TrustProxy, false), Disabled);
+        // A deploy with no explicit policy stays quiet in EVERY mode — enforcement (and
+        // its shadow-denial logging) is strictly opt-in via the env var.
+        for kind in [Oidc, Local, TrustProxy] {
+            assert_eq!(MembershipPolicy::default_for(kind, true), Disabled);
+            assert_eq!(MembershipPolicy::default_for(kind, false), Disabled);
+        }
     }
 }

@@ -40,14 +40,24 @@ export const useAuthStore = create<AuthState>()(
 /**
  * True if the caller may perform `permission` (its access is "allow" or "own").
  *
- * When no permission set is resolved — non-OIDC modes (`local`/`trust_proxy`),
- * membership enforcement disabled, or `/me` not yet loaded — this returns `true`
- * so the UI does not hide controls the server would actually allow. Gating here
- * is UX only; runtara remains the enforcement point.
+ * When no permission set is resolved — membership enforcement disabled, or `/me`
+ * not yet loaded — this returns `true` so the UI does not hide controls the
+ * server would actually allow. Gating here is UX only; runtara remains the
+ * enforcement point.
  */
 export function useHasPermission(permission: string): boolean {
   return useAuthStore((state) => {
     if (Object.keys(state.permissions).length === 0) return true;
     return permission in state.permissions;
   });
+}
+
+/**
+ * Like `useHasPermission`, but default-DENY: `true` only when `/me` explicitly
+ * granted `permission`. For opt-in surfaces that don't exist in every
+ * deployment (e.g. the user-management link into the managed control plane),
+ * where "no permission data yet" must hide the entry rather than show it.
+ */
+export function useHasExplicitPermission(permission: string): boolean {
+  return useAuthStore((state) => permission in state.permissions);
 }

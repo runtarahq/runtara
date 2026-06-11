@@ -20,7 +20,7 @@ import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
-import { useAuthStore, useHasPermission } from '@/shared/stores/authStore.ts';
+import { useAuthStore, useHasExplicitPermission } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
 import { DollarSign, Settings, Users } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -100,9 +100,11 @@ function AppMenu() {
 
   // The tenant user-management UI lives in the smo-management SPA (served by the gateway at
   // /ui/management/ — shared, NOT org-namespaced; the SPA resolves the tenant from the JWT).
-  // Show the link only to roles that may reach it: the `user_management:access` permission is
-  // Owner/Admin. It is a UI-only gate — runtara enforces nothing on it; smo-management does.
-  const canManageUsers = useHasPermission('user_management:access');
+  // Show the link only when /me explicitly grants `user_management:access` (Owner/Admin under
+  // enforcement). Default-deny, unlike other permission gates: the target surface only exists
+  // in the managed deployment, so before enforcement is on — and in self-hosted modes — the
+  // entry must stay hidden rather than render a dead link. UI-only gate; smo-management enforces.
+  const canManageUsers = useHasExplicitPermission('user_management:access');
 
   const isHomePage = location.pathname === '/';
 
