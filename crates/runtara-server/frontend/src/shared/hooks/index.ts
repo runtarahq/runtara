@@ -5,6 +5,7 @@ export * from './useDialogState';
 export * from './usePageTitle';
 export * from './usePagination';
 export * from './useToast';
+export * from './useMe';
 export * from './useOrgId';
 export * from './useTenantUrlGuard';
 export * from './useToken';

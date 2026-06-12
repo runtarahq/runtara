@@ -281,7 +281,7 @@ async fn render_report_snapshots() {
             created_at: now,
             updated_at: now,
         };
-        repo.create(TENANT_ID, &report)
+        repo.create(TENANT_ID, &report, None)
             .await
             .unwrap_or_else(|e| panic!("{name}: persist fixture: {e}"));
         report_ids.push((name, report.id));

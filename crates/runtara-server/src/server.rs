@@ -615,6 +615,59 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// The static role → permission map runtara enforces, as JSON. Unauthenticated and
+/// tenant-independent — the distribution mechanism for smo-management and the admin UI so they
+/// render exactly what runtara enforces (see `docs/security/user-management-contracts.md`).
+async fn permissions_handler() -> Json<serde_json::Value> {
+    Json(crate::authz::permission_map_json())
+}
+
+/// The authenticated caller's identity + effective permissions for this tenant.
+///
+/// The role is read from the per-tenant Valkey `member:{sub}` entry (attached to
+/// [`AuthContext`] by the auth middleware) — **never** from the JWT, which doesn't carry it.
+/// `permissions` lists only what the caller may do (its role's non-`Deny` grants), with the
+/// access level (`allow`/`own`) so the SPA can show/hide controls. In `local`/`trust_proxy`
+/// modes the caller acts as Owner, minus `user_management:access`: that UI-only capability
+/// links to the managed control plane, which self-hosted deployments don't have.
+/// See `docs/security/user-management-contracts.md`.
+async fn me_handler(
+    axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
+) -> Json<serde_json::Value> {
+    let permissions = match auth.role {
+        Some(role) => {
+            // `local` and `trust_proxy` authenticate outside runtara (or not at all) and
+            // report `Unauthenticated`; only real JWT/API-key callers can reach the
+            // user-management surface behind the gateway.
+            let self_hosted = auth.auth_method == crate::auth::AuthMethod::Unauthenticated;
+            let mut m = serde_json::Map::new();
+            for (perm, access) in role.grants() {
+                if self_hosted && *perm == crate::authz::Permission::UserManagementAccess {
+                    continue;
+                }
+                if !matches!(access, crate::authz::Access::Deny) {
+                    m.insert(
+                        perm.as_str().to_string(),
+                        serde_json::to_value(access).expect("Access serializes to a string"),
+                    );
+                }
+            }
+            serde_json::Value::Object(m)
+        }
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    Json(serde_json::json!({
+        "org_id": auth.org_id,
+        "tenant_slug": auth.tenant_slug,
+        "user_id": auth.user_id,
+        "email": auth.email,
+        "name": auth.name,
+        "role": auth.role.map(|r| r.as_str()),
+        "permissions": permissions,
+    }))
+}
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
@@ -705,14 +758,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ Database connected successfully");
 
-    let auth_state = auth::AuthState {
-        provider: auth_providers.api.clone(),
-        pool: pool.clone(),
-    };
-    let mcp_auth_state = auth::AuthState {
-        provider: auth_providers.mcp.clone(),
-        pool: pool.clone(),
-    };
     let auth_kind = auth_providers.kind;
 
     // Build the single, process-wide Valkey/Redis connection manager. Every
@@ -754,6 +799,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             }
             None
         }
+    };
+
+    // Per-tenant Valkey membership enforcement policy. Built here, after the
+    // shared manager, so the policy default can see whether Valkey is actually configured.
+    // The auth middleware consumes both; they ride on AuthState.
+    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
+    // Publish to the process-wide accessor so handler-level ownership checks see the same
+    // policy the route gate enforces.
+    auth::set_membership_policy(membership_policy);
+    println!("✓ Auth membership policy: {}", membership_policy.as_str());
+
+    let auth_state = auth::AuthState {
+        provider: auth_providers.api.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+    let mcp_auth_state = auth::AuthState {
+        provider: auth_providers.mcp.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
     };
 
     let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
@@ -1690,6 +1757,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // itself is open. Session/JWT users on the same routes are
         // unaffected.
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),
@@ -1711,6 +1783,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 crate::middleware::tenant_auth::inject_connections_tenant_id,
             ))
             .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            // Enforce the per-route role permission map (no-op unless membership is Required).
+            .layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
             .layer(from_fn_with_state(
                 auth_state.clone(),
                 crate::middleware::auth::authenticate,
@@ -1832,6 +1908,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Reject API-key-authenticated requests when `api` is off. Lives
         // between the `database` gate (inner) and auth (outer).
         .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
         // Apply JWT authentication middleware to object model routes
         .route_layer(from_fn_with_state(
             auth_state.clone(),
@@ -1839,7 +1919,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ));
 
     // Create router for public/global endpoints (no tenant auth required)
-    let public_routes = Router::new().route("/health", get(health_handler));
+    let public_routes = Router::new()
+        .route("/health", get(health_handler))
+        // Unauthenticated: the permission map is static and the same for every tenant.
+        .route("/api/runtime/permissions", get(permissions_handler));
 
     // Internal API routes (called by workflow binaries, no tenant header required)
     // Runtime connection endpoint now served by runtara-connections crate
@@ -2086,11 +2169,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(oidc_cache);
 
+    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
+    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
+    // gate, since every authenticated caller may read their own identity.
+    let me_routes = Router::new()
+        .route("/api/runtime/me", get(me_handler))
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ));
+
     let public_app = Router::new()
         .merge(tenant_routes)
         .nest("/api/runtime", connections_tenant_routes)
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
+        .merge(me_routes)
         .merge(public_routes.clone())
         .merge(event_routes)
         .merge(channel_routes)

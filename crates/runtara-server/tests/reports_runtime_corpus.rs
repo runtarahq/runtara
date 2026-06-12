@@ -357,11 +357,11 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
         // since `tools::reports::validate_report` calls `api_post` itself.
         .layer(axum::middleware::from_fn(
             |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
-                request.extensions_mut().insert(AuthContext {
-                    org_id: TENANT_ID.to_string(),
-                    user_id: "test-mcp-validate".to_string(),
-                    auth_method: AuthMethod::Jwt,
-                });
+                request.extensions_mut().insert(AuthContext::new(
+                    TENANT_ID.to_string(),
+                    "test-mcp-validate".to_string(),
+                    AuthMethod::Jwt,
+                ));
                 next.run(request).await
             },
         ));

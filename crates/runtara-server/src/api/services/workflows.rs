@@ -136,6 +136,7 @@ impl WorkflowService {
         description: String,
         memory_tier: Option<MemoryTier>,
         track_events: Option<bool>,
+        created_by: &str,
     ) -> Result<WorkflowDto, ServiceError> {
         // Validation: name should not be empty
         if name.trim().is_empty() {
@@ -185,7 +186,7 @@ impl WorkflowService {
         // Create workflow metadata entry (name/description are now in execution graph)
         let (created_at, updated_at) = self
             .repository
-            .create(tenant_id, &workflow_id)
+            .create(tenant_id, &workflow_id, Some(created_by))
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
 
@@ -716,6 +717,7 @@ impl WorkflowService {
         tenant_id: &str,
         source_workflow_id: &str,
         new_name: &str,
+        created_by: &str,
     ) -> Result<(String, i32), ServiceError> {
         // Clones count toward `maxWorkflows` like fresh creates.
         let snapshot = crate::config::entitlements();
@@ -759,7 +761,13 @@ impl WorkflowService {
         // Delegate to repository
         let versions_cloned = self
             .repository
-            .clone_workflow(tenant_id, source_workflow_id, &new_workflow_id, new_name)
+            .clone_workflow(
+                tenant_id,
+                source_workflow_id,
+                &new_workflow_id,
+                new_name,
+                Some(created_by),
+            )
             .await
             .map_err(|e| ServiceError::DatabaseError(format!("Failed to clone workflow: {}", e)))?;
 

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authorization;
 pub mod cors;
 pub mod entitlement;
 pub mod http_metrics;

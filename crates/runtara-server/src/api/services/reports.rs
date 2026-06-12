@@ -356,10 +356,17 @@ impl ReportService {
         }
     }
 
+    /// The `created_by` (owner) of a report, for `Own`-scoped authorization. `None` when the
+    /// report does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(&self, tenant_id: &str, id_or_slug: &str) -> Option<String> {
+        self.repo.owner(tenant_id, id_or_slug).await.ok().flatten()
+    }
+
     pub async fn create_report(
         &self,
         tenant_id: &str,
         mut request: CreateReportRequest,
+        created_by: &str,
     ) -> Result<ReportDto, ReportServiceError> {
         self.normalize_definition_connections(tenant_id, &mut request.definition)
             .await;
@@ -388,7 +395,7 @@ impl ReportService {
         };
 
         self.repo
-            .create(tenant_id, &report)
+            .create(tenant_id, &report, Some(created_by))
             .await
             .map_err(Into::into)
     }

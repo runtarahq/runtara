@@ -59,6 +59,7 @@ impl ReportRepository {
         &self,
         tenant_id: &str,
         report: &ReportDto,
+        created_by: Option<&str>,
     ) -> Result<ReportDto, sqlx::Error> {
         let definition = serde_json::to_value(&report.definition).unwrap_or(Value::Null);
         let tags = serde_json::to_value(&report.tags).unwrap_or(Value::Array(vec![]));
@@ -67,9 +68,9 @@ impl ReportRepository {
             r#"
             INSERT INTO report_definitions
                 (id, tenant_id, slug, name, description, tags, definition_version,
-                 definition, status)
+                 definition, status, created_by)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id, slug, name, description, tags, definition_version, definition,
                       status, created_at, updated_at
             "#,
@@ -83,10 +84,28 @@ impl ReportRepository {
         .bind(report.definition_version)
         .bind(definition)
         .bind(report.status.as_str())
+        .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
 
         row_to_report(row)
+    }
+
+    /// The `created_by` (owner) of a report, for `Own`-scoped authorization. `None` when the
+    /// report does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let owner: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT created_by FROM report_definitions WHERE tenant_id = $1 AND (id = $2 OR slug = $2)",
+        )
+        .bind(tenant_id)
+        .bind(id_or_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(owner.flatten())
     }
 
     pub async fn update(

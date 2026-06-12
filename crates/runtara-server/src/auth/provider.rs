@@ -124,6 +124,11 @@ impl AuthProviders {
         let issuer = std::env::var("OAUTH2_ISSUER").expect("OAUTH2_ISSUER must be set");
         let api_audience = std::env::var("OAUTH2_AUDIENCE").ok();
         let mcp_audience = std::env::var("OAUTH2_MCP_AUDIENCE").ok();
+        // Off during rollout before the Auth0 Action emits `jti`; flipped on once every
+        // token carries it. See docs/security/user-management-contracts.md.
+        let require_jti = std::env::var("RUNTARA_AUTH_REQUIRE_JTI")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         let jwks_cache = crate::auth::jwks::JwksCache::new(jwks_uri.clone()).await;
         crate::auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
@@ -133,6 +138,7 @@ impl AuthProviders {
                 jwks_uri: jwks_uri.clone(),
                 issuer: issuer.clone(),
                 audience: api_audience,
+                require_jti,
             },
             jwks_cache.clone(),
             tenant_id.clone(),
@@ -143,6 +149,7 @@ impl AuthProviders {
                 jwks_uri,
                 issuer,
                 audience: mcp_audience,
+                require_jti,
             },
             jwks_cache,
             tenant_id,

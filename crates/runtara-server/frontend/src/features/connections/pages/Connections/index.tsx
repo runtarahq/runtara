@@ -4,6 +4,7 @@ import { ExistingConnections } from '@/features/connections/components/ExistingC
 import { ConnectionPickerModal } from '@/features/connections/components/ConnectionPickerModal';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import { Plus, Loader2 } from 'lucide-react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -43,27 +44,29 @@ export function Connections() {
     <ConsoleToolbar
       left={<Breadcrumb items={[{ label: 'Connections' }]} />}
       actions={
-        <Button
-          disabled={
-            isFetching ||
-            connectionTypes.length === 0 ||
-            connectionTypesError ||
-            connectionsError
-          }
-          onClick={() => setIsModalOpen(true)}
-        >
-          {isFetching ? (
-            <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Loading...
-            </>
-          ) : (
-            <>
-              <Plus className="mr-2 h-4 w-4" />
-              New connection
-            </>
-          )}
-        </Button>
+        <Can permission="connection:create">
+          <Button
+            disabled={
+              isFetching ||
+              connectionTypes.length === 0 ||
+              connectionTypesError ||
+              connectionsError
+            }
+            onClick={() => setIsModalOpen(true)}
+          >
+            {isFetching ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading...
+              </>
+            ) : (
+              <>
+                <Plus className="mr-2 h-4 w-4" />
+                New connection
+              </>
+            )}
+          </Button>
+        </Can>
       }
     />
   );

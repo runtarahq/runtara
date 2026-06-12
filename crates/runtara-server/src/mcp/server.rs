@@ -1093,6 +1093,38 @@ impl SmoMcpServer {
 
 #[tool_handler]
 impl ServerHandler for SmoMcpServer {
+    /// Dispatch a tool call, binding the authenticated caller's identity for the
+    /// duration of the call.
+    ///
+    /// `#[tool_handler]` only generates `call_tool` when the impl doesn't define one,
+    /// so this hand-written version replaces it. The auth middleware that wraps the MCP
+    /// transport resolved the caller's [`AuthContext`] (identity + per-tenant Valkey
+    /// role) and rmcp's streamable-http transport injected the HTTP request `Parts` into
+    /// the request extensions. We recover the `AuthContext` from there and bind it via
+    /// [`with_caller_auth`] so every in-process API call this tool makes runs as the
+    /// real caller — applying role and ownership authorization instead of bypassing it.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::auth::AuthContext>())
+            .cloned();
+
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        match caller {
+            Some(auth) => {
+                tools::internal_api::with_caller_auth(auth, self.tool_router.call(tcc)).await
+            }
+            // No HTTP-derived identity (non-HTTP transport / tests): dispatch without
+            // binding; in-process calls fall back to their role-less synthetic context.
+            None => self.tool_router.call(tcc).await,
+        }
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_06_18)

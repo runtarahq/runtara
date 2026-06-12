@@ -90,6 +90,7 @@ async fn maybe_unregister_webhook(
 )]
 pub async fn create_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Json(request): Json<CreateInvocationTriggerRequest>,
@@ -97,7 +98,10 @@ pub async fn create_invocation_trigger(
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
     let service = TriggerService::new(repository);
 
-    match service.create_trigger(request, Some(&tenant_id)).await {
+    match service
+        .create_trigger(request, Some(&tenant_id), &user_id)
+        .await
+    {
         Ok(trigger) => {
             maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
 
@@ -250,12 +254,26 @@ pub async fn get_invocation_trigger(
 )]
 pub async fn update_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(id): Path<String>,
     Json(request): Json<UpdateInvocationTriggerRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may update only triggers they created.
+    let owner = repository.owner(&id).await.ok().flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::TriggerUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+    }
+
     let service = TriggerService::new(repository);
 
     // Load previous state for webhook lifecycle.
@@ -344,11 +362,25 @@ pub async fn update_invocation_trigger(
 )]
 pub async fn delete_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may delete only triggers they created.
+    let owner = repository.owner(&id).await.ok().flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::TriggerDelete,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+    }
+
     let service = TriggerService::new(repository);
 
     // Load trigger before deleting for webhook cleanup.

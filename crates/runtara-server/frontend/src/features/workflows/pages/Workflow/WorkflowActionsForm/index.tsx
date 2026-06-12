@@ -3,6 +3,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { NextForm } from '@/shared/components/NextForm';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import * as form from './WorkflowActionsItem';
 import { useRef } from 'react';
 import {
@@ -246,6 +247,7 @@ export function WorkflowActionsForm(props: Props) {
               </>
             )}
 
+            <Can permission="workflow:execute">
             {/* Start button */}
             <Button
               type="button"
@@ -311,6 +313,7 @@ export function WorkflowActionsForm(props: Props) {
                 <Square className="h-3.5 w-3.5" />
               </Button>
             )}
+            </Can>
 
             {/* Details button - only show when executing */}
             {isExecuting && onViewExecutionDetails && (
@@ -343,6 +346,7 @@ export function WorkflowActionsForm(props: Props) {
             <div className="mx-1 h-4 w-px bg-border" />
 
             {/* Save button */}
+            <Can permission="workflow:update">
             <Button
               type="button"
               variant="ghost"
@@ -354,6 +358,7 @@ export function WorkflowActionsForm(props: Props) {
             >
               <Save className="h-4 w-4" />
             </Button>
+            </Can>
 
             <div className="mx-1 h-4 w-px bg-border" />
 

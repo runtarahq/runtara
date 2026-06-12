@@ -16,6 +16,8 @@ RUNTARA-issued API keys (`rt_*` / `smo_*` prefixes) continue to work in every mo
 
 Auth answers "who is calling"; **entitlements answer "what they can do"**. Both are env-driven and resolve at startup. See [`entitlements.md`](entitlements.md) for the feature gates, agent allowlist, and tier limits — common questions like "why is the Reports menu hidden" or "why does this workflow fail with `AGENT_NOT_ENABLED`" live there.
 
+For SaaS multi-tenant deployments, per-user **roles and permissions** (Owner / Admin / Member / Viewer) are resolved per request from the tenant's Valkey rather than from the JWT. The cross-service contract — JWT claim shape, Valkey key schema, the static permission map, and the audit-event shape — is specified in [`../security/user-management-contracts.md`](../security/user-management-contracts.md).
+
 The MCP Streamable HTTP endpoint validates the inbound `Host` header before MCP auth and tool dispatch. Local loopback hosts are allowed by default. Public or proxied deployments must set `RUNTARA_MCP_ALLOWED_HOSTS` to the comma-separated public host authorities clients use, for example `runtara.example.com,runtara.example.com:7001`.
 
 MCP session recovery uses Valkey by default (`RUNTARA_MCP_SESSION_STORE=valkey`). Valkey mode requires `VALKEY_HOST` and a working shared Valkey connection at startup; the server exits instead of falling back to process-local sessions. Set `RUNTARA_MCP_SESSION_STORE=local` only for explicit single-process development. `RUNTARA_MCP_SESSION_TTL_SECONDS` controls the persisted recovery-state TTL and defaults to `86400`.
@@ -30,8 +32,12 @@ Backwards-compatible with the previous RUNTARA behaviour.
 | `OAUTH2_ISSUER` | yes | Validated against the `iss` claim. |
 | `OAUTH2_AUDIENCE` | no | If set, validated against the `aud` claim on API routes. |
 | `OAUTH2_MCP_AUDIENCE` | no | Same, but for MCP routes. |
+| `RUNTARA_AUTH_REQUIRE_JTI` | no | When `true`, reject any JWT lacking a `jti` claim. Defaults to `false` for backwards compatibility; flip to `true` once the Auth0 Action emits `jti` on every token, since `jti` is the key the revocation denylist relies on. See [`../security/user-management-contracts.md`](../security/user-management-contracts.md). |
+| `RUNTARA_AUTH_MEMBERSHIP_POLICY` | no | `disabled` \| `logging` \| `required` — how the per-tenant Valkey membership/revocation lookup is treated. Default: `disabled` in every mode — enforcement (including `logging`'s shadow-denial warns) is strictly opt-in per tenant. `logging` looks up and logs would-be denials without blocking; `required` fails requests closed on missing membership, revoked token, or unreachable Valkey. |
 
-The runtime expects every JWT to carry an `org_id` claim equal to `TENANT_ID`; a mismatch returns `403 Forbidden`. `sub` becomes `AuthContext.user_id`.
+`RUNTARA_AUTH_REQUIRE_JTI` and `RUNTARA_AUTH_MEMBERSHIP_POLICY` only have effect in `oidc` mode. In `local` and `trust_proxy` modes there is no membership store to consult — every caller acts as the tenant Owner (see below) — so both vars are inert and safe to leave set (or default to their strictest values) across mixed fleets.
+
+The runtime expects every JWT to carry an `org_id` claim equal to `TENANT_ID`; a mismatch returns `403 Forbidden`. `sub` becomes `AuthContext.user_id`. Auth0-namespaced custom claims (e.g. `https://runtara.io/org_id`) are accepted and normalized to their raw names.
 
 ## `AUTH_PROVIDER=trust_proxy`
 
@@ -49,6 +55,8 @@ RUNTARA performs no in-process authentication. A reverse proxy is expected to:
 
 If the user header is absent, `AuthContext.user_id` falls back to the literal `"proxy"` so audit logs still record that a proxy-terminated request landed.
 
+Every proxy-authenticated caller (and every API key) acts as the tenant **Owner**: there is no per-tenant membership store in this mode, so role-based authorization is fully permissive regardless of `RUNTARA_AUTH_MEMBERSHIP_POLICY`. The "User Management" link is hidden — that surface belongs to the managed control plane, which self-hosted deployments don't have.
+
 Reference configs: [`docs/reference/proxy/`](../reference/proxy/).
 
 ## `AUTH_PROVIDER=local`
@@ -59,6 +67,8 @@ No authentication at all. Every request is served as the configured tenant with 
 - Developer workstations and local CI.
 
 `SERVER_HOST` must be a loopback address; RUNTARA refuses to start otherwise.
+
+The local user acts as the tenant **Owner** (override with `RUNTARA_DEV_ROLE=owner|admin|member|viewer` to exercise role-based behavior in development). As in `trust_proxy` mode, the "User Management" link is hidden.
 
 ## Startup safety check
 

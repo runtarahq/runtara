@@ -12,6 +12,7 @@ import {
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { cn, formatDate } from '@/lib/utils.ts';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { Can } from '@/shared/components/Can';
 import { TableCell, TableRow } from '@/shared/components/ui/table';
 import { parseSchema } from '@/features/workflows/utils/schema';
 
@@ -107,6 +108,7 @@ export function WorkflowCard({
       </TableCell>
       <TableCell className="text-right">
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <Can permission="workflow:execute">
           <Button
             variant="ghost"
             size="icon"
@@ -121,6 +123,7 @@ export function WorkflowCard({
               <Play className="w-4 h-4" />
             )}
           </Button>
+          </Can>
           {onChat && (
             <Button
               variant="ghost"
@@ -132,6 +135,7 @@ export function WorkflowCard({
               <MessageSquare className="w-4 h-4" />
             </Button>
           )}
+          <Can permission="workflow:update">
           <Button
             variant="ghost"
             size="icon"
@@ -141,7 +145,9 @@ export function WorkflowCard({
           >
             <Pencil className="w-4 h-4" />
           </Button>
+          </Can>
           {showMoveAction && onMoveToFolder && (
+            <Can permission="workflow:update">
             <Button
               variant="ghost"
               size="icon"
@@ -156,7 +162,9 @@ export function WorkflowCard({
                 <FolderInput className="w-4 h-4" />
               )}
             </Button>
+            </Can>
           )}
+          <Can permission="workflow:create">
           <Button
             variant="ghost"
             size="icon"
@@ -171,6 +179,8 @@ export function WorkflowCard({
               <Copy className="w-4 h-4" />
             )}
           </Button>
+          </Can>
+          <Can permission="workflow:delete">
           <Button
             variant="ghost"
             size="icon"
@@ -185,6 +195,7 @@ export function WorkflowCard({
               <Trash2 className="w-4 h-4" />
             )}
           </Button>
+          </Can>
         </div>
       </TableCell>
     </TableRow>

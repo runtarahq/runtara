@@ -89,6 +89,7 @@ pub async fn get_report(
 
 pub async fn create_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
@@ -97,7 +98,7 @@ pub async fn create_report(
     let request = parse_report_request::<CreateReportRequest>(request)?;
     let service = ReportService::new(pool, manager, connections);
 
-    match service.create_report(&tenant_id, request).await {
+    match service.create_report(&tenant_id, request, &user_id).await {
         Ok(report) => Ok((
             StatusCode::CREATED,
             Json(GetReportResponse {
@@ -111,6 +112,7 @@ pub async fn create_report(
 
 pub async fn update_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
@@ -119,6 +121,18 @@ pub async fn update_report(
 ) -> Result<(StatusCode, Json<GetReportResponse>), (StatusCode, Json<Value>)> {
     let request = parse_report_request::<UpdateReportRequest>(request)?;
     let service = ReportService::new(pool, manager, connections);
+
+    // Own-scoped authorization: a Member may update only reports they created.
+    let owner = service.owner(&tenant_id, &report_id).await;
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::ReportUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+    }
 
     match service.update_report(&tenant_id, &report_id, request).await {
         Ok(report) => Ok((
@@ -134,12 +148,25 @@ pub async fn update_report(
 
 pub async fn delete_report(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(report_id): Path<String>,
 ) -> Result<(StatusCode, Json<DeleteReportResponse>), (StatusCode, Json<Value>)> {
     let service = ReportService::new(pool, manager, connections);
+
+    // Own-scoped authorization: a Member may delete only reports they created.
+    let owner = service.owner(&tenant_id, &report_id).await;
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        role,
+        crate::authz::Permission::ReportDelete,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+    }
 
     match service.delete_report(&tenant_id, &report_id).await {
         Ok(()) => Ok((

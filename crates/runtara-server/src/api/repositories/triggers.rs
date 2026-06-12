@@ -19,12 +19,13 @@ impl TriggerRepository {
         &self,
         request: &CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
+        created_by: Option<&str>,
     ) -> Result<InvocationTrigger, sqlx::Error> {
         let trigger = sqlx::query_as::<_, InvocationTrigger>(
             r#"
             INSERT INTO public.invocation_trigger
-                (tenant_id, workflow_id, trigger_type, active, configuration, remote_tenant_id, single_instance)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (tenant_id, workflow_id, trigger_type, active, configuration, remote_tenant_id, single_instance, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                       created_at, last_run, updated_at, remote_tenant_id, single_instance
             "#,
@@ -36,10 +37,22 @@ impl TriggerRepository {
         .bind(&request.configuration)
         .bind(&request.remote_tenant_id)
         .bind(request.single_instance)
+        .bind(created_by)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(trigger)
+    }
+
+    /// The `created_by` (owner) of a trigger, for `Own`-scoped authorization. `None` when the
+    /// trigger does not exist or predates ownership tracking (NULL `created_by`).
+    pub async fn owner(&self, id: &str) -> Result<Option<String>, sqlx::Error> {
+        let owner: Option<Option<String>> =
+            sqlx::query_scalar("SELECT created_by FROM invocation_trigger WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(owner.flatten())
     }
 
     /// List all invocation triggers with optional tenant filtering

@@ -20,6 +20,7 @@ impl TriggerService {
         &self,
         request: CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
+        created_by: &str,
     ) -> Result<InvocationTrigger, ServiceError> {
         // Validation: workflow_id should not be empty
         if request.workflow_id.trim().is_empty() {
@@ -35,7 +36,7 @@ impl TriggerService {
 
         // Delegate to repository
         self.repository
-            .create(&request, tenant_id)
+            .create(&request, tenant_id, Some(created_by))
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))
     }

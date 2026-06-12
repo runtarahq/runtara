@@ -172,6 +172,21 @@ pub struct Metrics {
     pub agent_test_total: Counter<u64>,
     pub agent_test_failed: Counter<u64>,
     pub agent_test_duration: Histogram<f64>,
+
+    // Auth / authorization metrics. Six conceptual signals (membership lookup
+    // latency / failures / missing-member / revoked-token / permission denials
+    // by permission / Valkey unavailable) collapse into three instruments
+    // because OTEL attributes carry the low-cardinality breakdowns the others
+    // would be separate counters for:
+    //   - lookup latency                  -> auth_membership_lookup_duration
+    //   - lookup failures, missing member,
+    //     revoked token, Valkey unavailable-> auth_membership_denials_total{code}
+    //   - permission denial by permission -> auth_permission_denials_total{permission}
+    // `enforced` distinguishes a real `Required`-mode block from a `Logging`-mode
+    // shadow denial; `auth_method` separates the JWT and API-key paths.
+    pub auth_membership_lookup_duration: Histogram<f64>,
+    pub auth_membership_denials_total: Counter<u64>,
+    pub auth_permission_denials_total: Counter<u64>,
 }
 
 impl Metrics {
@@ -289,6 +304,26 @@ impl Metrics {
             .with_unit("s")
             .build();
 
+        // Auth / authorization metrics
+        let auth_membership_lookup_duration = meter
+            .f64_histogram("runtara.auth.membership.lookup.duration")
+            .with_description("Per-tenant Valkey membership/revocation lookup duration in seconds")
+            .with_unit("s")
+            .build();
+
+        let auth_membership_denials_total = meter
+            .u64_counter("runtara.auth.membership.denials.total")
+            .with_description(
+                "Membership/revocation denials by `code` (NOT_A_MEMBER, TOKEN_REVOKED, \
+                 AUTH_MEMBERSHIP_UNAVAILABLE, ...), `auth_method`, and whether `enforced`",
+            )
+            .build();
+
+        let auth_permission_denials_total = meter
+            .u64_counter("runtara.auth.permission.denials.total")
+            .with_description("Route-level authorization denials by `permission`")
+            .build();
+
         Self {
             meter,
             worker_executions_total,
@@ -311,6 +346,9 @@ impl Metrics {
             agent_test_total,
             agent_test_failed,
             agent_test_duration,
+            auth_membership_lookup_duration,
+            auth_membership_denials_total,
+            auth_permission_denials_total,
         }
     }
 
@@ -323,6 +361,50 @@ impl Metrics {
 /// Get the global metrics instance
 pub fn metrics() -> Option<&'static Metrics> {
     METRICS.get()
+}
+
+/// Record the duration of a per-tenant membership/revocation lookup. `outcome` is `"allow"`
+/// (a role resolved) or `"deny"` (any denial code), `auth_method` the stable identifier from
+/// [`crate::auth::AuthMethod::as_str`]. No-op when telemetry is disabled (tests, OTEL off).
+pub fn record_membership_lookup(
+    duration_secs: f64,
+    auth_method: &'static str,
+    outcome: &'static str,
+) {
+    if let Some(m) = metrics() {
+        m.auth_membership_lookup_duration.record(
+            duration_secs,
+            &[
+                KeyValue::new("auth_method", auth_method),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
+    }
+}
+
+/// Count a membership/revocation denial, keyed by its stable `code` (see
+/// [`crate::middleware::auth`]), the `auth_method`, and whether enforcement actually blocked
+/// the request (`enforced=false` is a `Logging`-mode shadow denial). No-op when telemetry is off.
+pub fn record_membership_denial(code: &'static str, auth_method: &'static str, enforced: bool) {
+    if let Some(m) = metrics() {
+        m.auth_membership_denials_total.add(
+            1,
+            &[
+                KeyValue::new("code", code),
+                KeyValue::new("auth_method", auth_method),
+                KeyValue::new("enforced", enforced),
+            ],
+        );
+    }
+}
+
+/// Count a route-level authorization denial, keyed by the colon-form `permission` that was
+/// refused. No-op when telemetry is disabled.
+pub fn record_permission_denial(permission: &'static str) {
+    if let Some(m) = metrics() {
+        m.auth_permission_denials_total
+            .add(1, &[KeyValue::new("permission", permission)]);
+    }
 }
 
 /// Initialize OpenTelemetry with OTLP exporter

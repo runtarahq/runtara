@@ -20,9 +20,9 @@ import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
-import { useAuthStore } from '@/shared/stores/authStore.ts';
+import { useAuthStore, useHasExplicitPermission } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
-import { DollarSign, Settings } from 'lucide-react';
+import { DollarSign, Settings, Users } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
@@ -98,6 +98,14 @@ function AppMenu() {
     [userGroups, entitlements]
   );
 
+  // The tenant user-management UI lives in the smo-management SPA (served by the gateway at
+  // /ui/management/ — shared, NOT org-namespaced; the SPA resolves the tenant from the JWT).
+  // Show the link only when /me explicitly grants `user_management:access` (Owner/Admin under
+  // enforcement). Default-deny, unlike other permission gates: the target surface only exists
+  // in the managed deployment, so before enforcement is on — and in self-hosted modes — the
+  // entry must stay hidden rather than render a dead link. UI-only gate; smo-management enforces.
+  const canManageUsers = useHasExplicitPermission('user_management:access');
+
   const isHomePage = location.pathname === '/';
 
   return (
@@ -114,6 +122,22 @@ function AppMenu() {
             }
           />
         ))}
+        {canManageUsers && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              asChild
+              tooltip="User Management"
+              className="text-muted-foreground"
+            >
+              {/* External link: leaves the runtara SPA for the management SPA. A plain
+                  anchor (not react-router <Link>) so the browser does a full navigation. */}
+              <a href="/ui/management/">
+                <Users size={16} />
+                <span>User Management</span>
+              </a>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
       </SidebarGroup>
     </SidebarMenu>
   );
@@ -121,6 +145,8 @@ function AppMenu() {
 
 function FooterMenu() {
   const navigate = useNavigate();
+  // The "User Management" entry now lives in the main sidebar nav (see AppMenu), gated by the
+  // `user_management:access` permission.
   const versionLabel = formatBuildLabel(
     config.build.version,
     config.build.commit,

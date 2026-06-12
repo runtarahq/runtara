@@ -62,6 +62,7 @@ export function Settings() {
     <ConsoleToolbar
       left={<Breadcrumb items={breadcrumbItems} />}
       actions={
+        // API keys are personal: any user may create their own, so this is not role-gated.
         <Button onClick={() => setCreateOpen(true)} disabled={isError}>
           <PlusIcon className="mr-2 h-4 w-4" />
           New API Key
@@ -154,6 +155,8 @@ export function Settings() {
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
+                  {/* A caller manages only its own keys (server-enforced), so revoke is
+                      always available on the keys shown — not role-gated. */}
                   <Button
                     variant="ghost"
                     size="icon"

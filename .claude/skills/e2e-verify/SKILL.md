@@ -45,7 +45,10 @@ Never `pkill runtara-server` — that takes down the dev server too.
 
 ```bash
 cargo build -p runtara-server --bin runtara-server
+cargo build -p runtara-management-sdk --bin runtara-ctl
 ```
+
+There is no standalone `runtara-compile` binary anymore — the compile→register→execute path lives inside the in-process cargo suites (step 4).
 
 ### 2. Build agent components
 
@@ -87,7 +90,30 @@ psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_test;"    # core + environment
 docker run -d --rm --name runtara-e2e-valkey -p 16390:6379 valkey/valkey:8-alpine
 ```
 
-### 4. Start the server (coexisting with a running dev server)
+### 4. Run the in-process e2e suite
+
+The modern compile→register→execute path lives inside two CI-gated cargo test suites in `runtara-workflows`. They drive the same components-mode compiler that the old `runtara-compile` CLI did, then execute the produced WASM in-process. ~35 tests in ~55s, including a 41-case execution smoke.
+
+```bash
+RUNTARA_RUN_DIRECT_WASM_E2E=1 \
+RUNTARA_AGENT_COMPONENTS_DIR=/Users/dmytro/Workspace/runtara/target/wasm32-wasip2/release \
+  cargo test -p runtara-workflows \
+  --test direct_wasm_execute \
+  --test validation_integration_test \
+  -- --nocapture --test-threads=1
+```
+
+Without `RUNTARA_RUN_DIRECT_WASM_E2E=1` the tests are gated out — they show as `ok. 0 passed; 0 ignored` and prove nothing. `RUNTARA_AGENT_COMPONENTS_DIR` must point at the directory step 2 produced.
+
+For agent / capability changes: read the assertions in `crates/runtara-workflows/tests/direct_wasm_execute.rs` (and any new tests you added) to confirm the output reflects the logic you added, not a stale cached binary. If you added a new agent or capability, add a case that exercises it.
+
+## Manual HTTP-driven path (for object-model/SQL features)
+
+The HTTP-server-driven path is still required to verify object-model, trigram, FTS, and pgvector features. [e2e/run_all.sh](../../../e2e/run_all.sh) wraps the SQL/search tests; run it after the in-process suite passes.
+
+To drive a single workflow against a live server manually:
+
+### Start the server (coexisting with a running dev server)
 
 A dev server already holds the default ports (`SERVER_PORT`/`INTERNAL_PORT` 7001/7002, gRPC + HTTP 8001–8004); shift the e2e server into 17xxx/18xxx. The server **auto-loads `.env`** (`dotenvy`), so override every DB URL and port inline or it will point at the dev DB. `AUTH_PROVIDER=local` + `SESSION_TOKEN_SECRET` + `TENANT_ID` let plain curl hit `/api/runtime` without a real auth provider.
 

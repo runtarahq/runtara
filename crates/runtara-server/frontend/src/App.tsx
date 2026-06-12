@@ -2,6 +2,7 @@ import { RouterProvider } from 'react-router/dom';
 import { router } from '@/router';
 import { Loader } from '@/shared/components/loader.tsx';
 import { useAutoSignin } from '@/shared/hooks/useAutoSignin';
+import { useMe } from '@/shared/hooks/useMe';
 import { useOrgId } from '@/shared/hooks/useOrgId';
 import { useTenantUrlGuard } from '@/shared/hooks/useTenantUrlGuard';
 import { useUserGroups } from '@/shared/hooks/useUserGroups';
@@ -18,6 +19,7 @@ function App() {
   useOrgId();
   useTenantUrlGuard();
   useUserGroups();
+  useMe();
   const isMaintenanceMode = useHealthCheck();
 
   // Initialize theme

@@ -7,6 +7,7 @@ import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import {
   Table,
   TableBody,
@@ -208,6 +209,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
+                    <Can permission="connection:update">
                     <Link to={`/connections/${connection.id}`}>
                       <Button
                         variant="ghost"
@@ -218,6 +220,8 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                         <Pencil className="h-4 w-4" />
                       </Button>
                     </Link>
+                    </Can>
+                    <Can permission="connection:delete">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -232,6 +236,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                         <Trash2 className="h-4 w-4" />
                       )}
                     </Button>
+                    </Can>
                   </div>
                 </TableCell>
               </TableRow>

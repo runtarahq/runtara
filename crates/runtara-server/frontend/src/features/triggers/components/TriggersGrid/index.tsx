@@ -16,6 +16,7 @@ import {
 import { Icons } from '@/shared/components/icons.tsx';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import {
   Table,
   TableBody,
@@ -295,6 +296,7 @@ export function TriggersGrid({
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
+                      <Can permission="trigger:update">
                       <Link to={`/invocation-triggers/${trigger.id}`}>
                         <Button
                           variant="ghost"
@@ -305,6 +307,8 @@ export function TriggersGrid({
                           <Pencil className="h-4 w-4" />
                         </Button>
                       </Link>
+                      </Can>
+                      <Can permission="trigger:delete">
                       <Button
                         variant="ghost"
                         size="icon"
@@ -319,6 +323,7 @@ export function TriggersGrid({
                           <Trash2 className="h-4 w-4" />
                         )}
                       </Button>
+                      </Can>
                     </div>
                   </TableCell>
                 </TableRow>

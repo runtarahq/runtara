@@ -27,6 +27,7 @@ import {
 import { WorkflowCard } from '../WorkflowCard';
 import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { Can } from '@/shared/components/Can';
 import { cn } from '@/lib/utils.ts';
 import {
   Table,
@@ -484,6 +485,7 @@ export function WorkflowsGrid({
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                    <Can permission="workflow:update">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -493,6 +495,8 @@ export function WorkflowsGrid({
                     >
                       <Pencil className="h-4 w-4" />
                     </Button>
+                    </Can>
+                    <Can permission="workflow:delete">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -502,6 +506,7 @@ export function WorkflowsGrid({
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
+                    </Can>
                   </div>
                 </TableCell>
               </TableRow>

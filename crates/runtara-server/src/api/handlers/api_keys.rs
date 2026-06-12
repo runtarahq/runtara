@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::middleware::tenant_auth::OrgId;
+use crate::middleware::tenant_auth::{CallerId, OrgId};
 
 /// API key record (key_hash is never exposed via serde skip)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -26,6 +26,13 @@ pub struct ApiKey {
     #[schema(read_only)]
     pub key_hash: String,
     pub created_by: Option<String>,
+    /// Auth0 `sub` of the user who owns the key. The key acts as this user: it inherits their
+    /// current role from the tenant Valkey at validation time, and only they may read/revoke it.
+    /// Required — every key has an owner (enforced by the NOT NULL column).
+    pub issuing_user_id: String,
+    /// Token identity — the `token:revoked:{jti}` revocation-denylist key. `None` for
+    /// legacy rows.
+    pub jti: Option<String>,
     #[schema(value_type = String)]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = Option<String>)]
@@ -72,6 +79,7 @@ fn sha256_hex(input: &str) -> String {
 )]
 pub async fn create_api_key(
     OrgId(tenant_id): OrgId,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -103,7 +111,12 @@ pub async fn create_api_key(
         }
     }
 
-    let created_by = Some("jwt-user".to_string());
+    // The key inherits the creating user's identity: `issuing_user_id` drives the Valkey
+    // role lookup at validation time, and `jti` is its revocation-denylist key. `created_by`
+    // moves off the legacy hard-coded "jwt-user" to the real caller.
+    let issuing_user_id = user_id;
+    let created_by = issuing_user_id.clone();
+    let jti = Uuid::new_v4().to_string();
 
     let random_bytes: [u8; 24] = rand::random();
     let random_hex = hex::encode(random_bytes);
@@ -113,21 +126,31 @@ pub async fn create_api_key(
 
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(&tenant_id)
     .bind(&request.name)
     .bind(key_prefix)
     .bind(&key_hash)
-    .bind(created_by.as_deref())
+    .bind(&created_by)
+    .bind(&issuing_user_id)
+    .bind(&jti)
     .bind(request.expires_at)
     .fetch_one(&pool)
     .await
     {
         Ok(api_key) => {
+            crate::audit::emit(
+                &pool,
+                &tenant_id,
+                Some(&issuing_user_id),
+                crate::audit::AuditEvent::new("token.create")
+                    .resource("api_key", api_key.id.to_string()),
+            )
+            .await;
             let response = CreateApiKeyResponse {
                 api_key,
                 key: plaintext_key,
@@ -156,17 +179,21 @@ pub async fn create_api_key(
 )]
 pub async fn list_api_keys(
     OrgId(tenant_id): OrgId,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
 ) -> (StatusCode, Json<Value>) {
+    // An API key is a personal credential: a caller sees only the keys they issued, regardless
+    // of role. Ownership — not a role permission — is the gate, so this scoping is unconditional.
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        SELECT id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         FROM public.api_keys
-        WHERE org_id = $1
+        WHERE org_id = $1 AND issuing_user_id = $2
         ORDER BY created_at DESC
         "#,
     )
     .bind(&tenant_id)
+    .bind(&user_id)
     .fetch_all(&pool)
     .await
     {
@@ -196,30 +223,51 @@ pub async fn list_api_keys(
 )]
 pub async fn revoke_api_key(
     OrgId(tenant_id): OrgId,
+    CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
+    State(valkey): State<Option<redis::aio::ConnectionManager>>,
     Path(id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
-    match sqlx::query(
+    // A caller may revoke only a key they issued. Scoping the mutation by `issuing_user_id`
+    // makes ownership the gate atomically: another user's key simply isn't matched, so it reads
+    // as 404 (not found) rather than leaking its existence.
+    let revoked = sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>)>(
         r#"
         UPDATE public.api_keys
         SET is_revoked = TRUE
-        WHERE id = $1 AND org_id = $2
+        WHERE id = $1 AND org_id = $2 AND issuing_user_id = $3
+        RETURNING jti, expires_at
         "#,
     )
     .bind(id)
     .bind(&tenant_id)
-    .execute(&pool)
-    .await
-    {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "API key not found"})),
-                )
-            } else {
-                (StatusCode::NO_CONTENT, Json(json!(null)))
+    .bind(&user_id)
+    .fetch_optional(&pool)
+    .await;
+
+    match revoked {
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "API key not found"})),
+        ),
+        Ok(Some((jti, expires_at))) => {
+            // Propagate the revocation to the tenant's Valkey denylist so it takes effect
+            // immediately across the contract. The DB `is_revoked` flag is the authoritative
+            // block for `rt_*` keys, so a Valkey failure here is logged, not fatal.
+            if let (Some(jti), Some(manager)) = (jti.as_deref(), valkey.as_ref()) {
+                let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
+                if let Err(e) = crate::valkey::auth::revoke_token(manager, jti, ttl).await {
+                    tracing::warn!(error = %e, "failed to write token revocation to Valkey");
+                }
             }
+            crate::audit::emit(
+                &pool,
+                &tenant_id,
+                Some(&user_id),
+                crate::audit::AuditEvent::new("token.revoke").resource("api_key", id.to_string()),
+            )
+            .await;
+            (StatusCode::NO_CONTENT, Json(json!(null)))
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -238,7 +286,7 @@ pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<A
         WHERE key_hash = $1
           AND is_revoked = FALSE
           AND (expires_at IS NULL OR expires_at > NOW())
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, created_at, expires_at, last_used_at, is_revoked
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(key_hash)

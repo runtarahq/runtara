@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, memo, useRef, useEffect } from 'react';
 import { RowSelectionState, SortingState } from '@tanstack/react-table';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import {
   Download,
   Loader2,
@@ -647,22 +648,24 @@ export function ObjectInstanceDtosTable({
                         )}
                         Export
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setShowImportDialog(true)}
-                      >
-                        <Upload className="mr-2 h-4 w-4" />
-                        Import
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setShowBulkInsertDialog(true)}
-                      >
-                        <Plus className="mr-2 h-4 w-4" />
-                        Bulk insert
-                      </Button>
+                      <Can permission="database:create">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setShowImportDialog(true)}
+                        >
+                          <Upload className="mr-2 h-4 w-4" />
+                          Import
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setShowBulkInsertDialog(true)}
+                        >
+                          <Plus className="mr-2 h-4 w-4" />
+                          Bulk insert
+                        </Button>
+                      </Can>
                     </>
                   )}
                 </div>
@@ -684,22 +687,26 @@ export function ObjectInstanceDtosTable({
             count={selectedCount}
             onClear={() => setRowSelection({})}
           >
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowBulkEditDialog(true)}
-            >
-              <Pencil className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setShowBulkDeleteDialog(true)}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
+            <Can permission="database:update">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowBulkEditDialog(true)}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
+            </Can>
+            <Can permission="database:delete">
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowBulkDeleteDialog(true)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </Button>
+            </Can>
           </SelectionActionBar>
         }
         footer={
@@ -753,7 +760,11 @@ export function ObjectInstanceDtosTable({
           getRowClassName={(row) =>
             row.original.id === animatingRowId ? 'row-animating' : ''
           }
-          beforePaginationSlot={<AddRowButton onClick={handleAddRow} />}
+          beforePaginationSlot={
+            <Can permission="database:create">
+              <AddRowButton onClick={handleAddRow} />
+            </Can>
+          }
         />
       </ConsoleTableShell>
 

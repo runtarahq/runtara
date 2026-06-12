@@ -6,6 +6,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::auth::AuthContext;
+use crate::authz::Role;
 
 /// Middleware that bridges server auth context to `runtara_connections::TenantId`.
 ///
@@ -45,6 +46,64 @@ impl<S: Send + Sync> FromRequestParts<S> for OrgId {
             .extensions
             .get::<AuthContext>()
             .map(|ctx| OrgId(ctx.org_id.clone()))
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "Unauthorized",
+                        "message": "Authentication required"
+                    })),
+                )
+            })
+    }
+}
+
+/// Axum extractor for the authenticated caller's user id (Auth0 `sub`, or the synthetic id
+/// for non-JWT modes). Like [`OrgId`], it reads `AuthContext` from request extensions and
+/// requires the `authenticate` middleware to have run.
+pub struct CallerId(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for CallerId {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|ctx| CallerId(ctx.user_id.clone()))
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "Unauthorized",
+                        "message": "Authentication required"
+                    })),
+                )
+            })
+    }
+}
+
+/// Axum extractor yielding both the caller's user id and resolved [`Role`] — what handler-level
+/// `Own` ownership checks need (compare `created_by` against `user_id`, gated by `role`). Like
+/// [`OrgId`]/[`CallerId`] it reads `AuthContext` from request extensions, so the `authenticate`
+/// middleware must have run. `role` is `None` outside SaaS enforcement (local/trust_proxy, or
+/// before the membership lookup populates it).
+pub struct Caller {
+    pub user_id: String,
+    pub role: Option<Role>,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|ctx| Caller {
+                user_id: ctx.user_id.clone(),
+                role: ctx.role,
+            })
             .ok_or_else(|| {
                 (
                     StatusCode::UNAUTHORIZED,

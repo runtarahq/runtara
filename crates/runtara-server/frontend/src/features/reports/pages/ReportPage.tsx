@@ -15,6 +15,7 @@ import {
   AlertTitle,
 } from '@/shared/components/ui/alert';
 import { Button } from '@/shared/components/ui/button';
+import { Can } from '@/shared/components/Can';
 import { TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
@@ -415,39 +416,47 @@ export function ReportPage() {
             Refresh
           </Button>
           {isExisting && reportId && existingReport ? (
-            <ReportDeleteButton
-              reportId={reportId}
-              reportName={existingReport.name}
-              className="sm:px-4"
-            />
+            <Can permission="report:delete">
+              <ReportDeleteButton
+                reportId={reportId}
+                reportName={existingReport.name}
+                className="sm:px-4"
+              />
+            </Can>
           ) : null}
-          <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
-            <Button
-              variant="outline"
-              className="w-full sm:px-4"
-            >
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-          </Link>
+          <Can permission="report:update">
+            <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
+              <Button
+                variant="outline"
+                className="w-full sm:px-4"
+              >
+                <Edit className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
+            </Link>
+          </Can>
         </>
       )}
       {editing && isExisting && reportId && existingReport ? (
-        <ReportDeleteButton
-          reportId={reportId}
-          reportName={existingReport.name}
-          className="sm:px-4"
-        />
+        <Can permission="report:delete">
+          <ReportDeleteButton
+            reportId={reportId}
+            reportName={existingReport.name}
+            className="sm:px-4"
+          />
+        </Can>
       ) : null}
       {editing ? (
-        <Button
-          className="sm:px-4"
-          disabled={!canSave}
-          onClick={handleSave}
-        >
-          <Save className="mr-2 h-4 w-4" />
-          Save
-        </Button>
+        <Can permission="report:update">
+          <Button
+            className="sm:px-4"
+            disabled={!canSave}
+            onClick={handleSave}
+          >
+            <Save className="mr-2 h-4 w-4" />
+            Save
+          </Button>
+        </Can>
       ) : null}
     </div>
   );
