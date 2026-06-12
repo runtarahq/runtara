@@ -134,6 +134,16 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                             .with_termination("shutdown_requested", None),
                     )
                     .await?;
+                // Mark the instance as immediately due for wake so the wake
+                // scheduler relaunches it after the server restarts. Drain
+                // pauses the scheduler, so this cannot fire mid-shutdown.
+                if let Err(e) = state
+                    .persistence
+                    .set_instance_sleep(&ack.instance_id, chrono::Utc::now())
+                    .await
+                {
+                    warn!(error = %e, "Failed to schedule post-restart wake for shutdown suspend");
+                }
                 info!("Instance suspended for shutdown");
             }
         }

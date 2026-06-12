@@ -803,7 +803,7 @@ pub async fn handle_resume_instance(
 
     // Get checkpoint ID from instance record, or look up the latest checkpoint
     let checkpoint_id = match instance.checkpoint_id {
-        Some(id) => id,
+        Some(id) => Some(id),
         None => {
             // Failed instances may not have checkpoint_id on the record if the crash
             // happened before the SDK could update it. Fall back to the latest
@@ -820,13 +820,18 @@ pub async fn handle_resume_instance(
                         checkpoint_id = %record.checkpoint_id,
                         "Found latest checkpoint for failed instance"
                     );
-                    record.checkpoint_id
+                    Some(record.checkpoint_id)
                 }
                 _ => {
-                    return Ok(ResumeInstanceResponse {
-                        success: false,
-                        error: Some("Instance has no checkpoint to resume from".to_string()),
-                    });
+                    // No checkpoint anywhere (e.g. suspended for shutdown while
+                    // blocked in a non-durable step before the first checkpoint).
+                    // The workflow model is replay-from-start with checkpoints as
+                    // a result cache, so relaunching without one is valid.
+                    info!(
+                        instance_id = %request.instance_id,
+                        "No checkpoint recorded; relaunching from the start"
+                    );
+                    None
                 }
             }
         }
@@ -880,7 +885,7 @@ pub async fn handle_resume_instance(
         input: serde_json::json!({}), // Input was consumed on first run
         timeout: Duration::from_secs(300),
         runtara_core_addr: state.core_addr.clone(),
-        checkpoint_id: Some(checkpoint_id.clone()),
+        checkpoint_id: checkpoint_id.clone(),
         env: stored_env, // Restore env from initial launch
     };
 
@@ -904,12 +909,23 @@ pub async fn handle_resume_instance(
         warn!(error = %e, "Failed to update instance status to running before launch");
     }
     // Also update checkpoint_id on the instance record
-    if let Err(e) = state
-        .persistence
-        .update_instance_checkpoint(&request.instance_id, &checkpoint_id)
-        .await
+    if let Some(cp_id) = checkpoint_id.as_deref()
+        && let Err(e) = state
+            .persistence
+            .update_instance_checkpoint(&request.instance_id, cp_id)
+            .await
     {
         warn!(error = %e, "Failed to update instance checkpoint before launch");
+    }
+    // Clear any pending wake so the wake scheduler doesn't relaunch an
+    // instance we're resuming manually (shutdown-suspended instances carry
+    // sleep_until = now for post-restart recovery).
+    if let Err(e) = state
+        .persistence
+        .clear_instance_sleep(&request.instance_id)
+        .await
+    {
+        warn!(error = %e, "Failed to clear sleep_until before resume");
     }
 
     // Launch
@@ -918,7 +934,7 @@ pub async fn handle_resume_instance(
             info!(
                 instance_id = %request.instance_id,
                 handle_id = %handle.handle_id,
-                checkpoint_id = %checkpoint_id,
+                checkpoint_id = ?checkpoint_id,
                 "Instance resumed successfully"
             );
 
@@ -1189,6 +1205,24 @@ pub fn spawn_container_monitor(
                                 Ok(applied) => {
                                     if applied {
                                         if drain.is_draining() {
+                                            // Schedule an immediate wake so the wake
+                                            // scheduler relaunches the instance after
+                                            // restart — without this a force-stopped
+                                            // instance with no checkpoint stays
+                                            // suspended forever.
+                                            if let Err(e) = persistence
+                                                .set_instance_sleep(
+                                                    &instance_id,
+                                                    chrono::Utc::now(),
+                                                )
+                                                .await
+                                            {
+                                                warn!(
+                                                    instance_id = %instance_id,
+                                                    error = %e,
+                                                    "Failed to schedule post-restart wake"
+                                                );
+                                            }
                                             info!(
                                                 instance_id = %instance_id,
                                                 pid = ?pid,
