@@ -2824,7 +2824,7 @@ pub async fn set_workflow_metadata(
         ));
     }
 
-    let (_guard, mut graph, latest, current) =
+    let (_guard, mut graph, latest, _current) =
         fetch_latest_graph_locked(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
@@ -2836,13 +2836,37 @@ pub async fn set_workflow_metadata(
         target["description"] = serde_json::Value::String(description.clone());
     }
 
-    let (version, new_version) =
-        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    // A never-edited workflow's stored graph carries `entryPoint: null` (see
+    // `create_initial_version`), which the DSL `ExecutionGraph` (`entry_point: String`)
+    // cannot deserialize — so a metadata round-trip would 400 with
+    // "invalid type: null, expected a string". Coerce a null/missing entryPoint to "";
+    // it is harmless on a stepless graph and is overwritten once real steps are added.
+    if target
+        .get("entryPoint")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        target["entryPoint"] = serde_json::Value::String(String::new());
+    }
+
+    // Metadata is cosmetic and touches no structure, so patch the latest version in
+    // place via PUT (which validates DSL structure only, skipping reachability) rather
+    // than POST /update. This is what lets the change land on incomplete graphs — and
+    // a rename should apply to the live version, not spawn a new uncompiled one.
+    api_put(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}/versions/{}/graph",
+            params.workflow_id, latest
+        ),
+        Some(serde_json::json!({ "executionGraph": graph })),
+    )
+    .await?;
+
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
-        "version": version,
-        "newVersion": new_version,
+        "version": latest.to_string(),
+        "newVersion": false,
         "name": params.name,
         "description": params.description,
     }))
@@ -3533,6 +3557,63 @@ pub async fn apply_graph_mutations(
         "applied": applied,
         "operationCount": operation_count,
     }))
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    //! Regression coverage for the `set_workflow_metadata` entryPoint coercion.
+    //! A freshly created workflow's stored graph carries `entryPoint: null` (see
+    //! `create_initial_version`), which the DSL `ExecutionGraph` cannot deserialize.
+    //! `set_workflow_metadata` coerces that to "" so the metadata round-trip parses.
+
+    /// Mirror of the inline coercion in `set_workflow_metadata`.
+    fn coerce_entry_point(target: &mut serde_json::Value) {
+        if target
+            .get("entryPoint")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            target["entryPoint"] = serde_json::Value::String(String::new());
+        }
+    }
+
+    fn fresh_graph() -> serde_json::Value {
+        // Shape written by create_initial_version.
+        serde_json::json!({
+            "name": "wf",
+            "description": "",
+            "steps": {},
+            "executionPlan": [],
+            "entryPoint": null
+        })
+    }
+
+    #[test]
+    fn null_entry_point_fails_to_deserialize() {
+        // Pins the root cause: the stored fresh-graph shape is not a valid DSL Workflow.
+        let wrapped = serde_json::json!({ "executionGraph": fresh_graph() });
+        let parsed = serde_json::from_value::<runtara_dsl::Workflow>(wrapped);
+        assert!(
+            parsed.is_err(),
+            "fresh graph with entryPoint:null must not deserialize (that's the bug)"
+        );
+    }
+
+    #[test]
+    fn coerced_entry_point_deserializes() {
+        let mut graph = fresh_graph();
+        coerce_entry_point(&mut graph);
+        assert_eq!(graph["entryPoint"], serde_json::json!(""));
+        let wrapped = serde_json::json!({ "executionGraph": graph });
+        serde_json::from_value::<runtara_dsl::Workflow>(wrapped)
+            .expect("coerced graph deserializes into a DSL Workflow");
+    }
+
+    #[test]
+    fn coerce_leaves_real_entry_point_untouched() {
+        let mut graph = serde_json::json!({ "entryPoint": "step1", "steps": {} });
+        coerce_entry_point(&mut graph);
+        assert_eq!(graph["entryPoint"], serde_json::json!("step1"));
+    }
 }
 
 #[cfg(test)]

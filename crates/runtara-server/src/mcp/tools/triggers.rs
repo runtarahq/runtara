@@ -3,7 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_delete, api_get, api_post, api_put, validate_path_param};
+use super::internal_api::{
+    api_delete, api_get, api_post, api_put, normalize_json_arg, validate_path_param,
+};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -111,7 +113,10 @@ pub async fn create_trigger(
         body["active"] = serde_json::json!(active);
     }
     if let Some(config) = params.configuration {
-        body["configuration"] = config;
+        // Some MCP clients send `configuration` as a JSON-encoded string rather than
+        // a nested object; recover it so the backend sees the object it expects (else
+        // a CRON config's `expression` looks missing and the create 400s).
+        body["configuration"] = normalize_json_arg(config, "configuration")?;
     }
     if let Some(si) = params.single_instance {
         body["single_instance"] = serde_json::json!(si);
@@ -128,11 +133,17 @@ pub async fn update_trigger(
     params: UpdateTriggerParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("trigger_id", &params.trigger_id)?;
+    // Recover a stringified `configuration` object (see create_trigger); `null` passes
+    // through unchanged so an omitted configuration stays omitted.
+    let configuration = match params.configuration {
+        Some(config) => normalize_json_arg(config, "configuration")?,
+        None => serde_json::Value::Null,
+    };
     let body = serde_json::json!({
         "workflow_id": params.workflow_id,
         "trigger_type": params.trigger_type,
         "active": params.active,
-        "configuration": params.configuration,
+        "configuration": configuration,
         "single_instance": params.single_instance,
         "remote_tenant_id": params.remote_tenant_id,
     });
