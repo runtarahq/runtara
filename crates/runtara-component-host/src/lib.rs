@@ -23,15 +23,20 @@ pub mod dispatcher;
 pub mod engine;
 pub mod host_state;
 pub mod registry;
+pub mod workflow;
 
 pub use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
 pub use dispatcher::{
     ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
     TestError, TestResult,
 };
-pub use engine::{EngineConfig, build_engine, spawn_epoch_ticker};
+pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
+pub use workflow::{
+    WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec,
+    WorkflowState,
+};
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the
 /// component `.wasm`. Re-exported here so server code can call

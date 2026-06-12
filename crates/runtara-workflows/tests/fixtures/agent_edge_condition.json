@@ -1,0 +1,98 @@
+{
+  "name": "Agent Edge Condition",
+  "description": "GAP-13: conditioned normal-flow edges from an Agent source, routed on the agent's own output, with priority + default fallback and an onError handler on the same step",
+  "steps": {
+    "echo": {
+      "stepType": "Agent",
+      "id": "echo",
+      "name": "Echo Input",
+      "agentId": "utils",
+      "capabilityId": "return-input",
+      "maxRetries": 0,
+      "inputMapping": {
+        "value": {
+          "valueType": "composite",
+          "value": {
+            "status": { "valueType": "reference", "value": "data.status" },
+            "tier": { "valueType": "reference", "value": "data.tier", "default": "none" }
+          }
+        }
+      }
+    },
+    "finish_vip": {
+      "stepType": "Finish",
+      "id": "finish_vip",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "vip" },
+        "status": { "valueType": "reference", "value": "steps.echo.outputs.status" }
+      }
+    },
+    "finish_active": {
+      "stepType": "Finish",
+      "id": "finish_active",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "active" },
+        "status": { "valueType": "reference", "value": "steps.echo.outputs.status" }
+      }
+    },
+    "finish_default": {
+      "stepType": "Finish",
+      "id": "finish_default",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "default" },
+        "status": { "valueType": "reference", "value": "steps.echo.outputs.status" }
+      }
+    },
+    "handler_finish": {
+      "stepType": "Finish",
+      "id": "handler_finish",
+      "inputMapping": {
+        "path": { "valueType": "immediate", "value": "handled" }
+      }
+    }
+  },
+  "entryPoint": "echo",
+  "executionPlan": [
+    {
+      "fromStep": "echo",
+      "toStep": "finish_active",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.echo.outputs.status" },
+          { "valueType": "immediate", "value": "active" }
+        ]
+      },
+      "priority": 5
+    },
+    {
+      "fromStep": "echo",
+      "toStep": "finish_vip",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.echo.outputs.tier" },
+          { "valueType": "immediate", "value": "vip" }
+        ]
+      },
+      "priority": 10
+    },
+    {
+      "fromStep": "echo",
+      "toStep": "finish_default"
+    },
+    {
+      "fromStep": "echo",
+      "toStep": "handler_finish",
+      "label": "onError"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "status": { "type": "string", "required": true },
+    "tier": { "type": "string", "required": false }
+  },
+  "outputSchema": {}
+}

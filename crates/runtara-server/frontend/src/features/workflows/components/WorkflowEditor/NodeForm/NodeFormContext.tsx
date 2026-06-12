@@ -8,7 +8,7 @@ import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 /** Simple variable type matching the WorkflowEditor prop type */
 export interface SimpleVariable {
   name: string;
-  value: string;
+  value: unknown;
   type: string;
   description?: string | null;
 }
@@ -29,6 +29,10 @@ export interface NodeFormContextContextData {
   variables?: SimpleVariable[];
   /** Whether this step is inside a While loop (or the While condition itself) */
   isInsideWhileLoop?: boolean;
+  /** Whether this step is inside a Split iteration subgraph */
+  isInsideSplit?: boolean;
+  /** Whether this step is inside a WaitForSignal onWait subgraph */
+  isInsideWaitScope?: boolean;
 }
 
 export const NodeFormContext = createContext<NodeFormContextContextData>({

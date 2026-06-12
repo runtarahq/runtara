@@ -77,10 +77,12 @@ const IMMEDIATE_TYPE_OPTIONS: { value: ImmediateValueType; label: string }[] = [
   { value: 'boolean', label: 'Boolean' },
 ];
 
-// Argument with value type metadata (for reference vs immediate values)
+// Argument with value type metadata (for reference vs immediate values).
+// `value` is typed JSON, not just string: stored definitions round-trip
+// booleans, numbers, and arrays (IN/NOT_IN lists) verbatim.
 export interface ConditionArgument {
   valueType: 'immediate' | 'reference';
-  value: string;
+  value: any;
   immediateType?: ImmediateValueType; // Type hint for immediate values
 }
 
@@ -230,12 +232,19 @@ const isConditionArgument = (arg: any): arg is ConditionArgument => {
   );
 };
 
-// Helper to get the display value from an argument
+// Helper to get the display value from an argument. Stored definitions carry
+// typed JSON immediates (boolean, number, array) — render them as text.
 const getArgumentDisplayValue = (
   arg: Condition | string | ConditionArgument
 ): string => {
   if (typeof arg === 'string') return arg;
-  if (isConditionArgument(arg)) return arg.value;
+  if (isConditionArgument(arg)) {
+    const value = arg.value as unknown;
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.join(', ');
+    if (value === null || value === undefined) return '';
+    return String(value);
+  }
   return ''; // For Condition, handled separately
 };
 
@@ -248,9 +257,17 @@ const getArgumentImmediateType = (
   }
   // Try to infer type from value
   if (typeof arg === 'string' || isConditionArgument(arg)) {
-    const value = typeof arg === 'string' ? arg : arg.value;
+    const value = typeof arg === 'string' ? arg : (arg.value as unknown);
+    if (typeof value === 'boolean') return 'boolean';
+    if (typeof value === 'number') return 'number';
     if (value === 'true' || value === 'false') return 'boolean';
-    if (!isNaN(Number(value)) && value !== '') return 'number';
+    if (
+      typeof value === 'string' &&
+      value !== '' &&
+      !isNaN(Number(value))
+    ) {
+      return 'number';
+    }
   }
   return 'string';
 };
@@ -270,18 +287,54 @@ interface VariableSuggestion {
   label: string;
   value: string;
   description?: string;
-  group: 'Workflow Inputs' | 'Step Outputs' | 'Current Item' | 'Loop Context';
+  group:
+    | 'Workflow Inputs'
+    | 'Variables'
+    | 'Step Outputs'
+    | 'Current Item'
+    | 'Loop Context';
   type?: string;
   stepName?: string; // Step name for display
   stepId?: string; // Step ID for reference
 }
 
+/** Minimal structural shape for workflow input schema fields. */
+export interface ConditionSchemaFieldInfo {
+  name?: string;
+  type?: string;
+  description?: string | null;
+}
+
+/** Minimal structural shape for workflow variables (constants). */
+export interface ConditionVariableInfo {
+  name?: string;
+  type?: string;
+  description?: string | null;
+}
+
 // Helper functions for autocomplete
 function composeVariableSuggestions(
   previousSteps: any[],
-  isInsideWhileLoop?: boolean
+  isInsideWhileLoop?: boolean,
+  inputSchemaFields?: ConditionSchemaFieldInfo[],
+  variables?: ConditionVariableInfo[]
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
+
+  // Per-field workflow input suggestions (data.<field> references)
+  if (inputSchemaFields) {
+    for (const field of inputSchemaFields) {
+      if (field.name) {
+        suggestions.push({
+          label: `data.${field.name}`,
+          value: `workflow.inputs.data.${field.name}`,
+          description: field.description || 'Workflow input field',
+          group: 'Workflow Inputs',
+          type: field.type,
+        });
+      }
+    }
+  }
 
   // Add hardcoded workflow input suggestions
   suggestions.push({
@@ -297,6 +350,45 @@ function composeVariableSuggestions(
     description: 'Workflow input variables',
     group: 'Workflow Inputs',
   });
+
+  // Built-in runtime variables (always available)
+  suggestions.push({
+    label: '_workflow_id',
+    value: 'variables._workflow_id',
+    description:
+      'Workflow ID and instance ID (format: {workflow_id}::{instance_id})',
+    group: 'Variables',
+    type: 'string',
+  });
+  suggestions.push({
+    label: '_instance_id',
+    value: 'variables._instance_id',
+    description: 'Execution instance UUID',
+    group: 'Variables',
+    type: 'string',
+  });
+  suggestions.push({
+    label: '_tenant_id',
+    value: 'variables._tenant_id',
+    description: 'Tenant identifier',
+    group: 'Variables',
+    type: 'string',
+  });
+
+  // User-declared workflow variables (constants)
+  if (variables) {
+    for (const variable of variables) {
+      if (variable.name) {
+        suggestions.push({
+          label: variable.name,
+          value: `workflow.inputs.variables.${variable.name}`,
+          description: variable.description || 'Workflow variable',
+          group: 'Variables',
+          type: variable.type?.toLowerCase(),
+        });
+      }
+    }
+  }
 
   // Add current item references (used in Filter/Split step conditions)
   suggestions.push({
@@ -416,6 +508,7 @@ function groupSuggestions(
     'Loop Context': [],
     'Current Item': [],
     'Workflow Inputs': [],
+    Variables: [],
     'Step Outputs': [],
   };
   for (const suggestion of suggestions) {
@@ -431,18 +524,28 @@ const ConditionVariablePickerModal = ({
   onSelect,
   previousSteps,
   isInsideWhileLoop = false,
+  inputSchemaFields,
+  variables,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (variable: VariableSuggestion) => void;
   previousSteps: any[];
   isInsideWhileLoop?: boolean;
+  inputSchemaFields?: ConditionSchemaFieldInfo[];
+  variables?: ConditionVariableInfo[];
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
 
   const allSuggestions = useMemo(
-    () => composeVariableSuggestions(previousSteps, isInsideWhileLoop),
-    [previousSteps, isInsideWhileLoop]
+    () =>
+      composeVariableSuggestions(
+        previousSteps,
+        isInsideWhileLoop,
+        inputSchemaFields,
+        variables
+      ),
+    [previousSteps, isInsideWhileLoop, inputSchemaFields, variables]
   );
 
   const filteredSuggestions = useMemo(
@@ -493,10 +596,37 @@ const ConditionVariablePickerModal = ({
 
           {/* Variable list */}
           <div className="max-h-[400px] overflow-y-auto space-y-4">
+            {/* Free-text path entry: any legal reference path can be used
+                even when it is not in the suggestion list */}
+            {searchQuery.trim() !== '' &&
+              !allSuggestions.some(
+                (suggestion) => suggestion.value === searchQuery.trim()
+              ) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSelect({
+                      label: searchQuery.trim(),
+                      value: searchQuery.trim(),
+                      group: 'Workflow Inputs',
+                    })
+                  }
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded border border-dashed hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="font-mono text-sm truncate">
+                      {searchQuery.trim()}
+                    </p>
+                    <p className="text-xs truncate opacity-70">
+                      Use as custom reference path
+                    </p>
+                  </div>
+                </button>
+              )}
             {filteredSuggestions.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Inbox className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p>No variables found</p>
+                <p>No matching variables</p>
               </div>
             ) : (
               <>
@@ -556,6 +686,41 @@ const ConditionVariablePickerModal = ({
                               {suggestion.label}
                             </p>
                           </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Variables (built-ins + user-declared constants) */}
+                {groupedSuggestions['Variables'].length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Variables
+                    </h4>
+                    <div className="space-y-0.5">
+                      {groupedSuggestions['Variables'].map((suggestion) => (
+                        <button
+                          key={suggestion.value}
+                          type="button"
+                          onClick={() => handleSelect(suggestion)}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-sm truncate">
+                              {suggestion.label}
+                            </p>
+                            {suggestion.description && (
+                              <p className="text-xs truncate opacity-70">
+                                {suggestion.description}
+                              </p>
+                            )}
+                          </div>
+                          {suggestion.type && (
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              {suggestion.type}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
@@ -842,6 +1007,8 @@ interface ConditionEditorProps {
   disabled?: boolean;
   previousSteps?: any[]; // StepInfo[] - for autocomplete suggestions
   isInsideWhileLoop?: boolean; // Show loop.* references
+  inputSchemaFields?: ConditionSchemaFieldInfo[]; // data.<field> suggestions
+  variables?: ConditionVariableInfo[]; // variables.* suggestions
 }
 
 export const ConditionEditor = ({
@@ -850,6 +1017,8 @@ export const ConditionEditor = ({
   disabled = false,
   previousSteps = [],
   isInsideWhileLoop = false,
+  inputSchemaFields,
+  variables,
 }: ConditionEditorProps) => {
   // Parse condition value from string
   const parseConditionValue = (val?: string): Condition | undefined => {
@@ -916,6 +1085,8 @@ export const ConditionEditor = ({
         disabled={disabled}
         previousSteps={previousSteps}
         isInsideWhileLoop={isInsideWhileLoop}
+        inputSchemaFields={inputSchemaFields}
+        variables={variables}
       />
       {/* Expression preview */}
       {readableExpression && (
@@ -933,6 +1104,8 @@ const ConditionBuilder = ({
   disabled = false,
   previousSteps = [],
   isInsideWhileLoop = false,
+  inputSchemaFields,
+  variables,
   inlineControls,
 }: {
   value?: Condition;
@@ -940,6 +1113,8 @@ const ConditionBuilder = ({
   disabled?: boolean;
   previousSteps?: any[];
   isInsideWhileLoop?: boolean;
+  inputSchemaFields?: ConditionSchemaFieldInfo[];
+  variables?: ConditionVariableInfo[];
   inlineControls?: React.ReactNode;
 }) => {
   const initialOp = value?.op || 'EQ';
@@ -1239,6 +1414,8 @@ const ConditionBuilder = ({
                   disabled={disabled}
                   previousSteps={previousSteps}
                   isInsideWhileLoop={isInsideWhileLoop}
+                  inputSchemaFields={inputSchemaFields}
+                  variables={variables}
                   inlineControls={
                     <>
                       <ArgumentValueTypeSelector
@@ -1392,6 +1569,8 @@ const ConditionBuilder = ({
         }}
         previousSteps={previousSteps}
         isInsideWhileLoop={isInsideWhileLoop}
+        inputSchemaFields={inputSchemaFields}
+        variables={variables}
       />
     </div>
   );

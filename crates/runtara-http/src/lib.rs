@@ -192,6 +192,11 @@ impl RequestBuilder {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"))
             .map(|(_, v)| v.clone());
+        let ai_provider = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-ai-provider"))
+            .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
         let clean_headers: Vec<(String, String)> = self
@@ -219,6 +224,7 @@ impl RequestBuilder {
             "body": body_json,
             "body_raw": body_raw,
             "connection_id": connection_id,
+            "ai_provider": ai_provider,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
         });
 
@@ -259,8 +265,16 @@ impl RequestBuilder {
         let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)
             .map_err(|e| HttpError::Transport(format!("Failed to parse proxy response: {}", e)))?;
 
-        // Reconstruct HttpResponse
-        let status = resp_json["status"].as_u64().unwrap_or(502) as u16;
+        // Reconstruct HttpResponse. Proxy-level errors (e.g. a 400
+        // AI_PROVIDER_CONNECTION_MISMATCH or 404 connection-not-found) are
+        // plain JSON error objects, not the forwarding envelope — when the
+        // `status` key is absent, surface the proxy transport status and body
+        // verbatim instead of synthesizing an empty transient 502 (which sent
+        // agents into a retry storm and swallowed the actionable message).
+        let status = resp_json["status"]
+            .as_u64()
+            .map(|v| v as u16)
+            .unwrap_or(proxy_response.status);
         let resp_headers: HashMap<String, String> = resp_json["headers"]
             .as_object()
             .map(|m| {
@@ -281,6 +295,9 @@ impl RequestBuilder {
             } else {
                 serde_json::to_vec(body_val).unwrap_or_default()
             }
+        } else if resp_json.get("status").is_none() {
+            // Non-envelope response: keep the raw proxy error body
+            proxy_response.body.clone()
         } else {
             Vec::new()
         };

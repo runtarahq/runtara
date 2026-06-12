@@ -115,6 +115,14 @@ impl WakeScheduler {
 
     /// Process pending wakes.
     async fn process_pending_wakes(&self) -> crate::error::Result<()> {
+        // While draining, suspended instances are being stamped with
+        // `sleep_until = now` so they relaunch after restart. Relaunching
+        // them in this (shutting-down) process would defeat the drain.
+        if self.drain.is_draining() {
+            debug!("Draining; skipping wake processing");
+            return Ok(());
+        }
+
         let sleeping_instances = self
             .persistence
             .get_sleeping_instances_due(self.config.batch_size)
@@ -156,13 +164,18 @@ impl WakeScheduler {
             "Waking instance"
         );
 
-        // Get checkpoint_id from instance
-        let checkpoint_id = instance.checkpoint_id.clone().ok_or_else(|| {
-            crate::error::Error::Other(format!(
-                "Instance '{}' has no checkpoint to resume from",
-                instance.instance_id
-            ))
-        })?;
+        // Instances suspended mid-step during a graceful drain may have no
+        // checkpoint at all. The workflow model is replay-from-start with
+        // checkpoints as a result cache, so relaunching without one is
+        // valid — completed durable steps replay from cache, the rest
+        // re-execute.
+        let checkpoint_id = instance.checkpoint_id.clone();
+        if checkpoint_id.is_none() {
+            info!(
+                instance_id = %instance.instance_id,
+                "No checkpoint recorded; relaunching from the start"
+            );
+        }
 
         // Look up image_id and stored env from instance_images table
         let (image_id, stored_env) =
@@ -182,14 +195,9 @@ impl WakeScheduler {
             .await?
             .ok_or_else(|| crate::error::Error::ImageNotFound(image_id.clone()))?;
 
-        // Ensure bundle exists
-        let bundle_path = image
-            .bundle_path
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                crate::error::Error::ImageNotFound(format!("Image '{}' has no bundle", image_id))
-            })?;
+        // Every image is wasm now, so read the binary directly — `bundle_path`
+        // is a legacy field that in-process compile registration leaves unset.
+        let bundle_path = std::path::PathBuf::from(&image.binary_path);
 
         // Build launch options with restored env
         let options = LaunchOptions {
@@ -199,7 +207,7 @@ impl WakeScheduler {
             input: serde_json::json!({}), // Input was already consumed on first run
             timeout: Duration::from_secs(300),
             runtara_core_addr: self.config.core_addr.clone(),
-            checkpoint_id: Some(checkpoint_id.clone()),
+            checkpoint_id,
             env: stored_env, // Restore env from initial launch
         };
 

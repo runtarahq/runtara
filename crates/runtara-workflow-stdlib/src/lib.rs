@@ -570,6 +570,20 @@ mod component {
             })
         }
 
+        fn wait_timeout_error_envelope(
+            step_id: String,
+            signal_id: String,
+            timeout_ms: u64,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_timeout_error_envelope(&step_id, &signal_id, timeout_ms)
+            })
+        }
+
         fn wait_on_wait_variables(
             step_id: String,
             instance_id: String,
@@ -846,6 +860,37 @@ mod component {
             )
         }
 
+        fn ai_turn_cache_key(
+            step_id: String,
+            iteration: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_turn_cache_key(&step_id, iteration, &source)
+        }
+
+        fn ai_turn_snapshot(
+            state: Vec<u8>,
+            pending: Vec<u8>,
+            tool_calls: u32,
+            complete: bool,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot(
+                &state, &pending, tool_calls, complete,
+            )
+        }
+
+        fn ai_turn_snapshot_part(snapshot: Vec<u8>, part: u32) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_part(&snapshot, part)
+        }
+
+        fn ai_turn_snapshot_tool_calls(snapshot: Vec<u8>) -> Result<u32, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_tool_calls(&snapshot)
+        }
+
+        fn ai_turn_snapshot_complete(snapshot: Vec<u8>) -> Result<bool, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_complete(&snapshot)
+        }
+
         fn ai_turn_output(
             agent_id: u32,
             source: Vec<u8>,
@@ -857,6 +902,106 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.ai_turn_output(agent_id, &source, &turn_out)
+            })
+        }
+
+        fn ai_tool_debug_start(
+            agent_id: u32,
+            turn_out: Vec<u8>,
+            index: u32,
+            iteration: u32,
+            call_counter: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_tool_debug_start(
+                    agent_id,
+                    &turn_out,
+                    index,
+                    iteration,
+                    call_counter,
+                    &source,
+                )
+            })
+        }
+
+        fn ai_tool_debug_end(
+            agent_id: u32,
+            turn_out: Vec<u8>,
+            index: u32,
+            iteration: u32,
+            call_counter: u32,
+            tool_result: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_tool_debug_end(
+                    agent_id,
+                    &turn_out,
+                    index,
+                    iteration,
+                    call_counter,
+                    &tool_result,
+                    &source,
+                )
+            })
+        }
+
+        fn ai_memory_debug_start(
+            agent_id: u32,
+            phase: u32,
+            conversation: Vec<u8>,
+            state: Vec<u8>,
+            max_messages: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_memory_debug_start(
+                    agent_id,
+                    phase,
+                    &conversation,
+                    &state,
+                    max_messages,
+                    &source,
+                )
+            })
+        }
+
+        fn ai_memory_debug_end(
+            agent_id: u32,
+            phase: u32,
+            conversation: Vec<u8>,
+            state: Vec<u8>,
+            prior_state: Vec<u8>,
+            max_messages: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.ai_memory_debug_end(
+                    agent_id,
+                    phase,
+                    &conversation,
+                    &state,
+                    &prior_state,
+                    max_messages,
+                    &source,
+                )
             })
         }
 

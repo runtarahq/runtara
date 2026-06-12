@@ -11,7 +11,8 @@ type WhileStepFieldProps = {
 
 export function WhileStepField({ name }: WhileStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps } = useContext(NodeFormContext);
+  const { previousSteps, inputSchemaFields, variables } =
+    useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const whileCondition = useWatch({
     name: 'whileCondition',
@@ -90,6 +91,8 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
           onChange={handleConditionChange}
           previousSteps={previousSteps}
           isInsideWhileLoop={true}
+          inputSchemaFields={inputSchemaFields}
+          variables={variables}
         />
       </div>
 
@@ -97,11 +100,12 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
       <div className="space-y-2">
         <Label className="text-sm font-medium">Max Iterations</Label>
         <p className="text-xs text-muted-foreground">
-          Safety limit to prevent infinite loops. Set to 0 for unlimited.
+          Safety limit to prevent infinite loops. The loop exits once this many iterations have
+          run.
         </p>
         <Input
           type="number"
-          min={0}
+          min={1}
           value={whileMaxIterations ?? 10}
           onChange={(e) => {
             const val = parseInt(e.target.value, 10);
@@ -111,13 +115,20 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
           }}
           className="w-32"
         />
+        {whileMaxIterations === 0 && (
+          <p className="text-xs text-amber-600">
+            With 0 the loop body never runs — there is no &quot;unlimited&quot; mode. Use a high
+            value instead.
+          </p>
+        )}
       </div>
 
       {/* Timeout */}
       <div className="space-y-2">
-        <Label className="text-sm font-medium">Timeout (seconds)</Label>
+        <Label className="text-sm font-medium">Timeout (milliseconds)</Label>
         <p className="text-xs text-muted-foreground">
-          Overall timeout for the entire While step. Leave empty for no timeout.
+          Overall timeout for the entire While step, in milliseconds (e.g. 60000 = 1 minute).
+          Leave empty for no timeout.
         </p>
         <Input
           type="number"

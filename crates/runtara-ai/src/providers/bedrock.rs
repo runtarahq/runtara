@@ -71,6 +71,7 @@ impl CompletionModel for BedrockCompletionModel {
             .http
             .request("POST", &path)
             .header("X-Runtara-Connection-Id", &self.client.connection_id)
+            .header("X-Runtara-Ai-Provider", crate::provider::PROVIDER_BEDROCK)
             .header("Content-Type", "application/json")
             .body_json(&body)
             .call_agent()

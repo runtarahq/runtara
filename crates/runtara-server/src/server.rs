@@ -1241,7 +1241,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let compilation_runtime_client = runtime_client.clone();
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = component_dispatcher.as_ref().map(|d| d.catalog());
-        let compilation_connections_facade = Some(connections_facade.clone());
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
@@ -1251,7 +1250,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 compilation_pool,
                 compilation_runtime_client,
                 compilation_agent_catalog,
-                compilation_connections_facade,
                 worker_config,
                 compilation_shutdown,
             )

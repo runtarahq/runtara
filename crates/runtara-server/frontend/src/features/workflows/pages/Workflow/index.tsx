@@ -20,7 +20,10 @@ import { queryClient } from '@/main.tsx';
 import { slugify } from '@/shared/utils/string-utils';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  rewriteStepReferencesDeep,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { DebugStepInspector } from '@/features/workflows/components/DebugStepInspector';
 
 import { WorkflowExecuteDialog } from '@/features/workflows/components/WorkflowExecuteDialog';
@@ -39,7 +42,7 @@ import {
 } from '@/features/workflows/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
+import { ExecutionStatus, MemoryTier } from '@/generated/RuntaraRuntimeApi';
 
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { UnsavedChangesDialog } from '@/shared/components/unsaved-changes-dialog';
@@ -59,7 +62,20 @@ import {
 import {
   parseSchema,
   buildSchemaFromFields,
+  type SchemaField,
 } from '@/features/workflows/utils/schema';
+import { NODE_TYPES } from '@/features/workflows/config/workflow';
+
+type WorkflowVariable = {
+  name: string;
+  value: unknown;
+  type: string;
+  description?: string | null;
+};
+
+function hasOwn(object: object, key: string) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
 
 function normalizeNodeDataForStagingComparison(
   data?: Partial<form.SchemaType>
@@ -142,23 +158,15 @@ export function Workflow() {
   const [stagedWorkflowChanges, setStagedWorkflowChanges] = useState<{
     name?: string;
     description?: string;
-    variables?: Array<{ name: string; value: string; type: string }>;
-    inputSchemaFields?: Array<{
-      name: string;
-      type: string;
-      required: boolean;
-      description: string;
-      defaultValue?: any;
-    }>;
-    outputSchemaFields?: Array<{
-      name: string;
-      type: string;
-      required: boolean;
-      description: string;
-      defaultValue?: any;
-    }>;
+    variables?: WorkflowVariable[];
+    inputSchemaFields?: SchemaField[];
+    outputSchemaFields?: SchemaField[];
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
+    durable?: boolean | null;
+    entryPoint?: string;
+    memoryTier?: MemoryTier | null;
+    trackEvents?: boolean;
   }>({});
 
   // Sync staged node IDs to workflow store for visual highlighting
@@ -166,6 +174,31 @@ export function Workflow() {
     const stagedIds = new Set(Object.keys(stagedNodeChanges));
     useWorkflowStore.getState().setStagedNodeIds(stagedIds);
   }, [stagedNodeChanges]);
+
+  // When a step id is renamed in the store, follow the rename in staged node
+  // changes: re-key the renamed step's entry and rewrite step references
+  // (mapping values, conditions, templates) inside every staged value.
+  const lastStepRename = useWorkflowStore((state) => state.lastStepRename);
+  useEffect(() => {
+    if (!lastStepRename) return;
+    const { oldId, newId } = lastStepRename;
+    setStagedNodeChanges((prev) => {
+      const entries = Object.entries(prev);
+      if (entries.length === 0) return prev;
+      const next: Record<string, form.SchemaType> = {};
+      for (const [key, value] of entries) {
+        next[key === oldId ? newId : key] = rewriteStepReferencesDeep(
+          value,
+          oldId,
+          newId
+        ) as form.SchemaType;
+      }
+      return next;
+    });
+    // Intentionally keyed on the rename event only: each rename is applied
+    // exactly once, even if staged changes update for other reasons.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastStepRename]);
 
   // Reactively subscribe to isDirty state
   const isDirty = useWorkflowStore((state) => state.isDirty);
@@ -301,7 +334,8 @@ export function Workflow() {
         return undefined;
       }
       return {
-        status: compilationProgress.status as CompilationToolbarStatus['status'],
+        status:
+          compilationProgress.status as CompilationToolbarStatus['status'],
         stage: compilationProgress.stage ?? null,
         stageIndex: compilationProgress.stageIndex ?? null,
         totalStages: compilationProgress.totalStages ?? null,
@@ -342,19 +376,22 @@ export function Workflow() {
     }
 
     let cancelled = false;
-    const id = window.setTimeout(async () => {
-      try {
-        await queryClient.refetchQueries({
-          queryKey: queryKeys.workflows.versions(workflowId ?? ''),
-        });
-      } catch {
-        // refetch failure is non-fatal — the user can hit reload
-      }
-      if (!cancelled) {
-        setWatchedCompilationVersion(undefined);
-        setPendingRebuildVersion(undefined);
-      }
-    }, isSuccess ? 2500 : 8000);
+    const id = window.setTimeout(
+      async () => {
+        try {
+          await queryClient.refetchQueries({
+            queryKey: queryKeys.workflows.versions(workflowId ?? ''),
+          });
+        } catch {
+          // refetch failure is non-fatal — the user can hit reload
+        }
+        if (!cancelled) {
+          setWatchedCompilationVersion(undefined);
+          setPendingRebuildVersion(undefined);
+        }
+      },
+      isSuccess ? 2500 : 8000
+    );
 
     return () => {
       cancelled = true;
@@ -579,6 +616,18 @@ export function Workflow() {
               ...(savedStagedChanges.rateLimitBudgetMs !== undefined && {
                 rateLimitBudgetMs: savedStagedChanges.rateLimitBudgetMs,
               }),
+              ...(hasOwn(savedStagedChanges, 'durable') && {
+                durable: savedStagedChanges.durable,
+              }),
+              ...(savedStagedChanges.entryPoint !== undefined && {
+                entryPoint: savedStagedChanges.entryPoint,
+              }),
+              ...(hasOwn(savedStagedChanges, 'memoryTier') && {
+                memoryTier: savedStagedChanges.memoryTier,
+              }),
+              ...(savedStagedChanges.trackEvents !== undefined && {
+                trackEvents: savedStagedChanges.trackEvents,
+              }),
               // Keep the original currentVersionNumber (the active version)
             },
           };
@@ -674,18 +723,9 @@ export function Workflow() {
       refetchInterval: (query: any) => {
         const status = query.state.data?.status;
         const isActive =
-          status &&
-          [
-            'queued',
-            'compiling',
-            'running',
-          ].includes(status);
+          status && ['queued', 'compiling', 'running'].includes(status);
         // Also keep polling (slower) when suspended to detect resume completion
-        return isActive
-          ? 2000
-          : status === 'suspended'
-            ? 3000
-            : false;
+        return isActive ? 2000 : status === 'suspended' ? 3000 : false;
       },
     });
 
@@ -703,12 +743,7 @@ export function Workflow() {
         // Keep polling while instance is active or suspended
         const status = executionInstanceData?.status;
         const isActive =
-          status &&
-          [
-            'queued',
-            'compiling',
-            'running',
-          ].includes(status);
+          status && ['queued', 'compiling', 'running'].includes(status);
         // Poll more frequently (500ms) in debug mode to catch intermediate states
         return isActive || status === 'suspended' ? 500 : false;
       },
@@ -790,12 +825,7 @@ export function Workflow() {
   useEffect(() => {
     if (!executionInstanceData?.status || !executingInstanceId) return;
 
-    const terminalStates = [
-      'completed',
-      'failed',
-      'timeout',
-      'cancelled',
-    ];
+    const terminalStates = ['completed', 'failed', 'timeout', 'cancelled'];
 
     // If execution just finished and we haven't done final refetch for this instance yet
     if (
@@ -955,9 +985,7 @@ export function Workflow() {
 
           // Determine status from end event payload
           const hasError = !!event.payload.error;
-          const status = hasError
-            ? 'failed'
-            : 'completed';
+          const status = hasError ? 'failed' : 'completed';
 
           processedSteps.set(event.payload.step_id, {
             status,
@@ -1319,20 +1347,31 @@ export function Workflow() {
     // Values are already typed correctly (boolean, number, etc.) from VariablesEditor
     const variablesArray =
       stagedWorkflowChanges.variables ?? data.variables ?? [];
-    let variables: Record<string, { type: string; value: any }> | undefined;
+    let variables:
+      | Record<string, { type: string; value: unknown; description?: string }>
+      | undefined;
     if (variablesArray.length > 0) {
       variables = variablesArray.reduce(
         (
-          acc: Record<string, { type: string; value: any }>,
-          variable: { name: string; value: any; type: string }
+          acc: Record<
+            string,
+            { type: string; value: unknown; description?: string }
+          >,
+          variable: WorkflowVariable
         ) => {
           acc[variable.name] = {
             type: variable.type || 'string',
             value: variable.value,
+            ...(variable.description
+              ? { description: variable.description }
+              : {}),
           };
           return acc;
         },
-        {} as Record<string, { type: string; value: any }>
+        {} as Record<
+          string,
+          { type: string; value: unknown; description?: string }
+        >
       );
     }
 
@@ -1399,6 +1438,18 @@ export function Workflow() {
     // Get rate limit budget from staged changes or original data
     const rateLimitBudgetMs =
       stagedWorkflowChanges.rateLimitBudgetMs ?? data.rateLimitBudgetMs;
+    const durable = hasOwn(stagedWorkflowChanges, 'durable')
+      ? stagedWorkflowChanges.durable
+      : data.durable;
+    const entryPoint = hasOwn(stagedWorkflowChanges, 'entryPoint')
+      ? stagedWorkflowChanges.entryPoint
+      : data.entryPoint;
+    const memoryTier = hasOwn(stagedWorkflowChanges, 'memoryTier')
+      ? stagedWorkflowChanges.memoryTier
+      : data.memoryTier;
+    const trackEvents = hasOwn(stagedWorkflowChanges, 'trackEvents')
+      ? stagedWorkflowChanges.trackEvents
+      : data.trackEvents;
 
     // Get name and description for the execution graph
     // Name is required - prefer staged changes, fall back to current data, ensure non-empty
@@ -1417,6 +1468,8 @@ export function Workflow() {
         outputSchema,
         executionTimeoutSeconds,
         rateLimitBudgetMs,
+        durable,
+        entryPoint,
       }) ?? {};
 
     const rustValidation = await validateExecutionGraphWithRust(executionGraph);
@@ -1472,6 +1525,8 @@ export function Workflow() {
           {
             id: workflowId!,
             data: executionGraph,
+            memoryTier,
+            trackEvents,
           },
           {
             onSuccess: resolve,
@@ -1742,20 +1797,31 @@ export function Workflow() {
     // Build variables object for export
     const variablesArray =
       stagedWorkflowChanges.variables ?? data.variables ?? [];
-    let variables: Record<string, { type: string; value: string }> | undefined;
+    let variables:
+      | Record<string, { type: string; value: unknown; description?: string }>
+      | undefined;
     if (variablesArray.length > 0) {
       variables = variablesArray.reduce(
         (
-          acc: Record<string, { type: string; value: string }>,
-          variable: { name: string; value: string; type: string }
+          acc: Record<
+            string,
+            { type: string; value: unknown; description?: string }
+          >,
+          variable: WorkflowVariable
         ) => {
           acc[variable.name] = {
             type: variable.type || 'string',
             value: variable.value,
+            ...(variable.description
+              ? { description: variable.description }
+              : {}),
           };
           return acc;
         },
-        {} as Record<string, { type: string; value: string }>
+        {} as Record<
+          string,
+          { type: string; value: unknown; description?: string }
+        >
       );
     }
 
@@ -1777,19 +1843,50 @@ export function Workflow() {
     const exportExecutionTimeoutSeconds =
       stagedWorkflowChanges.executionTimeoutSeconds ??
       data.executionTimeoutSeconds;
+    const exportRateLimitBudgetMs =
+      stagedWorkflowChanges.rateLimitBudgetMs ?? data.rateLimitBudgetMs;
+    const exportDurable = hasOwn(stagedWorkflowChanges, 'durable')
+      ? stagedWorkflowChanges.durable
+      : data.durable;
+    const exportEntryPoint = hasOwn(stagedWorkflowChanges, 'entryPoint')
+      ? stagedWorkflowChanges.entryPoint
+      : data.entryPoint;
+    const exportName = stagedWorkflowChanges.name ?? data.name ?? '';
+    const exportDescription =
+      stagedWorkflowChanges.description ?? data.description ?? '';
+    const exportMemoryTier = hasOwn(stagedWorkflowChanges, 'memoryTier')
+      ? stagedWorkflowChanges.memoryTier
+      : data.memoryTier;
+    const exportTrackEvents = hasOwn(stagedWorkflowChanges, 'trackEvents')
+      ? stagedWorkflowChanges.trackEvents
+      : data.trackEvents;
 
     const executionGraph = composeExecutionGraph(nodes, edges, {
+      name: exportName,
+      description: exportDescription,
       variables,
       inputSchema,
       outputSchema,
       executionTimeoutSeconds: exportExecutionTimeoutSeconds,
+      rateLimitBudgetMs: exportRateLimitBudgetMs,
+      durable: exportDurable,
+      entryPoint: exportEntryPoint,
     });
 
     if (executionGraph) {
       // Wrap with name and description for the new format
       const exportData = {
-        name: data.name || '',
-        description: data.description || '',
+        name: exportName,
+        description: exportDescription,
+        ...(exportMemoryTier !== undefined
+          ? { memoryTier: exportMemoryTier }
+          : {}),
+        ...(exportTrackEvents !== undefined
+          ? { trackEvents: exportTrackEvents }
+          : {}),
+        ...(exportDurable !== undefined && exportDurable !== null
+          ? { durable: exportDurable }
+          : {}),
         executionGraph,
       };
 
@@ -1804,7 +1901,7 @@ export function Workflow() {
 
       // Use slugified workflow name and append version to the filename
       // Use selectedVersion (the version being viewed) instead of currentVersionNumber (the active version)
-      const slugifiedName = data.name ? slugify(data.name) : 'export';
+      const slugifiedName = exportName ? slugify(exportName) : 'export';
       const versionToExport = selectedVersion ?? data.currentVersionNumber;
       const versionSuffix = versionToExport ? `-v${versionToExport}` : '';
       a.download = `${slugifiedName}${versionSuffix}.json`;
@@ -1846,46 +1943,64 @@ export function Workflow() {
             name,
             value: val?.value ?? val ?? '',
             type: val?.type ?? 'string',
+            description: val?.description ?? null,
           })
         );
 
         // Extract and parse input/output schemas from execution graph
         // Convert SchemaField[] to the required format with all fields having defaults
-        const inputSchemaFields = parseSchema(executionGraph.inputSchema).map(
-          (field) => ({
-            name: field.name,
+        const normalizeSchemaFields = (fields: SchemaField[]) =>
+          fields.map((field) => ({
+            ...field,
             type: field.type ?? 'string',
             required: field.required ?? true,
             description: field.description ?? '',
-            defaultValue: field.defaultValue,
-          })
+          }));
+        const inputSchemaFields = normalizeSchemaFields(
+          parseSchema(executionGraph.inputSchema)
         );
-        const outputSchemaFields = parseSchema(executionGraph.outputSchema).map(
-          (field) => ({
-            name: field.name,
-            type: field.type ?? 'string',
-            required: field.required ?? true,
-            description: field.description ?? '',
-            defaultValue: field.defaultValue,
-          })
+        const outputSchemaFields = normalizeSchemaFields(
+          parseSchema(executionGraph.outputSchema)
         );
 
         // Extract execution timeout from execution graph
         const executionTimeoutSeconds = executionGraph.executionTimeoutSeconds;
+        const rateLimitBudgetMs = executionGraph.rateLimitBudgetMs;
 
         // Stage the workflow changes (variables, schemas, timeout)
         const workflowChanges: typeof stagedWorkflowChanges = {};
-        if (variables.length > 0) {
-          workflowChanges.variables = variables;
+        workflowChanges.variables = variables;
+        workflowChanges.inputSchemaFields = inputSchemaFields;
+        workflowChanges.outputSchemaFields = outputSchemaFields;
+        if (parsed.name !== undefined || executionGraph.name !== undefined) {
+          workflowChanges.name = parsed.name ?? executionGraph.name ?? '';
         }
-        if (inputSchemaFields.length > 0) {
-          workflowChanges.inputSchemaFields = inputSchemaFields;
-        }
-        if (outputSchemaFields.length > 0) {
-          workflowChanges.outputSchemaFields = outputSchemaFields;
+        if (
+          parsed.description !== undefined ||
+          executionGraph.description !== undefined
+        ) {
+          workflowChanges.description =
+            parsed.description ?? executionGraph.description ?? '';
         }
         if (executionTimeoutSeconds !== undefined) {
           workflowChanges.executionTimeoutSeconds = executionTimeoutSeconds;
+        }
+        if (rateLimitBudgetMs !== undefined) {
+          workflowChanges.rateLimitBudgetMs = rateLimitBudgetMs;
+        }
+        if (hasOwn(executionGraph, 'durable')) {
+          workflowChanges.durable = executionGraph.durable ?? null;
+        } else if (hasOwn(parsed, 'durable')) {
+          workflowChanges.durable = parsed.durable ?? null;
+        }
+        if (executionGraph.entryPoint !== undefined) {
+          workflowChanges.entryPoint = executionGraph.entryPoint;
+        }
+        if (parsed.memoryTier !== undefined) {
+          workflowChanges.memoryTier = parsed.memoryTier;
+        }
+        if (parsed.trackEvents !== undefined) {
+          workflowChanges.trackEvents = parsed.trackEvents;
         }
 
         setStagedWorkflowChanges(workflowChanges);
@@ -1938,6 +2053,26 @@ export function Workflow() {
   const hasBreakpoints = useWorkflowStore((state) =>
     state.nodes.some((n) => (n.data as any)?.breakpoint)
   );
+  const currentEditorNodes = useWorkflowStore((state) => state.nodes);
+  const entryPointOptions = useMemo(() => {
+    const nodesForOptions =
+      currentEditorNodes.length > 0 ? currentEditorNodes : data.nodes || [];
+    return nodesForOptions
+      .filter(
+        (node: any) =>
+          node.type !== NODE_TYPES.NoteNode &&
+          node.type !== NODE_TYPES.CreateNode &&
+          node.type !== NODE_TYPES.StartIndicatorNode &&
+          !node.parentId
+      )
+      .map((node: any) => ({
+        id: node.id,
+        name: String((node.data as any)?.name || node.id),
+      }))
+      .sort((a: { name: string }, b: { name: string }) =>
+        a.name.localeCompare(b.name)
+      );
+  }, [currentEditorNodes, data.nodes]);
 
   // Memoize workflow object to prevent unnecessary re-renders in WorkflowPropertiesDialog
   const workflowForSettings = useMemo(
@@ -1957,6 +2092,19 @@ export function Workflow() {
         data.executionTimeoutSeconds,
       rateLimitBudgetMs:
         stagedWorkflowChanges.rateLimitBudgetMs ?? data.rateLimitBudgetMs,
+      durable: hasOwn(stagedWorkflowChanges, 'durable')
+        ? stagedWorkflowChanges.durable
+        : data.durable,
+      entryPoint: hasOwn(stagedWorkflowChanges, 'entryPoint')
+        ? stagedWorkflowChanges.entryPoint
+        : data.entryPoint,
+      entryPointOptions,
+      memoryTier: hasOwn(stagedWorkflowChanges, 'memoryTier')
+        ? stagedWorkflowChanges.memoryTier
+        : data.memoryTier,
+      trackEvents: hasOwn(stagedWorkflowChanges, 'trackEvents')
+        ? stagedWorkflowChanges.trackEvents
+        : data.trackEvents,
     }),
     [
       workflowId,
@@ -1967,6 +2115,11 @@ export function Workflow() {
       stagedWorkflowChanges.outputSchemaFields,
       stagedWorkflowChanges.executionTimeoutSeconds,
       stagedWorkflowChanges.rateLimitBudgetMs,
+      stagedWorkflowChanges.durable,
+      stagedWorkflowChanges.entryPoint,
+      entryPointOptions,
+      stagedWorkflowChanges.memoryTier,
+      stagedWorkflowChanges.trackEvents,
       data.name,
       data.description,
       data.variables,
@@ -1974,6 +2127,10 @@ export function Workflow() {
       data.outputSchemaFields,
       data.executionTimeoutSeconds,
       data.rateLimitBudgetMs,
+      data.durable,
+      data.entryPoint,
+      data.memoryTier,
+      data.trackEvents,
     ]
   );
 
@@ -2004,12 +2161,9 @@ export function Workflow() {
               isExecuting={!!executingInstanceId}
               isExecutionActive={
                 executionInstanceData?.status &&
-                [
-                  'queued',
-                  'compiling',
-                  'running',
-                  'suspended',
-                ].includes(executionInstanceData.status)
+                ['queued', 'compiling', 'running', 'suspended'].includes(
+                  executionInstanceData.status
+                )
               }
               isDirty={hasStructuralUnsavedChanges}
               onStop={handleStop}

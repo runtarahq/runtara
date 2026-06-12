@@ -13,11 +13,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { NodeFormContext } from './NodeFormContext';
-import {
-  MappingValueInput,
-  ValueMode,
-} from './InputMappingField/MappingValueInput';
+import { ValueMode } from './InputMappingField/MappingValueInput';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
 
 type LogStepFieldProps = {
   name: string;
@@ -69,12 +68,6 @@ export function LogStepField({ name }: LogStepFieldProps) {
     return field?.value || '';
   };
 
-  const getValueType = (fieldName: string) => {
-    const mapping = inputMapping || [];
-    const field = mapping.find((item: any) => item.type === fieldName);
-    return field?.valueType || 'immediate';
-  };
-
   const updateField = (
     fieldName: string,
     value: any,
@@ -106,7 +99,7 @@ export function LogStepField({ name }: LogStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: 'string',
+            typeHint: fieldName === 'context' ? 'json' : 'string',
             valueType: valueType || 'immediate',
           },
         ],
@@ -131,16 +124,16 @@ export function LogStepField({ name }: LogStepFieldProps) {
       {/* Log Message */}
       <FormItem>
         <FormLabel>Message *</FormLabel>
-        <FormDescription>The log message to emit</FormDescription>
+        <FormDescription>
+          The log message is emitted verbatim — references and templates are
+          not resolved here. Put dynamic values in Context below.
+        </FormDescription>
         <FormControl>
-          <MappingValueInput
+          <Textarea
             value={getValue('message')}
-            onChange={(value) => updateField('message', value)}
-            valueType={getValueType('message') as ValueMode}
-            onValueTypeChange={(valueType) =>
-              updateField('message', getValue('message'), valueType)
+            onChange={(event) =>
+              updateField('message', event.target.value, 'immediate')
             }
-            fieldType="textarea"
             placeholder="Enter log message..."
           />
         </FormControl>
@@ -166,6 +159,18 @@ export function LogStepField({ name }: LogStepFieldProps) {
             <SelectItem value="error">Error</SelectItem>
           </SelectContent>
         </Select>
+      </FormItem>
+
+      <FormItem>
+        <FormLabel>Context</FormLabel>
+        <FormDescription>
+          Optional DSL input-mapping object attached to the log event.
+        </FormDescription>
+        <MappingObjectField
+          value={getValue('context')}
+          onChange={(next) => updateField('context', next, 'composite')}
+          jsonPlaceholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+        />
       </FormItem>
     </div>
   );

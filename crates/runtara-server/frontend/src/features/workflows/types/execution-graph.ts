@@ -13,7 +13,10 @@ export interface ExecutionGraphDto {
   executionPlan?: ExecutionGraphTransitionDto[];
   entryPoint?: string;
   /** Variables with their types and default values */
-  variables?: Record<string, { type: string; value: string }>;
+  variables?: Record<
+    string,
+    { type: string; value: unknown; description?: string | null }
+  >;
   /** JSON Schema for workflow input validation */
   inputSchema?: Record<string, unknown>;
   /** JSON Schema for workflow output validation */
@@ -22,6 +25,8 @@ export interface ExecutionGraphDto {
   executionTimeoutSeconds?: number;
   /** Rate limit wait budget in milliseconds (default: 60000, min: 1000, max: 86400000) */
   rateLimitBudgetMs?: number;
+  /** Graph-level durability flag. None/undefined means durable by default. */
+  durable?: boolean | null;
 }
 
 /** Mapping value structure for inputMapping and config fields */
@@ -29,6 +34,7 @@ export interface MappingValue {
   valueType: 'reference' | 'immediate' | 'composite' | 'template';
   value: unknown;
   type?: string;
+  default?: unknown;
 }
 
 /** Configuration for Split step */
@@ -43,6 +49,18 @@ export interface SplitStepConfig {
   dontStopOnFailed?: boolean;
   /** Additional variables to pass to each iteration's subgraph */
   variables?: Record<string, MappingValue>;
+  /** Maximum retry attempts for the split operation */
+  maxRetries?: number;
+  /** Base delay between retries in milliseconds */
+  retryDelay?: number;
+  /** Step timeout in milliseconds */
+  timeout?: number;
+  /** Treat null input as an empty array */
+  allowNull?: boolean;
+  /** Wrap a single non-array value in an array */
+  convertSingleValue?: boolean;
+  /** Group input items into batches before iteration */
+  batchSize?: number;
 }
 
 export interface ExecutionGraphStepDto {
@@ -67,7 +85,13 @@ export interface ExecutionGraphStepDto {
     | 'Event'
     | 'RepeatUntil'
     | 'Filter'
-    | 'While';
+    | 'While'
+    | 'Switch'
+    | 'Error'
+    | 'Log'
+    | 'Delay'
+    | 'WaitForSignal'
+    | 'AiAgent';
   inputMapping?: Record<string, string>;
   /** Configuration for Split steps (replaces inputMapping for Split) */
   config?: SplitStepConfig;
@@ -78,7 +102,11 @@ export interface ExecutionGraphStepDto {
   maxRetries?: number;
   /** @format int64 */
   retryDelay?: number;
+  /** @format int64 */
+  timeout?: number;
   retryStrategy?: 'Linear' | 'Exponential';
+  durable?: boolean | null;
+  compensation?: unknown;
   renderingParameters?: ExecutionGraphStepRenderingParametersDto;
   subgraph?: ExecutionGraphDto;
 }
@@ -98,4 +126,6 @@ export interface ExecutionGraphTransitionDto {
   fromStep?: string;
   toStep?: string;
   label?: string;
+  condition?: unknown;
+  priority?: number;
 }

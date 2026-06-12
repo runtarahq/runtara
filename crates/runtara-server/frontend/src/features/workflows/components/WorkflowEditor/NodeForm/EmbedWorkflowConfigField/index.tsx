@@ -18,7 +18,7 @@ import { queryKeys } from '@/shared/queries/query-keys';
 
 interface EmbedWorkflowConfigFieldProps {
   workflowIdValue: string;
-  versionValue: string;
+  versionValue: string | number;
   onWorkflowIdChange: (value: string) => void;
   onVersionChange: (value: string) => void;
   disabled?: boolean;
@@ -47,9 +47,11 @@ export function EmbedWorkflowConfigField({
     return workflowIdValue || '';
   }, [workflowIdValue]);
 
-  // Use version value directly (no JSON parsing needed)
+  // Use version value directly (no JSON parsing needed). Pinned versions
+  // round-trip from the DSL as integers — normalize to string for the Select.
   const currentVersion = useMemo(() => {
-    return versionValue || 'latest';
+    if (versionValue === '' || versionValue === undefined) return 'latest';
+    return String(versionValue);
   }, [versionValue]);
 
   const workflowOptions = useMemo(
@@ -154,13 +156,7 @@ export function EmbedWorkflowConfigField({
             </div>
           ) : (
             <Select
-              value={
-                currentVersion === 'latest'
-                  ? 'latest'
-                  : currentVersion === 'current'
-                    ? 'current'
-                    : currentVersion?.toString()
-              }
+              value={currentVersion}
               onValueChange={handleVersionChange}
               disabled={disabled}
             >
@@ -202,6 +198,25 @@ export function EmbedWorkflowConfigField({
                         )}
                       </SelectItem>
                     ))}
+
+                  {/* Keep an externally-authored pin visible even when it is
+                      not in the fetched version list, instead of rendering a
+                      blank select that loses the pin on the next change. */}
+                  {currentVersion !== 'latest' &&
+                    currentVersion !== 'current' &&
+                    !versions.some(
+                      (version: any) =>
+                        version.versionNumber?.toString() === currentVersion
+                    ) && (
+                      <SelectItem value={currentVersion}>
+                        <span className="font-medium">
+                          Version {currentVersion}
+                        </span>
+                        <span className="text-muted-foreground ml-2">
+                          (not in version list)
+                        </span>
+                      </SelectItem>
+                    )}
                 </SelectGroup>
               </SelectContent>
             </Select>

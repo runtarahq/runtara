@@ -35,7 +35,10 @@ import type {
   CompositeValue,
   CompositeArrayValue,
 } from '@/features/workflows/stores/nodeFormStore';
-import { CompositeValueItem } from './CompositeValueItem';
+import {
+  CompositeValueItem,
+  makeCompositeTemplateValue,
+} from './CompositeValueItem';
 import { VALUE_TYPE_OPTIONS } from '../ValueTypeSelector/constants';
 import type { ValidationError } from './compositeValidation';
 
@@ -82,11 +85,16 @@ export function CompositeArrayEditor({
 }: CompositeArrayEditorProps) {
   // Infer the default type for new items from the first element
   const inferredType = useMemo<
-    'reference' | 'immediate' | 'composite-object' | 'composite-array'
+    | 'reference'
+    | 'immediate'
+    | 'composite-object'
+    | 'composite-array'
+    | 'template'
   >(() => {
     if (value.length === 0) return 'immediate';
     const first = value[0];
     if (first.valueType === 'reference') return 'reference';
+    if ((first.valueType as string) === 'template') return 'template';
     if (first.valueType === 'composite') {
       return Array.isArray(first.value)
         ? 'composite-array'
@@ -118,6 +126,10 @@ export function CompositeArrayEditor({
             ? { valueType: 'immediate', value: '', typeHint }
             : { valueType: 'immediate', value: '' };
         }
+        case 'template':
+          // The dropdown advertises Template — emit a real nested template
+          // (DSL MappingValue::Template), not a silent immediate downgrade.
+          return makeCompositeTemplateValue('');
         case 'composite-object':
           return { valueType: 'composite', value: {} };
         case 'composite-array':

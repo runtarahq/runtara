@@ -100,6 +100,29 @@ interface CompositeValueItemProps {
 /** Maximum nesting depth for visual indentation */
 const MAX_VISUAL_DEPTH = 6;
 
+/**
+ * Template value nested inside a composite. The store's CompositeValue union
+ * predates nested templates, but the DSL (MappingValue::Template) nests
+ * templates in composites and both serialization paths already round-trip
+ * them (processCompositeValue / convertCompositeToUIFormat in
+ * CustomNodes/utils.tsx) — so the editors treat template as a first-class
+ * member locally.
+ */
+export type CompositeTemplateValue = { valueType: 'template'; value: string };
+
+type EditorCompositeValue = CompositeValue | CompositeTemplateValue;
+
+function isTemplateCompositeValue(
+  value: EditorCompositeValue
+): value is CompositeTemplateValue {
+  return value.valueType === 'template';
+}
+
+/** Build a nested template value typed as the store union for onChange. */
+export function makeCompositeTemplateValue(text: string): CompositeValue {
+  return { valueType: 'template', value: text } as unknown as CompositeValue;
+}
+
 /** Icon components for value types */
 const VALUE_TYPE_ICONS = {
   link: Link,
@@ -205,7 +228,7 @@ export function CompositeValueItem({
       } else if (newType === 'composite-array') {
         onChange({ valueType: 'composite', value: [] });
       } else if (newType === 'template') {
-        onChange({ valueType: 'immediate', value: '' });
+        onChange(makeCompositeTemplateValue(''));
       }
     },
     [onChange]
@@ -308,16 +331,18 @@ export function CompositeValueItem({
       ? isArray
         ? 'composite-array'
         : 'composite-object'
-      : value.valueType;
+      : (value as EditorCompositeValue).valueType;
     const IconComponent =
       VALUE_TYPE_ICONS[
         badgeType === 'reference'
           ? 'link'
           : badgeType === 'immediate'
             ? 'pin'
-            : isArray
-              ? 'list'
-              : 'braces'
+            : badgeType === 'template'
+              ? 'code'
+              : isArray
+                ? 'list'
+                : 'braces'
       ];
 
     return (
@@ -398,6 +423,24 @@ export function CompositeValueItem({
 
   // Render the value editor based on type
   const renderValueEditor = () => {
+    // Template mode — mirror of MappingValueInput's top-level template input:
+    // a monospace text field; the string renders via minijinja at runtime.
+    if (isTemplateCompositeValue(value as EditorCompositeValue)) {
+      return (
+        <Input
+          type="text"
+          value={String((value as EditorCompositeValue).value ?? '')}
+          onChange={(e) => onChange(makeCompositeTemplateValue(e.target.value))}
+          placeholder="e.g., Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
+          disabled={disabled}
+          className={cn(
+            'flex-1 h-8 font-mono text-sm',
+            hasError && 'border-destructive'
+          )}
+        />
+      );
+    }
+
     switch (value.valueType) {
       case 'immediate':
         return (
@@ -735,6 +778,8 @@ function CompositeArrayEditorInline({
       newItem = { valueType: 'immediate', value: '' };
     } else if (type === 'reference') {
       newItem = { valueType: 'reference', value: '' };
+    } else if (type === 'template') {
+      newItem = makeCompositeTemplateValue('');
     } else if (type === 'composite-object') {
       newItem = { valueType: 'composite', value: {} };
     } else {

@@ -3,9 +3,28 @@
 // contain JSX (renderFormField, renderComponent) which tightly couples them to components.
 // Separating would require complex refactoring with circular dependency resolution.
 import { z } from 'zod';
-import { useState, createContext, useContext, useCallback } from 'react';
+import {
+  useState,
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { InputMappingField } from './InputMappingField';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
+import { NodeFormContext } from './NodeFormContext';
+import {
+  COMPENSATION_TRIGGER_OPTIONS,
+  patchCompensation,
+  readCompensationParts,
+  serializeCompensationData,
+  type CompensationPatch,
+} from './compensation';
+import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
+import { NODE_TYPES } from '@/features/workflows/config/workflow';
 import { TestAgentInline } from './TestAgentButton/TestAgentInline';
 import { EmbedWorkflowConfigField } from './EmbedWorkflowConfigField';
 import { NameField } from './NameField';
@@ -24,6 +43,19 @@ import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
+import { DelayStepField } from './DelayStepField';
+import { Input } from '@/shared/components/ui/input';
+import { Label } from '@/shared/components/ui/label';
+import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
+import { Textarea } from '@/shared/components/ui/textarea';
+import { Button } from '@/shared/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/shared/components/ui/select';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -119,6 +151,404 @@ function FormTabs() {
           <TestAgentInline />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+const DURABLE_STEP_TYPES = new Set([
+  'Agent',
+  'Split',
+  'EmbedWorkflow',
+  'Delay',
+  'AiAgent',
+]);
+
+const RETRY_STEP_TYPES = new Set(['Agent', 'EmbedWorkflow']);
+
+function StepAdvancedFields() {
+  const { activeTab } = useTabContext();
+  const form = useFormContext();
+  const stepType = useWatch({ name: 'stepType', control: form.control });
+  const breakpoint = useWatch({ name: 'breakpoint', control: form.control });
+  const durable = useWatch({ name: 'durable', control: form.control });
+  const maxRetries = useWatch({ name: 'maxRetries', control: form.control });
+  const retryDelay = useWatch({ name: 'retryDelay', control: form.control });
+  const timeout = useWatch({ name: 'timeout', control: form.control });
+
+  if (activeTab !== 'main' || !stepType || stepType === 'Start') {
+    return null;
+  }
+
+  const showDurable = DURABLE_STEP_TYPES.has(stepType);
+  const showRetries = RETRY_STEP_TYPES.has(stepType);
+  const showCompensation = stepType === 'Agent';
+
+  return (
+    <div className="space-y-4 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-0.5">
+          <Label className="text-sm">Breakpoint</Label>
+          <p className="text-xs text-muted-foreground">
+            Pause before this step when debugging.
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={breakpoint === true}
+          onCheckedChange={(checked) =>
+            form.setValue('breakpoint', checked, { shouldDirty: true })
+          }
+        />
+      </div>
+
+      {showDurable && (
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Durable</Label>
+            <p className="text-xs text-muted-foreground">
+              Keep this step suspendable and resumable.
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={durable !== false}
+            onCheckedChange={(checked) =>
+              form.setValue('durable', checked, { shouldDirty: true })
+            }
+          />
+        </div>
+      )}
+
+      {showRetries && (
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1">
+              <Label className="text-sm">Retries</Label>
+              <Input
+                type="number"
+                min={0}
+                value={maxRetries ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'maxRetries',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Retry delay (ms)</Label>
+              <Input
+                type="number"
+                min={0}
+                value={retryDelay ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'retryDelay',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-sm">Timeout (ms)</Label>
+              <Input
+                type="number"
+                min={0}
+                value={timeout ?? ''}
+                onChange={(event) =>
+                  form.setValue(
+                    'timeout',
+                    event.target.value === ''
+                      ? undefined
+                      : Number(event.target.value),
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Timeout is accepted by the DSL for these steps; runtime validation
+            currently reports it as warning-only.
+          </p>
+        </>
+      )}
+
+      {showCompensation && <CompensationField />}
+    </div>
+  );
+}
+
+// Node types that never represent a referenceable workflow step.
+const NON_STEP_NODE_TYPES = new Set([
+  NODE_TYPES.CreateNode,
+  NODE_TYPES.NoteNode,
+  NODE_TYPES.StartIndicatorNode,
+]);
+
+const COMPENSATION_STEP_NONE = '__none__';
+const COMPENSATION_TRIGGER_DEFAULT = '__default__';
+
+/**
+ * Structured editor for Agent.compensation (CompensationConfig in
+ * runtara-dsl/src/schema_types.rs: compensationStep / compensationData /
+ * trigger / order). The form value stays in the raw DSL shape because the
+ * save path passes `compensation` through verbatim for Agent steps — all
+ * assembly/clearing logic lives in the pure helpers in ./compensation.ts.
+ * A collapsed "Edit as JSON" textarea (the legacy editor) remains bound to
+ * the same value for exotic shapes.
+ */
+function CompensationField() {
+  const form = useFormContext();
+  const { nodeId } = useContext(NodeFormContext);
+  const compensation = useWatch({
+    name: 'compensation',
+    control: form.control,
+  });
+  const nodes = useWorkflowStore((state) => state.nodes);
+
+  const [showJson, setShowJson] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState('');
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  // compensationData as last emitted by MappingObjectField (UI-format
+  // entries, or a raw string while its JSON textarea holds invalid JSON).
+  // Only valid serializations are committed to the form value; the draft
+  // keeps the editor responsive in between.
+  const [dataDraft, setDataDraft] = useState<unknown>(undefined);
+  const lastCommittedData = useRef('null');
+
+  useEffect(() => {
+    setJsonDraft(compensation ? JSON.stringify(compensation, null, 2) : '');
+    setJsonError(null);
+
+    const incoming = readCompensationParts(compensation).compensationData;
+    const incomingKey = JSON.stringify(incoming ?? null) ?? 'null';
+    if (incomingKey !== lastCommittedData.current) {
+      lastCommittedData.current = incomingKey;
+      setDataDraft(incoming);
+    }
+  }, [compensation]);
+
+  const parts = readCompensationParts(compensation);
+
+  const stepOptions = useMemo(
+    () =>
+      nodes
+        .filter(
+          (node) =>
+            node.id !== nodeId && !NON_STEP_NODE_TYPES.has(node.type ?? '')
+        )
+        .map((node) => ({
+          id: node.id,
+          name:
+            typeof node.data?.name === 'string' && node.data.name
+              ? node.data.name
+              : node.id,
+        })),
+    [nodes, nodeId]
+  );
+
+  const commit = (patch: CompensationPatch) => {
+    form.setValue(
+      'compensation',
+      patchCompensation(form.getValues('compensation'), patch),
+      { shouldDirty: true }
+    );
+  };
+
+  const handleDataChange = (value: unknown) => {
+    setDataDraft(value);
+    const result = serializeCompensationData(value);
+    if (!result.ok) return;
+    lastCommittedData.current = JSON.stringify(result.data ?? null) ?? 'null';
+    commit({ compensationData: result.data });
+  };
+
+  const stepKnown =
+    parts.compensationStep === '' ||
+    stepOptions.some((option) => option.id === parts.compensationStep);
+  const triggerKnown =
+    parts.trigger === '' ||
+    COMPENSATION_TRIGGER_OPTIONS.some(
+      (option) => option.value === parts.trigger
+    );
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-0.5">
+        <Label className="text-sm">Compensation</Label>
+        <p className="text-xs text-amber-600">
+          Accepted by the DSL; runtime validation reports compensation as
+          warning-only (W070) — it is not enforced at runtime.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">
+            Compensation step
+          </Label>
+          <Select
+            value={parts.compensationStep || COMPENSATION_STEP_NONE}
+            onValueChange={(value) =>
+              commit({
+                compensationStep:
+                  value === COMPENSATION_STEP_NONE ? undefined : value,
+              })
+            }
+          >
+            <SelectTrigger className="h-9">
+              <SelectValue placeholder="Select step..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={COMPENSATION_STEP_NONE}>None</SelectItem>
+              {!stepKnown && (
+                <SelectItem value={parts.compensationStep}>
+                  {parts.compensationStep} (not in graph)
+                </SelectItem>
+              )}
+              {stepOptions.map((option) => (
+                <SelectItem key={option.id} value={option.id}>
+                  {option.name}
+                  {option.name !== option.id && (
+                    <span
+                      className="ml-2 font-mono text-xs text-muted-foreground"
+                      title={option.id}
+                    >
+                      {option.id.length > 12
+                        ? `${option.id.slice(0, 12)}…`
+                        : option.id}
+                    </span>
+                  )}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Trigger</Label>
+          <Select
+            value={parts.trigger || COMPENSATION_TRIGGER_DEFAULT}
+            onValueChange={(value) =>
+              commit({
+                trigger:
+                  value === COMPENSATION_TRIGGER_DEFAULT ? undefined : value,
+              })
+            }
+          >
+            <SelectTrigger className="h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={COMPENSATION_TRIGGER_DEFAULT}>
+                Default (on downstream error)
+              </SelectItem>
+              {!triggerKnown && (
+                <SelectItem value={parts.trigger}>{parts.trigger}</SelectItem>
+              )}
+              {COMPENSATION_TRIGGER_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">Order</Label>
+        <Input
+          type="number"
+          step={1}
+          value={parts.order}
+          onChange={(event) => {
+            if (event.target.value === '') {
+              commit({ order: undefined });
+              return;
+            }
+            const parsed = Number(event.target.value);
+            if (Number.isNaN(parsed)) return;
+            commit({ order: Math.trunc(parsed) });
+          }}
+        />
+        <p className="text-xs text-muted-foreground">
+          Higher compensates first; defaults to reverse execution order.
+        </p>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs text-muted-foreground">
+          Compensation data
+        </Label>
+        <MappingObjectField
+          value={dataDraft}
+          onChange={handleDataChange}
+          jsonPlaceholder={`{"chargeId": {"valueType": "reference", "value": "steps['charge'].outputs.chargeId"}}`}
+        />
+      </div>
+
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setShowJson(!showJson)}
+        >
+          {showJson ? 'Hide JSON' : 'Edit as JSON'}
+        </Button>
+      </div>
+
+      {showJson && (
+        <>
+          <Textarea
+            value={jsonDraft}
+            onChange={(event) => {
+              const nextDraft = event.target.value;
+              setJsonDraft(nextDraft);
+
+              if (!nextDraft.trim()) {
+                form.setValue('compensation', undefined, {
+                  shouldDirty: true,
+                });
+                setJsonError(null);
+                return;
+              }
+
+              try {
+                const parsed = JSON.parse(nextDraft);
+                if (
+                  !parsed ||
+                  typeof parsed !== 'object' ||
+                  Array.isArray(parsed)
+                ) {
+                  setJsonError('Compensation must be a JSON object.');
+                  return;
+                }
+
+                form.setValue('compensation', parsed, { shouldDirty: true });
+                setJsonError(null);
+              } catch (error) {
+                setJsonError(
+                  error instanceof Error ? error.message : 'Invalid JSON.'
+                );
+              }
+            }}
+            className="min-h-[120px] font-mono text-xs"
+            spellCheck={false}
+            placeholder='{"compensationStep":"rollback"}'
+          />
+          {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
+        </>
+      )}
     </div>
   );
 }
@@ -328,6 +758,10 @@ function InputMappingWrapper(config: Record<string, unknown>) {
     return <WhileStepField {...config} name={config.name as string} />;
   }
 
+  if (stepType === 'Delay') {
+    return <DelayStepField {...config} name={config.name as string} />;
+  }
+
   return (
     <div className="-my-3">
       <InputMappingField {...config} />
@@ -372,6 +806,14 @@ export const fieldsConfig = [
     renderComponent: () => <FormTabs />,
   },
   ...mainTabFieldsConfig,
+  {
+    type: 'custom',
+    label: '',
+    name: 'stepAdvanced',
+    initialValue: undefined,
+    colSpan: 'full',
+    renderComponent: () => <StepAdvancedFields />,
+  },
 ];
 
 export const schema = () =>
@@ -382,8 +824,17 @@ export const schema = () =>
       agentId: z.string().optional(),
       capabilityId: z.string().optional(),
       connectionId: z.string().optional(),
+      breakpoint: z.boolean().nullable().optional(),
+      durable: z.boolean().nullable().optional(),
+      timeout: z.any().optional(),
+      compensation: z.any().optional(),
+      onWait: z.any().optional(),
+      action: z.any().optional(),
       childWorkflowId: z.string().optional(),
-      childVersion: z.string().optional(),
+      // Pinned versions round-trip from the DSL as integers
+      // (ChildVersion::Specific); coerce so a loaded pin doesn't fail
+      // validation on a hidden field and silently dead-end the Save button.
+      childVersion: z.coerce.string().optional(),
       embedWorkflowConfig: z.any().optional(), // UI-only field
       condition: z.any().optional(), // Condition for Conditional steps
       inputMapping: z.array(
@@ -404,15 +855,29 @@ export const schema = () =>
             valueType: z
               .enum(['immediate', 'reference', 'composite', 'template'])
               .optional(),
+            // ReferenceValue.default — fallback used at runtime when the
+            // referenced path is missing or null. Must pass through the
+            // resolver or a node-form save strips a JSON-authored default.
+            defaultValue: z.any().optional(),
+            // Editor-only marker for rows auto-seeded from a capability/child
+            // workflow schema that the user never filled in. Must pass through
+            // the resolver (zodResolver replaces form data with parsed output)
+            // so the save path can drop untouched empty seeds while keeping
+            // explicit immediate '' values.
+            autoSeeded: z.boolean().optional(),
           })
           .refine(
             (item) => {
               // Validate JSON fields contain valid JSON strings
+              // ('object'/'array' are form-level hints — e.g. Finish output
+              // types — that carry the same JSON parse semantics on save)
               // BUT skip validation for:
               // - Reference values (they resolve at runtime)
               // - Template variables (they resolve at runtime)
               if (
-                item.typeHint === 'json' &&
+                (item.typeHint === 'json' ||
+                  item.typeHint === 'object' ||
+                  item.typeHint === 'array') &&
                 typeof item.value === 'string' &&
                 item.value
               ) {
@@ -450,13 +915,15 @@ export const schema = () =>
       inputSchema: z.any().optional(),
       inputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-            required: z.boolean().optional(),
-            description: z.string().optional(),
-            defaultValue: z.any().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+              required: z.boolean().optional(),
+              description: z.string().optional(),
+              defaultValue: z.any().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       variablesFields: z
@@ -472,18 +939,22 @@ export const schema = () =>
       outputSchema: z.any().optional(),
       splitInputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       splitOutputSchemaFields: z
         .array(
-          z.object({
-            name: z.string().optional(),
-            type: z.string().optional(),
-          })
+          z
+            .object({
+              name: z.string().optional(),
+              type: z.string().optional(),
+            })
+            .passthrough()
         )
         .optional(),
       // Split step config fields
@@ -494,8 +965,11 @@ export const schema = () =>
               name: z.string().optional(),
               value: z.any().optional(),
               type: z.string().optional(),
+              // Must accept every mode MappingValueInput's toggle can cycle
+              // into — omitting 'template' made the enum fail invisibly (no
+              // rendered error for valueType) and Save silently no-op.
               valueType: z
-                .enum(['reference', 'immediate', 'composite'])
+                .enum(['reference', 'immediate', 'composite', 'template'])
                 .optional(),
             })
             .superRefine((item, ctx) => {
@@ -536,6 +1010,12 @@ export const schema = () =>
       splitParallelism: z.number().optional(),
       splitSequential: z.boolean().optional(),
       splitDontStopOnFailed: z.boolean().optional(),
+      splitMaxRetries: z.any().optional(),
+      splitRetryDelay: z.any().optional(),
+      splitTimeout: z.any().optional(),
+      splitAllowNull: z.boolean().optional(),
+      splitConvertSingleValue: z.boolean().optional(),
+      splitBatchSize: z.any().optional(),
       // Filter step condition (stored separately from inputMapping)
       filterCondition: z.any().optional(),
       // While step fields
@@ -545,6 +1025,37 @@ export const schema = () =>
       // GroupBy step fields
       groupByKey: z.string().optional(),
       groupByExpectedKeys: z.array(z.string()).optional(),
+    })
+    .superRefine((inputs, ctx) => {
+      // Switch requires a value to switch on: SwitchConfig.value is mandatory
+      // on the backend (deny_unknown_fields serde struct), so an empty value
+      // must block the form save instead of failing with a raw serde error.
+      if (inputs.stepType !== 'Switch') return;
+      const valueItem = (inputs.inputMapping || []).find(
+        (item) => item.type === 'value'
+      );
+      const rawValue = valueItem?.value;
+      const isEmptyComposite =
+        valueItem?.valueType === 'composite' &&
+        rawValue !== null &&
+        typeof rawValue === 'object' &&
+        (Array.isArray(rawValue)
+          ? rawValue.length === 0
+          : Object.keys(rawValue as object).length === 0);
+      const hasValue =
+        valueItem !== undefined &&
+        rawValue !== undefined &&
+        (rawValue !== null || valueItem.valueType === 'immediate') &&
+        !(typeof rawValue === 'string' && rawValue.trim() === '') &&
+        !isEmptyComposite;
+
+      if (!hasValue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['inputMapping'],
+          message: 'Value to Switch On is required',
+        });
+      }
     })
     .superRefine((inputs, ctx) => {
       if (inputs.stepType !== 'Split') return;
@@ -582,6 +1093,29 @@ export const schema = () =>
           });
         }
       });
+    })
+    .superRefine((inputs, ctx) => {
+      // Finish outputs serialize through Object.fromEntries, which silently
+      // collapses duplicate names last-wins before the server ever sees them.
+      // Block the save with a visible error on every duplicated row instead.
+      if (inputs.stepType !== 'Finish') return;
+      const nameCounts = new Map<string, number>();
+      (inputs.inputMapping || []).forEach((item) => {
+        const trimmedName = (item.type || '').trim();
+        if (!trimmedName) return;
+        nameCounts.set(trimmedName, (nameCounts.get(trimmedName) || 0) + 1);
+      });
+      (inputs.inputMapping || []).forEach((item, index) => {
+        const trimmedName = (item.type || '').trim();
+        if (!trimmedName) return;
+        if ((nameCounts.get(trimmedName) || 0) > 1) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['inputMapping', index, 'type'],
+            message: `Duplicate output name "${trimmedName}"`,
+          });
+        }
+      });
     });
 
 export type SchemaType = z.infer<ReturnType<typeof schema>>;
@@ -596,6 +1130,12 @@ export const initialValues: Partial<SchemaType> = {
   maxRetries: 1,
   retryDelay: 1000,
   retryStrategy: 'Linear',
+  breakpoint: undefined,
+  durable: undefined,
+  timeout: undefined,
+  compensation: undefined,
+  onWait: undefined,
+  action: undefined,
   inputSchema: undefined,
   inputSchemaFields: [],
   variablesFields: [],
@@ -610,6 +1150,12 @@ export const initialValues: Partial<SchemaType> = {
   splitParallelism: 0,
   splitSequential: false,
   splitDontStopOnFailed: false,
+  splitMaxRetries: undefined,
+  splitRetryDelay: undefined,
+  splitTimeout: undefined,
+  splitAllowNull: false,
+  splitConvertSingleValue: false,
+  splitBatchSize: undefined,
   // GroupBy step fields
   groupByKey: '',
   groupByExpectedKeys: [],

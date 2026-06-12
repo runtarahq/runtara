@@ -447,17 +447,6 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
-        DirectRunPlan::Fanout {
-            branches,
-            merge_plan,
-        } => {
-            for branch in branches {
-                collect_run_plan_ids(branch, condition_ids, mapping_ids);
-            }
-            if let Some(merge_plan) = merge_plan {
-                collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
-            }
-        }
         DirectRunPlan::GroupBy { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
@@ -632,14 +621,9 @@ fn direct_core_variables_include_compile_workflow_id() {
     let graph = durable_agent_no_retry_graph();
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
-    let core_config = DirectCoreConfig::new_with_workflow_id(
-        &manifest,
-        &manifest_json,
-        false,
-        "wf-cache-key",
-        &std::collections::HashMap::new(),
-    )
-    .expect("core config");
+    let core_config =
+        DirectCoreConfig::new_with_workflow_id(&manifest, &manifest_json, false, "wf-cache-key")
+            .expect("core config");
 
     let variables: serde_json::Value =
         serde_json::from_slice(&core_config.static_data.variables.data).expect("variables");
@@ -660,14 +644,9 @@ fn direct_core_variables_override_user_workflow_id_variable() {
     );
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
-    let core_config = DirectCoreConfig::new_with_workflow_id(
-        &manifest,
-        &manifest_json,
-        false,
-        "compiled-id",
-        &std::collections::HashMap::new(),
-    )
-    .expect("core config");
+    let core_config =
+        DirectCoreConfig::new_with_workflow_id(&manifest, &manifest_json, false, "compiled-id")
+            .expect("core config");
 
     let variables: serde_json::Value =
         serde_json::from_slice(&core_config.static_data.variables.data).expect("variables");
@@ -777,13 +756,12 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::AiAgent { breakpoint, .. }
+        | DirectRunPlan::AiAgentLoop { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::EdgeRoute { .. }
-        | DirectRunPlan::Fanout { .. }
-        | DirectRunPlan::AiAgentLoop { .. }
-        | DirectRunPlan::Join
-        | DirectRunPlan::ImplicitFinish => None,
+        DirectRunPlan::EdgeRoute { .. } | DirectRunPlan::Join | DirectRunPlan::ImplicitFinish => {
+            None
+        }
     }
 }
 
@@ -870,7 +848,6 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
 
@@ -968,7 +945,6 @@ fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("emit should succeed for a handler step that carries an onError edge");
 
@@ -984,8 +960,8 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
     // that fans out to two parallel normal successors (`b`, `c`) which re-converge
     // at `join`. The support gate accepted this, but the plan builder used to bail
     // with "unsupported parallel normal branches" because the fan-out is off the
-    // topological backbone. The Fanout plan node now linearizes it. Confirm the
-    // full emit pipeline produces a valid Wasm component.
+    // topological backbone. The branch's region order now linearizes it. Confirm
+    // the full emit pipeline produces a valid Wasm component.
     let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
         r##"{
           "entryPoint": "cond",
@@ -1022,9 +998,93 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("emit should succeed for fan-out inside a Conditional branch");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new()
+        .validate_all(&wasm)
+        .expect("emitted artifact should validate as a Wasm component");
+}
+
+#[test]
+fn direct_compile_long_chain_compiles_from_small_stack_caller() {
+    // compile_direct_workflow must not depend on the caller's stack budget:
+    // production invokes it from tokio `spawn_blocking` threads (2 MiB).
+    // Run-plan build, emit, and the run-plan drop all recurse with chain
+    // length; before the dedicated compile thread a chain this long overflowed
+    // the caller's 2 MiB stack in debug builds and aborted the process
+    // (release builds died between 400 and 800 chained steps). 600 steps is 6x
+    // the debug overflow threshold — affordable since plan construction
+    // memoizes region orders (`DirectRegionOrderCache`) instead of recomputing
+    // them per step, which was O(n^3) in chain length and made this length
+    // take ~16s in debug.
+    let chain_len = 600usize;
+    let mut steps = serde_json::Map::new();
+    let mut plan = Vec::new();
+    for i in 0..chain_len {
+        steps.insert(
+            format!("s{i}"),
+            serde_json::json!({
+                "id": format!("s{i}"),
+                "stepType": "Agent",
+                "agentId": "utils",
+                "capabilityId": "return-input",
+                "inputMapping": {"value": {"valueType": "immediate", "value": i}}
+            }),
+        );
+        if i + 1 < chain_len {
+            plan.push(serde_json::json!({
+                "fromStep": format!("s{i}"),
+                "toStep": format!("s{}", i + 1)
+            }));
+        }
+    }
+    steps.insert(
+        "finish".to_string(),
+        serde_json::json!({
+            "id": "finish",
+            "stepType": "Finish",
+            "inputMapping": {
+                "out": {
+                    "valueType": "reference",
+                    "value": format!("steps.s{}.outputs", chain_len - 1)
+                }
+            }
+        }),
+    );
+    plan.push(serde_json::json!({
+        "fromStep": format!("s{}", chain_len - 1),
+        "toStep": "finish"
+    }));
+    let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "entryPoint": "s0",
+        "steps": steps,
+        "executionPlan": plan
+    }))
+    .expect("graph parses");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output_dir = temp.path().to_path_buf();
+    let handle = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            compile_direct_workflow(DirectCompilationInput {
+                workflow_id: "repro/long-chain".to_string(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir,
+                track_events: true,
+                agent_catalog: None,
+            })
+        })
+        .expect("spawn 2 MiB caller thread");
+    let result = handle
+        .join()
+        .expect("compile must not exhaust the caller thread's stack")
+        .expect("long chain should compile");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
     Validator::new()
@@ -1044,7 +1104,6 @@ fn direct_compile_embeds_manifest_and_support_sections() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
 
@@ -1119,7 +1178,6 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
 
@@ -1171,7 +1229,6 @@ fn direct_compile_supports_conditional_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct conditional compile should succeed");
 
@@ -1201,7 +1258,6 @@ fn direct_compile_supports_nested_conditional_tree() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested conditional compile should succeed");
 
@@ -1237,7 +1293,6 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow compile should succeed");
 
@@ -1306,7 +1361,6 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow breakpoint compile should succeed");
 
@@ -1492,7 +1546,6 @@ fn direct_compile_supports_static_embed_workflow_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow retry override compile should succeed");
 
@@ -1551,7 +1604,6 @@ fn direct_compile_supports_nested_static_embed_workflow_retry_frame_isolation() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested EmbedWorkflow retry compile should succeed");
 
@@ -1617,7 +1669,6 @@ fn direct_compile_supports_static_embed_workflow_with_terminal_error_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow terminal Error child compile should succeed");
 
@@ -1665,7 +1716,6 @@ fn direct_compile_supports_static_embed_workflow_with_conditional_error_child() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow conditional Error child compile should succeed");
 
@@ -1717,7 +1767,6 @@ fn direct_compile_supports_static_embed_workflow_parent_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow parent onError compile should succeed");
 
@@ -1772,7 +1821,6 @@ fn direct_compile_supports_static_embed_workflow_child_local_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct EmbedWorkflow child-local onError compile should succeed");
 
@@ -1837,7 +1885,6 @@ fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested EmbedWorkflow compile should succeed");
 
@@ -1927,7 +1974,6 @@ fn direct_compile_supports_nested_static_embed_workflow_failure_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested EmbedWorkflow failure compile should succeed");
 
@@ -1959,7 +2005,6 @@ fn direct_compile_supports_group_by_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct GroupBy compile should succeed");
 
@@ -1991,7 +2036,6 @@ fn direct_compile_supports_sequential_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Split compile should succeed");
 
@@ -2034,7 +2078,6 @@ fn direct_compile_supports_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested Split compile should succeed");
 
@@ -2074,7 +2117,6 @@ fn direct_compile_supports_dont_stop_split_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct dontStop nested Split compile should succeed");
 
@@ -2120,7 +2162,6 @@ fn direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct dontStop deep nested Split/While compile should succeed");
 
@@ -2176,7 +2217,6 @@ fn direct_compile_supports_simple_while_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct While compile should succeed");
 
@@ -2206,7 +2246,6 @@ fn direct_compile_supports_split_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Split onError compile should succeed");
 
@@ -2252,7 +2291,6 @@ fn direct_compile_supports_ai_agent_single_shot_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct single-shot AiAgent compile should succeed");
 
@@ -2319,7 +2357,6 @@ fn direct_compile_supports_ai_agent_structured_output_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct structured-output AiAgent compile should succeed");
 
@@ -2369,7 +2406,6 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct tool-loop AiAgent compile should succeed");
 
@@ -2441,7 +2477,6 @@ fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct embed-tool AiAgent compile should succeed");
 
@@ -2503,7 +2538,6 @@ fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct wait-tool AiAgent compile should succeed");
 
@@ -2558,7 +2592,6 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct wait-tool-with-onWait AiAgent compile should succeed");
 
@@ -2590,7 +2623,6 @@ fn direct_compile_supports_wait_for_signal_with_nested_on_wait() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested-onWait wait compile should succeed");
 
@@ -2625,7 +2657,6 @@ fn direct_compile_supports_embed_workflow_child_with_agent_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct embed-with-agent-child compile should succeed");
 
@@ -2673,7 +2704,6 @@ fn direct_compile_supports_embed_workflow_child_with_split_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct embed-with-split-child compile should succeed");
 
@@ -2702,7 +2732,6 @@ fn direct_compile_supports_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct conditional-diamond compile should succeed");
 
@@ -2751,7 +2780,6 @@ fn direct_compile_supports_nested_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct nested conditional-diamond compile should succeed");
 
@@ -2780,7 +2808,6 @@ fn direct_compile_supports_edge_condition_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct edge-condition-diamond compile should succeed");
 
@@ -2810,7 +2837,6 @@ fn direct_compile_supports_ai_agent_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct AiAgent-with-onError compile should succeed");
 
@@ -2837,7 +2863,6 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct multi-tool AiAgent compile should succeed");
 
@@ -2881,7 +2906,6 @@ fn direct_compile_supports_ai_agent_memory_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct memory AiAgent compile should succeed");
 
@@ -2956,7 +2980,6 @@ fn direct_compile_supports_ai_agent_memory_compaction_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct memory-compaction AiAgent compile should succeed");
 
@@ -3006,7 +3029,6 @@ fn direct_compile_supports_ai_agent_memory_summarize_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct memory-summarize AiAgent compile should succeed");
 
@@ -3063,7 +3085,6 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct MCP AiAgent compile should succeed");
 
@@ -3174,7 +3195,6 @@ fn direct_compile_supports_ai_agent_tool_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct tool-error AiAgent compile should succeed");
 
@@ -3201,7 +3221,6 @@ fn direct_compile_supports_fanout_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct fan-out diamond compile should succeed");
 
@@ -3264,7 +3283,6 @@ fn direct_compile_supports_split_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Split timeout compile should succeed");
 
@@ -3298,7 +3316,6 @@ fn direct_compile_supports_while_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct While timeout compile should succeed");
 
@@ -3332,7 +3349,6 @@ fn direct_compile_supports_while_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct While onError compile should succeed");
 
@@ -3378,7 +3394,6 @@ fn direct_compile_supports_while_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct While with nested Split compile should succeed");
 
@@ -3420,7 +3435,6 @@ fn direct_compile_supports_split_schema_validation_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Split schema compile should succeed");
 
@@ -3458,7 +3472,6 @@ fn direct_compile_supports_split_dont_stop_on_failed_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Split dontStopOnFailed compile should succeed");
 
@@ -3487,7 +3500,6 @@ fn direct_compile_supports_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Delay compile should succeed");
 
@@ -3520,7 +3532,6 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct dynamic Delay compile should succeed");
 
@@ -3556,7 +3567,6 @@ fn direct_compile_supports_non_durable_delay() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("non-durable Delay should compile");
 
@@ -3586,7 +3596,6 @@ fn direct_compile_supports_filter_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Filter compile should succeed");
 
@@ -3616,7 +3625,6 @@ fn direct_compile_supports_value_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct value Switch compile should succeed");
 
@@ -3646,7 +3654,6 @@ fn direct_compile_supports_routing_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct routing Switch compile should succeed");
 
@@ -3676,7 +3683,6 @@ fn direct_compile_supports_log_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Log compile should succeed");
 
@@ -3706,7 +3712,6 @@ fn direct_compile_supports_error_entry_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Error compile should succeed");
 
@@ -3736,7 +3741,6 @@ fn direct_compile_supports_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct edge-condition compile should succeed");
 
@@ -3767,7 +3771,6 @@ fn direct_compile_supports_non_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Agent compile should succeed");
 
@@ -3801,7 +3804,6 @@ fn direct_compile_supports_non_durable_agent_default_retry() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("non-durable Agent default retry compile should succeed");
 
@@ -3833,7 +3835,6 @@ fn direct_compile_supports_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct durable Agent compile should succeed");
 
@@ -3867,7 +3868,6 @@ fn direct_compile_supports_durable_agent_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct durable Agent retry compile should succeed");
 
@@ -3900,7 +3900,6 @@ fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Agent connection compile should succeed");
 
@@ -3932,7 +3931,6 @@ fn direct_compile_supports_non_durable_agent_default_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Agent onError compile should succeed");
 
@@ -3968,7 +3966,6 @@ fn direct_compile_supports_non_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct Agent conditional onError compile should succeed");
 
@@ -4003,7 +4000,6 @@ fn direct_compile_supports_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct durable Agent conditional onError compile should succeed");
 
@@ -4041,7 +4037,6 @@ fn direct_compile_supports_next_label_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct next edge-condition compile should succeed");
 
@@ -9833,7 +9828,6 @@ fn direct_compile_writes_component_scaffold_sidecars() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
 
@@ -9871,7 +9865,6 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
 
@@ -9939,7 +9932,6 @@ fn direct_compile_composition_rejects_stale_component_metadata() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct compile should succeed");
     let component = &result.component_artifacts.shared_components[0];
@@ -9986,7 +9978,6 @@ fn direct_compile_composition_reports_missing_agent_component() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct agent compile should succeed");
     for component in &result.component_artifacts.shared_components {
@@ -10028,7 +10019,6 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         &components_dir,
     )
@@ -10095,7 +10085,6 @@ fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect_err("parallel fan-out is not supported in direct mode");
 
@@ -10154,7 +10143,6 @@ fn direct_compile_supports_single_agent_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("single-agent-no-finish should compile direct (implicit finish)");
 
@@ -10218,7 +10206,6 @@ fn direct_compile_supports_agent_chain_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("agent-chain-no-finish should compile direct (implicit finish)");
 

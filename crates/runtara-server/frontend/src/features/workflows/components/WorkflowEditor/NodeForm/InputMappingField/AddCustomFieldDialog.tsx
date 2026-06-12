@@ -40,6 +40,26 @@ interface AddCustomFieldDialogProps {
   existingFieldNames: Set<string>;
 }
 
+/**
+ * Validate a custom mapping key. Returns an error message or null when valid.
+ *
+ * Dot-separated keys are legal: the DSL validates them by root segment
+ * (validation.rs) and the runtime builds nested objects from them
+ * (direct_json.rs insert_nested), so each dot-separated segment must be a
+ * valid identifier.
+ */
+export function validateCustomFieldName(name: string): string | null {
+  if (!name) {
+    return 'Field name is required';
+  }
+  const segments = name.split('.');
+  const segmentPattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+  if (!segments.every((segment) => segmentPattern.test(segment))) {
+    return 'Each dot-separated segment must start with a letter or underscore and contain only letters, numbers, and underscores';
+  }
+  return null;
+}
+
 export function AddCustomFieldDialog({
   open,
   onOpenChange,
@@ -60,17 +80,10 @@ export function AddCustomFieldDialog({
   const handleAdd = () => {
     const trimmedName = fieldName.trim();
 
-    // Validate
-    if (!trimmedName) {
-      setError('Field name is required');
-      return;
-    }
-
-    // Check for valid identifier (alphanumeric, underscores, starting with letter or underscore)
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(trimmedName)) {
-      setError(
-        'Field name must start with a letter or underscore and contain only letters, numbers, and underscores'
-      );
+    // Validate (dot-separated segments build nested objects in the DSL)
+    const validationError = validateCustomFieldName(trimmedName);
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
@@ -114,6 +127,10 @@ export function AddCustomFieldDialog({
               placeholder="my_parameter"
               autoFocus
             />
+            <p className="text-xs text-muted-foreground">
+              Use dots to build nested objects, e.g.{' '}
+              <code className="bg-muted px-1 rounded">payload.user.name</code>.
+            </p>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
 

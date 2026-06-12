@@ -44,19 +44,11 @@ impl CompilationWorkerConfig {
 }
 
 /// Background worker that consumes compilation requests from the queue
-#[instrument(skip(
-    pool,
-    runtime_client,
-    agent_catalog,
-    connections_facade,
-    config,
-    shutdown
-))]
+#[instrument(skip(pool, runtime_client, agent_catalog, config, shutdown))]
 pub async fn run(
     pool: PgPool,
     runtime_client: Option<Arc<RuntimeClient>>,
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    connections_facade: Option<Arc<runtara_connections::ConnectionsFacade>>,
     config: CompilationWorkerConfig,
     shutdown: ShutdownSignal,
 ) {
@@ -115,9 +107,6 @@ pub async fn run(
     .with_direct_compilation(direct_compilation_settings_from_config());
     if let Some(catalog) = agent_catalog {
         compilation_service = compilation_service.with_agent_catalog(catalog);
-    }
-    if let Some(facade) = connections_facade {
-        compilation_service = compilation_service.with_connections_facade(facade);
     }
 
     // Reuse the shared (non-blocking) manager for progress writes — they're

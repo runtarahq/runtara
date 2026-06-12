@@ -207,7 +207,7 @@ pub trait Runner: Send + Sync {
     /// Wait for the instance to exit, polling with the given interval.
     ///
     /// The default implementation polls [`Runner::is_running`] at `poll_interval`.
-    /// Runners that own a `Child` on the handle (e.g. WasmRunner) should override
+    /// Runners that own a `Child` on the handle should override
     /// this to use `child.wait()` so process exit is observed without a poll
     /// budget and so all stdio is flushed before the monitor proceeds.
     ///

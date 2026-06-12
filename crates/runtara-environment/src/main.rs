@@ -17,7 +17,6 @@ use tracing::{info, warn};
 use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::config::Config;
 use runtara_environment::runner::Runner;
-use runtara_environment::runner::wasm::WasmRunner;
 use runtara_environment::runtime::EnvironmentRuntime;
 
 #[tokio::main]
@@ -116,22 +115,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_runner(persistence: Arc<dyn runtara_core::persistence::Persistence>) -> Arc<dyn Runner> {
-    if let Ok(other) = std::env::var("RUNTARA_RUNNER")
-        && !matches!(
-            other.to_ascii_lowercase().as_str(),
-            "wasm" | "wasmtime" | ""
-        )
-    {
-        warn!(
-            requested = %other,
-            "RUNTARA_RUNNER is set to a non-wasm value but only the wasm runner exists \
-             after Phase 3 step 11. Using WasmRunner regardless."
-        );
-    }
-    Arc::new(WasmRunner::new(
-        runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
-        persistence,
-    ))
+    runtara_environment::runner::runner_from_env(persistence)
+        .expect("failed to build workflow runner (RUNTARA_RUNNER)")
 }
 
 /// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back

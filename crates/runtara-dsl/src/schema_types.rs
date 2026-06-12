@@ -129,6 +129,13 @@ pub struct ExecutionGraph {
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
     pub rate_limit_budget_ms: u64,
 
+    /// Maximum wall-clock time (in seconds) an execution of this workflow may
+    /// run before the server stops it. Written by the workflow editor
+    /// (validated 1-3600 in the UI) and enforced server-side when scheduling
+    /// the execution — the compiler does not interpret this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_timeout_seconds: Option<u32>,
+
     /// Disable durability for this workflow when `Some(false)`. Mirrors
     /// `Workflow.durable`; `parse_workflow` copies the top-level flag here when
     /// this field is `None`. Codegen reads `ctx.durable` from this value at
@@ -160,6 +167,7 @@ impl Default for ExecutionGraph {
             nodes: None,
             edges: None,
             rate_limit_budget_ms: default_rate_limit_budget_ms(),
+            execution_timeout_seconds: None,
             durable: None,
         }
     }
@@ -264,6 +272,25 @@ pub struct Note {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
+
+    /// Sizing metadata (width/height) written by the workflow editor UI.
+    /// Not used in compilation or execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<NoteMetadata>,
+}
+
+/// Sizing metadata for a note, managed by the workflow editor UI
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NoteMetadata {
+    /// Note width in pixels
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+
+    /// Note height in pixels
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
 }
 
 /// Position coordinates for UI elements
@@ -378,8 +405,11 @@ pub struct FinishStep {
 
 /// Compensation configuration for saga pattern support.
 ///
-/// Defines what compensation step to execute if a downstream step fails,
-/// enabling distributed transaction rollback.
+/// **Not enforced.** This configuration is parsed and stored but the compiler
+/// never emits it, the SDK never receives it, and the host never triggers it —
+/// no compensation step will run on failure (validation flags it with W070).
+/// Model rollback explicitly with `onError` routing instead, which is
+/// enforced end-to-end.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -436,12 +466,19 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds.
+    ///
+    /// **Not enforced** — a running capability invoke cannot be preempted in
+    /// the synchronous component model, so this value is accepted and ignored
+    /// (validation warns with W071). Split, While, and WaitForSignal timeouts
+    /// are enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// Compensation configuration for saga pattern support.
-    /// Defines what step to execute to rollback this step's effects on failure.
+    ///
+    /// **Not enforced** — accepted and ignored end-to-end; no rollback runs
+    /// (validation warns with W070). Use `onError` routing for rollback logic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation: Option<CompensationConfig>,
 
@@ -595,7 +632,11 @@ pub struct EmbedWorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds.
+    ///
+    /// **Not enforced** — no deadline exists for a running child workflow, so
+    /// this value is accepted and ignored (validation warns with W071).
+    /// Split, While, and WaitForSignal timeouts are enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -734,14 +775,21 @@ pub enum LogLevel {
 /// with structured metadata. This is the primary mechanism for business
 /// logic errors that should be distinguishable from technical errors.
 ///
+/// `message` is a verbatim string — no interpolation is performed. Put
+/// dynamic values in `context`, which is a regular input mapping:
+///
 /// Example:
 /// ```json
 /// {
 ///   "stepType": "Error",
 ///   "id": "credit_limit_error",
-///   "category": "business",
+///   "category": "permanent",
 ///   "code": "CREDIT_LIMIT_EXCEEDED",
-///   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
+///   "message": "Order total exceeds credit limit",
+///   "context": {
+///     "total": { "valueType": "reference", "value": "data.total" },
+///     "limit": { "valueType": "reference", "value": "data.limit" }
+///   }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1064,6 +1112,10 @@ pub struct WaitForSignalStep {
     /// This runs before suspending and is typically used to notify
     /// external systems of the signal_id they should use.
     /// The subgraph has access to `variables._signal_id` and `variables._instance_id`.
+    ///
+    /// **Ignored when this step is used as an AiAgent tool** (reached via a
+    /// tool-labelled edge): the tool lowering emits the durable wait but never
+    /// runs `onWait` (validation warns with W072).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub on_wait: Option<Box<ExecutionGraph>>,
@@ -1188,9 +1240,12 @@ pub struct AiAgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
 
-    /// Disable durability for this step when `Some(false)`. Skips checkpoint
-    /// on each tool call and LLM call inside this agent's loop. Ignored when
-    /// the enclosing workflow is already non-durable.
+    /// Disable durability for this step when `Some(false)`. Skips the
+    /// per-turn checkpoints inside the tool loop (each completed turn — LLM
+    /// response plus dispatched tool results — is snapshotted under
+    /// `{step}.turn.{n}` so a crash never re-runs finished turns) and the
+    /// invoke checkpoint on the single-shot path. Ignored when the enclosing
+    /// workflow is already non-durable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -1248,6 +1303,19 @@ pub struct AiAgentConfig {
     /// Maximum tokens per LLM call
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+
+    /// Maximum retry attempts for the LLM call (default: 0 — no retries).
+    ///
+    /// Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
+    /// because every retry re-bills the model call. Applies to the
+    /// single-shot (chat-completion) path; per-turn retry inside the tool
+    /// loop is deliberately deferred until per-turn durability lands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (default: 1000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
 
     /// Conversation memory configuration.
     /// Requires a "memory" labeled edge pointing to a memory provider Agent step.
@@ -1631,9 +1699,10 @@ pub struct Variable {
 /// ## Form rendering extensions
 ///
 /// The optional fields `label`, `placeholder`, `order`, `format`, `min`, `max`,
-/// `pattern`, `properties`, and `visible_when` enable clients to render rich
-/// forms from WaitForSignal response schemas. All are backward-compatible —
-/// existing schemas without these fields continue to work unchanged.
+/// `pattern`, `properties`, `visible_when`, and `nullable` enable clients to
+/// render rich forms from WaitForSignal response schemas. All are
+/// backward-compatible — existing schemas without these fields continue to
+/// work unchanged.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1715,6 +1784,13 @@ pub struct SchemaField {
     /// matches a specific value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<VisibleWhen>,
+
+    /// Whether the field value may be `null`.
+    ///
+    /// Form-layer hint written by the workflow editor (rendered as a
+    /// checkbox); the runtime does not enforce nullability today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
 }
 
 /// Conditional visibility rule for a schema field.
@@ -1983,11 +2059,17 @@ pub struct SplitConfig {
     /// The array to iterate over
     pub value: MappingValue,
 
-    /// Maximum concurrent iterations (0 = unlimited)
+    /// Maximum concurrent iterations (0 = unlimited).
+    ///
+    /// **Ignored** — Split iterations execute strictly sequentially in the
+    /// WASM runtime; any value other than 1 triggers validation warning W073.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 
-    /// Execute iterations sequentially instead of in parallel
+    /// Execute iterations sequentially instead of in parallel.
+    ///
+    /// **Redundant** — sequential execution is the only mode the WASM runtime
+    /// supports, so this flag changes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential: Option<bool>,
 

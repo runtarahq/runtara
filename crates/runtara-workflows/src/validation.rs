@@ -47,6 +47,7 @@
 //! | E021 | UnknownCapability | Capability doesn't exist |
 //! | E022 | MissingRequiredInput | Required agent input missing |
 //! | E026 | AgentMissingConnection | Agent capability requires connectionId |
+//! | E027 | QueryOnlyConditionOperator | Operator only valid in object-model query conditions |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -306,6 +307,17 @@ pub enum ValidationError {
         field_name: String,
         path: String,
         message: String,
+    },
+    /// A workflow condition (Conditional/While/Filter step or executionPlan
+    /// edge) uses an operator that only exists for object-model query
+    /// conditions. The workflow runtime has no evaluator for these operators,
+    /// so the condition can never hold.
+    QueryOnlyConditionOperator {
+        step_id: String,
+        /// Where the condition lives: `"condition"` for step conditions, or a
+        /// human-readable edge description for executionPlan edges.
+        location: String,
+        operator: String,
     },
 
     // === Naming Errors ===
@@ -809,6 +821,18 @@ impl std::fmt::Display for ValidationError {
                     step_id, field_name, path, message
                 )
             }
+            ValidationError::QueryOnlyConditionOperator {
+                step_id,
+                location,
+                operator,
+            } => {
+                write!(
+                    f,
+                    "[E027] Step '{}': operator '{}' in {} is only valid inside object-model \
+                     query conditions; the workflow runtime cannot evaluate it",
+                    step_id, operator, location
+                )
+            }
 
             // Naming Errors
             ValidationError::DuplicateStepName { name, step_ids } => {
@@ -1014,11 +1038,10 @@ pub enum ValidationWarning {
         recommended_max_ms: u64,
     },
     /// High parallelism may cause resource issues.
-    HighParallelism {
-        step_id: String,
-        parallelism: u32,
-        recommended_max: u32,
-    },
+    /// A Split step sets `parallelism` to a value that promises concurrency.
+    /// Split iterations execute strictly sequentially in the WASM runtime —
+    /// the field is accepted and ignored.
+    SplitParallelismIgnored { step_id: String, parallelism: u32 },
     /// High max iterations may indicate infinite loop risk.
     HighMaxIterations {
         step_id: String,
@@ -1047,13 +1070,24 @@ pub enum ValidationWarning {
         to_step: String,
         labels: Vec<String>,
     },
-    /// A step with side effects has no compensation defined in its transaction.
-    MissingCompensation {
+    /// A step configures `compensation`, but compensation is accepted and
+    /// ignored end-to-end: it is never emitted by the compiler, never wired to
+    /// the SDK, and never triggered by the host. No rollback will run.
+    CompensationNotEnforced { step_id: String },
+    /// An Agent or EmbedWorkflow step configures `timeout`, but no deadline
+    /// exists anywhere for these step types: a running capability invoke
+    /// cannot be preempted in the synchronous component model, so the value
+    /// is accepted and ignored. (Split, While, and WaitForSignal timeouts
+    /// ARE enforced.)
+    TimeoutNotEnforced { step_id: String, step_type: String },
+    /// An AiAgent tool edge targets a WaitForSignal step that has an `onWait`
+    /// subgraph. The tool lowering emits the durable wait and feeds the signal
+    /// payload back to the model, but never runs `onWait` (parity with the
+    /// generated path) — the subgraph is dead code in this position.
+    OnWaitIgnoredForAiAgentTool {
         step_id: String,
-        agent_id: String,
-        capability_id: String,
-        /// If the agent provides a compensation hint, this suggests what to use.
-        suggested_compensation: Option<CompensationSuggestion>,
+        tool_label: String,
+        wait_step_id: String,
     },
     /// A reference is valid through a known prefix, but the remaining suffix is
     /// inside an open/dynamic object where static validation cannot prove fields.
@@ -1080,26 +1114,6 @@ pub enum ValidationWarning {
         reference_path: String,
         suggested_path: String,
     },
-}
-
-// ============================================================================
-// Compensation Suggestions
-// ============================================================================
-
-/// Suggestion for how to compensate a step with side effects.
-///
-/// These suggestions come from agent capability metadata and are never
-/// auto-applied - they're only provided to help workflow authors.
-///
-/// Note: The actual compensation data mapping is defined by the workflow author
-/// in the workflow definition, not here. This hint only suggests which capability
-/// can reverse the effects - the author decides how to wire up the inputs.
-#[derive(Debug, Clone)]
-pub struct CompensationSuggestion {
-    /// The capability ID that can undo the effects (e.g., "release" for "reserve").
-    pub compensation_capability_id: String,
-    /// Human-readable description of what the compensation does.
-    pub description: Option<String>,
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -1156,15 +1170,14 @@ impl std::fmt::Display for ValidationWarning {
                     recommended_max_ms
                 )
             }
-            ValidationWarning::HighParallelism {
+            ValidationWarning::SplitParallelismIgnored {
                 step_id,
                 parallelism,
-                recommended_max,
             } => {
                 write!(
                     f,
-                    "[W032] Split step '{}' has parallelism={}. Consider reducing to {} or less for resource efficiency.",
-                    step_id, parallelism, recommended_max
+                    "[W073] Split step '{}' sets parallelism={}, but Split executes iterations strictly sequentially in the WASM runtime — the value has no effect.",
+                    step_id, parallelism
                 )
             }
             ValidationWarning::HighMaxIterations {
@@ -1222,34 +1235,33 @@ impl std::fmt::Display for ValidationWarning {
                     labels.join(", ")
                 )
             }
-            ValidationWarning::MissingCompensation {
+            ValidationWarning::CompensationNotEnforced { step_id } => {
+                write!(
+                    f,
+                    "[W070] Step '{}': 'compensation' is accepted but not enforced — no rollback \
+                     will execute on failure. Model rollback explicitly with onError routing.",
+                    step_id
+                )
+            }
+            ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
+                write!(
+                    f,
+                    "[W071] Step '{}': 'timeout' is accepted but not enforced for {} steps — the \
+                     step will not fail when the duration is exceeded. Split, While, and \
+                     WaitForSignal timeouts are enforced.",
+                    step_id, step_type
+                )
+            }
+            ValidationWarning::OnWaitIgnoredForAiAgentTool {
                 step_id,
-                agent_id,
-                capability_id,
-                suggested_compensation,
+                tool_label,
+                wait_step_id,
             } => {
-                let base_msg = format!(
-                    "[W060] Step '{}' calls '{}:{}' which has side effects but no compensation is defined",
-                    step_id, agent_id, capability_id
-                );
-                if let Some(suggestion) = suggested_compensation {
-                    let desc_str = suggestion
-                        .description
-                        .as_ref()
-                        .map(|d| format!(" ({})", d))
-                        .unwrap_or_default();
-                    write!(
-                        f,
-                        "{}\n       Suggested: use '{}:{}' as compensation{}",
-                        base_msg, agent_id, suggestion.compensation_capability_id, desc_str
-                    )
-                } else {
-                    write!(
-                        f,
-                        "{}\n       Note: Agent does not provide a compensation hint. Consider defining manual compensation.",
-                        base_msg
-                    )
-                }
+                write!(
+                    f,
+                    "[W072] Step '{}': tool '{}' targets WaitForSignal '{}' whose onWait subgraph is ignored for AiAgent tool waits — it will never run. Move that logic before the AiAgent step or into a tool the model can call.",
+                    step_id, tool_label, wait_step_id
+                )
             }
             ValidationWarning::PartiallyUnverifiedReference {
                 step_id,
@@ -1345,11 +1357,17 @@ pub fn validate_workflow(
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
 
-    // Phase 9: Compensation validation (warnings for missing compensation)
-    validate_compensation(graph, catalog, &mut result);
+    // Phase 9: Compensation validation (W070 — configured compensation is not enforced)
+    validate_compensation(graph, &mut result);
+
+    // Phase 9.5: Timeout validation (W071 — Agent/EmbedWorkflow timeouts are not enforced)
+    validate_unenforced_timeouts(graph, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
+
+    // Phase 10.5: Reject query-only condition operators in workflow conditions (E027)
+    validate_condition_operators(graph, &mut result);
 
     // Phase 11: AI Agent validation
     validate_ai_agent_steps(graph, &mut result);
@@ -1802,6 +1820,12 @@ const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop", "_loop_indi
 /// `variables.<name>` inside a While subgraph.
 const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", "_loop_indices"];
 
+/// Variables the runtime injects into a WaitForSignal `onWait` scope (see
+/// `wait_on_wait_variables` in `runtara_workflow_stdlib::direct_json`),
+/// referenceable as `variables.<name>` inside the onWait subgraph.
+/// `_instance_id` is also injected there but is already a global built-in.
+const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
+
 /// Step ids the runtime injects implicitly rather than as authored steps —
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
@@ -2171,9 +2195,13 @@ fn validate_template_static_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
+                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     validate_template_static_references_with_context(
                         on_wait,
-                        &HashSet::new(),
+                        &injected_vars,
                         false,
                         result,
                     );
@@ -2988,13 +3016,35 @@ fn looks_like_mapping_value_envelope(value: &serde_json::Value) -> bool {
 // Thresholds for configuration warnings
 const MAX_RETRY_RECOMMENDED: u32 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 3_600_000; // 1 hour
-const MAX_PARALLELISM_RECOMMENDED: u32 = 100;
 const MAX_ITERATIONS_RECOMMENDED: u32 = 10_000;
 const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 
 fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         match step {
+            Step::AiAgent(ai_step) => {
+                // Retry hygiene applies to LLM calls too (each retry re-bills).
+                if let Some(config) = ai_step.config.as_ref() {
+                    if let Some(max_retries) = config.max_retries
+                        && max_retries > MAX_RETRY_RECOMMENDED
+                    {
+                        result.warnings.push(ValidationWarning::HighRetryCount {
+                            step_id: step_id.clone(),
+                            max_retries,
+                            recommended_max: MAX_RETRY_RECOMMENDED,
+                        });
+                    }
+                    if let Some(retry_delay) = config.retry_delay
+                        && retry_delay > MAX_RETRY_DELAY_MS
+                    {
+                        result.warnings.push(ValidationWarning::LongRetryDelay {
+                            step_id: step_id.clone(),
+                            retry_delay_ms: retry_delay,
+                            recommended_max_ms: MAX_RETRY_DELAY_MS,
+                        });
+                    }
+                }
+            }
             Step::Agent(agent_step) => {
                 // Check retry count
                 if let Some(max_retries) = agent_step.max_retries
@@ -3032,15 +3082,20 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 
             Step::Split(split_step) => {
                 if let Some(config) = &split_step.config {
-                    // Check parallelism
+                    // W073: parallelism promises concurrency that the WASM
+                    // runtime does not deliver — Split is always sequential.
+                    // parallelism=1 matches actual behavior, so only other
+                    // values (0 = "unlimited", >1) warn. `sequential` also
+                    // matches actual behavior and never warns.
                     if let Some(parallelism) = config.parallelism
-                        && parallelism > MAX_PARALLELISM_RECOMMENDED
+                        && parallelism != 1
                     {
-                        result.warnings.push(ValidationWarning::HighParallelism {
-                            step_id: step_id.clone(),
-                            parallelism,
-                            recommended_max: MAX_PARALLELISM_RECOMMENDED,
-                        });
+                        result
+                            .warnings
+                            .push(ValidationWarning::SplitParallelismIgnored {
+                                step_id: step_id.clone(),
+                                parallelism,
+                            });
                     }
 
                     // Check retry count
@@ -3256,63 +3311,80 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 // Phase 9: Compensation Validation
 // ============================================================================
 
-/// Validate that steps with side effects have proper compensation when needed.
+/// W070: warn when a step configures `compensation`.
 ///
-/// This generates warnings (not errors) for steps that:
-/// - Have side effects (according to agent capability metadata)
-/// - Don't have compensation defined
-///
-/// The warning includes a suggestion if the agent provides compensation hints.
-fn validate_compensation(
-    graph: &ExecutionGraph,
-    catalog: &runtara_dsl::agent_meta::AgentCatalog,
-    result: &mut ValidationResult,
-) {
-    validate_compensation_recursive(graph, catalog, result);
-}
-
-fn validate_compensation_recursive(
-    graph: &ExecutionGraph,
-    catalog: &runtara_dsl::agent_meta::AgentCatalog,
-    result: &mut ValidationResult,
-) {
+/// Compensation is accepted by the DSL but ignored end-to-end — it is never
+/// emitted by the compiler, never wired to the SDK, and never triggered by
+/// the host, so no rollback runs. Until that changes, any configured
+/// compensation is a false promise; the warning points authors at onError
+/// routing, which is enforced. (The old W060 warning that *suggested* adding
+/// compensation to side-effecting steps was removed for the same reason:
+/// it encouraged configuring a no-op.)
+fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
-        if let Step::Agent(agent_step) = step {
-            // Find the capability metadata in the runtime catalog
-            let capability = catalog.capability(&agent_step.agent_id, &agent_step.capability_id);
-
-            // Check if capability has side effects and no compensation is defined
-            if let Some(cap) = capability
-                && cap.has_side_effects
-                && agent_step.compensation.is_none()
-            {
-                // Build suggestion from capability's compensation hint
-                let suggested_compensation =
-                    cap.compensation_hint
-                        .as_ref()
-                        .map(|hint| CompensationSuggestion {
-                            compensation_capability_id: hint.capability_id.clone(),
-                            description: hint.description.clone(),
-                        });
-
-                result
-                    .warnings
-                    .push(ValidationWarning::MissingCompensation {
-                        step_id: step_id.clone(),
-                        agent_id: agent_step.agent_id.clone(),
-                        capability_id: agent_step.capability_id.clone(),
-                        suggested_compensation,
-                    });
-            }
+        if let Step::Agent(agent_step) = step
+            && agent_step.compensation.is_some()
+        {
+            result
+                .warnings
+                .push(ValidationWarning::CompensationNotEnforced {
+                    step_id: step_id.clone(),
+                });
         }
 
         // Recursively validate subgraphs
         match step {
             Step::Split(split_step) => {
-                validate_compensation_recursive(&split_step.subgraph, catalog, result);
+                validate_compensation(&split_step.subgraph, result);
             }
             Step::While(while_step) => {
-                validate_compensation_recursive(&while_step.subgraph, catalog, result);
+                validate_compensation(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    validate_compensation(on_wait, result);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// W071: warn when an Agent or EmbedWorkflow step configures `timeout`.
+///
+/// No deadline exists for these step types — a running capability invoke
+/// cannot be preempted in the synchronous component model, so the value is
+/// parsed and ignored. Split, While, and WaitForSignal timeouts ARE enforced
+/// by the emitter, so those step types are deliberately not flagged.
+fn validate_unenforced_timeouts(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::Agent(agent_step) if agent_step.timeout.is_some() => {
+                result.warnings.push(ValidationWarning::TimeoutNotEnforced {
+                    step_id: step_id.clone(),
+                    step_type: "Agent".to_string(),
+                });
+            }
+            Step::EmbedWorkflow(embed_step) if embed_step.timeout.is_some() => {
+                result.warnings.push(ValidationWarning::TimeoutNotEnforced {
+                    step_id: step_id.clone(),
+                    step_type: "EmbedWorkflow".to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        match step {
+            Step::Split(split_step) => {
+                validate_unenforced_timeouts(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_unenforced_timeouts(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    validate_unenforced_timeouts(on_wait, result);
+                }
             }
             _ => {}
         }
@@ -3332,6 +3404,98 @@ fn validate_compensation_recursive(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+}
+
+/// E027: workflow conditions must not use operators that only exist for
+/// object-model query conditions (`SIMILARITY_GTE`, `MATCH`,
+/// `COSINE_DISTANCE_LTE`, `L2_DISTANCE_LTE`). Those are evaluated server-side
+/// inside an object-model query; the workflow runtime has no evaluator for
+/// them, so a Conditional/While/Filter/edge condition using one can never
+/// hold. Checks step conditions and executionPlan edge conditions (including
+/// `onError` edges), recursing into Split/While subgraphs and WaitForSignal
+/// `onWait` graphs. Object-model query conditions travel inside agent
+/// `inputMapping` values and are deliberately NOT visited here.
+fn validate_condition_operators(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::Conditional(conditional) => check_condition_expression_operators(
+                step_id,
+                "condition",
+                &conditional.condition,
+                result,
+            ),
+            Step::Filter(filter) => check_condition_expression_operators(
+                step_id,
+                "condition",
+                &filter.config.condition,
+                result,
+            ),
+            Step::While(while_step) => {
+                check_condition_expression_operators(
+                    step_id,
+                    "condition",
+                    &while_step.condition,
+                    result,
+                );
+                validate_condition_operators(&while_step.subgraph, result);
+            }
+            Step::Split(split) => validate_condition_operators(&split.subgraph, result),
+            Step::WaitForSignal(wait) => {
+                if let Some(on_wait) = &wait.on_wait {
+                    validate_condition_operators(on_wait, result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for edge in &graph.execution_plan {
+        if let Some(condition) = &edge.condition {
+            let location = match edge.label.as_deref() {
+                Some("onError") => format!("the onError edge to '{}'", edge.to_step),
+                _ => format!("the edge to '{}'", edge.to_step),
+            };
+            check_condition_expression_operators(&edge.from_step, &location, condition, result);
+        }
+    }
+}
+
+fn check_condition_expression_operators(
+    step_id: &str,
+    location: &str,
+    expr: &runtara_dsl::ConditionExpression,
+    result: &mut ValidationResult,
+) {
+    match expr {
+        runtara_dsl::ConditionExpression::Operation(operation) => {
+            if let Some(operator) = query_only_operator_name(&operation.op) {
+                result
+                    .errors
+                    .push(ValidationError::QueryOnlyConditionOperator {
+                        step_id: step_id.to_string(),
+                        location: location.to_string(),
+                        operator: operator.to_string(),
+                    });
+            }
+            for argument in &operation.arguments {
+                if let runtara_dsl::ConditionArgument::Expression(nested) = argument {
+                    check_condition_expression_operators(step_id, location, nested, result);
+                }
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(_) => {}
+    }
+}
+
+fn query_only_operator_name(op: &runtara_dsl::ConditionOperator) -> Option<&'static str> {
+    use runtara_dsl::ConditionOperator;
+    match op {
+        ConditionOperator::SimilarityGte => Some("SIMILARITY_GTE"),
+        ConditionOperator::Match => Some("MATCH"),
+        ConditionOperator::CosineDistanceLte => Some("COSINE_DISTANCE_LTE"),
+        ConditionOperator::L2DistanceLte => Some("L2_DISTANCE_LTE"),
+        _ => None,
+    }
 }
 
 /// W040: a step has both a normal-flow edge and an `onError` edge to the SAME
@@ -4313,10 +4477,16 @@ fn validate_data_and_variable_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    // WaitForSignal on_wait handlers don't have inherited variables or implicit data
+                    // WaitForSignal on_wait handlers don't inherit parent variables
+                    // or implicit data, but the runtime injects `_signal_id`
+                    // (plus the global built-ins) into the scope.
+                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     validate_data_and_variable_references_with_context(
                         on_wait,
-                        &HashSet::new(),
+                        &injected_vars,
                         false,
                         result,
                     );
@@ -4746,6 +4916,38 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                     }
                 }
             }
+
+            // === W072: WaitForSignal tools never run their onWait subgraph ===
+            // A tool edge (any label except next/onError/memory/mcp.*) whose
+            // target is a WaitForSignal step emits the durable wait, but the
+            // tool lowering ignores `onWait` entirely (parity with the
+            // generated path) — warn so authors don't rely on dead logic.
+            for edge in &graph.execution_plan {
+                if edge.from_step != *step_id {
+                    continue;
+                }
+                let Some(ref label) = edge.label else {
+                    continue;
+                };
+                if label == "next"
+                    || label == "onError"
+                    || label == "memory"
+                    || label.starts_with("mcp.")
+                {
+                    continue;
+                }
+                if let Some(Step::WaitForSignal(wait_step)) = graph.steps.get(&edge.to_step)
+                    && wait_step.on_wait.is_some()
+                {
+                    result
+                        .warnings
+                        .push(ValidationWarning::OnWaitIgnoredForAiAgentTool {
+                            step_id: step_id.clone(),
+                            tool_label: label.clone(),
+                            wait_step_id: edge.to_step.clone(),
+                        });
+                }
+            }
         }
     }
 
@@ -4875,6 +5077,7 @@ mod tests {
             pattern: None,
             properties: None,
             visible_when: None,
+            nullable: None,
         }
     }
 
@@ -5209,6 +5412,8 @@ mod tests {
                 max_iterations: None,
                 temperature: None,
                 max_tokens: None,
+                max_retries: None,
+                retry_delay: None,
                 memory: None,
                 output_schema: None,
             }),
@@ -8661,122 +8866,11 @@ mod tests {
         );
     }
 
-    // === Compensation Validation Tests ===
+    // === Compensation Validation Tests (W070) ===
 
     #[test]
-    fn test_side_effects_without_compensation_generates_warning() {
-        // object_model:create-instance has side_effects = true
-        let mut steps = HashMap::new();
-        steps.insert(
-            "om_call".to_string(),
-            Step::Agent(AgentStep {
-                id: "om_call".to_string(),
-                name: None,
-                agent_id: "object_model".to_string(),
-                capability_id: "create-instance".to_string(),
-                connection_id: None,
-                input_mapping: None,
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                compensation: None, // No compensation defined
-                breakpoint: None,
-                durable: None,
-            }),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "om_call");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "om_call".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        // Should have MissingCompensation warning
-        let missing_comp_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
-            .collect();
-        assert!(
-            !missing_comp_warnings.is_empty(),
-            "Should have MissingCompensation warning for object_model:create-instance step"
-        );
-
-        // Check warning contents
-        if let Some(ValidationWarning::MissingCompensation {
-            step_id,
-            agent_id,
-            capability_id,
-            ..
-        }) = missing_comp_warnings.first()
-        {
-            assert_eq!(step_id, "om_call");
-            assert_eq!(agent_id, "object_model");
-            assert_eq!(capability_id, "create-instance");
-        }
-    }
-
-    #[test]
-    fn test_no_side_effects_no_compensation_warning() {
-        // transform:map has no side effects
-        let mut steps = HashMap::new();
-        steps.insert(
-            "transform_step".to_string(),
-            create_agent_step(
-                "transform_step",
-                "transform",
-                Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "data".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!({"key": "value"}),
-                        }),
-                    );
-                    m.insert(
-                        "expression".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("data"),
-                        }),
-                    );
-                    m
-                }),
-            ),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "transform_step");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "transform_step".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        // Should NOT have MissingCompensation warning
-        let missing_comp_warnings: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
-            .collect();
-        assert!(
-            missing_comp_warnings.is_empty(),
-            "Should NOT have MissingCompensation warning for transform:map (no side effects)"
-        );
-    }
-
-    #[test]
-    fn test_side_effects_with_compensation_no_warning() {
-        // http:request with compensation defined should NOT warn
+    fn test_compensation_present_warns_w070() {
+        // Compensation is accepted but not enforced; configuring it must warn.
         let mut steps = HashMap::new();
         steps.insert(
             "http_call".to_string(),
@@ -8815,39 +8909,6 @@ mod tests {
                 durable: None,
             }),
         );
-        // Add a rollback step (even though we won't actually execute it in this test)
-        steps.insert(
-            "rollback_step".to_string(),
-            Step::Agent(AgentStep {
-                id: "rollback_step".to_string(),
-                name: None,
-                agent_id: "http".to_string(),
-                capability_id: "http-request".to_string(),
-                connection_id: None,
-                input_mapping: Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "url".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("https://example.com/rollback"),
-                        }),
-                    );
-                    m.insert(
-                        "method".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("DELETE"),
-                        }),
-                    );
-                    m
-                }),
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                compensation: None,
-                breakpoint: None,
-                durable: None,
-            }),
-        );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
 
         let mut graph = create_basic_graph(steps, "http_call");
@@ -8861,63 +8922,514 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        // Should NOT have MissingCompensation warning for http_call (has compensation)
-        let missing_comp_for_http_call: Vec<_> = result
+        let w070: Vec<_> = result
             .warnings
             .iter()
-            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { step_id, .. } if step_id == "http_call"))
+            .filter(|w| {
+                matches!(w, ValidationWarning::CompensationNotEnforced { step_id } if step_id == "http_call")
+            })
             .collect();
-        assert!(
-            missing_comp_for_http_call.is_empty(),
-            "Should NOT have MissingCompensation warning for http_call (has compensation defined)"
+        assert_eq!(
+            w070.len(),
+            1,
+            "configured compensation must warn W070: {:?}",
+            result.warnings
         );
+        let display = format!("{}", w070[0]);
+        assert!(display.contains("[W070]"), "{display}");
+        assert!(display.contains("not enforced"), "{display}");
+        assert!(display.contains("onError"), "{display}");
     }
 
     #[test]
-    fn test_compensation_warning_display_format() {
-        let warning = ValidationWarning::MissingCompensation {
-            step_id: "test_step".to_string(),
-            agent_id: "inventory".to_string(),
-            capability_id: "reserve".to_string(),
-            suggested_compensation: Some(CompensationSuggestion {
-                compensation_capability_id: "release".to_string(),
-                description: Some("Releases the reserved inventory".to_string()),
+    fn test_no_compensation_no_w070_warning() {
+        // No compensation configured (even on a side-effecting capability):
+        // nothing to warn about. The old W060 "consider adding compensation"
+        // suggestion was removed because it encouraged configuring a no-op.
+        let mut steps = HashMap::new();
+        steps.insert(
+            "om_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "om_call".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "create-instance".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
             }),
-        };
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
 
-        let display = format!("{}", warning);
-        assert!(display.contains("[W060]"), "Should have warning code W060");
-        assert!(display.contains("test_step"), "Should include step ID");
+        let mut graph = create_basic_graph(steps, "om_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "om_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph, &test_catalog());
+
         assert!(
-            display.contains("inventory:reserve"),
-            "Should include capability"
-        );
-        assert!(
-            display.contains("inventory:release"),
-            "Should suggest compensation"
-        );
-        assert!(
-            display.contains("Releases the reserved inventory"),
-            "Should include description"
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::CompensationNotEnforced { .. })),
+            "no compensation configured must not warn W070: {:?}",
+            result.warnings
         );
     }
 
     #[test]
-    fn test_compensation_warning_display_no_hint() {
-        let warning = ValidationWarning::MissingCompensation {
-            step_id: "test_step".to_string(),
-            agent_id: "http".to_string(),
-            capability_id: "http-request".to_string(),
-            suggested_compensation: None,
-        };
+    fn test_compensation_warns_w070_inside_split_subgraph() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [
+                      {"fromStep":"inner","toStep":"inner_finish"}
+                    ],
+                    "steps": {
+                      "inner": {"id":"inner","stepType":"Agent","agentId":"utils",
+                        "capabilityId":"get-current-iso-datetime","inputMapping":{},
+                        "compensation":{"compensationStep":"inner_finish"}},
+                      "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
 
-        let display = format!("{}", warning);
-        assert!(display.contains("[W060]"), "Should have warning code W060");
-        assert!(display.contains("test_step"), "Should include step ID");
+        let result = validate_workflow(&graph, &test_catalog());
+
         assert!(
-            display.contains("manual compensation"),
-            "Should mention manual compensation when no hint"
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::CompensationNotEnforced { step_id } if step_id == "inner"
+            )),
+            "compensation in a Split subgraph must warn W070: {:?}",
+            result.warnings
         );
+    }
+
+    // === Unenforced Timeout Tests (W071) ===
+
+    #[test]
+    fn test_agent_and_embed_timeout_warn_w071() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"embed"},
+                {"fromStep":"embed","toStep":"finish"}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils",
+                  "capabilityId":"get-current-iso-datetime","inputMapping":{},"timeout":5000},
+                "embed": {"id":"embed","stepType":"EmbedWorkflow",
+                  "childWorkflowId":"child","childVersion":"latest","timeout":9000},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        let mut flagged: Vec<(String, String)> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
+                    Some((step_id.clone(), step_type.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        flagged.sort();
+        assert_eq!(
+            flagged,
+            vec![
+                ("a".to_string(), "Agent".to_string()),
+                ("embed".to_string(), "EmbedWorkflow".to_string())
+            ],
+            "{:?}",
+            result.warnings
+        );
+        let display = result
+            .warnings
+            .iter()
+            .find(|w| matches!(w, ValidationWarning::TimeoutNotEnforced { .. }))
+            .map(|w| format!("{w}"))
+            .unwrap();
+        assert!(display.contains("[W071]"), "{display}");
+        assert!(display.contains("not enforced"), "{display}");
+    }
+
+    #[test]
+    fn test_enforced_timeouts_do_not_warn_w071() {
+        // Split / While / WaitForSignal timeouts ARE enforced - no W071.
+        // The Agent inside the Split subgraph has no timeout either.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"loop"},
+                {"fromStep":"loop","toStep":"wait"},
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1]},
+                    "timeout": 10000
+                  },
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [],
+                    "steps": {"inner": {"id":"inner","stepType":"Finish"}}
+                  }},
+                "loop": {"id":"loop","stepType":"While","condition":{
+                    "type":"operation","op":"EQ","arguments":[
+                      {"valueType":"immediate","value":1},
+                      {"valueType":"immediate","value":2}
+                    ]},
+                  "config": {"maxIterations": 2, "timeout": 10000},
+                  "subgraph": {
+                    "entryPoint": "wf",
+                    "executionPlan": [],
+                    "steps": {"wf": {"id":"wf","stepType":"Finish"}}
+                  }},
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "timeoutMs": {"valueType":"immediate","value":10000}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::TimeoutNotEnforced { .. })),
+            "enforced Split/While/Wait timeouts must not warn W071: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_timeout_warns_w071_inside_while_subgraph() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [
+                {"fromStep":"loop","toStep":"finish"}
+              ],
+              "steps": {
+                "loop": {"id":"loop","stepType":"While","condition":{
+                    "type":"operation","op":"EQ","arguments":[
+                      {"valueType":"immediate","value":1},
+                      {"valueType":"immediate","value":2}
+                    ]},
+                  "subgraph": {
+                    "entryPoint": "inner",
+                    "executionPlan": [
+                      {"fromStep":"inner","toStep":"inner_finish"}
+                    ],
+                    "steps": {
+                      "inner": {"id":"inner","stepType":"Agent","agentId":"utils",
+                        "capabilityId":"get-current-iso-datetime","inputMapping":{},"timeout":1000},
+                      "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::TimeoutNotEnforced { step_id, .. } if step_id == "inner"
+            )),
+            "Agent timeout in a While subgraph must warn W071: {:?}",
+            result.warnings
+        );
+    }
+
+    // === AiAgent WaitForSignal Tool onWait Tests (W072) ===
+
+    fn w072_graph(with_on_wait: bool, tool_edge: bool) -> ExecutionGraph {
+        let on_wait = if with_on_wait {
+            r##","onWait":{"entryPoint":"notify_finish","executionPlan":[],"steps":{"notify_finish":{"id":"notify_finish","stepType":"Finish"}}}"##
+        } else {
+            ""
+        };
+        let edge_label = if tool_edge { "approval" } else { "next" };
+        let json = format!(
+            r##"{{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {{"fromStep":"ai","toStep":"wait","label":"{edge_label}"}},
+                {{"fromStep":"ai","toStep":"finish","label":"next"}}
+              ],
+              "steps": {{
+                "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+                  "systemPrompt":{{"valueType":"immediate","value":"You are helpful"}},
+                  "userPrompt":{{"valueType":"immediate","value":"Do the thing"}},
+                  "provider":"openai"
+                }}}},
+                "wait": {{"id":"wait","stepType":"WaitForSignal"{on_wait}}},
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }}
+            }}"##
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_wait_tool_with_on_wait_warns_w072() {
+        let graph = w072_graph(true, true);
+        let result = validate_workflow(&graph, &test_catalog());
+
+        let w072: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. }))
+            .collect();
+        assert_eq!(w072.len(), 1, "{:?}", result.warnings);
+        let display = format!("{}", w072[0]);
+        assert!(display.contains("[W072]"), "{display}");
+        assert!(display.contains("'approval'"), "{display}");
+        assert!(display.contains("'wait'"), "{display}");
+    }
+
+    #[test]
+    fn test_wait_tool_without_on_wait_no_w072() {
+        let graph = w072_graph(false, true);
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. })),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_normal_flow_wait_with_on_wait_no_w072() {
+        // The wait sits on the AiAgent's "next" edge (normal flow, not a
+        // tool): onWait DOES run there, so no warning.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {"fromStep":"ai","toStep":"wait","label":"next"},
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                  "systemPrompt":{"valueType":"immediate","value":"You are helpful"},
+                  "userPrompt":{"valueType":"immediate","value":"Do the thing"},
+                  "provider":"openai"
+                }},
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"nf","executionPlan":[],"steps":{"nf":{"id":"nf","stepType":"Finish"}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::OnWaitIgnoredForAiAgentTool { .. })),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    // === WaitForSignal onWait scope variable tests ===
+
+    #[test]
+    fn test_on_wait_signal_id_variable_reference_is_valid() {
+        // The runtime injects `_signal_id` (and `_instance_id`) into the
+        // onWait scope (wait_on_wait_variables in runtara-workflow-stdlib);
+        // the validator must accept `variables._signal_id` references there.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "wait",
+              "executionPlan": [
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"notify","executionPlan":[],
+                    "steps":{"notify":{"id":"notify","stepType":"Finish",
+                      "inputMapping":{
+                        "signalId":{"valueType":"reference","value":"variables._signal_id"},
+                        "instanceId":{"valueType":"reference","value":"variables._instance_id"}
+                      }}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "_signal_id" || variable_name == "_instance_id"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_on_wait_unknown_variable_reference_is_rejected() {
+        // `_signal_id` is scoped to onWait; an unknown variable there must
+        // still be rejected so the injection isn't a blanket allow.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "wait",
+              "executionPlan": [
+                {"fromStep":"wait","toStep":"finish"}
+              ],
+              "steps": {
+                "wait": {"id":"wait","stepType":"WaitForSignal",
+                  "onWait":{"entryPoint":"notify","executionPlan":[],
+                    "steps":{"notify":{"id":"notify","stepType":"Finish",
+                      "inputMapping":{
+                        "bogus":{"valueType":"reference","value":"variables._not_a_thing"}
+                      }}}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "_not_a_thing"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    // === Split Parallelism Advisory Tests (W073) ===
+
+    fn split_graph_with_config(config_extra: &str) -> ExecutionGraph {
+        let json = format!(
+            r##"{{
+              "entryPoint": "split",
+              "executionPlan": [
+                {{"fromStep":"split","toStep":"finish"}}
+              ],
+              "steps": {{
+                "split": {{"id":"split","stepType":"Split","config":{{
+                    "value": {{"valueType":"immediate","value":[1,2]}}{config_extra}
+                  }},
+                  "subgraph": {{
+                    "entryPoint": "inner",
+                    "executionPlan": [],
+                    "steps": {{"inner": {{"id":"inner","stepType":"Finish"}}}}
+                  }}}},
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }}
+            }}"##
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn test_split_parallelism_warns_w073() {
+        for (extra, expected_parallelism) in
+            [(r#","parallelism":8"#, 8u32), (r#","parallelism":0"#, 0u32)]
+        {
+            let graph = split_graph_with_config(extra);
+            let result = validate_workflow(&graph, &test_catalog());
+
+            let w073: Vec<_> = result
+                .warnings
+                .iter()
+                .filter_map(|w| match w {
+                    ValidationWarning::SplitParallelismIgnored {
+                        step_id,
+                        parallelism,
+                    } => Some((step_id.clone(), *parallelism)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                w073,
+                vec![("split".to_string(), expected_parallelism)],
+                "{:?}",
+                result.warnings
+            );
+        }
+        let display = format!(
+            "{}",
+            ValidationWarning::SplitParallelismIgnored {
+                step_id: "split".to_string(),
+                parallelism: 8,
+            }
+        );
+        assert!(display.contains("[W073]"), "{display}");
+        assert!(display.contains("sequentially"), "{display}");
+    }
+
+    #[test]
+    fn test_split_parallelism_one_or_sequential_no_w073() {
+        // parallelism=1 and sequential=true match the actual (sequential)
+        // behavior - no advisory.
+        for extra in [r#","parallelism":1"#, r#","sequential":true"#, ""] {
+            let graph = split_graph_with_config(extra);
+            let result = validate_workflow(&graph, &test_catalog());
+
+            assert!(
+                !result
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, ValidationWarning::SplitParallelismIgnored { .. })),
+                "extra={extra}: {:?}",
+                result.warnings
+            );
+        }
     }
 
     // === Edge Condition Tests ===
@@ -9498,6 +10010,249 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
+        );
+    }
+
+    // --- E027: query-only condition operators in workflow conditions ---
+
+    fn e027_operators(result: &ValidationResult) -> Vec<(String, String)> {
+        result
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                ValidationError::QueryOnlyConditionOperator {
+                    step_id, operator, ..
+                } => Some((step_id.clone(), operator.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn e027_rejected_in_conditional_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "check",
+              "executionPlan": [
+                {"fromStep":"check","toStep":"finish_true","label":"true"},
+                {"fromStep":"check","toStep":"finish_false","label":"false"}
+              ],
+              "steps": {
+                "check": {"id":"check","stepType":"Conditional","condition":{
+                  "type":"operation","op":"MATCH","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"needle"}
+                  ]}},
+                "finish_true": {"id":"finish_true","stepType":"Finish"},
+                "finish_false": {"id":"finish_false","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("check".to_string(), "MATCH".to_string())],
+            "{:?}",
+            result.errors
+        );
+        let display = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, ValidationError::QueryOnlyConditionOperator { .. }))
+            .map(|e| format!("{e}"))
+            .unwrap();
+        assert!(display.contains("[E027]"), "{display}");
+        assert!(display.contains("MATCH"), "{display}");
+    }
+
+    #[test]
+    fn e027_rejected_in_while_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [
+                {"fromStep":"loop","toStep":"finish"}
+              ],
+              "steps": {
+                "loop": {"id":"loop","stepType":"While","condition":{
+                  "type":"operation","op":"SIMILARITY_GTE","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"query"},
+                    {"valueType":"immediate","value":0.8}
+                  ]},
+                  "subgraph": {
+                    "entryPoint": "inner_finish",
+                    "executionPlan": [],
+                    "steps": {"inner_finish": {"id":"inner_finish","stepType":"Finish"}}
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("loop".to_string(), "SIMILARITY_GTE".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_in_filter_condition() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "filter",
+              "executionPlan": [
+                {"fromStep":"filter","toStep":"finish"}
+              ],
+              "steps": {
+                "filter": {"id":"filter","stepType":"Filter","config":{
+                  "value": {"valueType":"immediate","value":[1,2,3]},
+                  "condition": {"type":"operation","op":"COSINE_DISTANCE_LTE","arguments":[
+                    {"valueType":"reference","value":"item.embedding"},
+                    {"valueType":"immediate","value":[0.1,0.2]},
+                    {"valueType":"immediate","value":0.3}
+                  ]}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("filter".to_string(), "COSINE_DISTANCE_LTE".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_in_edge_and_on_error_edge_conditions() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "a",
+              "executionPlan": [
+                {"fromStep":"a","toStep":"finish_match","condition":{
+                  "type":"operation","op":"MATCH","arguments":[
+                    {"valueType":"reference","value":"variables.text"},
+                    {"valueType":"immediate","value":"needle"}
+                  ]}},
+                {"fromStep":"a","toStep":"finish_default"},
+                {"fromStep":"a","toStep":"finish_err","label":"onError","condition":{
+                  "type":"operation","op":"L2_DISTANCE_LTE","arguments":[
+                    {"valueType":"reference","value":"steps.__error.embedding"},
+                    {"valueType":"immediate","value":[0.0]},
+                    {"valueType":"immediate","value":1.0}
+                  ]}}
+              ],
+              "steps": {
+                "a": {"id":"a","stepType":"Agent","agentId":"utils","capabilityId":"get-current-iso-datetime","inputMapping":{}},
+                "finish_match": {"id":"finish_match","stepType":"Finish"},
+                "finish_default": {"id":"finish_default","stepType":"Finish"},
+                "finish_err": {"id":"finish_err","stepType":"Finish"}
+              },
+              "variables": {"text": {"type": "string", "value": "haystack"}}
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        let mut operators = e027_operators(&result);
+        operators.sort();
+        assert_eq!(
+            operators,
+            vec![
+                ("a".to_string(), "L2_DISTANCE_LTE".to_string()),
+                ("a".to_string(), "MATCH".to_string())
+            ],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_rejected_inside_split_subgraph_and_nested_under_and() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "check",
+                    "executionPlan": [
+                      {"fromStep":"check","toStep":"f_true","label":"true"},
+                      {"fromStep":"check","toStep":"f_false","label":"false"}
+                    ],
+                    "steps": {
+                      "check": {"id":"check","stepType":"Conditional","condition":{
+                        "type":"operation","op":"AND","arguments":[
+                          {"type":"operation","op":"MATCH","arguments":[
+                            {"valueType":"reference","value":"data.text"},
+                            {"valueType":"immediate","value":"needle"}
+                          ]},
+                          {"type":"operation","op":"EQ","arguments":[
+                            {"valueType":"immediate","value":1},
+                            {"valueType":"immediate","value":1}
+                          ]}
+                        ]}},
+                      "f_true": {"id":"f_true","stepType":"Finish"},
+                      "f_false": {"id":"f_false","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            e027_operators(&result),
+            vec![("check".to_string(), "MATCH".to_string())],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn e027_not_raised_for_object_model_query_conditions() {
+        // SIMILARITY_GTE is legitimate inside an object-model query condition
+        // (it travels as agent inputMapping JSON, not a workflow condition).
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "SIMILARITY_GTE",
+            "arguments": [
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "reference", "value": "data.query_embedding"},
+                {"valueType": "immediate", "value": 0.8}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", "object_model", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            e027_operators(&result).is_empty(),
+            "object-model query conditions must not trigger E027: {:?}",
+            result.errors
         );
     }
 }

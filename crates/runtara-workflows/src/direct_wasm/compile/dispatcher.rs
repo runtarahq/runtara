@@ -296,63 +296,6 @@ pub(super) fn emit_run_plan_mapping(
                 );
             }
         }
-        DirectRunPlan::Fanout {
-            branches,
-            merge_plan,
-        } => {
-            // Unconditional parallel fan-out: emit every branch in sequence (each
-            // ends in a `Join` no-op at the shared merge and falls through), then
-            // the merge once. No conditional dispatch and no extra block nesting,
-            // so the failure / handled targets stay at the current depth.
-            for branch in branches {
-                emit_run_plan_mapping(
-                    body,
-                    indices,
-                    static_data,
-                    track_events,
-                    variables,
-                    branch,
-                    data_ptr_local,
-                    data_len_local,
-                    steps_ptr_local,
-                    steps_len_local,
-                    source_ptr_local,
-                    source_len_local,
-                    output_ptr_local,
-                    output_len_local,
-                    route_ptr_local,
-                    route_len_local,
-                    workflow_log_kind,
-                    workflow_error_kind,
-                    failure_target,
-                    handled_target,
-                );
-            }
-            if let Some(merge_plan) = merge_plan {
-                emit_run_plan_mapping(
-                    body,
-                    indices,
-                    static_data,
-                    track_events,
-                    variables,
-                    merge_plan,
-                    data_ptr_local,
-                    data_len_local,
-                    steps_ptr_local,
-                    steps_len_local,
-                    source_ptr_local,
-                    source_len_local,
-                    output_ptr_local,
-                    output_len_local,
-                    route_ptr_local,
-                    route_len_local,
-                    workflow_log_kind,
-                    workflow_error_kind,
-                    failure_target,
-                    handled_target,
-                );
-            }
-        }
         DirectRunPlan::GroupBy {
             step_id,
             group_id,
@@ -551,6 +494,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             on_wait_plan,
             next_plan,
+            error_plan,
         } => {
             emit_wait_for_signal_plan(
                 body,
@@ -562,6 +506,7 @@ pub(super) fn emit_run_plan_mapping(
                 *breakpoint,
                 on_wait_plan.as_deref(),
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -664,14 +609,17 @@ pub(super) fn emit_run_plan_mapping(
             input_mapping_id,
             durable_checkpoint,
             breakpoint,
+            max_retries,
+            retry_delay_ms,
             next_plan,
             error_plan,
         } => {
-            // Single-shot AiAgent reuses the Agent invoke/checkpoint path (it is
-            // an invoke of `ai_tools`/`chat-completion`); only the output
+            // Single-shot AiAgent reuses the Agent invoke/checkpoint/retry path
+            // (it is an invoke of `ai_tools`/`chat-completion`); only the output
             // transform differs (`ai-agent-output` builds the
-            // `{response, iterations, toolCalls}` envelope). No retry/rate-limit
-            // in this slice.
+            // `{response, iterations, toolCalls}` envelope). Retries are opt-in
+            // via config.maxRetries (plan default 0 — LLM calls re-bill); no
+            // rate-limit budget (ai-tools is not catalog-rate-limited).
             emit_agent_plan(
                 body,
                 indices,
@@ -684,8 +632,8 @@ pub(super) fn emit_run_plan_mapping(
                 *input_mapping_id,
                 *durable_checkpoint,
                 *breakpoint,
-                0,
-                0,
+                *max_retries,
+                *retry_delay_ms,
                 0,
                 next_plan,
                 error_plan.as_ref(),
@@ -711,10 +659,13 @@ pub(super) fn emit_run_plan_mapping(
             agent_id,
             agent_component_id,
             input_mapping_id,
+            durable_checkpoint,
+            breakpoint,
             max_iterations,
             tools,
             memory,
             next_plan,
+            error_plan,
         } => {
             super::ai_agent_loop::emit_ai_agent_loop_plan(
                 body,
@@ -726,10 +677,13 @@ pub(super) fn emit_run_plan_mapping(
                 *agent_id,
                 agent_component_id,
                 *input_mapping_id,
+                *durable_checkpoint,
+                *breakpoint,
                 *max_iterations,
                 tools,
                 memory.as_ref(),
                 next_plan,
+                error_plan.as_ref(),
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -742,6 +696,8 @@ pub(super) fn emit_run_plan_mapping(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
+                failure_target,
+                handled_target,
             );
         }
         DirectRunPlan::Error {

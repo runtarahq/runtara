@@ -4,13 +4,7 @@ import { NodeFormContext } from './NodeFormContext';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { TagInput } from '@/shared/components/ui/tag-input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
+import { SourceMappingValueField } from './SourceMappingValueField';
 
 type GroupByStepFieldProps = {
   name: string;
@@ -64,60 +58,13 @@ export function GroupByStepField({ name }: GroupByStepFieldProps) {
 
   return (
     <div className="space-y-6">
-      {/* Array Source Selection */}
-      <div className="space-y-2">
-        <Label className="text-sm font-medium">Array Source</Label>
-        <p className="text-xs text-muted-foreground">
-          Select the array to group. Items will be grouped by the specified key.
-        </p>
-        <Select
-          value={form.getValues(`${name}.0.value`) || ''}
-          onValueChange={(value) => {
-            form.setValue(
-              name,
-              [
-                {
-                  type: 'value',
-                  value,
-                  typeHint: 'auto',
-                  valueType: 'reference',
-                },
-              ],
-              { shouldDirty: true }
-            );
-          }}
-        >
-          <SelectTrigger>
-            <SelectValue placeholder="Select array source..." />
-          </SelectTrigger>
-          <SelectContent>
-            {arraySuggestions.map((suggestion) => (
-              <SelectItem key={suggestion.value} value={suggestion.value}>
-                {suggestion.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">Or enter a custom path:</p>
-        <Input
-          placeholder="e.g., steps['fetch'].outputs.items"
-          value={form.getValues(`${name}.0.value`) || ''}
-          onChange={(e) => {
-            form.setValue(
-              name,
-              [
-                {
-                  type: 'value',
-                  value: e.target.value,
-                  typeHint: 'auto',
-                  valueType: 'reference',
-                },
-              ],
-              { shouldDirty: true }
-            );
-          }}
-        />
-      </div>
+      <SourceMappingValueField
+        name={name}
+        label="Array Source"
+        description="Select the array to group. Items will be grouped by the specified key."
+        suggestions={arraySuggestions}
+        placeholder="e.g., steps['fetch'].outputs.items"
+      />
 
       {/* Group Key */}
       <div className="space-y-2">

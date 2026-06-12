@@ -7,6 +7,7 @@ import {
   ListStepTypesResponse,
   MoveWorkflowRequest,
   RenameFolderRequest,
+  MemoryTier,
   WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi.ts';
 import { executionGraphToReactFlow } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
@@ -205,18 +206,21 @@ export async function getWorkflowWorkflow(
 
   // Parse variables from API format to array format used by the UI
   // Variables are now inside executionGraph (moved from workflow root)
-  // API returns variables as an object: { varName: { type, value }, ... }
-  // UI expects: [{ name, value, type }, ...]
+  // API returns variables as an object: { varName: { type, value, description }, ... }
+  // UI expects: [{ name, value, type, description }, ...]
   const variablesObj = (executionGraph.variables || {}) as Record<
     string,
-    { type?: string; value?: unknown } | unknown
+    { type?: string; value?: unknown; description?: string | null } | unknown
   >;
   const variables = Object.entries(variablesObj).map(([name, val]) => {
-    const varObj = val as { type?: string; value?: unknown } | undefined;
+    const varObj = val as
+      | { type?: string; value?: unknown; description?: string | null }
+      | undefined;
     return {
       name,
       value: varObj?.value ?? val ?? '',
       type: varObj?.type ?? 'string',
+      description: varObj?.description ?? null,
     };
   });
 
@@ -230,6 +234,8 @@ export async function getWorkflowWorkflow(
 
   // Extract rateLimitBudgetMs from executionGraph
   const rateLimitBudgetMs = executionGraph.rateLimitBudgetMs;
+  const durable = executionGraph.durable;
+  const entryPoint = executionGraph.entryPoint;
 
   // Name and description are now inside executionGraph (moved from workflow root).
   // Prefer executionGraph values; fall back to legacy top-level fields so workflows
@@ -251,6 +257,10 @@ export async function getWorkflowWorkflow(
       outputSchemaFields,
       executionTimeoutSeconds,
       rateLimitBudgetMs,
+      durable,
+      entryPoint,
+      memoryTier: workflowData.memoryTier,
+      trackEvents: workflowData.trackEvents,
     },
     message: responseData?.message,
     success: responseData?.success,
@@ -262,14 +272,18 @@ export async function updateWorkflow(
   newWorkflow: {
     id: string;
     data: ExecutionGraphDto; // name and description are now inside the execution graph
+    memoryTier?: MemoryTier | null;
+    trackEvents?: boolean | null;
   }
 ) {
-  const { id, data } = newWorkflow;
+  const { id, data, memoryTier, trackEvents } = newWorkflow;
 
   const result = await RuntimeREST.api.updateWorkflowHandler(
     id,
     {
       executionGraph: data,
+      ...(memoryTier !== undefined ? { memoryTier } : {}),
+      ...(trackEvents !== undefined ? { trackEvents } : {}),
     },
     createAuthHeaders(token)
   );
@@ -357,6 +371,36 @@ export async function resumeInstance(token: string, instanceId: string) {
   );
 
   return result.data;
+}
+
+/**
+ * Pause a running workflow instance.
+ *
+ * POST /api/runtime/workflows/instances/{instanceId}/pause
+ * (api/handlers/workflows.rs::pause_instance_handler). Only instances in the
+ * 'running' state can be paused; already-suspended instances are a no-op 200
+ * and any other state returns 400 "Instance not pausable". The generated API
+ * client does not expose this handler yet, so call it with a raw fetch like
+ * rebuildWorkflowVersion does.
+ */
+export async function pauseInstance(token: string, instanceId: string) {
+  const base = getRuntimeBaseUrl();
+  const url = `${base}/workflows/instances/${encodeURIComponent(
+    instanceId
+  )}/pause`;
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(url, { method: 'POST', headers });
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.message || `Failed to pause instance (HTTP ${response.status})`
+    );
+  }
+
+  return payload;
 }
 
 export async function cloneWorkflow(

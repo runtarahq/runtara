@@ -468,7 +468,6 @@ $([ -n "$valkey_pass" ] && echo "VALKEY_PASSWORD=${valkey_pass}" || echo "# VALK
 
 ${auth_lines}
 
-WASMTIME_PATH=${RUNTARA_DIR}/bin/wasmtime
 # Pre-built agent components plus direct workflow stdlib/runtime components
 # staged into the bundle by scripts/build-bundle.sh. The server loads each
 # agent pair into the runtime AgentCatalog at boot, and direct workflow
@@ -658,7 +657,6 @@ print_summary() {
     printf '%s  Runtara v%s installed successfully!%s\n' "${GREEN}${BOLD}" "$version" "$NC"
     echo ""
     echo "  Binary:        ${RUNTARA_DIR}/bin/runtara-server"
-    echo "  Wasmtime:      ${RUNTARA_DIR}/bin/wasmtime"
     echo "  Agents:        ${RUNTARA_DIR}/agents/"
     echo "  Config:        ${CONFIG_DIR}/runtara-server.conf"
     echo "  Data:          ${DATA_DIR}/"

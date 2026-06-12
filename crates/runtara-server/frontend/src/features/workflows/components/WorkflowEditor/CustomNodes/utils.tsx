@@ -13,6 +13,7 @@ import { type Note, ValueType } from '@/generated/RuntaraRuntimeApi.ts';
 import {
   parseSchema,
   buildSchemaFromFields,
+  type SchemaField,
 } from '@/features/workflows/utils/schema';
 import {
   snapToGrid,
@@ -86,6 +87,15 @@ function mapMatchTypeFromAPI(matchType: string): string {
   return MATCH_TYPE_API_TO_UI[matchType] || matchType.toLowerCase();
 }
 
+function normalizeSchemaFieldForEditor(field: SchemaField): SchemaField {
+  return {
+    ...field,
+    type: field.type || 'string',
+    required: field.required !== false,
+    description: field.description || '',
+  };
+}
+
 export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
   return layoutReactFlowElements(nodes, edges);
 }
@@ -132,11 +142,16 @@ export function composeExecutionGraph(
   options?: {
     name?: string;
     description?: string;
-    variables?: Record<string, { type: string; value: unknown }>;
+    variables?: Record<
+      string,
+      { type: string; value: unknown; description?: string | null }
+    >;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
+    durable?: boolean | null;
+    entryPoint?: string;
   }
 ): ExecutionGraph | null {
   const nodesMap: any = new Map();
@@ -147,8 +162,7 @@ export function composeExecutionGraph(
   if (options?.name !== undefined) {
     executionGraph.name = options.name;
   }
-  // Only include description if it has a non-empty value
-  if (options?.description) {
+  if (options?.description !== undefined) {
     executionGraph.description = options.description;
   }
 
@@ -167,6 +181,12 @@ export function composeExecutionGraph(
   }
   if (options?.rateLimitBudgetMs !== undefined) {
     executionGraph.rateLimitBudgetMs = options.rateLimitBudgetMs;
+  }
+  if (options?.durable !== undefined) {
+    executionGraph.durable = options.durable;
+  }
+  if (options?.entryPoint) {
+    executionGraph.entryPoint = options.entryPoint;
   }
 
   // Separate notes from regular nodes
@@ -255,7 +275,12 @@ export function composeExecutionGraph(
     if (stepType === 'Split' || stepType === 'While') {
       const containerStep = nodesMap.get(node.id);
       if (containerStep && !containerStep.subgraph) {
-        containerStep.subgraph = { steps: {} };
+        // Seed the rebuilt subgraph with the graph-level fields captured at
+        // load time (variables, schemas, name, description, notes, ...).
+        containerStep.subgraph = {
+          ...(containerStep.data?.subgraphMeta || {}),
+          steps: {},
+        };
       }
     }
   });
@@ -265,7 +290,9 @@ export function composeExecutionGraph(
       const parent = nodesMap.get(node.parentId);
       if (parent) {
         if (!parent.subgraph) {
-          parent.subgraph = {};
+          parent.subgraph = {
+            ...(parent.data?.subgraphMeta || {}),
+          };
           parent.subgraph.steps = {};
         }
         parent.subgraph.steps[node.id] = nodesMap.get(node.id);
@@ -308,21 +335,35 @@ export function composeExecutionGraph(
         if (!parent.subgraph.executionPlan) {
           parent.subgraph.executionPlan = [];
         }
-        parent.subgraph.executionPlan.push({
+        const planEdge: Record<string, unknown> = {
           fromStep: edge.source,
           toStep: edge.target,
           label: specLabel,
-        });
+        };
+        if ((edge.data as any)?.condition !== undefined) {
+          planEdge.condition = (edge.data as any).condition;
+        }
+        if ((edge.data as any)?.priority !== undefined) {
+          planEdge.priority = Number((edge.data as any).priority);
+        }
+        parent.subgraph.executionPlan.push(planEdge);
       }
     } else {
       if (!executionGraph.executionPlan) {
         executionGraph.executionPlan = [];
       }
-      executionGraph.executionPlan.push({
+      const planEdge: Record<string, unknown> = {
         fromStep: edge.source,
         toStep: edge.target,
         label: specLabel,
-      });
+      };
+      if ((edge.data as any)?.condition !== undefined) {
+        planEdge.condition = (edge.data as any).condition;
+      }
+      if ((edge.data as any)?.priority !== undefined) {
+        planEdge.priority = Number((edge.data as any).priority);
+      }
+      executionGraph.executionPlan.push(planEdge);
     }
   });
 
@@ -343,6 +384,10 @@ function stripEditorOnlyStepFields(steps?: Record<string, any>) {
     delete step.renderingParameters;
     if (step.subgraph?.steps) {
       stripEditorOnlyStepFields(step.subgraph.steps);
+    }
+    // WaitForSignal nested onWait graph (container-mode steps).
+    if (step.onWait?.steps) {
+      stripEditorOnlyStepFields(step.onWait.steps);
     }
   }
 }
@@ -446,12 +491,20 @@ function addStarts(executionGraph: ExecutionGraphDto) {
 
   function findAllStarts(executionGraph: ExecutionGraphDto) {
     const { steps = {}, executionPlan = [] } = executionGraph;
-    const entry = findStart(steps, executionPlan);
-    executionGraph.entryPoint = entry;
+    if (!executionGraph.entryPoint || !steps[executionGraph.entryPoint]) {
+      const entry = findStart(steps, executionPlan);
+      executionGraph.entryPoint = entry;
+    }
 
     for (const step of Object.values(steps)) {
       if (step.subgraph) {
         findAllStarts(step.subgraph);
+      }
+      // WaitForSignal onWait is a nested ExecutionGraph too — keep its
+      // entryPoint valid as children are added/removed/rewired.
+      const onWait = (step as { onWait?: ExecutionGraphDto }).onWait;
+      if (onWait?.steps) {
+        findAllStarts(onWait);
       }
     }
   }
@@ -502,7 +555,14 @@ function normalizeConditionExpression(condition: any): any {
   return {
     ...condition,
     type: condition.type || 'operation',
-    arguments: convertConditionArguments(condition.op, condition.arguments),
+    arguments: convertConditionArguments(
+      condition.op,
+      condition.arguments,
+      undefined,
+      // Save path: string IN/NOT_IN right-hand sides become real arrays
+      // (the runtime requires an array; a string RHS is a dead condition).
+      { parseInLists: true }
+    ),
   };
 }
 
@@ -531,6 +591,12 @@ function cleanNodeData(steps: Record<string, any>) {
       splitParallelism: _7,
       splitSequential: _8,
       splitDontStopOnFailed: _9,
+      splitMaxRetries,
+      splitRetryDelay,
+      splitTimeout,
+      splitAllowNull,
+      splitConvertSingleValue,
+      splitBatchSize,
       formTabs: _10,
       startMode: _11,
       selectedTriggerId: _12,
@@ -542,6 +608,7 @@ function cleanNodeData(steps: Record<string, any>) {
       whileCondition,
       whileMaxIterations,
       whileTimeout,
+      subgraphMeta: _15,
       ...restData
     } = data;
     // Suppress unused variable warnings for destructured exclusions
@@ -559,6 +626,7 @@ function cleanNodeData(steps: Record<string, any>) {
     void _12;
     void _13;
     void _14;
+    void _15;
 
     if (subgraph) {
       data.subgraph = {
@@ -595,7 +663,9 @@ function cleanNodeData(steps: Record<string, any>) {
         const typedVal = val as {
           valueType: 'reference' | 'immediate' | 'composite' | 'template';
           value: any;
+          type?: string;
           typeHint?: string;
+          default?: any;
           defaultValue?: any;
         };
 
@@ -628,17 +698,13 @@ function cleanNodeData(steps: Record<string, any>) {
           valueType: typedVal.valueType || 'immediate',
           value: coercedValue,
         };
-        if (
-          typedVal.valueType === 'reference' &&
-          isValidValueType(typedVal.typeHint)
-        ) {
-          out.type = typedVal.typeHint;
+        const typeHint = typedVal.typeHint ?? typedVal.type;
+        if (typedVal.valueType === 'reference' && isValidValueType(typeHint)) {
+          out.type = typeHint;
         }
-        if (
-          typedVal.valueType === 'reference' &&
-          typedVal.defaultValue !== undefined
-        ) {
-          out.default = typedVal.defaultValue;
+        const defaultValue = typedVal.defaultValue ?? typedVal.default;
+        if (typedVal.valueType === 'reference' && defaultValue !== undefined) {
+          out.default = defaultValue;
         }
         return out;
       };
@@ -708,9 +774,17 @@ function cleanNodeData(steps: Record<string, any>) {
         const isTemplate = value.includes('{{');
 
         if (!isTemplate) {
-          // For non-template strings, only parse as JSON if typeHint is explicitly 'json'
-          // No auto-detection - explicit typeHint required
-          if (typeHint === 'json') {
+          // For non-template strings, only parse as JSON if the typeHint is
+          // explicitly JSON-shaped. 'object'/'array' are form-level hints
+          // (e.g. Finish output types) that keep the editors' object-vs-array
+          // distinction; they carry the same parse semantics as 'json' and
+          // are never emitted as backend type hints (isValidValueType).
+          // No auto-detection - explicit typeHint required.
+          if (
+            typeHint === 'json' ||
+            typeHint === 'object' ||
+            typeHint === 'array'
+          ) {
             try {
               finalValue = JSON.parse(value);
             } catch {
@@ -725,9 +799,7 @@ function cleanNodeData(steps: Record<string, any>) {
             if (!isNaN(numValue)) {
               // For integers, ensure we get a whole number
               finalValue =
-                typeHint === 'integer'
-                  ? Math.trunc(numValue)
-                  : numValue;
+                typeHint === 'integer' ? Math.trunc(numValue) : numValue;
             }
           }
 
@@ -775,6 +847,84 @@ function cleanNodeData(steps: Record<string, any>) {
       return [type, mappingValue];
     };
 
+    const hasMappingValuePayload = (mappingValue: any): boolean => {
+      if (!mappingValue || typeof mappingValue !== 'object') return false;
+      if (!('value' in mappingValue)) return false;
+      if (mappingValue.value === undefined) return false;
+      if (mappingValue.value === null) {
+        return mappingValue.valueType === 'immediate';
+      }
+      if (
+        typeof mappingValue.value === 'string' &&
+        mappingValue.value.trim() === ''
+      ) {
+        return false;
+      }
+      return true;
+    };
+
+    const serializeSourceMappingValue = (mapping: any[]): any | undefined => {
+      if (!Array.isArray(mapping) || mapping.length === 0) return undefined;
+      const sourceEntry =
+        mapping.find((item: any) => item?.type === 'value') ?? mapping[0];
+      if (!sourceEntry) return undefined;
+      if (
+        sourceEntry.value === undefined ||
+        (typeof sourceEntry.value === 'string' &&
+          sourceEntry.value.trim() === '')
+      ) {
+        return undefined;
+      }
+
+      const [, sourceValue] = processMappingEntry({
+        type: 'value',
+        value: sourceEntry.value,
+        typeHint: sourceEntry.typeHint,
+        valueType: sourceEntry.valueType,
+        defaultValue: sourceEntry.defaultValue,
+      }) as [string, any];
+
+      return hasMappingValuePayload(sourceValue) ? sourceValue : undefined;
+    };
+
+    const parseObjectValue = (value: any): Record<string, any> | undefined => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return value;
+      }
+      if (typeof value === 'string' && value.trim()) {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed;
+          }
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    };
+
+    const serializeMappingObject = (
+      value: any,
+      valueType?: string
+    ): Record<string, any> | undefined => {
+      const objectValue = parseObjectValue(value);
+      if (!objectValue) {
+        return undefined;
+      }
+
+      if (valueType === 'composite') {
+        const processed = processCompositeValue(objectValue);
+        return processed.value &&
+          typeof processed.value === 'object' &&
+          !Array.isArray(processed.value)
+          ? processed.value
+          : undefined;
+      }
+
+      return objectValue;
+    };
+
     // Filter out empty optional fields that shouldn't be sent to the API
     const optionalFieldsToFilterIfEmpty = [
       'agentId',
@@ -791,15 +941,23 @@ function cleanNodeData(steps: Record<string, any>) {
     if (Array.isArray(inputMapping)) {
       const preserveInvalidMappingsForRustValidation =
         data.stepType === 'Finish';
+      // Error/Log extract direct fields (code, message, level, ...) from the
+      // filtered mapping, where '' is the form's "field cleared" signal and
+      // must keep deleting the key. Every other consumer serializes a real
+      // inputMapping object, where immediate '' is a legal DSL value.
+      const emptyStringMeansCleared =
+        data.stepType === 'Error' || data.stepType === 'Log';
       const filteredMapping = inputMapping.filter(
         ({
           type,
           value,
           valueType,
+          autoSeeded,
         }: {
           type: string;
           value: any;
           valueType?: string;
+          autoSeeded?: boolean;
         }) => {
           // Filter out entries with empty keys (field names)
           if (!type || type.trim() === '') {
@@ -814,7 +972,20 @@ function cleanNodeData(steps: Record<string, any>) {
             if (preserveInvalidMappingsForRustValidation) {
               return true;
             }
-            return value === null && valueType === 'immediate';
+            if (value === null && valueType === 'immediate') {
+              return true;
+            }
+            // Immediate '' is legal DSL: keep entries that were loaded from the
+            // step JSON or explicitly authored by the user. Only drop rows the
+            // editor auto-seeded from the capability/child-workflow schema and
+            // that still hold their untouched empty value (autoSeeded flag set
+            // at seed time, see InputMappingField auto-populate).
+            return (
+              !emptyStringMeansCleared &&
+              value === '' &&
+              valueType === 'immediate' &&
+              !autoSeeded
+            );
           }
           return true;
         }
@@ -833,9 +1004,24 @@ function cleanNodeData(steps: Record<string, any>) {
           delete filteredRestData[field];
         });
         normalizedMapping.forEach(
-          ({ type, value }: { type: string; value: any }) => {
+          ({
+            type,
+            value,
+            valueType,
+          }: {
+            type: string;
+            value: any;
+            valueType?: string;
+          }) => {
             if (errorFields.includes(type)) {
               filteredRestData[type] = value; // Direct string value
+            } else if (type === 'context') {
+              const context = serializeMappingObject(value, valueType);
+              if (context && Object.keys(context).length > 0) {
+                filteredRestData.context = context;
+              } else {
+                delete filteredRestData.context;
+              }
             }
           }
         );
@@ -848,9 +1034,24 @@ function cleanNodeData(steps: Record<string, any>) {
           delete filteredRestData[field];
         });
         normalizedMapping.forEach(
-          ({ type, value }: { type: string; value: any }) => {
+          ({
+            type,
+            value,
+            valueType,
+          }: {
+            type: string;
+            value: any;
+            valueType?: string;
+          }) => {
             if (logFields.includes(type)) {
               filteredRestData[type] = value;
+            } else if (type === 'context') {
+              const context = serializeMappingObject(value, valueType);
+              if (context && Object.keys(context).length > 0) {
+                filteredRestData.context = context;
+              } else {
+                delete filteredRestData.context;
+              }
             }
           }
         );
@@ -924,6 +1125,23 @@ function cleanNodeData(steps: Record<string, any>) {
       );
     }
 
+    if (restData.stepType === 'Delay') {
+      const durationItem = Array.isArray(inputMapping)
+        ? inputMapping.find((item: any) => item.type === 'durationMs')
+        : undefined;
+      delete cleaned[id].inputMapping;
+      if (durationItem?.value !== undefined && durationItem.value !== '') {
+        const [, durationValue] = processMappingEntry({
+          type: 'durationMs',
+          value: durationItem.value,
+          typeHint: durationItem.typeHint || 'number',
+          valueType: durationItem.valueType || 'immediate',
+          defaultValue: durationItem.defaultValue,
+        }) as [string, unknown];
+        cleaned[id].durationMs = durationValue;
+      }
+    }
+
     // Ensure EmbedWorkflow has childWorkflowId and childVersion at root level (DSL v2.0.0 requirement)
     if (restData.stepType === 'EmbedWorkflow') {
       if (childWorkflowId) {
@@ -954,7 +1172,7 @@ function cleanNodeData(steps: Record<string, any>) {
       // Build the config object for Split step
       const splitConfig: {
         value?: {
-          valueType: 'reference' | 'immediate';
+          valueType: 'reference' | 'immediate' | 'template' | 'composite';
           value: unknown;
           type?: string;
           default?: unknown;
@@ -965,68 +1183,31 @@ function cleanNodeData(steps: Record<string, any>) {
         variables?: Record<
           string,
           {
-            valueType: 'reference' | 'immediate' | 'composite';
+            valueType: 'reference' | 'immediate' | 'composite' | 'template';
             value: unknown;
             type?: string;
           }
         >;
+        maxRetries?: number;
+        retryDelay?: number;
+        timeout?: number;
+        allowNull?: boolean;
+        convertSingleValue?: boolean;
+        batchSize?: number;
       } = {};
 
-      // Get the array source value from inputMapping (which was the array format)
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        const hasSplitSourceValue =
-          firstMapping &&
-          firstMapping.value !== undefined &&
-          firstMapping.value !== null &&
-          !(
-            typeof firstMapping.value === 'string' &&
-            firstMapping.value.trim() === ''
-          );
-        if (hasSplitSourceValue) {
-          const splitValueType = firstMapping.valueType || 'reference';
-          splitConfig.value = {
-            valueType: splitValueType,
-            value: firstMapping.value,
-            ...(splitValueType === 'reference' &&
-            isValidValueType(firstMapping.typeHint)
-              ? { type: firstMapping.typeHint }
-              : {}),
-            ...(splitValueType === 'reference' &&
-            firstMapping.defaultValue !== undefined
-              ? { default: firstMapping.defaultValue }
-              : {}),
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        splitConfig.value = sourceValue;
       }
 
       // Keep existing value if form inputMapping is temporarily empty.
       // This prevents emitting invalid Split config without the required source value.
       if (
         !splitConfig.value &&
-        existingSplitConfig?.value &&
-        existingSplitConfig.value.value !== undefined &&
-        existingSplitConfig.value.value !== null &&
-        !(
-          typeof existingSplitConfig.value.value === 'string' &&
-          existingSplitConfig.value.value.trim() === ''
-        )
+        hasMappingValuePayload(existingSplitConfig?.value)
       ) {
-        const splitValueType =
-          existingSplitConfig.value.valueType === 'immediate'
-            ? 'immediate'
-            : 'reference';
-        splitConfig.value = {
-          valueType: splitValueType,
-          value: existingSplitConfig.value.value,
-          ...(splitValueType === 'reference' && existingSplitConfig.value.type
-            ? { type: existingSplitConfig.value.type }
-            : {}),
-          ...(splitValueType === 'reference' &&
-          existingSplitConfig.value.default !== undefined
-            ? { default: existingSplitConfig.value.default }
-            : {}),
-        };
+        splitConfig.value = existingSplitConfig.value;
       }
 
       // Add execution options from the form data
@@ -1039,8 +1220,29 @@ function cleanNodeData(steps: Record<string, any>) {
       if (data.splitDontStopOnFailed === true) {
         splitConfig.dontStopOnFailed = true;
       }
+      const advancedSplitFields: Array<
+        [keyof typeof splitConfig, unknown, (value: unknown) => unknown]
+      > = [
+        ['maxRetries', splitMaxRetries, Number],
+        ['retryDelay', splitRetryDelay, Number],
+        ['timeout', splitTimeout, Number],
+        ['allowNull', splitAllowNull, Boolean],
+        ['convertSingleValue', splitConvertSingleValue, Boolean],
+        ['batchSize', splitBatchSize, Number],
+      ];
+      for (const [field, formValue, coerce] of advancedSplitFields) {
+        if (formValue !== undefined && formValue !== null && formValue !== '') {
+          (splitConfig as any)[field] = coerce(formValue);
+        } else if (existingSplitConfig?.[field] !== undefined) {
+          (splitConfig as any)[field] = existingSplitConfig[field];
+        }
+      }
 
-      // Add variables from splitVariablesFields
+      // Add variables from splitVariablesFields. Route every variable through
+      // the shared processMappingEntry path so templates serialize as real
+      // template MappingValues, typed immediates (number/boolean) are coerced
+      // from their form strings, composites are normalized to backend format,
+      // and reference type hints only carry legal backend ValueTypes.
       if (
         Array.isArray(data.splitVariablesFields) &&
         data.splitVariablesFields.length > 0
@@ -1048,7 +1250,7 @@ function cleanNodeData(steps: Record<string, any>) {
         const variables: Record<
           string,
           {
-            valueType: 'reference' | 'immediate' | 'composite';
+            valueType: 'reference' | 'immediate' | 'composite' | 'template';
             value: unknown;
             type?: string;
           }
@@ -1057,18 +1259,22 @@ function cleanNodeData(steps: Record<string, any>) {
           const variableName =
             typeof varField.name === 'string' ? varField.name.trim() : '';
           if (variableName && varField.value !== undefined) {
-            const resolvedValueType: 'reference' | 'immediate' | 'composite' =
+            const resolvedValueType:
+              | 'reference'
+              | 'immediate'
+              | 'composite'
+              | 'template' =
               varField.valueType ||
               (typeof varField.value === 'object' && varField.value !== null
                 ? 'composite'
                 : 'immediate');
-            variables[variableName] = {
-              valueType: resolvedValueType,
+            const [, mappingValue] = processMappingEntry({
+              type: variableName,
               value: varField.value,
-              ...(resolvedValueType === 'reference' && varField.type
-                ? { type: varField.type }
-                : {}),
-            };
+              typeHint: varField.type,
+              valueType: resolvedValueType,
+            }) as [string, (typeof variables)[string]];
+            variables[variableName] = mappingValue;
           }
         }
         if (Object.keys(variables).length > 0) {
@@ -1083,7 +1289,13 @@ function cleanNodeData(steps: Record<string, any>) {
         (splitConfig.variables ||
           splitConfig.parallelism !== undefined ||
           splitConfig.sequential !== undefined ||
-          splitConfig.dontStopOnFailed !== undefined)
+          splitConfig.dontStopOnFailed !== undefined ||
+          splitConfig.maxRetries !== undefined ||
+          splitConfig.retryDelay !== undefined ||
+          splitConfig.timeout !== undefined ||
+          splitConfig.allowNull !== undefined ||
+          splitConfig.convertSingleValue !== undefined ||
+          splitConfig.batchSize !== undefined)
       ) {
         splitConfig.value = {
           valueType: 'reference',
@@ -1097,7 +1309,13 @@ function cleanNodeData(steps: Record<string, any>) {
         splitConfig.variables ||
         splitConfig.parallelism !== undefined ||
         splitConfig.sequential !== undefined ||
-        splitConfig.dontStopOnFailed !== undefined
+        splitConfig.dontStopOnFailed !== undefined ||
+        splitConfig.maxRetries !== undefined ||
+        splitConfig.retryDelay !== undefined ||
+        splitConfig.timeout !== undefined ||
+        splitConfig.allowNull !== undefined ||
+        splitConfig.convertSingleValue !== undefined ||
+        splitConfig.batchSize !== undefined
       ) {
         cleaned[id].config = splitConfig;
       }
@@ -1119,7 +1337,12 @@ function cleanNodeData(steps: Record<string, any>) {
       delete cleaned[id].switchRoutingMode;
 
       const switchConfig: {
-        value?: { valueType: string; value: unknown };
+        value?: {
+          valueType: string;
+          value: unknown;
+          type?: string;
+          default?: unknown;
+        };
         cases?: Array<{
           match: any;
           matchType: string;
@@ -1130,19 +1353,12 @@ function cleanNodeData(steps: Record<string, any>) {
       } = {};
 
       if (Array.isArray(inputMapping)) {
-        // Extract value field
-        const valueItem = inputMapping.find(
-          (item: any) => item.type === 'value'
-        );
-        if (valueItem?.value !== undefined && valueItem.value !== '') {
-          const isRef =
-            typeof valueItem.value === 'string' &&
-            valueItem.value.includes('{{');
-          switchConfig.value = {
-            valueType:
-              valueItem.valueType || (isRef ? 'reference' : 'immediate'),
-            value: valueItem.value,
-          };
+        // Serialize the switch value through the shared mapping path (same as
+        // Split/Filter/GroupBy) so reference type hints, fallback defaults,
+        // and composite values round-trip.
+        const sourceValue = serializeSourceMappingValue(inputMapping);
+        if (sourceValue) {
+          switchConfig.value = sourceValue;
         }
 
         // Extract cases
@@ -1162,21 +1378,24 @@ function cleanNodeData(steps: Record<string, any>) {
           }));
         }
 
-        // Extract default
+        // Extract default — only when the entry was authored. An absent
+        // default means "no match is an error" at runtime, so fabricating
+        // one (or persisting a cleared '') would change semantics.
         const defaultItem = inputMapping.find(
           (item: any) => item.type === 'default'
         );
-        if (defaultItem?.value !== undefined) {
+        if (
+          defaultItem !== undefined &&
+          defaultItem.value !== undefined &&
+          defaultItem.value !== ''
+        ) {
           switchConfig.default = defaultItem.value;
         }
       }
 
-      // Add config if it has any meaningful fields (value, cases, or default)
-      if (
-        switchConfig.value ||
-        switchConfig.cases ||
-        switchConfig.default !== undefined
-      ) {
+      // SwitchConfig requires `value` (deny_unknown_fields + mandatory field
+      // on the backend); never emit a config object lacking it.
+      if (switchConfig.value) {
         cleaned[id].config = switchConfig;
       }
     }
@@ -1185,26 +1404,27 @@ function cleanNodeData(steps: Record<string, any>) {
     if (restData.stepType === 'Filter') {
       delete cleaned[id].inputMapping;
       delete cleaned[id].filterCondition;
+      const existingFilterConfig = (restData as any).config;
 
       const filterConfig: {
-        value?: { valueType: 'reference' | 'immediate'; value: unknown };
+        value?: any;
         condition?: any;
       } = {};
 
-      // Get the array source value from inputMapping
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        if (firstMapping?.value) {
-          filterConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
-            value: firstMapping.value,
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        filterConfig.value = sourceValue;
+      } else if (hasMappingValuePayload(existingFilterConfig?.value)) {
+        filterConfig.value = existingFilterConfig.value;
       }
 
       // Add condition from form data
       if (filterCondition) {
         filterConfig.condition = normalizeConditionExpression(filterCondition);
+      } else if (existingFilterConfig?.condition) {
+        filterConfig.condition = normalizeConditionExpression(
+          existingFilterConfig.condition
+        );
       }
 
       // Only add config if it has the required fields
@@ -1245,27 +1465,26 @@ function cleanNodeData(steps: Record<string, any>) {
       delete cleaned[id].inputMapping;
       delete cleaned[id].groupByKey;
       delete cleaned[id].groupByExpectedKeys;
+      const existingGroupByConfig = (restData as any).config;
 
       const groupByConfig: {
-        value?: { valueType: 'reference' | 'immediate'; value: unknown };
+        value?: any;
         key?: string;
         expectedKeys?: unknown[];
       } = {};
 
-      // Get the array source value from inputMapping
-      if (Array.isArray(inputMapping) && inputMapping.length > 0) {
-        const firstMapping = inputMapping[0];
-        if (firstMapping?.value) {
-          groupByConfig.value = {
-            valueType: firstMapping.valueType || 'reference',
-            value: firstMapping.value,
-          };
-        }
+      const sourceValue = serializeSourceMappingValue(inputMapping);
+      if (sourceValue) {
+        groupByConfig.value = sourceValue;
+      } else if (hasMappingValuePayload(existingGroupByConfig?.value)) {
+        groupByConfig.value = existingGroupByConfig.value;
       }
 
       // Add group key from form data
       if (groupByKey) {
         groupByConfig.key = groupByKey;
+      } else if (existingGroupByConfig?.key) {
+        groupByConfig.key = existingGroupByConfig.key;
       }
 
       // Add expected keys from form data (already an array)
@@ -1274,6 +1493,8 @@ function cleanNodeData(steps: Record<string, any>) {
         groupByExpectedKeys.length > 0
       ) {
         groupByConfig.expectedKeys = groupByExpectedKeys;
+      } else if (Array.isArray(existingGroupByConfig?.expectedKeys)) {
+        groupByConfig.expectedKeys = existingGroupByConfig.expectedKeys;
       }
 
       // Only add config if it has the required fields
@@ -1294,6 +1515,8 @@ function cleanNodeData(steps: Record<string, any>) {
         maxIterations?: number | null;
         temperature?: number | null;
         maxTokens?: number | null;
+        maxRetries?: number | null;
+        retryDelay?: number | null;
       } = {};
 
       if (Array.isArray(inputMapping)) {
@@ -1363,6 +1586,26 @@ function cleanNodeData(steps: Record<string, any>) {
         if (maxTokensItem?.value !== undefined && maxTokensItem.value !== '') {
           aiAgentConfig.maxTokens = Number(maxTokensItem.value);
         }
+
+        const maxRetriesItem = inputMapping.find(
+          (item: any) => item.type === 'maxRetries'
+        );
+        if (
+          maxRetriesItem?.value !== undefined &&
+          maxRetriesItem.value !== ''
+        ) {
+          aiAgentConfig.maxRetries = Number(maxRetriesItem.value);
+        }
+
+        const retryDelayItem = inputMapping.find(
+          (item: any) => item.type === 'retryDelay'
+        );
+        if (
+          retryDelayItem?.value !== undefined &&
+          retryDelayItem.value !== ''
+        ) {
+          aiAgentConfig.retryDelay = Number(retryDelayItem.value);
+        }
       }
 
       // Memory config: serialize from inputMapping entries into config.memory
@@ -1427,9 +1670,25 @@ function cleanNodeData(steps: Record<string, any>) {
       cleaned[id].config = aiAgentConfig;
     }
 
-    // WaitForSignal step: fields are top-level (not nested under config)
+    // WaitForSignal step: fields are top-level (not nested under config).
+    // Cleared form fields must DELETE the stale top-level key — loaded step
+    // data is spread into node.data and would otherwise resurrect on save.
+    // Semantics of absent keys: timeoutMs = wait indefinitely; pollIntervalMs =
+    // runtime default (1000ms); responseSchema = no validation; action = none.
     if (restData.stepType === 'WaitForSignal') {
       delete cleaned[id].inputMapping;
+
+      // Container-mode WaitForSignal: composeExecutionGraph rebuilds parented
+      // children into `subgraph` (generic container path); the DSL field is
+      // `onWait`. The rebuilt container is the single source of truth — it
+      // overwrites any raw onWait leftover in restData. A container with no
+      // children produces no subgraph, so the onWait key is removed entirely
+      // (an empty onWait graph has no meaning and the empty-steps graph shape
+      // is never validated/compiled).
+      if (subgraph) {
+        cleaned[id].onWait = data.subgraph;
+        delete cleaned[id].subgraph;
+      }
 
       if (Array.isArray(inputMapping)) {
         // responseSchema: convert SchemaField[] → Record<string, SchemaField>
@@ -1444,28 +1703,88 @@ function cleanNodeData(steps: Record<string, any>) {
           cleaned[id].responseSchema = buildSchemaFromFields(
             responseSchemaItem.value
           );
+        } else {
+          delete cleaned[id].responseSchema;
         }
 
-        // timeoutMs: serialize as MappingValue if present
+        // timeoutMs: serialize as MappingValue if present. The runtime
+        // (wait_timeout_ms in runtara-workflow-stdlib) requires the resolved
+        // value to be a number, so only immediate (numeric) and reference
+        // modes are valid — template renders to a string and composite to an
+        // object, both rejected at runtime. Non-numeric immediates (e.g.
+        // legacy template strings that would serialize as NaN → null) are
+        // dropped instead of emitting invalid JSON.
         const timeoutItem = inputMapping.find(
           (item: any) => item.type === 'timeoutMs'
         );
+        delete cleaned[id].timeoutMs;
         if (timeoutItem?.value !== undefined && timeoutItem.value !== '') {
-          cleaned[id].timeoutMs = {
-            valueType: timeoutItem.valueType || 'immediate',
-            value:
-              timeoutItem.valueType === 'reference'
-                ? timeoutItem.value
-                : Number(timeoutItem.value),
-          };
+          if (timeoutItem.valueType === 'reference') {
+            cleaned[id].timeoutMs = {
+              valueType: 'reference',
+              value: timeoutItem.value,
+            };
+          } else {
+            const timeoutNumber = Number(timeoutItem.value);
+            if (Number.isFinite(timeoutNumber)) {
+              cleaned[id].timeoutMs = {
+                valueType: 'immediate',
+                value: timeoutNumber,
+              };
+            }
+          }
         }
 
-        // pollIntervalMs: serialize as plain number
+        // pollIntervalMs: serialize as plain integer (backend type is u64;
+        // serde rejects decimals)
         const pollItem = inputMapping.find(
           (item: any) => item.type === 'pollIntervalMs'
         );
+        delete cleaned[id].pollIntervalMs;
         if (pollItem?.value !== undefined && pollItem.value !== '') {
-          cleaned[id].pollIntervalMs = Number(pollItem.value);
+          const pollNumber = Number(pollItem.value);
+          if (Number.isFinite(pollNumber)) {
+            cleaned[id].pollIntervalMs = Math.round(pollNumber);
+          }
+        }
+
+        const actionKeyItem = inputMapping.find(
+          (item: any) => item.type === 'actionKey'
+        );
+        const actionCorrelationItem = inputMapping.find(
+          (item: any) => item.type === 'actionCorrelation'
+        );
+        const actionContextItem = inputMapping.find(
+          (item: any) => item.type === 'actionContext'
+        );
+        const action: Record<string, unknown> = {};
+        if (actionKeyItem?.value) {
+          action.key = String(actionKeyItem.value);
+        }
+        const correlation = serializeMappingObject(
+          actionCorrelationItem?.value,
+          actionCorrelationItem?.valueType
+        );
+        if (correlation && Object.keys(correlation).length > 0) {
+          action.correlation = correlation;
+        }
+        const context = serializeMappingObject(
+          actionContextItem?.value,
+          actionContextItem?.valueType
+        );
+        if (context && Object.keys(context).length > 0) {
+          action.context = context;
+        }
+        if (Object.keys(action).length > 0) {
+          cleaned[id].action = action;
+        } else {
+          delete cleaned[id].action;
+        }
+
+        // onWait: the form editor sets `onWait` to undefined when blanked;
+        // drop null/undefined leftovers so the key never resurrects.
+        if (cleaned[id].onWait == null) {
+          delete cleaned[id].onWait;
         }
       }
     }
@@ -1500,7 +1819,12 @@ export function executionGraphToReactFlow(
     steps,
     executionPlan || []
   );
-  const nodes = applyStoredNodeVisualState(parsedNodes, graphToProcess.nodes);
+  // Stored visual state may predate a node's containerization (e.g. a
+  // WaitForSignal whose onWait was authored as JSON while it was a basic
+  // node), so re-clamp container sizes to their children afterwards.
+  const nodes = ensureContainersContainChildren(
+    applyStoredNodeVisualState(parsedNodes, graphToProcess.nodes)
+  );
 
   // Convert notes to React Flow nodes
   // New format uses: { text, position: {x, y} }
@@ -1552,9 +1876,57 @@ function normalizeNodesAndEdges(
     const { subgraph, ...data } = step;
     const { inputMapping = {} } = data;
 
-    const nodeType = step.stepType
-      ? STEP_TYPES[step.stepType] || NODE_TYPES.BasicNode
-      : NODE_TYPES.BasicNode;
+    // WaitForSignal `onWait` is a nested ExecutionGraph (DSL field name
+    // differs from `subgraph`, machinery is identical). A non-empty onWait
+    // explodes into child nodes with parentId — exactly like a Split
+    // subgraph — and its graph-level fields ride the subgraphMeta carrier.
+    // The raw key is removed from node.data so the restData spread on save
+    // can never resurrect it; the rebuilt container is the source of truth.
+    // Empty/malformed onWait graphs stay in node.data (defensive JSON path).
+    let onWaitGraph: ExecutionGraphDto | undefined;
+    if ((step.stepType as string) === 'WaitForSignal') {
+      const rawOnWait = (data as Record<string, unknown>).onWait as
+        | (ExecutionGraphDto & Record<string, unknown>)
+        | undefined;
+      if (
+        rawOnWait &&
+        typeof rawOnWait === 'object' &&
+        !Array.isArray(rawOnWait) &&
+        rawOnWait.steps &&
+        typeof rawOnWait.steps === 'object' &&
+        Object.keys(rawOnWait.steps).length > 0
+      ) {
+        onWaitGraph = rawOnWait;
+        delete (data as Record<string, unknown>).onWait;
+      }
+    }
+
+    // Preserve subgraph-level ExecutionGraph fields (variables, schemas,
+    // name, description, notes, entryPoint, ...). Child steps/edges become
+    // React Flow nodes and the subgraph is rebuilt from them on save, so
+    // anything not carried here would be silently dropped by a save.
+    const nestedGraph = subgraph ?? onWaitGraph;
+    if (nestedGraph) {
+      const {
+        steps: _subgraphSteps,
+        executionPlan: _subgraphPlan,
+        ...subgraphMeta
+      } = nestedGraph as Record<string, unknown>;
+      void _subgraphSteps;
+      void _subgraphPlan;
+      if (Object.keys(subgraphMeta).length > 0) {
+        (data as Record<string, unknown>).subgraphMeta = subgraphMeta;
+      }
+    }
+
+    // WaitForSignal steps with an onWait graph render as containers so the
+    // existing Split/While container machinery (canvas group node, timeline
+    // scope, child drag/drop) applies unchanged.
+    const nodeType = onWaitGraph
+      ? NODE_TYPES.ContainerNode
+      : step.stepType
+        ? STEP_TYPES[step.stepType] || NODE_TYPES.BasicNode
+        : NODE_TYPES.BasicNode;
 
     // Helper function to safely parse potentially double-stringified values
     const safeParseValue = (value: any): any => {
@@ -1736,14 +2108,19 @@ function normalizeNodesAndEdges(
               const splitVariablesFields = config?.variables
                 ? Object.entries(config.variables).map(([name, varDef]) => {
                     const typedVarDef = varDef as {
-                      valueType?: 'reference' | 'immediate' | 'composite';
+                      valueType?:
+                        | 'reference'
+                        | 'immediate'
+                        | 'composite'
+                        | 'template';
                       value: unknown;
                       type?: string;
                     };
                     const resolvedValueType:
                       | 'reference'
                       | 'immediate'
-                      | 'composite' =
+                      | 'composite'
+                      | 'template' =
                       typedVarDef.valueType ||
                       (typeof typedVarDef.value === 'object' &&
                       typedVarDef.value !== null
@@ -1783,25 +2160,13 @@ function normalizeNodesAndEdges(
                 // Override inputMapping with config.value for Split steps
                 inputMapping: splitInputMapping,
                 splitInputSchemaFields: parsedInputSchema
-                  ? Object.entries(parsedInputSchema).map(
-                      ([name, typeDef]) => ({
-                        name,
-                        type:
-                          typeof typeDef === 'object' && typeDef !== null
-                            ? (typeDef as any).type || 'string'
-                            : 'string',
-                      })
+                  ? parseSchema(parsedInputSchema).map(
+                      normalizeSchemaFieldForEditor
                     )
                   : [],
                 splitOutputSchemaFields: (data as any).outputSchema
-                  ? Object.entries((data as any).outputSchema).map(
-                      ([name, typeDef]) => ({
-                        name,
-                        type:
-                          typeof typeDef === 'object' && typeDef !== null
-                            ? (typeDef as any).type || 'string'
-                            : 'string',
-                      })
+                  ? parseSchema((data as any).outputSchema).map(
+                      normalizeSchemaFieldForEditor
                     )
                   : [],
                 outputSchema: safeParseValue((data as any).outputSchema),
@@ -1810,6 +2175,12 @@ function normalizeNodesAndEdges(
                 splitParallelism: config?.parallelism ?? 0,
                 splitSequential: config?.sequential ?? false,
                 splitDontStopOnFailed: config?.dontStopOnFailed ?? false,
+                splitMaxRetries: config?.maxRetries ?? undefined,
+                splitRetryDelay: config?.retryDelay ?? undefined,
+                splitTimeout: config?.timeout ?? undefined,
+                splitAllowNull: config?.allowNull ?? false,
+                splitConvertSingleValue: config?.convertSingleValue ?? false,
+                splitBatchSize: config?.batchSize ?? undefined,
               };
             })()
           : {}),
@@ -1819,19 +2190,24 @@ function normalizeNodesAndEdges(
               const config = (data as any).config;
               const switchInputMapping: any[] = [];
 
-              // Convert config.value to value field
+              // Convert config.value to value field. Carry the backend `type`
+              // and `default` through so the save path can round-trip them.
               if (config?.value) {
                 switchInputMapping.push({
                   type: 'value',
                   value: config.value.value,
-                  typeHint: config.value.type || 'string',
+                  typeHint: config.value.type ?? 'auto',
                   valueType: config.value.valueType || 'reference',
+                  ...(config.value.default !== undefined
+                    ? { defaultValue: config.value.default }
+                    : {}),
                 });
               } else {
                 switchInputMapping.push({
                   type: 'value',
                   value: '',
-                  typeHint: 'string',
+                  typeHint: 'auto',
+                  valueType: 'reference',
                 });
               }
 
@@ -1848,12 +2224,16 @@ function normalizeNodesAndEdges(
                 typeHint: 'json',
               });
 
-              // Convert config.default
-              switchInputMapping.push({
-                type: 'default',
-                value: config?.default ?? {},
-                typeHint: 'json',
-              });
+              // Convert config.default — only when the workflow authored one.
+              // An absent default means "no match fails the step"; fabricating
+              // a {} here would silently change semantics on the next save.
+              if (config?.default !== undefined) {
+                switchInputMapping.push({
+                  type: 'default',
+                  value: config.default,
+                  typeHint: 'json',
+                });
+              }
 
               // Detect routing mode: any case with a route field
               const hasRoutes = uiCases.some(
@@ -1879,8 +2259,11 @@ function normalizeNodesAndEdges(
                     {
                       type: 'value',
                       value: config.value.value,
-                      typeHint: 'auto',
+                      typeHint: config.value.type ?? 'auto',
                       valueType: config.value.valueType || 'reference',
+                      ...(config.value.default !== undefined
+                        ? { defaultValue: config.value.default }
+                        : {}),
                     },
                   ]
                 : [];
@@ -1912,8 +2295,11 @@ function normalizeNodesAndEdges(
                     {
                       type: 'value',
                       value: config.value.value,
-                      typeHint: 'auto',
+                      typeHint: config.value.type ?? 'auto',
                       valueType: config.value.valueType || 'reference',
+                      ...(config.value.default !== undefined
+                        ? { defaultValue: config.value.default }
+                        : {}),
                     },
                   ]
                 : [];
@@ -2005,6 +2391,30 @@ function normalizeNodesAndEdges(
                 });
               }
 
+              if (
+                config?.maxRetries !== undefined &&
+                config.maxRetries !== null
+              ) {
+                aiInputMapping.push({
+                  type: 'maxRetries',
+                  value: config.maxRetries,
+                  valueType: 'immediate',
+                  typeHint: 'integer',
+                });
+              }
+
+              if (
+                config?.retryDelay !== undefined &&
+                config.retryDelay !== null
+              ) {
+                aiInputMapping.push({
+                  type: 'retryDelay',
+                  value: config.retryDelay,
+                  valueType: 'immediate',
+                  typeHint: 'integer',
+                });
+              }
+
               // Memory config: deserialize config.memory into form fields
               if (config?.memory) {
                 aiInputMapping.push({
@@ -2058,7 +2468,8 @@ function normalizeNodesAndEdges(
               }
 
               // Build tools array from executionPlan edges with labels
-              // Filter out 'memory' label — it's not a tool
+              // Filter out 'memory' (memory provider) and 'onError' (error
+              // route) labels — they are not tools
               const toolNames = (executionPlan || [])
                 .filter(
                   (e) =>
@@ -2066,7 +2477,8 @@ function normalizeNodesAndEdges(
                     e.label &&
                     e.label !== 'next' &&
                     e.label !== 'default' &&
-                    e.label !== 'memory'
+                    e.label !== 'memory' &&
+                    e.label !== 'onError'
                 )
                 .map((e) => e.label as string);
 
@@ -2087,21 +2499,33 @@ function normalizeNodesAndEdges(
                 const schemaFields = parseSchema(config.outputSchema);
                 aiInputMapping.push({
                   type: 'outputSchema',
-                  value: schemaFields.map((f) => ({
-                    name: f.name,
-                    type: f.type || 'string',
-                    required: f.required !== false,
-                    description: f.description || '',
-                    ...(Array.isArray(f.enum) && f.enum.length > 0
-                      ? { enum: f.enum }
-                      : {}),
-                  })),
+                  value: schemaFields.map(normalizeSchemaFieldForEditor),
                   valueType: 'immediate',
                   typeHint: 'json',
                 });
               }
 
               return { inputMapping: aiInputMapping };
+            })()
+          : {}),
+        // For Delay steps, parse durationMs into inputMapping format
+        ...((step.stepType as string) === 'Delay'
+          ? (() => {
+              const delayStep = data as any;
+              const duration = delayStep.durationMs;
+              return {
+                inputMapping: [
+                  {
+                    type: 'durationMs',
+                    value: duration?.value ?? '',
+                    valueType: duration?.valueType || 'immediate',
+                    typeHint: duration?.type || 'number',
+                    ...(duration?.default !== undefined
+                      ? { defaultValue: duration.default }
+                      : {}),
+                  },
+                ],
+              };
             })()
           : {}),
         // For WaitForSignal steps, parse top-level fields into inputMapping
@@ -2114,12 +2538,7 @@ function normalizeNodesAndEdges(
               const schemaFields = parseSchema(waitStep.responseSchema);
               waitInputMapping.push({
                 type: 'responseSchema',
-                value: schemaFields.map((f) => ({
-                  name: f.name,
-                  type: f.type || 'string',
-                  required: f.required !== false,
-                  description: f.description || '',
-                })),
+                value: schemaFields.map(normalizeSchemaFieldForEditor),
                 valueType: 'immediate',
                 typeHint: 'json',
               });
@@ -2148,10 +2567,37 @@ function normalizeNodesAndEdges(
                   waitStep.pollIntervalMs !== undefined &&
                   waitStep.pollIntervalMs !== null
                     ? String(waitStep.pollIntervalMs)
-                    : '1000',
+                    : '',
                 valueType: 'immediate',
                 typeHint: 'number',
               });
+
+              if (waitStep.action?.key) {
+                waitInputMapping.push({
+                  type: 'actionKey',
+                  value: waitStep.action.key,
+                  valueType: 'immediate',
+                  typeHint: 'string',
+                });
+              }
+              if (waitStep.action?.correlation) {
+                waitInputMapping.push({
+                  type: 'actionCorrelation',
+                  value: convertCompositeToUIFormat(
+                    waitStep.action.correlation
+                  ),
+                  valueType: 'composite',
+                  typeHint: 'json',
+                });
+              }
+              if (waitStep.action?.context) {
+                waitInputMapping.push({
+                  type: 'actionContext',
+                  value: convertCompositeToUIFormat(waitStep.action.context),
+                  valueType: 'composite',
+                  typeHint: 'json',
+                });
+              }
 
               return { inputMapping: waitInputMapping };
             })()
@@ -2174,6 +2620,14 @@ function normalizeNodesAndEdges(
                   valueType: 'immediate',
                 },
               ];
+              if (logStep.context) {
+                logInputMapping.push({
+                  type: 'context',
+                  value: convertCompositeToUIFormat(logStep.context),
+                  typeHint: 'json',
+                  valueType: 'composite',
+                });
+              }
 
               return { inputMapping: logInputMapping };
             })()
@@ -2208,6 +2662,14 @@ function normalizeNodesAndEdges(
                   valueType: 'immediate',
                 },
               ];
+              if (errorStep.context) {
+                errorInputMapping.push({
+                  type: 'context',
+                  value: convertCompositeToUIFormat(errorStep.context),
+                  typeHint: 'json',
+                  valueType: 'composite',
+                });
+              }
 
               return { inputMapping: errorInputMapping };
             })()
@@ -2262,6 +2724,14 @@ function normalizeNodesAndEdges(
       );
       nodes.push(...childNodes);
       edges.push(...childEdges);
+    } else if (onWaitGraph) {
+      const { nodes: childNodes, edges: childEdges } = normalizeNodesAndEdges(
+        onWaitGraph.steps || {},
+        onWaitGraph.executionPlan || [],
+        id
+      );
+      nodes.push(...childNodes);
+      edges.push(...childEdges);
     }
   }
 
@@ -2305,6 +2775,10 @@ function normalizeNodesAndEdges(
       source: edge.fromStep ?? '',
       target: edge.toStep ?? '',
       sourceHandle,
+      data: {
+        ...(edge.condition !== undefined ? { condition: edge.condition } : {}),
+        ...(edge.priority !== undefined ? { priority: edge.priority } : {}),
+      },
     });
   }
 

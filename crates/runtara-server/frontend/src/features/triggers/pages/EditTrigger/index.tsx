@@ -8,6 +8,11 @@ import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { queryClient } from '@/main';
 import { scheduleToCron, cronToSchedule } from '@/features/triggers/utils/cron';
 import {
+  buildCronConfiguration,
+  buildWebhookConfiguration,
+} from '@/features/triggers/utils/trigger-configuration';
+import { AlertTriangle } from 'lucide-react';
+import {
   getInvocationTriggerById,
   updateInvocationTrigger,
 } from '@/features/triggers/queries';
@@ -43,6 +48,8 @@ export function EditTrigger() {
       return workflowsData.map((workflow: WorkflowDto) => ({
         id: workflow.id,
         name: workflow.name,
+        // CronInputsField renders this as a structured static-inputs form
+        inputSchema: workflow.inputSchema,
       }));
     },
   });
@@ -75,20 +82,38 @@ export function EditTrigger() {
       eventType,
       connectionId,
       sessionMode,
+      cronInputs,
+      cronDebug,
+      webhookDebug,
+      webhookConnectionId,
       configuration,
       ...restTrigger
     } = data;
 
-    let finalConfiguration = null;
+    // The server reads keys the form does not edit (e.g. `connection_id` for
+    // webhook signature verification, `debug`, `inputs`), and the form's own
+    // `configuration` value is rebuilt by ConfigurationField (reset to {} for
+    // non-APPLICATION types). Merge over the loaded trigger's configuration
+    // so API-authored keys survive an edit-save.
+    const existingConfiguration: Record<string, unknown> =
+      triggerData?.configuration && typeof triggerData.configuration === 'object'
+        ? { ...triggerData.configuration }
+        : {};
+
+    let finalConfiguration: Record<string, unknown> | null = null;
 
     switch (triggerType) {
       case 'CRON':
-        if (scheduleConfig) {
-          finalConfiguration = { expression: scheduleToCron(scheduleConfig) };
-        }
+        finalConfiguration = buildCronConfiguration({
+          existing: existingConfiguration,
+          expression: scheduleConfig ? scheduleToCron(scheduleConfig) : undefined,
+          inputsText: cronInputs,
+          debug: cronDebug,
+        });
         break;
       case 'APPLICATION':
         finalConfiguration = {
+          ...existingConfiguration,
           ...(configuration || {}),
           applicationName,
           eventType,
@@ -96,15 +121,39 @@ export function EditTrigger() {
         break;
       case 'CHANNEL':
         finalConfiguration = {
-          ...(configuration || {}),
-          connection_id: connectionId || (configuration as any)?.connection_id,
-          ...(sessionMode && sessionMode !== 'per_sender'
-            ? { session_mode: sessionMode }
-            : {}),
+          ...existingConfiguration,
+          connection_id:
+            connectionId || (existingConfiguration as any)?.connection_id,
         };
+        if (sessionMode && sessionMode !== 'per_sender') {
+          finalConfiguration.session_mode = sessionMode;
+        } else {
+          // per_sender is the default; remove the key so it doesn't linger
+          delete finalConfiguration.session_mode;
+        }
         break;
+      case 'HTTP':
+      case 'EMAIL': {
+        // Merge the form-managed keys (debug, connection_id) over the
+        // existing configuration so API-authored keys survive an edit-save.
+        const webhookConfiguration = buildWebhookConfiguration({
+          existing: existingConfiguration,
+          debug: webhookDebug,
+          connectionId: webhookConnectionId,
+        });
+        finalConfiguration =
+          Object.keys(webhookConfiguration).length > 0
+            ? webhookConfiguration
+            : null;
+        break;
+      }
       default:
-        finalConfiguration = null;
+        // Other types: keep the trigger's existing configuration
+        // instead of wiping it to null.
+        finalConfiguration =
+          Object.keys(existingConfiguration).length > 0
+            ? existingConfiguration
+            : null;
         break;
     }
 
@@ -141,6 +190,33 @@ export function EditTrigger() {
     );
   } else {
     initValues.scheduleConfig = defaultScheduleConfig;
+  }
+
+  // Surface CRON-managed configuration keys (inputs, debug) as form fields
+  initValues.cronInputs = '';
+  initValues.cronDebug = false;
+  if (initValues.triggerType === 'CRON' && initValues.configuration) {
+    if (initValues.configuration.inputs !== undefined) {
+      initValues.cronInputs = JSON.stringify(
+        initValues.configuration.inputs,
+        null,
+        2
+      );
+    }
+    initValues.cronDebug = initValues.configuration.debug === true;
+  }
+
+  // Surface webhook-managed configuration keys (debug, connection_id) for
+  // HTTP/EMAIL triggers
+  initValues.webhookDebug = false;
+  initValues.webhookConnectionId = '';
+  if (
+    (initValues.triggerType === 'HTTP' || initValues.triggerType === 'EMAIL') &&
+    initValues.configuration
+  ) {
+    initValues.webhookDebug = initValues.configuration.debug === true;
+    initValues.webhookConnectionId =
+      initValues.configuration.connection_id || '';
   }
 
   // Extract connectionId and sessionMode for CHANNEL triggers
@@ -198,6 +274,16 @@ export function EditTrigger() {
         </section>
 
         <section className="space-y-4 px-4 sm:px-5">
+          {initValues.triggerType === 'APPLICATION' && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>
+                Application triggers are not currently fired by the platform.
+                You can still edit this trigger, but it will not launch its
+                workflow until Application events are supported.
+              </p>
+            </div>
+          )}
           <TriggerForm
             title="Trigger details"
             description="Adjust the workflow mapping, schedule, and application payloads."

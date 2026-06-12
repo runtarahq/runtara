@@ -113,6 +113,10 @@ impl DirectJsonManifest {
         if mapping.purpose == "finish.inputMapping" {
             output = unwrap_finish_outputs(output);
         }
+        if mapping.purpose == "agent.inputMapping" {
+            resolve_nested_references(&mut output, &source);
+            output = unwrap_top_level_immediate_envelopes(output);
+        }
         serde_json::to_vec(&output)
             .map_err(|err| format!("failed to serialize mapping output: {err}"))
     }
@@ -888,6 +892,28 @@ impl DirectJsonManifest {
         .into_bytes())
     }
 
+    /// Structured WAIT_TIMEOUT envelope for onError routing (GAP-14). The
+    /// plain-string `wait_timeout_error` stays the /failed payload for parity
+    /// with the generated path; routed handlers need a structured envelope so
+    /// `steps.__error.code` / `.category` references resolve.
+    pub fn wait_timeout_error_envelope(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, String> {
+        self.wait_step(step_id)?;
+        serde_json::to_vec(&serde_json::json!({
+            "code": "WAIT_TIMEOUT",
+            "message": format!(
+                "WaitForSignal step '{step_id}' timed out after {timeout_ms}ms waiting for signal '{signal_id}'"
+            ),
+            "category": "timeout",
+            "severity": "error",
+        }))
+        .map_err(|err| format!("failed to serialize wait-timeout envelope: {err}"))
+    }
+
     /// Build generated-code-compatible inputs for a WaitForSignal `onWait` graph.
     pub fn wait_on_wait_variables(
         &self,
@@ -1238,6 +1264,80 @@ impl DirectJsonManifest {
     }
 
     /// True when the turn output's `action` is `complete`.
+    /// Per-turn durability: the checkpoint key for one AiAgent loop turn —
+    /// `{step_id}.turn.{iteration}`, scoped by `variables._loop_indices` like
+    /// the breakpoint and agent cache keys, so Split/While-nested loops get
+    /// distinct keys per iteration scope.
+    pub fn ai_turn_cache_key(
+        step_id: &str,
+        iteration: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
+        let indices_suffix = wait_loop_indices_suffix(&source);
+        Ok(format!("{step_id}.turn.{iteration}{indices_suffix}"))
+    }
+
+    /// Per-turn durability: wrap the post-turn loop state for the turn
+    /// checkpoint. `state`/`pending` are the loop's JSON payloads; the
+    /// monotonic tool-call counter must survive replay because
+    /// WaitForSignal-tool signal ids embed it.
+    pub fn ai_turn_snapshot(
+        state: &[u8],
+        pending: &[u8],
+        tool_calls: u32,
+        complete: bool,
+    ) -> Result<Vec<u8>, String> {
+        let state: Value = serde_json::from_slice(state)
+            .map_err(|err| format!("failed to parse ai-turn snapshot state: {err}"))?;
+        let pending: Value = serde_json::from_slice(pending)
+            .map_err(|err| format!("failed to parse ai-turn snapshot pending: {err}"))?;
+        serde_json::to_vec(&serde_json::json!({
+            "state": state,
+            "pending": pending,
+            "toolCalls": tool_calls,
+            "complete": complete,
+        }))
+        .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
+    }
+
+    /// Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
+    pub fn ai_turn_snapshot_part(snapshot: &[u8], part: u32) -> Result<Vec<u8>, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        let value = match part {
+            0 => snapshot.get("state").cloned().unwrap_or(Value::Null),
+            1 => snapshot
+                .get("pending")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+            other => return Err(format!("unknown ai-turn snapshot part {other}")),
+        };
+        serde_json::to_vec(&value)
+            .map_err(|err| format!("failed to serialize ai-turn snapshot part: {err}"))
+    }
+
+    /// Per-turn durability: the snapshot's monotonic tool-call counter.
+    pub fn ai_turn_snapshot_tool_calls(snapshot: &[u8]) -> Result<u32, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        Ok(snapshot
+            .get("toolCalls")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32)
+    }
+
+    /// Per-turn durability: whether the snapshotted turn completed the loop.
+    pub fn ai_turn_snapshot_complete(snapshot: &[u8]) -> Result<bool, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        Ok(snapshot
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
     pub fn ai_turn_is_complete(turn_out: &[u8]) -> Result<bool, String> {
         let turn_out: Value = serde_json::from_slice(turn_out)
             .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
@@ -1452,6 +1552,290 @@ impl DirectJsonManifest {
         );
         serde_json::to_vec(&Value::Object(steps))
             .map_err(|err| format!("failed to serialize AiAgent steps context: {err}"))
+    }
+
+    /// Build a `step_debug_start` payload for one dispatched AiAgent tool call.
+    ///
+    /// Mirrors the generated loop's synthetic tool-call step: id
+    /// `{ai_step}.tool.{name}.{call_number}`, name `Tool: {name}`, type
+    /// `AiAgentToolCall`, inputs `{tool_name, arguments, iteration,
+    /// call_number}`. `call_counter` is the loop's 0-based monotonic counter;
+    /// the visible call number is 1-based.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_tool_debug_start(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        iteration: u32,
+        call_counter: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-tool-debug source: {err}"))?;
+        let (step, tool_name, arguments) =
+            self.ai_tool_call_step(agent_id, turn_out, index, call_counter)?;
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step.id.clone(), timestamp);
+
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert(
+            "inputs".to_string(),
+            serde_json::json!({
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "iteration": iteration,
+                "call_number": call_counter + 1,
+            }),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-tool debug-start payload: {err}"))
+    }
+
+    /// Build the matching `step_debug_end` payload for a dispatched AiAgent
+    /// tool call, with the result wrapped in the legacy output envelope
+    /// `{tool_name, result, iteration, call_number}`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_tool_debug_end(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        iteration: u32,
+        call_counter: u32,
+        tool_result: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-tool-debug source: {err}"))?;
+        let (step, tool_name, _arguments) =
+            self.ai_tool_call_step(agent_id, turn_out, index, call_counter)?;
+        let result: Value = serde_json::from_slice(tool_result)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(tool_result).into_owned()));
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(&step.id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        let outputs = step_output_envelope(
+            &step,
+            serde_json::json!({
+                "tool_name": tool_name,
+                "result": result,
+                "iteration": iteration,
+                "call_number": call_counter + 1,
+            }),
+            None,
+        );
+        payload.insert("outputs".to_string(), outputs);
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-tool debug-end payload: {err}"))
+    }
+
+    /// Build a `step_debug_start` payload for an AiAgent conversation-memory
+    /// phase (load/save/compaction), mirroring the generated compiler's
+    /// synthetic memory steps. Phases: 0 = load, 1 = save, 2 = sliding-window
+    /// compaction, 3 = summarize compaction. The compaction phases return an
+    /// empty payload when the history is at/below `max_messages` — the caller
+    /// skips the event, matching the generated "only when exceeded" gate.
+    pub fn ai_memory_debug_start(
+        &self,
+        agent_id: u32,
+        phase: u32,
+        conversation: &[u8],
+        state: &[u8],
+        max_messages: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-memory-debug source: {err}"))?;
+        let phase = AiMemoryDebugPhase::from_code(phase)?;
+        let step = self.ai_memory_step(agent_id, phase)?;
+        let conversation_id = ai_memory_conversation_id(conversation)?;
+        let history = ai_memory_chat_history(state)?;
+
+        let inputs = match phase {
+            AiMemoryDebugPhase::Load => serde_json::json!({
+                "conversation_id": conversation_id,
+            }),
+            AiMemoryDebugPhase::Save => serde_json::json!({
+                "conversation_id": conversation_id,
+                "message_count": history.len(),
+            }),
+            AiMemoryDebugPhase::CompactSliding | AiMemoryDebugPhase::CompactSummarize => {
+                if history.len() <= max_messages as usize {
+                    return Ok(Vec::new());
+                }
+                let excess = history.len() - max_messages as usize;
+                let excess_key = match phase {
+                    AiMemoryDebugPhase::CompactSliding => "messages_to_drop",
+                    _ => "messages_to_compact",
+                };
+                let mut inputs = serde_json::json!({
+                    "strategy": phase.strategy(),
+                    "messages_before": history.len(),
+                    "max_messages": max_messages,
+                    "conversation_id": conversation_id,
+                });
+                if let Some(map) = inputs.as_object_mut() {
+                    map.insert(excess_key.to_string(), Value::from(excess));
+                }
+                inputs
+            }
+        };
+
+        let timestamp = timestamp_ms();
+        self.debug_start_ms
+            .borrow_mut()
+            .insert(step.id.clone(), timestamp);
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert("inputs".to_string(), inputs);
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-memory debug-start payload: {err}"))
+    }
+
+    /// Build the matching `step_debug_end` payload for an AiAgent memory
+    /// phase. `state` is the post-phase loop state; `prior_state` is the
+    /// pre-compaction state (an empty object for load/save).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_memory_debug_end(
+        &self,
+        agent_id: u32,
+        phase: u32,
+        conversation: &[u8],
+        state: &[u8],
+        prior_state: &[u8],
+        max_messages: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse ai-memory-debug source: {err}"))?;
+        let phase = AiMemoryDebugPhase::from_code(phase)?;
+        let step = self.ai_memory_step(agent_id, phase)?;
+        let conversation_id = ai_memory_conversation_id(conversation)?;
+        let history = ai_memory_chat_history(state)?;
+
+        let outputs = match phase {
+            // Load/save end events carry raw outputs (not the step output
+            // envelope), with truncated message previews — like the generated
+            // loop. Failures take the agent-error branch and fail the step, so
+            // an end event always reports success.
+            AiMemoryDebugPhase::Load | AiMemoryDebugPhase::Save => {
+                let previews: Vec<Value> = history.iter().map(ai_memory_message_preview).collect();
+                serde_json::json!({
+                    "success": true,
+                    "conversation_id": conversation_id,
+                    "message_count": history.len(),
+                    "messages": previews,
+                })
+            }
+            AiMemoryDebugPhase::CompactSliding | AiMemoryDebugPhase::CompactSummarize => {
+                let before = ai_memory_chat_history(prior_state)?;
+                if before.len() <= max_messages as usize {
+                    return Ok(Vec::new());
+                }
+                let excess = before.len() - max_messages as usize;
+                let details = match phase {
+                    AiMemoryDebugPhase::CompactSliding => serde_json::json!({
+                        "strategy": phase.strategy(),
+                        "success": true,
+                        "messages_before": before.len(),
+                        "messages_after": history.len(),
+                        "messages_dropped": excess,
+                    }),
+                    _ => serde_json::json!({
+                        "strategy": phase.strategy(),
+                        "success": true,
+                        "messages_before": before.len(),
+                        "messages_after": history.len(),
+                        "messages_compacted": excess,
+                        "summary": ai_memory_compaction_summary(&history),
+                    }),
+                };
+                step_output_envelope(&step, details, None)
+            }
+        };
+
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(&step.id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+        let mut payload = debug_event_base(&step, &source, timestamp);
+        payload.insert("outputs".to_string(), outputs);
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize ai-memory debug-end payload: {err}"))
+    }
+
+    /// The synthetic step identity for an AiAgent memory phase.
+    fn ai_memory_step(
+        &self,
+        agent_id: u32,
+        phase: AiMemoryDebugPhase,
+    ) -> Result<DirectJsonStep, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        Ok(DirectJsonStep {
+            id: format!("{}{}", agent.step_id, phase.id_suffix()),
+            step_type: phase.step_type().to_string(),
+            name: Some(phase.step_name().to_string()),
+            body: Value::Null,
+        })
+    }
+
+    /// The synthetic step identity for the `index`-th tool call of a turn,
+    /// plus the call's tool name and arguments.
+    fn ai_tool_call_step(
+        &self,
+        agent_id: u32,
+        turn_out: &[u8],
+        index: u32,
+        call_counter: u32,
+    ) -> Result<(DirectJsonStep, String, Value), String> {
+        let turn_out: Value = serde_json::from_slice(turn_out)
+            .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let call = turn_out
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .and_then(|calls| calls.get(index as usize));
+        let tool_name = call
+            .and_then(|call| call.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let arguments = call
+            .and_then(|call| call.get("arguments"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let step = DirectJsonStep {
+            id: format!("{}.tool.{}.{}", agent.step_id, tool_name, call_counter + 1),
+            step_type: "AiAgentToolCall".to_string(),
+            name: Some(format!("Tool: {tool_name}")),
+            body: Value::Null,
+        };
+        Ok((step, tool_name, arguments))
     }
 
     /// Validate resolved Agent inputs and return a generated-code-compatible
@@ -3534,6 +3918,139 @@ fn debug_event_base(
     payload
 }
 
+/// An AiAgent conversation-memory phase whose debug events surface as a
+/// synthetic step, mirroring the generated compiler (which used the
+/// `.memory_load`/`.memory_save`/`.memory.compact` id suffixes verbatim).
+#[derive(Clone, Copy, PartialEq)]
+enum AiMemoryDebugPhase {
+    Load,
+    Save,
+    CompactSliding,
+    CompactSummarize,
+}
+
+impl AiMemoryDebugPhase {
+    fn from_code(code: u32) -> Result<Self, String> {
+        match code {
+            0 => Ok(Self::Load),
+            1 => Ok(Self::Save),
+            2 => Ok(Self::CompactSliding),
+            3 => Ok(Self::CompactSummarize),
+            other => Err(format!("unknown ai-memory debug phase {other}")),
+        }
+    }
+
+    fn id_suffix(self) -> &'static str {
+        match self {
+            Self::Load => ".memory_load",
+            Self::Save => ".memory_save",
+            Self::CompactSliding | Self::CompactSummarize => ".memory.compact",
+        }
+    }
+
+    fn step_name(self) -> &'static str {
+        match self {
+            Self::Load => "Memory: Load",
+            Self::Save => "Memory: Save",
+            Self::CompactSliding => "Memory: Sliding Window",
+            Self::CompactSummarize => "Memory: Summarize",
+        }
+    }
+
+    fn step_type(self) -> &'static str {
+        match self {
+            Self::Load => "AiAgentMemoryLoad",
+            Self::Save => "AiAgentMemorySave",
+            Self::CompactSliding | Self::CompactSummarize => "AiAgentMemoryCompaction",
+        }
+    }
+
+    fn strategy(self) -> &'static str {
+        match self {
+            Self::CompactSliding => "sliding_window",
+            Self::CompactSummarize => "summarize",
+            _ => "",
+        }
+    }
+}
+
+/// The resolved conversation object's id (string, or null when absent).
+fn ai_memory_conversation_id(conversation: &[u8]) -> Result<Value, String> {
+    let conversation: Value = serde_json::from_slice(conversation)
+        .map_err(|err| format!("failed to parse ai-memory conversation: {err}"))?;
+    Ok(conversation
+        .get("conversation_id")
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+/// The loop state's chat history (empty when absent).
+fn ai_memory_chat_history(state: &[u8]) -> Result<Vec<Value>, String> {
+    let state: Value = serde_json::from_slice(state)
+        .map_err(|err| format!("failed to parse ai-memory state: {err}"))?;
+    Ok(state
+        .get("chat_history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// A `{role, preview}` entry for one serialized chat message, with the
+/// preview truncated to ~200 chars — the generated loop's debug-event shape.
+fn ai_memory_message_preview(message: &Value) -> Value {
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("?");
+    let parts: Vec<String> = match message.get("content") {
+        Some(Value::Array(items)) => items.iter().filter_map(ai_memory_content_preview).collect(),
+        Some(single) => ai_memory_content_preview(single).into_iter().collect(),
+        None => Vec::new(),
+    };
+    let preview = parts.join(" ");
+    let truncated = if preview.chars().count() > 200 {
+        let cut: String = preview.chars().take(200).collect();
+        format!("{cut}...")
+    } else {
+        preview
+    };
+    serde_json::json!({ "role": role, "preview": truncated })
+}
+
+/// Preview one content part: text verbatim, tool results/calls as markers.
+fn ai_memory_content_preview(part: &Value) -> Option<String> {
+    if let Some(text) = part.get("text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if part.get("type").and_then(Value::as_str) == Some("tool_result") {
+        let id = part.get("id").and_then(Value::as_str).unwrap_or("?");
+        return Some(format!("[tool_result:{id}]"));
+    }
+    if let Some(name) = part
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+    {
+        return Some(format!("[tool_call:{name}]"));
+    }
+    None
+}
+
+/// Extract the summary text the summarize-memory capability prepended as the
+/// first history message (`[Previous conversation summary]: …`).
+fn ai_memory_compaction_summary(history: &[Value]) -> Value {
+    const MARKER: &str = "[Previous conversation summary]: ";
+    history
+        .first()
+        .and_then(|message| match message.get("content") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str)),
+            Some(single) => single.get("text").and_then(Value::as_str),
+            None => None,
+        })
+        .and_then(|text| text.strip_prefix(MARKER))
+        .map(|summary| Value::String(summary.to_string()))
+        .unwrap_or(Value::Null)
+}
+
 fn switch_debug_inputs(config: &Value, source: &Value) -> Result<Value, String> {
     let value = config
         .get("value")
@@ -3961,7 +4478,14 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
                 })
             })
             .unwrap_or(Ok(false)),
-        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => Ok(false),
+        // Query-only operators: evaluated server-side inside object-model
+        // query conditions, never by the workflow runtime. Validation rejects
+        // them up front (E027); erroring here (instead of silently returning
+        // false) covers workflows compiled before that validation existed.
+        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => Err(format!(
+            "condition operator '{op}' is only valid inside object-model query conditions; \
+             the workflow runtime cannot evaluate it"
+        )),
         other => Err(format!("unsupported condition operator '{other}'")),
     }
 }
@@ -4171,6 +4695,163 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
             .map(Value::Array),
         _ => Err("composite mapping value must be an object or array".to_string()),
     }
+}
+
+/// Resolve `{valueType: "reference", value: "<path>"}` envelopes buried inside
+/// agent input payloads — e.g. `ConditionExpression` arguments or score
+/// expressions nested in an immediate `condition` value.
+///
+/// Two positions intentionally stay as references because their string value
+/// names an Object Model column rather than a workflow path:
+/// - argument 0 of field-based condition operators (`EQ`, `IN`, ...);
+/// - unqualified references inside `fn` call arguments (e.g. `SIMILARITY`).
+///
+/// Resolved references are rewritten as `{valueType: "immediate", value: X}`
+/// rather than the bare value: condition arguments are typed at the agent
+/// boundary as untagged `MappingValue` shapes, so a bare scalar there fails
+/// deserialization. [`unwrap_top_level_immediate_envelopes`] strips exactly
+/// one wrapper per top-level field so primitive-typed agent inputs still see
+/// their bare value.
+fn resolve_nested_references(value: &mut Value, source: &Value) {
+    match value {
+        Value::Object(map) => {
+            if is_reference_envelope(map) {
+                let resolved = apply_reference(map, source).unwrap_or(Value::Null);
+                let mut wrapped = Map::with_capacity(2);
+                wrapped.insert("valueType".to_string(), Value::String("immediate".into()));
+                wrapped.insert("value".to_string(), resolved);
+                *value = Value::Object(wrapped);
+                if let Value::Object(map) = value
+                    && let Some(inner) = map.get_mut("value")
+                {
+                    resolve_nested_references(inner, source);
+                }
+                return;
+            }
+
+            let is_immediate_envelope = matches!(
+                map.get("valueType"),
+                Some(Value::String(s)) if s == "immediate"
+            );
+            if is_immediate_envelope {
+                if let Some(inner) = map.get_mut("value") {
+                    resolve_nested_references(inner, source);
+                }
+                return;
+            }
+
+            if map.get("fn").and_then(Value::as_str).is_some()
+                && let Some(args) = map.get_mut("arguments").and_then(Value::as_array_mut)
+            {
+                for arg in args.iter_mut() {
+                    if arg
+                        .as_object()
+                        .is_some_and(is_unqualified_reference_envelope)
+                    {
+                        continue;
+                    }
+                    resolve_nested_references(arg, source);
+                }
+                return;
+            }
+
+            let condition_op = map.get("op").and_then(Value::as_str).map(str::to_owned);
+            if let Some(op) = condition_op.as_deref()
+                && let Some(args) = map.get_mut("arguments").and_then(Value::as_array_mut)
+            {
+                for (index, arg) in args.iter_mut().enumerate() {
+                    if index == 0
+                        && is_field_argument_operator(op)
+                        && arg.as_object().is_some_and(is_reference_envelope)
+                    {
+                        continue;
+                    }
+                    resolve_nested_references(arg, source);
+                }
+                return;
+            }
+
+            for child in map.values_mut() {
+                resolve_nested_references(child, source);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                resolve_nested_references(item, source);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip a single `{valueType: "immediate", value: X}` envelope from each
+/// top-level field. Pairs with [`resolve_nested_references`]: the resolver
+/// wraps resolved references as immediates, so a top-level field that was a
+/// reference nested directly inside an immediate would otherwise reach the
+/// agent still wrapped. Nested wrappers deeper in the payload survive intact.
+fn unwrap_top_level_immediate_envelopes(mut value: Value) -> Value {
+    if let Value::Object(map) = &mut value {
+        for child in map.values_mut() {
+            let Value::Object(child_map) = child else {
+                continue;
+            };
+            let is_immediate = matches!(
+                child_map.get("valueType"),
+                Some(Value::String(s)) if s == "immediate"
+            );
+            if !is_immediate {
+                continue;
+            }
+            if let Some(inner) = child_map.remove("value") {
+                *child = inner;
+            }
+        }
+    }
+    value
+}
+
+fn is_reference_envelope(map: &Map<String, Value>) -> bool {
+    matches!(
+        map.get("valueType"),
+        Some(Value::String(s)) if s == "reference"
+    ) && matches!(map.get("value"), Some(Value::String(_)))
+}
+
+fn is_unqualified_reference_envelope(map: &Map<String, Value>) -> bool {
+    let Some(path) = map.get("value").and_then(Value::as_str) else {
+        return false;
+    };
+    is_reference_envelope(map) && !is_qualified_workflow_path(path)
+}
+
+fn is_qualified_workflow_path(path: &str) -> bool {
+    matches!(
+        path.split('.').next(),
+        Some("data" | "variables" | "workflow" | "steps" | "loop" | "item")
+    )
+}
+
+fn is_field_argument_operator(op: &str) -> bool {
+    matches!(
+        op.to_ascii_uppercase().as_str(),
+        "EQ" | "NE"
+            | "GT"
+            | "GTE"
+            | "LT"
+            | "LTE"
+            | "STARTS_WITH"
+            | "ENDS_WITH"
+            | "CONTAINS"
+            | "IN"
+            | "NOT_IN"
+            | "IS_DEFINED"
+            | "IS_EMPTY"
+            | "IS_NOT_EMPTY"
+            | "SIMILARITY_GTE"
+            | "MATCH"
+            | "COSINE_DISTANCE_LTE"
+            | "L2_DISTANCE_LTE"
+    )
 }
 
 fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Value {
@@ -5300,6 +5981,153 @@ mod tests {
     }
 
     #[test]
+    fn agent_mapping_resolves_refs_nested_in_condition_payload() {
+        // Regression (direct-wasm migration): references buried inside an
+        // immediate condition payload — e.g. object-model query-instances
+        // loading an instance back by the id a previous step produced — must
+        // resolve against workflow scope like the generated compiler's
+        // resolve_nested_references pass did. Without it the agent receives
+        // the literal path string and the query silently matches nothing.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "schema_name": { "valueType": "immediate", "value": "Invoice" },
+            "condition": { "valueType": "immediate", "value": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    { "valueType": "reference", "value": "id" },
+                    { "valueType": "reference", "value": "steps.create.outputs.id" }
+                ]
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(
+            b"{}",
+            b"{}",
+            br#"{"create":{"outputs":{"id":"5f0c9c2e-7e2b-4d27-9c0a-1a2b3c4d5e6f"}}}"#,
+        )
+        .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output,
+            json!({
+                "schema_name": "Invoice",
+                "condition": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        // Field-position references name Object Model columns,
+                        // not workflow paths, so they stay references.
+                        { "valueType": "reference", "value": "id" },
+                        {
+                            "valueType": "immediate",
+                            "value": "5f0c9c2e-7e2b-4d27-9c0a-1a2b3c4d5e6f"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn agent_mapping_keeps_immediate_condition_literals_intact() {
+        let condition = json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "id" },
+                { "valueType": "immediate", "value": "literal-uuid" }
+            ]
+        });
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "condition": { "valueType": "immediate", "value": condition }
+        })))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "condition": condition }));
+    }
+
+    #[test]
+    fn agent_mapping_score_expression_keeps_column_refs() {
+        // `fn` call arguments mix Object Model column refs (unqualified) and
+        // workflow refs (qualified); only the latter resolve.
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "score_expression": { "valueType": "immediate", "value": {
+                "alias": "sim",
+                "expression": { "fn": "SIMILARITY", "arguments": [
+                    { "valueType": "reference", "value": "commodity_title" },
+                    { "valueType": "reference", "value": "data.customer_category" }
+                ]}
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"customer_category":"leather wallet"}"#, b"{}", b"{}")
+            .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output["score_expression"]["expression"]["arguments"],
+            json!([
+                { "valueType": "reference", "value": "commodity_title" },
+                { "valueType": "immediate", "value": "leather wallet" }
+            ])
+        );
+    }
+
+    #[test]
+    fn agent_mapping_unwraps_top_level_ref_inside_immediate() {
+        // A reference nested directly inside a top-level immediate gets
+        // resolved + wrapped by the nested pass; the top-level unwrap strips
+        // that single envelope so primitive-typed agent inputs see the bare
+        // value (matches the generated compiler's
+        // unwrap_top_level_immediate_envelopes).
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "name": { "valueType": "immediate", "value": {
+                "valueType": "reference", "value": "data.name"
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"name":"Ada"}"#, b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "name": "Ada" }));
+    }
+
+    #[test]
+    fn finish_mapping_leaves_nested_ref_envelopes_alone() {
+        // The nested-reference pass is an agent-boundary behavior; other
+        // mapping purposes pass immediate payloads through verbatim.
+        let payload = json!({
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "id" },
+                { "valueType": "reference", "value": "steps.create.outputs.id" }
+            ]
+        });
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "result": { "valueType": "immediate", "value": payload }
+        })))
+        .expect("manifest");
+        let source =
+            build_source(b"{}", b"{}", br#"{"create":{"outputs":{"id":"abc"}}}"#).expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(output, json!({ "result": payload }));
+    }
+
+    #[test]
     fn eval_condition_handles_equality_against_source() {
         let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
             "type": "operation",
@@ -5313,6 +6141,91 @@ mod tests {
         let source = build_source(br#"{"flag":true}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    #[test]
+    fn ai_turn_snapshot_round_trip_preserves_all_fields() {
+        let state = br#"{"action":"tools","chat_history":[{"role":"assistant"}],"iterations":1}"#;
+        let pending = br#"[{"tool_call_id":"call_1","content":"42"}]"#;
+
+        let snapshot = DirectJsonManifest::ai_turn_snapshot(state, pending, 7, false)
+            .expect("snapshot builds");
+
+        let restored_state =
+            DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 0).expect("state part");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored_state).unwrap(),
+            serde_json::from_slice::<Value>(state).unwrap()
+        );
+        let restored_pending =
+            DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 1).expect("pending part");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored_pending).unwrap(),
+            serde_json::from_slice::<Value>(pending).unwrap()
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_tool_calls(&snapshot).unwrap(),
+            7
+        );
+        assert!(!DirectJsonManifest::ai_turn_snapshot_complete(&snapshot).unwrap());
+
+        let complete =
+            DirectJsonManifest::ai_turn_snapshot(state, b"[]", 7, true).expect("complete snapshot");
+        assert!(DirectJsonManifest::ai_turn_snapshot_complete(&complete).unwrap());
+        assert!(DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 2).is_err());
+    }
+
+    #[test]
+    fn ai_turn_cache_key_scopes_loop_indices() {
+        let plain = DirectJsonManifest::ai_turn_cache_key("ai", 3, br#"{"variables":{}}"#)
+            .expect("plain key");
+        assert_eq!(plain, "ai.turn.3");
+
+        let scoped = DirectJsonManifest::ai_turn_cache_key(
+            "ai",
+            3,
+            br#"{"variables":{"_loop_indices":[2,5]}}"#,
+        )
+        .expect("scoped key");
+        assert!(
+            scoped.starts_with("ai.turn.3") && scoped != plain,
+            "loop-nested keys must differ from plain keys: {scoped}"
+        );
+    }
+
+    #[test]
+    fn eval_condition_errors_on_query_only_operators() {
+        // SIMILARITY_GTE / MATCH / COSINE_DISTANCE_LTE / L2_DISTANCE_LTE are
+        // object-model query operators with no workflow-runtime evaluator.
+        // They must error loudly (validation rejects them up front with E027;
+        // this covers workflows compiled before that validation existed) —
+        // never silently evaluate to false.
+        for op in [
+            "SIMILARITY_GTE",
+            "MATCH",
+            "COSINE_DISTANCE_LTE",
+            "L2_DISTANCE_LTE",
+        ] {
+            let manifest = DirectJsonManifest::parse(&condition_manifest(json!({
+                "type": "operation",
+                "op": op,
+                "arguments": [
+                    { "valueType": "reference", "value": "data.text" },
+                    { "valueType": "immediate", "value": "needle" },
+                    { "valueType": "immediate", "value": 0.5 }
+                ]
+            })))
+            .expect("manifest");
+            let source = build_source(br#"{"text":"haystack"}"#, b"{}", b"{}").expect("source");
+
+            let error = manifest
+                .eval_condition(0, &source)
+                .expect_err("query-only operator must error, not evaluate");
+            assert!(
+                error.contains(op) && error.contains("object-model"),
+                "unexpected error for {op}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -7657,6 +8570,267 @@ mod tests {
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
         assert_eq!(end["outputs"]["outputs"]["response"], json!("Hello!"));
+    }
+
+    #[test]
+    fn ai_tool_debug_payloads_match_generated_shape() {
+        // Tool calls dispatched by the AiAgent loop must surface as synthetic
+        // `{step}.tool.{name}.{call}` steps of type AiAgentToolCall, matching
+        // the generated compiler's per-tool-call debug events.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": {}
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-turn",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let turn_out = serde_json::to_vec(&json!({
+            "action": "tools",
+            "tool_calls": [{
+                "tool_call_id": "call_1",
+                "name": "echo",
+                "tool_index": 0,
+                "arguments": { "value": 42 }
+            }]
+        }))
+        .expect("turn out");
+
+        let start = manifest
+            .ai_tool_debug_start(0, &turn_out, 0, 1, 0, &source)
+            .expect("tool debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.tool.echo.1"));
+        assert_eq!(start["step_name"], json!("Tool: echo"));
+        assert_eq!(start["step_type"], json!("AiAgentToolCall"));
+        assert_eq!(
+            start["inputs"],
+            json!({
+                "tool_name": "echo",
+                "arguments": { "value": 42 },
+                "iteration": 1,
+                "call_number": 1
+            })
+        );
+
+        let end = manifest
+            .ai_tool_debug_end(0, &turn_out, 0, 1, 0, br#"{"echoed":42}"#, &source)
+            .expect("tool debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["step_id"], json!("agent.tool.echo.1"));
+        assert_eq!(end["step_type"], json!("AiAgentToolCall"));
+        assert_eq!(end["outputs"]["stepId"], json!("agent.tool.echo.1"));
+        assert_eq!(end["outputs"]["stepName"], json!("Tool: echo"));
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgentToolCall"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "tool_name": "echo",
+                "result": { "echoed": 42 },
+                "iteration": 1,
+                "call_number": 1
+            })
+        );
+        assert!(end["duration_ms"].is_number());
+
+        // A non-JSON tool result (raw bytes) is wrapped as a string.
+        let end = manifest
+            .ai_tool_debug_end(0, &turn_out, 0, 1, 0, b"plain text", &source)
+            .expect("tool debug end with raw result");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["outputs"]["result"], json!("plain text"));
+    }
+
+    #[test]
+    fn ai_memory_debug_payloads_match_generated_shape() {
+        // The memory load/save/compaction phases must surface as synthetic
+        // AiAgentMemory* steps with the generated compiler's payload shapes,
+        // and the compaction phases must skip (empty payload) below the
+        // threshold.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.inputMapping",
+                    "value": {}
+                }],
+                "agents": [{
+                    "id": 0,
+                    "stepId": "agent",
+                    "name": "Ask Model",
+                    "stepType": "AiAgent",
+                    "purpose": "agent.config",
+                    "agentId": "ai-tools",
+                    "capabilityId": "chat-turn",
+                    "inputMappingId": 0,
+                    "requiredInputs": [],
+                    "connectionId": null
+                }],
+                "steps": [{
+                    "id": "agent",
+                    "stepType": "AiAgent",
+                    "name": "Ask Model",
+                    "body": { "id": "agent", "stepType": "AiAgent", "name": "Ask Model" }
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let conversation = serde_json::to_vec(&json!({ "conversation_id": "conv-42" })).unwrap();
+        let state = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi there" }] },
+                { "role": "assistant", "content": [{ "id": "c1", "function": { "name": "echo", "arguments": {} } }] },
+                { "role": "user", "content": [{ "type": "tool_result", "id": "c1", "content": [] }] }
+            ],
+            "iterations": 1,
+            "tool_call_log": []
+        }))
+        .unwrap();
+        let empty = b"{}".to_vec();
+
+        // Load: start carries the conversation id; end carries count + previews.
+        let start = manifest
+            .ai_memory_debug_start(0, 0, &conversation, &empty, 0, &source)
+            .expect("load debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory_load"));
+        assert_eq!(start["step_name"], json!("Memory: Load"));
+        assert_eq!(start["step_type"], json!("AiAgentMemoryLoad"));
+        assert_eq!(start["inputs"], json!({ "conversation_id": "conv-42" }));
+
+        let end = manifest
+            .ai_memory_debug_end(0, 0, &conversation, &state, &empty, 0, &source)
+            .expect("load debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["success"], json!(true));
+        assert_eq!(end["outputs"]["message_count"], json!(3));
+        assert_eq!(
+            end["outputs"]["messages"][0],
+            json!({ "role": "user", "preview": "hi there" })
+        );
+        assert_eq!(
+            end["outputs"]["messages"][1],
+            json!({ "role": "assistant", "preview": "[tool_call:echo]" })
+        );
+        assert_eq!(
+            end["outputs"]["messages"][2],
+            json!({ "role": "user", "preview": "[tool_result:c1]" })
+        );
+
+        // Save: start carries the message count too.
+        let start = manifest
+            .ai_memory_debug_start(0, 1, &conversation, &state, 0, &source)
+            .expect("save debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory_save"));
+        assert_eq!(start["step_type"], json!("AiAgentMemorySave"));
+        assert_eq!(
+            start["inputs"],
+            json!({ "conversation_id": "conv-42", "message_count": 3 })
+        );
+
+        // Sliding-window compaction over the threshold: legacy id/name/fields.
+        let compacted = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi there" }] }
+            ]
+        }))
+        .unwrap();
+        let start = manifest
+            .ai_memory_debug_start(0, 2, &conversation, &state, 1, &source)
+            .expect("compact debug start");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        assert_eq!(start["step_id"], json!("agent.memory.compact"));
+        assert_eq!(start["step_name"], json!("Memory: Sliding Window"));
+        assert_eq!(start["step_type"], json!("AiAgentMemoryCompaction"));
+        assert_eq!(
+            start["inputs"],
+            json!({
+                "strategy": "sliding_window",
+                "messages_before": 3,
+                "messages_to_drop": 2,
+                "max_messages": 1,
+                "conversation_id": "conv-42"
+            })
+        );
+        let end = manifest
+            .ai_memory_debug_end(0, 2, &conversation, &compacted, &state, 1, &source)
+            .expect("compact debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["outputs"]["stepType"], json!("AiAgentMemoryCompaction"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "strategy": "sliding_window",
+                "success": true,
+                "messages_before": 3,
+                "messages_after": 1,
+                "messages_dropped": 2
+            })
+        );
+
+        // Below the threshold both compaction payloads are empty (event skipped).
+        let skipped = manifest
+            .ai_memory_debug_start(0, 2, &conversation, &state, 50, &source)
+            .expect("below-threshold start");
+        assert!(skipped.is_empty());
+        let skipped = manifest
+            .ai_memory_debug_end(0, 2, &conversation, &state, &state, 50, &source)
+            .expect("below-threshold end");
+        assert!(skipped.is_empty());
+
+        // Summarize compaction surfaces the prepended summary message.
+        let summarized = serde_json::to_vec(&json!({
+            "chat_history": [
+                { "role": "user", "content": [{ "type": "text", "text": "[Previous conversation summary]: user said hi" }] },
+                { "role": "user", "content": [{ "type": "tool_result", "id": "c1", "content": [] }] }
+            ]
+        }))
+        .unwrap();
+        let end = manifest
+            .ai_memory_debug_end(0, 3, &conversation, &summarized, &state, 2, &source)
+            .expect("summarize debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(end["step_name"], json!("Memory: Summarize"));
+        assert_eq!(
+            end["outputs"]["outputs"],
+            json!({
+                "strategy": "summarize",
+                "success": true,
+                "messages_before": 3,
+                "messages_after": 2,
+                "messages_compacted": 1,
+                "summary": "user said hi"
+            })
+        );
     }
 
     #[test]

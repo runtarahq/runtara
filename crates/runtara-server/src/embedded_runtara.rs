@@ -83,14 +83,16 @@ impl EmbeddedRuntara {
             .await?;
         info!("✓ runtara-core started on {}", core_http_addr);
 
-        // Create WASM runner for workflow execution.
-        // Workflows are compiled to wasm32-wasip2 and executed via wasmtime.
+        // Create the workflow runner. Workflows are compiled to wasm32-wasip2
+        // and executed either via the wasmtime CLI (one process per instance)
+        // or the embedded in-process engine — selected by RUNTARA_RUNNER.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            Arc::new(runtara_environment::runner::wasm::WasmRunner::new(
-                runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
-                persistence.clone(),
-            ));
-        info!("Using WasmRunner for workflow execution");
+            runtara_environment::runner::runner_from_env(persistence.clone())
+                .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
+        info!(
+            runner_type = runner.runner_type(),
+            "Workflow runner initialized"
+        );
 
         // Start Environment (management protocol)
         // Note: core_client_addr is what workflow processes use to connect to runtara-core.

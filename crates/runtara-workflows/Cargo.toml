@@ -45,3 +45,7 @@ base64 = { workspace = true }
 wasmparser = "0.247"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.0", default-features = false }
+# Embedded-vs-CLI A/B in tests/direct_wasm_execute.rs: the composed component
+# must behave identically under the in-process WorkflowExecutor.
+runtara-component-host = { path = "../runtara-component-host" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }

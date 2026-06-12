@@ -2,9 +2,9 @@
 //!
 //! Provider-router for deterministic AI capabilities (text completion, image
 //! generation, vision, embeddings) across multiple LLM providers (OpenAI, AWS
-//! Bedrock). Each capability inspects the active `_connection`'s
-//! `integration_id` to dispatch to the right provider; the runtara HTTP proxy
-//! handles credential injection and base-URL rewriting per provider (OpenAI:
+//! Bedrock). Each capability routes from an explicit `provider` input; the
+//! runtara HTTP proxy validates that provider against the selected connection,
+//! then handles credential injection and base-URL rewriting per provider (OpenAI:
 //! `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]` /
@@ -128,12 +128,14 @@ pub struct RawConnection {
 // Provider routing
 // ============================================================================
 
-const PROVIDER_OPENAI: &str = "openai_api_key";
-const PROVIDER_BEDROCK: &str = "aws_credentials";
-
-fn provider_of(connection: &RawConnection) -> &str {
-    connection.integration_id.as_str()
-}
+const PROVIDER_OPENAI: &str = runtara_ai::provider::PROVIDER_OPENAI;
+const PROVIDER_BEDROCK: &str = runtara_ai::provider::PROVIDER_BEDROCK;
+// Only referenced from the host-only `agent_info()`; the wasm component
+// resolves integrations at runtime via the connection proxy.
+#[cfg(not(target_arch = "wasm32"))]
+const INTEGRATION_OPENAI_API_KEY: &str = "openai_api_key";
+#[cfg(not(target_arch = "wasm32"))]
+const INTEGRATION_AWS_CREDENTIALS: &str = "aws_credentials";
 
 fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnection, AgentError> {
     connection.ok_or_else(|| {
@@ -141,12 +143,26 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-fn unsupported_provider(integration_id: &str) -> AgentError {
+fn require_provider(provider: &str) -> Result<&str, AgentError> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_MISSING_PROVIDER",
+            "LLM provider is required",
+        ));
+    }
+    if runtara_ai::provider::compatible_integration_ids_for_provider(provider).is_none() {
+        return Err(unsupported_provider(provider));
+    }
+    Ok(provider)
+}
+
+fn unsupported_provider(provider: &str) -> AgentError {
     AgentError::permanent(
         "AI_TOOLS_UNSUPPORTED_PROVIDER",
-        format!("LLM provider not supported: {}", integration_id),
+        format!("LLM provider not supported: {}", provider),
     )
-    .with_attr("integration_id", integration_id)
+    .with_attr("provider", provider)
 }
 
 // ============================================================================
@@ -181,6 +197,7 @@ fn openai_post(
         .request("POST", &url)
         .header("Content-Type", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .header("X-Runtara-Ai-Provider", PROVIDER_OPENAI)
         .body_bytes(&body_bytes)
         .call_agent()
         .map_err(|e| {
@@ -248,6 +265,7 @@ fn bedrock_post(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .header("X-Runtara-Ai-Provider", PROVIDER_BEDROCK)
         .body_bytes(&body_bytes)
         .call_agent()
         .map_err(|e| {
@@ -305,6 +323,13 @@ pub struct TextCompletionInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+    )]
+    #[serde(default)]
+    pub provider: String,
 
     #[field(
         display_name = "Prompt",
@@ -417,7 +442,7 @@ pub struct TextCompletionOutput {
 )]
 pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    match provider_of(connection) {
+    match require_provider(&input.provider)? {
         PROVIDER_OPENAI => text_completion_openai(&input, connection),
         PROVIDER_BEDROCK => text_completion_bedrock(&input, connection),
         other => Err(unsupported_provider(other)),
@@ -652,7 +677,7 @@ pub struct ChatCompletionInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider integration id (e.g. \"openai\" or \"bedrock\"); selects the provider explicitly rather than inferring it from the connection"
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
@@ -755,6 +780,7 @@ pub struct ChatCompletionOutput {
 )]
 pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
+    let provider = require_provider(&input.provider)?;
 
     let chat_history = serde_json::from_value::<Vec<runtara_ai::Message>>(Value::Array(
         input.chat_history.clone(),
@@ -767,19 +793,8 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
     ))
     .map_err(|e| AgentError::permanent("AI_CHAT_BAD_TOOLS", format!("invalid tools: {e}")))?;
 
-    // The provider comes from the AiAgent config (mirroring the generated loop,
-    // which passes `config.provider` as the integration id) rather than from the
-    // connection's integration id — the direct emitter passes an empty
-    // integration id in the connection-info and relies on the proxy to resolve
-    // credentials from the connection id. Fall back to the connection's
-    // integration id when the caller did not specify a provider.
-    let integration_id = if input.provider.is_empty() {
-        connection.integration_id.clone()
-    } else {
-        input.provider.clone()
-    };
     let req = runtara_ai::CompletionInvokeRequest {
-        integration_id,
+        integration_id: provider.to_string(),
         conn_params: connection.parameters.clone(),
         connection_id: connection.connection_id.clone(),
         model_id: input.model.clone(),
@@ -853,7 +868,10 @@ pub struct ChatTurnInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
 
-    #[field(display_name = "Provider", description = "LLM provider integration id")]
+    #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\")"
+    )]
     #[serde(default)]
     pub provider: String,
     #[field(display_name = "Model", description = "Model identifier")]
@@ -971,6 +989,7 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
     use runtara_ai::message::{AssistantContent, Message, ToolResultContent, UserContent};
 
     let connection = require_connection(input._connection.as_ref())?;
+    let provider = require_provider(&input.provider)?;
 
     let mut history =
         serde_json::from_value::<Vec<Message>>(Value::Array(input.chat_history.clone())).map_err(
@@ -1009,13 +1028,8 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
     let iterations = input.iterations + 1;
     let is_first = iterations == 1;
 
-    let integration_id = if input.provider.is_empty() {
-        connection.integration_id.clone()
-    } else {
-        input.provider.clone()
-    };
     let req = runtara_ai::CompletionInvokeRequest {
-        integration_id: integration_id.clone(),
+        integration_id: provider.to_string(),
         conn_params: connection.parameters.clone(),
         connection_id: connection.connection_id.clone(),
         model_id: input.model.clone(),
@@ -1135,7 +1149,10 @@ pub struct SummarizeMemoryInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
 
-    #[field(display_name = "Provider", description = "LLM provider integration id")]
+    #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\")"
+    )]
     #[serde(default)]
     pub provider: String,
     #[field(display_name = "Model", description = "Model identifier")]
@@ -1184,6 +1201,7 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
     use runtara_ai::message::Message;
 
     let connection = require_connection(input._connection.as_ref())?;
+    let provider = require_provider(&input.provider)?;
 
     let mut state = input.state.clone();
     let history = state
@@ -1205,13 +1223,8 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
          facts, decisions, and context:\n{old_json}"
     );
 
-    let integration_id = if input.provider.is_empty() {
-        connection.integration_id.clone()
-    } else {
-        input.provider.clone()
-    };
     let req = runtara_ai::CompletionInvokeRequest {
-        integration_id,
+        integration_id: provider.to_string(),
         conn_params: connection.parameters.clone(),
         connection_id: connection.connection_id.clone(),
         model_id: input.model.clone(),
@@ -1266,6 +1279,13 @@ pub struct ImageGenerationInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+    )]
+    #[serde(default)]
+    pub provider: String,
 
     #[field(
         display_name = "Prompt",
@@ -1366,7 +1386,7 @@ pub struct ImageGenerationOutput {
 )]
 pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    match provider_of(connection) {
+    match require_provider(&input.provider)? {
         PROVIDER_OPENAI => image_generation_openai(&input, connection),
         PROVIDER_BEDROCK => image_generation_bedrock(&input, connection),
         other => Err(unsupported_provider(other)),
@@ -1492,6 +1512,13 @@ pub struct VisionToTextInput {
     pub _connection: Option<RawConnection>,
 
     #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+    )]
+    #[serde(default)]
+    pub provider: String,
+
+    #[field(
         display_name = "Prompt",
         description = "Question or instruction about the image",
         example = "Describe what you see in this image"
@@ -1582,7 +1609,7 @@ pub struct VisionToTextOutput {
 )]
 pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    match provider_of(connection) {
+    match require_provider(&input.provider)? {
         PROVIDER_OPENAI => vision_to_text_openai(&input, connection),
         PROVIDER_BEDROCK => vision_to_text_bedrock(&input, connection),
         other => Err(unsupported_provider(other)),
@@ -1735,6 +1762,13 @@ pub struct VisionToImageInput {
     pub _connection: Option<RawConnection>,
 
     #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+    )]
+    #[serde(default)]
+    pub provider: String,
+
+    #[field(
         display_name = "Prompt",
         description = "Instructions for how to modify the image",
         example = "Add dramatic lighting to the scene"
@@ -1824,7 +1858,7 @@ pub struct VisionToImageOutput {
 )]
 pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    match provider_of(connection) {
+    match require_provider(&input.provider)? {
         PROVIDER_OPENAI => vision_to_image_openai(&input, connection),
         PROVIDER_BEDROCK => vision_to_image_bedrock(&input, connection),
         other => Err(unsupported_provider(other)),
@@ -1934,6 +1968,13 @@ pub struct EmbedTextInput {
     pub _connection: Option<RawConnection>,
 
     #[field(
+        display_name = "Provider",
+        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+    )]
+    #[serde(default)]
+    pub provider: String,
+
+    #[field(
         display_name = "Texts",
         description = "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially).",
         example = "[\"hello\", \"world\"]"
@@ -1994,6 +2035,7 @@ pub struct EmbedTextOutput {
 )]
 pub fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
+    let provider = require_provider(&input.provider)?;
 
     // Validation (mirrors legacy ai_embed_text)
     if input.texts.is_empty() {
@@ -2029,7 +2071,7 @@ pub fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> 
         ));
     }
 
-    match provider_of(connection) {
+    match provider {
         PROVIDER_OPENAI => embed_text_openai(&input, connection),
         PROVIDER_BEDROCK => embed_text_bedrock(&input, connection),
         other => Err(unsupported_provider(other)),
@@ -2424,7 +2466,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             .into(),
         has_side_effects: true,
         supports_connections: true,
-        integration_ids: vec![PROVIDER_OPENAI.to_string(), PROVIDER_BEDROCK.to_string()],
+        integration_ids: vec![
+            INTEGRATION_OPENAI_API_KEY.to_string(),
+            INTEGRATION_AWS_CREDENTIALS.to_string(),
+        ],
         capabilities,
     }
 }
@@ -2581,6 +2626,7 @@ mod tests {
     fn embed_text_rejects_missing_connection() {
         let input = EmbedTextInput {
             _connection: None,
+            provider: PROVIDER_OPENAI.into(),
             texts: vec!["hi".into()],
             model: None,
             dimension: None,
@@ -2593,6 +2639,7 @@ mod tests {
     fn embed_text_rejects_empty_batch() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
+            provider: PROVIDER_OPENAI.into(),
             texts: vec![],
             model: None,
             dimension: None,
@@ -2606,6 +2653,7 @@ mod tests {
     fn embed_text_rejects_empty_text_entry() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
+            provider: PROVIDER_OPENAI.into(),
             texts: vec!["ok".into(), String::new()],
             model: None,
             dimension: None,
@@ -2619,6 +2667,7 @@ mod tests {
     fn embed_text_rejects_oversize_dimension() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
+            provider: PROVIDER_OPENAI.into(),
             texts: vec!["x".into()],
             model: None,
             dimension: Some(99_999),
@@ -2632,6 +2681,7 @@ mod tests {
     fn embed_text_rejects_zero_dimension() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
+            provider: PROVIDER_OPENAI.into(),
             texts: vec!["x".into()],
             model: None,
             dimension: Some(0),
@@ -2647,6 +2697,7 @@ mod tests {
             .collect();
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
+            provider: PROVIDER_OPENAI.into(),
             texts,
             model: None,
             dimension: None,

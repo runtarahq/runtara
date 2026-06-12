@@ -90,6 +90,16 @@ export interface CreateStepContext {
     source: string;
     sourceHandle: string;
   };
+  /**
+   * Parallel fan-out over an existing source->target edge: the new step N is
+   * wired source->N and N->target while the original edge is kept, so the
+   * unconditional branches re-converge at the target (validator E073).
+   */
+  parallelBranch?: {
+    source: string;
+    target: string;
+    sourceHandle: string;
+  };
 }
 
 const nodeTypes: NodeTypes = {
@@ -257,7 +267,12 @@ type WorkflowEditorProps = {
     id: string;
     name: string;
     description?: string;
-    variables?: Array<{ name: string; value: string; type: string }>;
+    variables?: Array<{
+      name: string;
+      value: unknown;
+      type: string;
+      description?: string | null;
+    }>;
     inputSchemaFields?: Array<{
       name: string;
       type: string;
@@ -274,6 +289,8 @@ type WorkflowEditorProps = {
     }>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
+    durable?: boolean | null;
+    entryPoint?: string;
   };
   stagedNodeChanges?: StagedNodeChanges;
   onStagedNodeChange?: (nodeId: string, data: form.SchemaType) => void;
@@ -430,6 +447,19 @@ function WorkflowEditorContent({
     setEditingSurface(null);
   }, []);
 
+  // Keep the config dialog/panel bound to the step being edited when its id
+  // is renamed (renameStep changes the node id in the store immediately).
+  const lastStepRename = useWorkflowStore((state) => state.lastStepRename);
+  useEffect(() => {
+    if (!lastStepRename) return;
+    setEditingNodeId((current) =>
+      current === lastStepRename.oldId ? lastStepRename.newId : current
+    );
+    // Keyed on the rename event only so a stale rename is never re-applied
+    // to a step that later reuses the freed id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastStepRename]);
+
   const closeCreateStep = useCallback(() => {
     setCreateStepContext(null);
     setCreateStepSurface(null);
@@ -541,6 +571,12 @@ function WorkflowEditorContent({
     );
 
     if (workflowNodes.length === 0) return null;
+    if (workflow?.entryPoint) {
+      const explicitEntryPoint = workflowNodes.find(
+        (node) => node.id === workflow.entryPoint
+      );
+      if (explicitEntryPoint) return explicitEntryPoint.id;
+    }
 
     const nodesWithIncomingEdges = new Set(
       edges
@@ -562,7 +598,7 @@ function WorkflowEditorContent({
     );
 
     return entryPointNode?.id || null;
-  }, [nodes, edges]);
+  }, [nodes, edges, workflow?.entryPoint]);
 
   // Identify AI Agent tool/memory nodes and edges to hide from canvas.
   // Tool steps are rendered inline in the AI Agent card, so their separate
@@ -575,13 +611,16 @@ function WorkflowEditorContent({
     const aiAgentNodes = nodes.filter((n) => n.type === NODE_TYPES.AiAgentNode);
 
     for (const agentNode of aiAgentNodes) {
-      // Find edges from this AI Agent whose sourceHandle is a tool name or 'memory'
-      // (any handle that is NOT the standard 'source' output)
+      // Find edges from this AI Agent whose sourceHandle is a tool name,
+      // 'memory' or an mcp.<toolset> route (any handle that is NOT the
+      // standard 'source' output). 'onError' is a normal error route — the
+      // handler stays visible on the canvas like any other error branch.
       for (const edge of edges) {
         if (
           edge.source === agentNode.id &&
           edge.sourceHandle &&
-          edge.sourceHandle !== 'source'
+          edge.sourceHandle !== 'source' &&
+          edge.sourceHandle !== 'onError'
         ) {
           hiddenEdges.add(edge.id);
           hiddenNodes.add(edge.target);
@@ -1071,6 +1110,8 @@ function WorkflowEditorContent({
           ...form.initialValues,
           stepType: request.directStep.stepType,
           name: generateUniqueStepName(request.directStep.name, nodes),
+          agentId: request.directStep.agentId || '',
+          capabilityId: request.directStep.capabilityId || '',
           inputMapping: request.directStep.inputMapping || [],
         } as form.SchemaType;
         let finalPosition = position;
@@ -1110,6 +1151,34 @@ function WorkflowEditorContent({
         });
         setPendingNodeSurface('timeline');
         setCreateStepContext(null);
+        return;
+      }
+
+      if (request.parallelBranch && sourceNode && targetNode) {
+        const sourcePosition = getAbsolutePosition(sourceNode);
+        const targetPosition = getAbsolutePosition(targetNode);
+        const sourceSize = getNodeSize(sourceNode);
+        const targetSize = getNodeSize(targetNode);
+
+        // The diamond keeps the existing source->target edge, so place the
+        // parallel step between them horizontally but below the current lane.
+        position = snapPositionToGrid({
+          x: (sourcePosition.x + sourceSize.width + targetPosition.x) / 2,
+          y:
+            Math.max(
+              sourcePosition.y + sourceSize.height,
+              targetPosition.y + targetSize.height
+            ) + 96,
+        });
+
+        setCreateStepContext({
+          position,
+          parallelBranch: {
+            source: sourceNode.id,
+            target: targetNode.id,
+            sourceHandle: request.sourceHandle || 'source',
+          },
+        });
         return;
       }
 
@@ -1350,12 +1419,8 @@ function WorkflowEditorContent({
             50,
             'integer'
           );
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryStrategy',
-            'summarize',
-            'string'
-          );
+          // No memoryStrategy: leave compaction strategy unset so the DSL
+          // default (SlidingWindow) applies, matching the canvas add-memory.
           updateNode(sourceNode.id, {
             inputMapping: sourceInputMapping,
           } as any);
@@ -1368,6 +1433,58 @@ function WorkflowEditorContent({
         setShowStepPicker(false);
         setTimelineAddStepRequest(null);
         setCreateStepSurface(null);
+        return;
+      }
+
+      // Parallel branch over an existing edge: defer creation like the other
+      // flows; the diamond edges are wired in handlePendingNodeSave.
+      if (createStepContext.parallelBranch) {
+        const sourceNode = nodes.find(
+          (n) => n.id === createStepContext.parallelBranch!.source
+        );
+
+        let finalPosition = createStepContext.position;
+        let parentId: string | undefined;
+
+        if (sourceNode?.parentId) {
+          parentId = sourceNode.parentId;
+
+          const getAbsolutePosition = (
+            node: Node
+          ): { x: number; y: number } => {
+            if (!node.parentId) return node.position;
+            const parent = nodes.find((n) => n.id === node.parentId);
+            if (!parent) return node.position;
+            const parentAbsolute = getAbsolutePosition(parent);
+            return {
+              x: parentAbsolute.x + node.position.x,
+              y: parentAbsolute.y + node.position.y,
+            };
+          };
+
+          const parentNode = nodes.find((n) => n.id === parentId);
+          if (parentNode) {
+            const parentAbsolute = getAbsolutePosition(parentNode);
+            finalPosition = {
+              x: createStepContext.position.x - parentAbsolute.x,
+              y: createStepContext.position.y - parentAbsolute.y,
+            };
+          }
+        }
+
+        setPendingNodeForCurrentSurface({
+          id: newNodeId,
+          data: data as any,
+          position: finalPosition,
+          parentId,
+          sourceNodeId: createStepContext.parallelBranch.source,
+          sourceHandle: createStepContext.parallelBranch.sourceHandle,
+          targetNodeId: createStepContext.parallelBranch.target,
+        });
+
+        setCreateStepContext(null);
+        setSelectedEdgeId(null);
+        setShowStepPicker(false);
         return;
       }
 
@@ -1669,7 +1786,40 @@ function WorkflowEditorContent({
         );
 
         if (createdNodeId) {
-          if (pendingNewNode.targetNodeId) {
+          if (pendingNewNode.sourceNodeId && pendingNewNode.targetNodeId) {
+            // Parallel branch: the existing source->target edge is kept; the
+            // new step gets the diamond legs source->new and new->target so
+            // the unconditional fan-out re-converges (validator E073).
+            const continuationEdges = isConditional
+              ? [
+                  {
+                    from: createdNodeId,
+                    to: pendingNewNode.targetNodeId,
+                    label: 'true',
+                  },
+                  {
+                    from: createdNodeId,
+                    to: pendingNewNode.targetNodeId,
+                    label: 'false',
+                  },
+                ]
+              : [
+                  {
+                    from: createdNodeId,
+                    to: pendingNewNode.targetNodeId,
+                    label: 'source',
+                  },
+                ];
+
+            addStoreEdges([
+              {
+                from: pendingNewNode.sourceNodeId,
+                to: createdNodeId,
+                label: pendingNewNode.sourceHandle || 'source',
+              },
+              ...continuationEdges,
+            ]);
+          } else if (pendingNewNode.targetNodeId) {
             // Connecting to a target node (e.g., inserting before first node from start indicator)
             if (isConditional) {
               addStoreEdges([
@@ -1792,14 +1942,18 @@ function WorkflowEditorContent({
         isAddingBefore={nodes.length === 0}
         parentNodeId={
           createStepContext.connection?.source ||
-          createStepContext.insertionEdge?.source
+          createStepContext.insertionEdge?.source ||
+          createStepContext.parallelBranch?.source
         }
       >
         <StepPickerPanel
           active
           onSelect={handleStepPickerSelect}
           onCancel={handleCancelCreate}
-          allowFinish={!createStepContext.insertionEdge}
+          allowFinish={
+            !createStepContext.insertionEdge &&
+            !createStepContext.parallelBranch
+          }
           mode={timelineAddStepRequest?.pickerMode || 'all'}
         />
       </NodeFormProvider>
@@ -1987,6 +2141,8 @@ function WorkflowEditorContent({
                 activeAddStepRequest={timelineAddStepRequest}
                 renderInlineAddStep={renderTimelineInlineAddStep}
                 onAddStep={handleTimelineAddStep}
+                inputSchemaFields={workflow?.inputSchemaFields}
+                variables={workflow?.variables}
               />
             </NodeConfigProvider>
           </TabsContent>

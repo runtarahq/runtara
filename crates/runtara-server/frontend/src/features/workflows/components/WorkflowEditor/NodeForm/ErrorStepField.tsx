@@ -14,11 +14,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { Textarea } from '@/shared/components/ui/textarea';
+import { Input } from '@/shared/components/ui/input';
 import { NodeFormContext } from './NodeFormContext';
-import {
-  MappingValueInput,
-  ValueMode,
-} from './InputMappingField/MappingValueInput';
+import { ValueMode } from './InputMappingField/MappingValueInput';
+import { MappingObjectField } from './InputMappingField/MappingObjectField';
 
 type ErrorStepFieldProps = {
   name: string;
@@ -86,13 +86,6 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
     return field?.value || '';
   };
 
-  // Helper to get current valueType from inputMapping array
-  const getValueType = (fieldName: string) => {
-    const mapping = inputMapping || [];
-    const field = mapping.find((item: any) => item.type === fieldName);
-    return field?.valueType || 'immediate';
-  };
-
   // Helper to update a field in the inputMapping array
   const updateField = (
     fieldName: string,
@@ -127,7 +120,7 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: 'string',
+            typeHint: fieldName === 'context' ? 'json' : 'string',
             valueType: valueType || 'immediate',
           },
         ],
@@ -155,17 +148,14 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
         <FormLabel>Error Code *</FormLabel>
         <FormDescription>
           Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED",
-          "INVALID_ACCOUNT")
+          "INVALID_ACCOUNT"). Used verbatim — references are not resolved.
         </FormDescription>
         <FormControl>
-          <MappingValueInput
+          <Input
             value={getValue('code')}
-            onChange={(value) => updateField('code', value)}
-            valueType={getValueType('code') as ValueMode}
-            onValueTypeChange={(valueType) =>
-              updateField('code', getValue('code'), valueType)
+            onChange={(event) =>
+              updateField('code', event.target.value, 'immediate')
             }
-            fieldType="string"
             placeholder="Enter error code..."
           />
         </FormControl>
@@ -175,16 +165,17 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
       {/* Error Message */}
       <FormItem>
         <FormLabel>Error Message *</FormLabel>
-        <FormDescription>Human-readable error message</FormDescription>
+        <FormDescription>
+          Human-readable error message, emitted verbatim — references and
+          templates are not resolved here. Put dynamic values in Context
+          below.
+        </FormDescription>
         <FormControl>
-          <MappingValueInput
+          <Textarea
             value={getValue('message')}
-            onChange={(value) => updateField('message', value)}
-            valueType={getValueType('message') as ValueMode}
-            onValueTypeChange={(valueType) =>
-              updateField('message', getValue('message'), valueType)
+            onChange={(event) =>
+              updateField('message', event.target.value, 'immediate')
             }
-            fieldType="textarea"
             placeholder="Enter error message..."
           />
         </FormControl>
@@ -247,6 +238,18 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
           </SelectContent>
         </Select>
         <FormMessage />
+      </FormItem>
+
+      <FormItem>
+        <FormLabel>Context</FormLabel>
+        <FormDescription>
+          Optional DSL input-mapping object attached to the structured error.
+        </FormDescription>
+        <MappingObjectField
+          value={getValue('context')}
+          onChange={(next) => updateField('context', next, 'composite')}
+          jsonPlaceholder='{"caseId": {"valueType": "reference", "value": "data.caseId"}}'
+        />
       </FormItem>
 
       <div className="rounded-md border border-blue-500/50 bg-blue-500/10 p-3 text-sm">

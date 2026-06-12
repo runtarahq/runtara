@@ -19,6 +19,16 @@ export function getHttpTriggerUrl(
   return `${resolveBaseUrl()}/api/events/${tenantId}/${eventType}/${triggerId}/my-action`;
 }
 
+/**
+ * Synchronous execution endpoint (api/handlers/workflows_sync.rs). Executes
+ * the workflow inline and returns the result in the HTTP response — 30 s hard
+ * timeout, no execution history recorded. Keyed by workflow id, not trigger
+ * id, and accepts any HTTP method.
+ */
+export function getHttpSyncUrl(workflowId: string, tenantId: string): string {
+  return `${resolveBaseUrl()}/api/events/${tenantId}/http-sync/${workflowId}`;
+}
+
 export function getEmailTriggerAddress(triggerId: string): string {
   const domain =
     import.meta.env.VITE_EMAIL_EVENTS_DOMAIN || 'events.example.com';

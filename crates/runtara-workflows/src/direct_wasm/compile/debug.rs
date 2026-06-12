@@ -68,6 +68,145 @@ pub(super) fn emit_step_debug_event(
     emit_fail_if_retptr_error_inplace(body, indices);
 }
 
+/// Emit a step-debug event for one dispatched AiAgent tool call: the stdlib
+/// builds the synthetic `{ai-step}.tool.{name}.{call}` payload from the turn
+/// output, then the runtime records it as a `step_debug_start`/`step_debug_end`
+/// custom event — mirroring the generated loop's per-tool-call events. For the
+/// end event, pass the dispatched result locals; the start event omits them.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_ai_tool_debug_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    turn_out_ptr_local: u32,
+    turn_out_len_local: u32,
+    tool_idx_local: u32,
+    iter_local: u32,
+    call_counter_local: u32,
+    result_locals: Option<(u32, u32)>,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(turn_out_ptr_local));
+    body.instruction(&Instruction::LocalGet(turn_out_len_local));
+    body.instruction(&Instruction::LocalGet(tool_idx_local));
+    body.instruction(&Instruction::LocalGet(iter_local));
+    body.instruction(&Instruction::LocalGet(call_counter_local));
+    if let Some((result_ptr_local, result_len_local)) = result_locals {
+        body.instruction(&Instruction::LocalGet(result_ptr_local));
+        body.instruction(&Instruction::LocalGet(result_len_local));
+    }
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(if result_locals.is_some() {
+        indices.stdlib_ai_tool_debug_end
+    } else {
+        indices.stdlib_ai_tool_debug_start
+    }));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, scratch_ptr_local, scratch_len_local);
+
+    push_segment_args(
+        body,
+        if result_locals.is_some() {
+            &static_data.step_debug_end_kind
+        } else {
+            &static_data.step_debug_start_kind
+        },
+    );
+    body.instruction(&Instruction::LocalGet(scratch_ptr_local));
+    body.instruction(&Instruction::LocalGet(scratch_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    emit_fail_if_retptr_error_inplace(body, indices);
+}
+
+/// Emit a step-debug event for an AiAgent conversation-memory phase
+/// (load/save/compaction) as a synthetic `AiAgentMemory*` step, mirroring the
+/// generated loop. `phase` uses the stdlib encoding (0 = load, 1 = save,
+/// 2 = sliding-window compaction, 3 = summarize compaction). `None` locals
+/// substitute the static empty-object segment. The stdlib returns an empty
+/// payload for a below-threshold compaction — the event is skipped at runtime.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_ai_memory_debug_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    agent_id: u32,
+    phase: u32,
+    start: bool,
+    conv_ptr_local: u32,
+    conv_len_local: u32,
+    state_locals: Option<(u32, u32)>,
+    prior_state_locals: Option<(u32, u32)>,
+    max_messages: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    let push_pair = |body: &mut WasmFunction, locals: Option<(u32, u32)>| match locals {
+        Some((ptr_local, len_local)) => {
+            body.instruction(&Instruction::LocalGet(ptr_local));
+            body.instruction(&Instruction::LocalGet(len_local));
+        }
+        None => push_segment_args(body, &static_data.agent_empty_parameters),
+    };
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::I32Const(phase as i32));
+    body.instruction(&Instruction::LocalGet(conv_ptr_local));
+    body.instruction(&Instruction::LocalGet(conv_len_local));
+    push_pair(body, state_locals);
+    if !start {
+        push_pair(body, prior_state_locals);
+    }
+    body.instruction(&Instruction::I32Const(max_messages as i32));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(if start {
+        indices.stdlib_ai_memory_debug_start
+    } else {
+        indices.stdlib_ai_memory_debug_end
+    }));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, scratch_ptr_local, scratch_len_local);
+
+    // Empty payload → below-threshold compaction; skip the event.
+    body.instruction(&Instruction::LocalGet(scratch_len_local));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_segment_args(
+        body,
+        if start {
+            &static_data.step_debug_start_kind
+        } else {
+            &static_data.step_debug_end_kind
+        },
+    );
+    body.instruction(&Instruction::LocalGet(scratch_ptr_local));
+    body.instruction(&Instruction::LocalGet(scratch_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    body.instruction(&Instruction::End);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_wait_debug_start_event(
     body: &mut WasmFunction,

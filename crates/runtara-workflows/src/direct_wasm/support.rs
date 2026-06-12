@@ -284,14 +284,6 @@ fn collect_graph_support_inner(
         if !graph.steps.contains_key(&edge.from_step) {
             continue;
         }
-        // An onError edge on an AiAgent is inert (never routed by the generated
-        // path); direct accepts it and leaves the handler dead, so it is not an
-        // unsupported routing shape.
-        if edge.label.as_deref() == Some("onError")
-            && matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_)))
-        {
-            continue;
-        }
         let condition_route_supported = if edge.label.as_deref() == Some("onError") {
             on_error_route_shape_supported(graph, &edge.from_step)
         } else {
@@ -299,7 +291,7 @@ fn collect_graph_support_inner(
         };
         if edge.condition.is_some() && !condition_route_supported {
             let reason = if edge.label.as_deref() == Some("onError") {
-                "direct emitter supports onError edge conditions only for Agent, EmbedWorkflow, Split, and While sources with at most one default fallback"
+                "direct emitter supports onError edge conditions only for Agent, AiAgent, EmbedWorkflow, Split, While, and WaitForSignal sources with at most one default fallback"
             } else {
                 "direct emitter supports edge-condition routing only for normal/next edges with exactly one default fallback"
             };
@@ -325,7 +317,7 @@ fn collect_graph_support_inner(
                     .map(step_type_name)
                     .map(str::to_string),
                 feature: "error-handler-edge".to_string(),
-                reason: "direct onError routing currently supports Agent, EmbedWorkflow, Split, and While sources with at most one default handler".to_string(),
+                reason: "direct onError routing currently supports Agent, AiAgent, EmbedWorkflow, Split, While, and WaitForSignal sources with at most one default handler".to_string(),
             });
         }
     }
@@ -672,6 +664,15 @@ fn supports_direct_control_step_inner(
                 stack,
                 child_stack,
                 include_on_error,
+            ) && on_error_supported_or_inert(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
             )
         }
         Step::Log(_) => supports_normal_flow_step(
@@ -745,20 +746,21 @@ fn supports_direct_control_step_inner(
                     reachable.insert(edge.to_step.clone());
                 }
             }
-            // An onError edge on an AiAgent is INERT — the generated path's
-            // `can_have_on_error` excludes AiAgent, so an AiAgent failure
-            // propagates fatally and the handler is never invoked (compiled but
-            // dead). Direct does not lower the handler either; it marks the dead
-            // handler subgraph reachable + its edges used so the graph-wide
-            // reachable/used invariants hold, without support-checking it (it may
-            // be any shape since it is never lowered).
-            for (index, edge) in graph.execution_plan.iter().enumerate() {
-                if edge.from_step == step_id && edge.label.as_deref() == Some("onError") {
-                    used_edges.insert(index);
-                    mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
-                }
-            }
+            // onError handlers are lowered LIVE on both AiAgent paths
+            // (GAP-07 for single-shot, GAP-05 for the tool loop: chat-turn /
+            // memory-provider failures route to the handler; individual TOOL
+            // failures still feed back to the LLM and never route). The
+            // handler shape must therefore pass the standard onError walk.
             supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && on_error_supported_or_inert(
                 graph,
                 child_workflows,
                 step_id,
@@ -834,10 +836,15 @@ fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> b
     true
 }
 
-/// Supports single-shot AiAgent (optionally structured output) and a tool loop
-/// with exactly one Agent-capability tool. Conversation memory, compaction, MCP
-/// synthetic tools, multi-tool loops, and tool-loops-with-onError fall back to
-/// the generated Rust compiler.
+/// AiAgent baseline: single-shot completions (optionally with structured
+/// output), multi-tool loops, conversation memory + compaction (sliding window
+/// and summarize), and MCP synthetic tools are all lowered directly. The
+/// requirements are: `config` must be present; `mcp.*` edges must target Agent
+/// steps with `agent_id == "mcp"`; the `memory` edge must target an Agent step
+/// and agree with `config.memory`; tool edges must target Agent steps,
+/// directly-lowerable EmbedWorkflow steps, or WaitForSignal steps. A graph
+/// failing these requirements is a hard compile error (there is no fallback
+/// compiler).
 fn supports_ai_agent_step_baseline(
     graph: &ExecutionGraph,
     step: &AiAgentStep,
@@ -1140,7 +1147,14 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         return false;
     };
     match step {
+        // Data steps whose output drives the route, plus (GAP-13) Agent /
+        // Delay / WaitForSignal sources — the EdgeRoute lowering is
+        // source-agnostic; the historical restriction was only this gate.
+        // Split / While / EmbedWorkflow stay excluded: their successor
+        // handling owns next/error-plan interplay and needs its own analysis.
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
+        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Delay(_) | Step::WaitForSignal(_) => {}
         Step::Switch(step)
             if !step
                 .config
@@ -1184,6 +1198,16 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         Step::EmbedWorkflow(_) => {}
         Step::Split(step) if supports_split_step_baseline(step) => {}
         Step::While(step) if supports_while_step_baseline(step) => {}
+        // AiAgent handlers (single-shot AND tool loop) are lowered live, so
+        // the shape rules apply to them like any Agent step.
+        Step::AiAgent(_) => {}
+        // WaitForSignal failures (timeout expiry) route to the handler
+        // (GAP-14).
+        Step::WaitForSignal(step)
+            if supports_wait_for_signal_step_baseline(
+                step,
+                &DirectSupportChildWorkflows::default(),
+            ) => {}
         _ => return false,
     };
 
@@ -1466,8 +1490,10 @@ fn collect_step_support(
         Step::AiAgent(_) => unsupported_step(
             step,
             "ai-agent",
-            "AiAgent direct lowering currently supports single-shot completions only \
-             (no tool, memory, structured-output, or MCP edges)",
+            "AiAgent step configuration is not lowerable: config must be present; mcp.* edges \
+             must target Agent steps with agentId \"mcp\"; the memory edge must target an Agent \
+             step and match config.memory; tool edges must target Agent steps, compilable \
+             EmbedWorkflow steps, or WaitForSignal steps",
             unsupported,
         ),
     }
@@ -3474,5 +3500,346 @@ mod handler_step_on_error_tests {
     fn handler_step_on_error_to_distinct_target_is_supported() {
         let r = analyze_direct_wasm_support(&v5());
         assert!(r.supported, "{:?}", codes(&r));
+    }
+    #[test]
+    fn ai_agent_rejection_reason_names_actual_requirements() {
+        // GAP-11 regression pin: the ai-agent rejection text must describe the
+        // real baseline (tools/memory/MCP are supported; the listed shape
+        // requirements are what can fail), not the long-gone
+        // "single-shot completions only" restriction.
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "ai": { "stepType": "AiAgent", "id": "ai" },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        let feature = report
+            .unsupported
+            .iter()
+            .find(|feature| feature.feature == "ai-agent")
+            .expect("missing-config AiAgent must report the ai-agent feature");
+        assert!(
+            feature.reason.contains("config must be present"),
+            "{}",
+            feature.reason
+        );
+        assert!(
+            !feature.reason.contains("single-shot completions only"),
+            "stale pre-tool-loop reason resurfaced: {}",
+            feature.reason
+        );
+    }
+    fn single_shot_ai_agent_graph(
+        handler_steps: serde_json::Value,
+        extra_edges: serde_json::Value,
+    ) -> ExecutionGraph {
+        let mut graph = serde_json::json!({
+            "steps": {
+                "ai": {
+                    "stepType": "AiAgent",
+                    "id": "ai",
+                    "connectionId": "conn-1",
+                    "config": {
+                        "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                        "userPrompt": {"valueType": "immediate", "value": "go"},
+                        "provider": "openai"
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        if let serde_json::Value::Object(handler_steps) = handler_steps {
+            for (id, step) in handler_steps {
+                graph["steps"][id] = step;
+            }
+        }
+        if let serde_json::Value::Array(extra_edges) = extra_edges {
+            for edge in extra_edges {
+                graph["executionPlan"].as_array_mut().unwrap().push(edge);
+            }
+        }
+        serde_json::from_value(graph).expect("graph parses")
+    }
+
+    #[test]
+    fn single_shot_ai_agent_well_formed_on_error_is_supported() {
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_finish", "label": "onError" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn single_shot_ai_agent_malformed_on_error_handler_is_rejected_at_gate() {
+        // GAP-07: the single-shot handler is lowered live, so its shape must
+        // be gate-checked. A Conditional with only a `true` edge cannot lower;
+        // before this fix the gate marked the handler "dead, any shape" and
+        // the defect only surfaced at plan build.
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_check": {
+                    "stepType": "Conditional",
+                    "id": "handler_check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    }
+                },
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_check", "label": "onError" },
+                { "fromStep": "handler_check", "toStep": "handler_finish", "label": "true" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(
+            !report.supported,
+            "malformed single-shot handler must be rejected at the gate"
+        );
+    }
+
+    #[test]
+    fn single_shot_ai_agent_two_default_on_error_edges_rejected() {
+        let graph = single_shot_ai_agent_graph(
+            serde_json::json!({
+                "handler_a": { "stepType": "Finish", "id": "handler_a" },
+                "handler_b": { "stepType": "Finish", "id": "handler_b" }
+            }),
+            serde_json::json!([
+                { "fromStep": "ai", "toStep": "handler_a", "label": "onError" },
+                { "fromStep": "ai", "toStep": "handler_b", "label": "onError" }
+            ]),
+        );
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "error-handler-edge"),
+            "{:?}",
+            report.unsupported
+        );
+    }
+
+    #[test]
+    fn tool_loop_ai_agent_malformed_on_error_handler_is_rejected() {
+        // GAP-05: tool-loop handlers are lowered live (chat-turn/memory
+        // failures route to them), so a malformed handler shape is rejected
+        // at the gate just like the single-shot path.
+        let mut graph = serde_json::json!({
+            "steps": {
+                "ai": {
+                    "stepType": "AiAgent",
+                    "id": "ai",
+                    "connectionId": "conn-1",
+                    "config": {
+                        "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                        "userPrompt": {"valueType": "immediate", "value": "go"},
+                        "provider": "openai"
+                    }
+                },
+                "tool_agent": {
+                    "stepType": "Agent",
+                    "id": "tool_agent",
+                    "agentId": "utils",
+                    "capabilityId": "return-input",
+                    "inputMapping": {}
+                },
+                "handler_check": {
+                    "stepType": "Conditional",
+                    "id": "handler_check",
+                    "condition": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    }
+                },
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" },
+                { "fromStep": "ai", "toStep": "tool_agent", "label": "echo" },
+                { "fromStep": "ai", "toStep": "handler_check", "label": "onError" },
+                { "fromStep": "handler_check", "toStep": "handler_finish", "label": "true" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        graph["steps"]["tool_agent"]["name"] = serde_json::Value::String("echo".to_string());
+        let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(
+            !report.supported,
+            "a malformed tool-loop handler must be rejected at the gate"
+        );
+    }
+
+    #[test]
+    fn tool_loop_ai_agent_well_formed_on_error_is_supported() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "ai": {
+                    "stepType": "AiAgent",
+                    "id": "ai",
+                    "connectionId": "conn-1",
+                    "config": {
+                        "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                        "userPrompt": {"valueType": "immediate", "value": "go"},
+                        "provider": "openai"
+                    }
+                },
+                "tool_agent": {
+                    "stepType": "Agent",
+                    "id": "tool_agent",
+                    "name": "echo",
+                    "agentId": "utils",
+                    "capabilityId": "return-input",
+                    "inputMapping": {}
+                },
+                "handler_finish": { "stepType": "Finish", "id": "handler_finish" },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "ai",
+            "executionPlan": [
+                { "fromStep": "ai", "toStep": "finish", "label": "next" },
+                { "fromStep": "ai", "toStep": "tool_agent", "label": "echo" },
+                { "fromStep": "ai", "toStep": "handler_finish", "label": "onError" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+    #[test]
+    fn agent_source_conditioned_edges_are_supported() {
+        // GAP-13: conditioned normal-flow edges from Agent / Delay /
+        // WaitForSignal sources lower as EdgeRoute like the data-step sources.
+        let graph: ExecutionGraph = serde_json::from_str(include_str!(
+            "../../tests/fixtures/agent_edge_condition.json"
+        ))
+        .expect("fixture parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn delay_and_wait_source_conditioned_edges_are_supported() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "pause": { "stepType": "Delay", "id": "pause",
+                    "durationMs": { "valueType": "immediate", "value": 1 } },
+                "wait": { "stepType": "WaitForSignal", "id": "wait",
+                    "timeoutMs": { "valueType": "immediate", "value": 10 } },
+                "finish_fast": { "stepType": "Finish", "id": "finish_fast" },
+                "finish_default": { "stepType": "Finish", "id": "finish_default" }
+            },
+            "entryPoint": "pause",
+            "executionPlan": [
+                { "fromStep": "pause", "toStep": "wait" },
+                { "fromStep": "wait", "toStep": "finish_fast", "condition": {
+                    "type": "operation", "op": "EQ", "arguments": [
+                        { "valueType": "reference", "value": "steps.wait.outputs.kind" },
+                        { "valueType": "immediate", "value": "fast" }
+                    ]}},
+                { "fromStep": "wait", "toStep": "finish_default" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn agent_source_conditioned_edges_with_two_defaults_rejected() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "echo": { "stepType": "Agent", "id": "echo", "agentId": "utils",
+                    "capabilityId": "return-input", "inputMapping": {} },
+                "finish_a": { "stepType": "Finish", "id": "finish_a" },
+                "finish_b": { "stepType": "Finish", "id": "finish_b" },
+                "finish_c": { "stepType": "Finish", "id": "finish_c" }
+            },
+            "entryPoint": "echo",
+            "executionPlan": [
+                { "fromStep": "echo", "toStep": "finish_a", "condition": {
+                    "type": "operation", "op": "EQ", "arguments": [
+                        { "valueType": "reference", "value": "steps.echo.outputs.x" },
+                        { "valueType": "immediate", "value": 1 }
+                    ]}},
+                { "fromStep": "echo", "toStep": "finish_b" },
+                { "fromStep": "echo", "toStep": "finish_c" }
+            ],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(
+            !report.supported,
+            "two unconditioned defaults must stay rejected"
+        );
+    }
+    #[test]
+    fn wait_for_signal_on_error_is_supported() {
+        // GAP-14: a WaitForSignal timeout routes to its onError handler.
+        let graph: ExecutionGraph = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wait_timeout_on_error.json"
+        ))
+        .expect("fixture parses");
+
+        let report = analyze_direct_wasm_support(&graph);
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 }

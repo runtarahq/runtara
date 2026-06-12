@@ -229,3 +229,138 @@ describe('condition-type-conversion', () => {
     });
   });
 });
+
+describe('convertConditionArguments fidelity (finding 16)', () => {
+  it('preserves type hint and default on reference arguments', () => {
+    const args = [
+      {
+        valueType: 'reference',
+        value: 'steps.fetch.outputs.count',
+        type: 'number',
+        default: 0,
+      },
+      { valueType: 'immediate', value: '5', immediateType: 'number' },
+    ];
+    const result = convertConditionArguments('GT', args);
+    expect(result[0]).toEqual({
+      valueType: 'reference',
+      value: 'steps.fetch.outputs.count',
+      type: 'number',
+      default: 0,
+    });
+  });
+
+  it('passes template arguments through untouched', () => {
+    const template = {
+      valueType: 'template',
+      value: '{{ data.user.tier }}',
+    };
+    const result = convertConditionArguments('EQ', [
+      template,
+      { valueType: 'immediate', value: 'gold' },
+    ]);
+    expect(result[0]).toEqual(template);
+    expect(result[0].valueType).toBe('template');
+  });
+
+  it('passes composite arguments through untouched', () => {
+    const composite = {
+      valueType: 'composite',
+      value: { a: { valueType: 'reference', value: 'data.a' } },
+    };
+    const result = convertConditionArguments('EQ', [
+      composite,
+      { valueType: 'immediate', value: 'x' },
+    ]);
+    expect(result[0]).toEqual(composite);
+  });
+
+  it('honors the explicit boolean immediate type selector', () => {
+    const result = convertConditionArguments('EQ', [
+      { valueType: 'reference', value: 'data.isActive' },
+      { valueType: 'immediate', value: 'true', immediateType: 'boolean' },
+    ]);
+    expect(result[1]).toEqual({ valueType: 'immediate', value: true });
+  });
+
+  it('does not stringify already-typed immediates from stored definitions', () => {
+    const args = [
+      { valueType: 'reference', value: 'data.flag' },
+      { valueType: 'immediate', value: true },
+    ];
+    const result = convertConditionArguments('EQ', args);
+    expect(result[1]).toEqual({ valueType: 'immediate', value: true });
+
+    const numeric = convertConditionArguments('EQ', [
+      { valueType: 'reference', value: 'data.count' },
+      { valueType: 'immediate', value: 42 },
+    ]);
+    expect(numeric[1]).toEqual({ valueType: 'immediate', value: 42 });
+  });
+
+  it('is idempotent for stored IN arrays', () => {
+    const args = [
+      { valueType: 'reference', value: 'data.country' },
+      { valueType: 'immediate', value: ['US', 'CA'] },
+    ];
+    const once = convertConditionArguments('IN', args, undefined, {
+      parseInLists: true,
+    });
+    const twice = convertConditionArguments('IN', once, undefined, {
+      parseInLists: true,
+    });
+    expect(once[1]).toEqual({ valueType: 'immediate', value: ['US', 'CA'] });
+    expect(twice).toEqual(once);
+  });
+
+  it('parses comma-separated IN lists into arrays on the save path only', () => {
+    const args = [
+      { valueType: 'reference', value: 'data.country' },
+      { valueType: 'immediate', value: 'US, CA, MX', immediateType: 'string' },
+    ];
+    const editorPath = convertConditionArguments('IN', args);
+    expect(editorPath[1]).toEqual({
+      valueType: 'immediate',
+      value: 'US, CA, MX',
+    });
+
+    const savePath = convertConditionArguments('IN', args, undefined, {
+      parseInLists: true,
+    });
+    expect(savePath[1]).toEqual({
+      valueType: 'immediate',
+      value: ['US', 'CA', 'MX'],
+    });
+  });
+
+  it('parses JSON-array IN lists on the save path', () => {
+    const savePath = convertConditionArguments(
+      'NOT_IN',
+      [
+        { valueType: 'reference', value: 'data.code' },
+        { valueType: 'immediate', value: '[1, 2, 3]' },
+      ],
+      undefined,
+      { parseInLists: true }
+    );
+    expect(savePath[1]).toEqual({ valueType: 'immediate', value: [1, 2, 3] });
+  });
+
+  it('applies fidelity rules inside nested conditions with options', () => {
+    const nested = {
+      type: 'operation',
+      op: 'IN',
+      arguments: [
+        { valueType: 'reference', value: 'data.country' },
+        { valueType: 'immediate', value: 'US, CA' },
+      ],
+    };
+    const result = convertConditionArguments('AND', [nested], undefined, {
+      parseInLists: true,
+    });
+    expect(result[0].arguments[1]).toEqual({
+      valueType: 'immediate',
+      value: ['US', 'CA'],
+    });
+  });
+});

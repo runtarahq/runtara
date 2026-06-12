@@ -1,6 +1,6 @@
 # Phase 12: AiAgent Direct Lowering — Implementation Plan
 
-Status: **Slices 0, 1, 2, 3 (memory), 4 (compaction), 5a (MCP tools) + multi-tool + 5b (EmbedWorkflow + WaitForSignal tools) complete — AiAgent tool loops no longer fall back; only durability hardening pending.**
+Status: **Complete. Slices 0–5b plus per-turn loop durability (GAP-04, 2026-06-10): each completed turn is checkpointed under `{step}.turn.{n}` (state + pending tool results + tool-call counter), so mid-loop crashes replay without re-running finished LLM turns.**
 
 ### Slice 5b (WaitForSignal tool) — DONE and e2e-verified
 

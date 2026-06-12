@@ -54,6 +54,7 @@ export function CustomFieldRow({
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
   const setFieldValueType = useNodeFormStore((s) => s.setFieldValueType);
   const setFieldTypeHint = useNodeFormStore((s) => s.setFieldTypeHint);
+  const setFieldDefaultValue = useNodeFormStore((s) => s.setFieldDefaultValue);
 
   // Local state for editing the name
   const [isEditingName, setIsEditingName] = useState(false);
@@ -80,6 +81,11 @@ export function CustomFieldRow({
 
   const handleTypeChange = (newType: string) => {
     setFieldTypeHint(nodeId, fieldName, newType);
+    onFieldChange();
+  };
+
+  const handleDefaultValueChange = (newDefault: string | undefined) => {
+    setFieldDefaultValue(nodeId, fieldName, newDefault);
     onFieldChange();
   };
 
@@ -221,6 +227,8 @@ export function CustomFieldRow({
             allowNull
             placeholder="Enter value..."
             hideReferenceToggle={hideReferenceToggle}
+            defaultValue={entry?.defaultValue}
+            onDefaultValueChange={handleDefaultValueChange}
           />
         )}
       </TableCell>

@@ -1,10 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Opt-in direct workflow compilation entry point.
+//! Direct workflow compilation entry point — the only compile path.
 //!
 //! Orchestrates the whole DSL-graph -> core-Wasm -> composed-component pipeline.
-//! `compile_direct_workflow` builds the manifest, runs the support gate (bailing
-//! to the caller's fallback on any unsupported feature), then emits the core
+//! `compile_direct_workflow` builds the manifest, runs the support gate
+//! (hard-failing with a per-feature report on any unsupported shape — there is
+//! no fallback compiler), then emits the core
 //! module byte-by-byte and lifts it into a component via `wit_component`,
 //! appending the manifest/support/ABI JSON as custom sections.
 //! `compose_direct_workflow` is the separate second phase that composes that
@@ -350,14 +351,6 @@ pub struct DirectCompilationInput {
     /// `None` falls back to the statically linked registry, matching the Rust
     /// codegen compiler's transition behavior.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    /// Pre-resolved `connection_id -> integration_id` map for the graph's agent
-    /// steps. Component-backed agents (e.g. `ai-tools`) dispatch on
-    /// `integration_id`, which the runner can't fetch from inside the WASM
-    /// module, so the compile pipeline resolves it once and the direct emitter
-    /// bakes it into the agent's connection ABI args. Mirrors the generated
-    /// path's `CompilationInput::connection_integration_ids`; empty entries fall
-    /// back to the empty-string behavior for agents that don't read it.
-    pub connection_integration_ids: HashMap<String, String>,
 }
 
 /// Result of opt-in direct workflow compilation.
@@ -582,14 +575,48 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-/// Compile a currently supported workflow through the direct path.
+/// Stack size for the dedicated compile thread.
 ///
-/// This does not replace [`crate::compile_workflow`]. It is intentionally
-/// opt-in and currently supports only graphs accepted by
-/// [`analyze_direct_wasm_support`]. The emitted component-format artifact is a
-/// stable direct pipeline artifact with a canonical `wasi:cli/run` export,
-/// stdlib JSON calls, and runtime completion calls.
+/// Run-plan construction, Wasm emission, and the run-plan drop all recurse
+/// proportionally to the longest unconditional step chain in the graph. On the
+/// 2 MiB default stack of `tokio::task::spawn_blocking` threads a release
+/// build overflows — aborting the whole process — between 400 and 800 chained
+/// steps, and a debug build around 100. This is address space, not committed
+/// memory: pages are only touched as the recursion actually deepens, and it
+/// buys two orders of magnitude of headroom over the largest graphs seen in
+/// practice.
+const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Compile a workflow through the direct path — the only compile path.
+///
+/// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
+/// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
+/// per-feature report. The emitted component-format artifact is a stable
+/// direct pipeline artifact with a canonical `wasi:cli/run` export, stdlib
+/// JSON calls, and runtime completion calls.
+///
+/// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
+/// stack so compilation never depends on the caller's stack budget; panics
+/// from the compile body resume on the caller.
 pub fn compile_direct_workflow(
+    input: DirectCompilationInput,
+) -> Result<DirectCompilationResult, DirectCompileError> {
+    let span = tracing::Span::current();
+    let handle = std::thread::Builder::new()
+        .name("direct-compile".to_string())
+        .stack_size(DIRECT_COMPILE_STACK_SIZE)
+        .spawn(move || {
+            let _span = span.entered();
+            compile_direct_workflow_inner(input)
+        })
+        .map_err(DirectCompileError::Io)?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
@@ -633,7 +660,6 @@ pub fn compile_direct_workflow(
         &support_json,
         input.track_events,
         &input.workflow_id,
-        &input.connection_integration_ids,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -701,7 +727,6 @@ fn emit_direct_artifact(
     support_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    connection_integration_ids: &HashMap<String, String>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = serde_json::to_vec(&serde_json::json!({
         "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -715,13 +740,7 @@ fn emit_direct_artifact(
         "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
     }))?;
 
-    let mut component = emit_direct_component(
-        manifest,
-        manifest_json,
-        track_events,
-        workflow_id,
-        connection_integration_ids,
-    )?;
+    let mut component = emit_direct_component(manifest, manifest_json, track_events, workflow_id)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -742,17 +761,11 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    connection_integration_ids: &HashMap<String, String>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) =
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)?;
-    let core_config = DirectCoreConfig::new_with_workflow_id(
-        manifest,
-        manifest_json,
-        track_events,
-        workflow_id,
-        connection_integration_ids,
-    )?;
+    let core_config =
+        DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;

@@ -212,6 +212,7 @@ function FieldRow({
   const entry = useNodeFormStore((s) => s.getFieldEntry(nodeId, field.name));
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
   const setFieldValueType = useNodeFormStore((s) => s.setFieldValueType);
+  const setFieldDefaultValue = useNodeFormStore((s) => s.setFieldDefaultValue);
 
   const label = getFieldLabel(field);
   const helpText = getFieldHelpText(field);
@@ -236,6 +237,11 @@ function FieldRow({
 
   const handleValueTypeChange = (newType: ValueMode) => {
     setFieldValueType(nodeId, field.name, newType);
+    onFieldChange?.();
+  };
+
+  const handleDefaultValueChange = (newDefault: string | undefined) => {
+    setFieldDefaultValue(nodeId, field.name, newDefault);
     onFieldChange?.();
   };
 
@@ -378,6 +384,8 @@ function FieldRow({
               enumOptions={enumOptions}
               allowNull={allowsNull}
               hideReferenceToggle={hideReferenceToggle}
+              defaultValue={entry?.defaultValue}
+              onDefaultValueChange={handleDefaultValueChange}
             />
           </div>
         )}
@@ -637,7 +645,10 @@ export function SimpleInputMappingEditor({
         });
       } else {
         // No existing value - use field default if available (especially for enum fields),
-        // otherwise initialize empty
+        // otherwise initialize empty. autoSeeded marks the row as
+        // schema-populated with no user input so the save path can drop it
+        // while it still holds the untouched empty value (explicit immediate
+        // '' entries are preserved — passing "" to an input is legal DSL).
         const defaultValue =
           field.default !== undefined && field.default !== null
             ? field.default
@@ -649,7 +660,8 @@ export function SimpleInputMappingEditor({
           value: defaultValue,
           valueType: 'immediate',
           typeHint: getTypeHintFromFieldType(field.type),
-        });
+          autoSeeded: true,
+        } as InputMappingEntry);
       }
     });
   }, [nodeId, requiredFields, initializeField, initialDataMap]);
@@ -671,12 +683,15 @@ export function SimpleInputMappingEditor({
     const fieldDef = optionalFields.find((f) => f.name === fieldName);
     if (fieldDef) {
       const initialValue = getFieldInitialValue(fieldDef, undefined);
+      // autoSeeded: an optional field added but never filled in keeps the
+      // historical drop-when-empty behavior on save.
       initializeField(nodeId, fieldName, {
         type: fieldName,
         value: initialValue ?? '',
         valueType: 'immediate',
         typeHint: getTypeHintFromFieldType(fieldDef.type),
-      });
+        autoSeeded: true,
+      } as InputMappingEntry);
       // Sync to parent after adding field
       // Use setTimeout to ensure store is updated before syncing
       setTimeout(() => syncToParent(), 0);

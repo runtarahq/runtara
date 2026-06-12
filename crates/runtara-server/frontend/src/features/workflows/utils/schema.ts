@@ -10,7 +10,9 @@ export type SchemaField = {
   required?: boolean;
   description?: string;
   defaultValue?: any;
-  enum?: string[];
+  enum?: any[];
+  example?: any;
+  items?: any;
   nullable?: boolean;
   // Form rendering extensions
   label?: string;
@@ -22,7 +24,29 @@ export type SchemaField = {
   pattern?: string;
   properties?: SchemaField[];
   visibleWhen?: VisibleWhen;
+  extensions?: Record<string, any>;
 };
+
+export const KNOWN_SCHEMA_FIELD_KEYS: ReadonlySet<string> = new Set([
+  'type',
+  'required',
+  'description',
+  'default',
+  'enum',
+  'example',
+  'items',
+  'nullable',
+  'label',
+  'placeholder',
+  'order',
+  'format',
+  'min',
+  'max',
+  'pattern',
+  'properties',
+  'visibleWhen',
+  'visible_when',
+]);
 
 function safeParseSchema(raw: any): any {
   if (raw === undefined || raw === null) {
@@ -63,6 +87,8 @@ function inferFormatFromName(name: string): string | undefined {
 /** Extract form rendering extensions from a raw field object. */
 function extractExtensions(field: Record<string, any>): Partial<SchemaField> {
   const ext: Partial<SchemaField> = {};
+  if (field.example !== undefined) ext.example = field.example;
+  if (field.items !== undefined) ext.items = field.items;
   if (field.nullable !== undefined) ext.nullable = !!field.nullable;
   if (field.label) ext.label = field.label;
   if (field.placeholder) ext.placeholder = field.placeholder;
@@ -81,6 +107,12 @@ function extractExtensions(field: Record<string, any>): Partial<SchemaField> {
   }
   if (field.properties && typeof field.properties === 'object') {
     ext.properties = parseSchema(field.properties);
+  }
+  const extensions = Object.fromEntries(
+    Object.entries(field).filter(([key]) => !KNOWN_SCHEMA_FIELD_KEYS.has(key))
+  );
+  if (Object.keys(extensions).length > 0) {
+    ext.extensions = extensions;
   }
   return ext;
 }
@@ -142,7 +174,7 @@ export function parseSchema(raw: any): SchemaField[] {
           ? { nullable: normalizedType.nullable }
           : {}),
         ...(Array.isArray(field.enum) && field.enum.length > 0
-          ? { enum: field.enum.map(String) }
+          ? { enum: field.enum }
           : {}),
         ...extractExtensions(field),
       };
@@ -162,7 +194,7 @@ export function parseSchema(raw: any): SchemaField[] {
           ? { nullable: normalizedType.nullable }
           : {}),
         ...(Array.isArray(field.enum) && field.enum.length > 0
-          ? { enum: field.enum.map(String) }
+          ? { enum: field.enum }
           : {}),
         ...extractExtensions(field),
       };
@@ -195,13 +227,16 @@ export function buildSchemaFromFields(
 
     const fieldType = field.type || 'string';
     const schemaField: Record<string, any> = {
+      ...(field.extensions || {}),
       type: fieldType,
       required: field.required !== undefined ? field.required : true,
     };
 
     // For array types, add a default items definition
     if (fieldType === 'array') {
-      schemaField.items = { type: 'string' };
+      schemaField.items = field.items ?? { type: 'string' };
+    } else if (field.items !== undefined) {
+      schemaField.items = field.items;
     }
 
     if (field.description) {
@@ -215,6 +250,7 @@ export function buildSchemaFromFields(
     if (field.defaultValue !== undefined && field.defaultValue !== '') {
       schemaField.default = field.defaultValue;
     }
+    if (field.example !== undefined) schemaField.example = field.example;
     if (field.nullable !== undefined) schemaField.nullable = field.nullable;
 
     // Form rendering extensions

@@ -2,10 +2,7 @@ import { useController, useFormContext, useWatch } from 'react-hook-form';
 import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { Input } from '@/shared/components/ui/input.tsx';
-import {
-  MappingValueInput,
-  type ValueMode,
-} from '../InputMappingField/MappingValueInput';
+import { SourceMappingValueField } from '../SourceMappingValueField';
 import { Textarea } from '@/shared/components/ui/textarea.tsx';
 import {
   Dialog,
@@ -37,15 +34,9 @@ import {
 } from '@/shared/components/ui/select.tsx';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch.tsx';
 import { Label } from '@/shared/components/ui/label.tsx';
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { ValueType } from '../TypeHintSelector';
-import {
-  composeVariableSuggestions,
-  filterSuggestions,
-  groupSuggestions,
-  VariableSuggestion,
-} from '../InputMappingValueField/VariableSuggestions';
 
 type MatchType =
   | 'exact'
@@ -151,22 +142,16 @@ const EXISTENCE_OPERATORS = new Set<MatchType>([
 
 export function SwitchCasesField(props: any) {
   const { label, name } = props;
-  const { setValue, getValues } = useFormContext();
-  const { previousSteps, nodeId } = useContext(NodeFormContext);
+  const { setValue } = useFormContext();
+  const { nodeId } = useContext(NodeFormContext);
   const [showRoutingConfirm, setShowRoutingConfirm] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingField, setEditingField] = useState<{
-    type: 'value' | 'defaultOutput' | 'caseMatch' | 'caseOutput';
+    type: 'defaultOutput' | 'caseMatch' | 'caseOutput';
     index?: number;
     currentValue: string;
   } | null>(null);
   const [editingValue, setEditingValue] = useState('');
-
-  // Autocomplete state
-  const [showAutocomplete, setShowAutocomplete] = useState<boolean>(false);
-  const [autocompleteQuery, setAutocompleteQuery] = useState<string>('');
-  const [triggerIndex, setTriggerIndex] = useState<number>(-1);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const {
     fieldState: { error },
@@ -186,23 +171,23 @@ export function SwitchCasesField(props: any) {
     (item: any) => item.type === 'routingMode'
   );
 
-  const switchValue = valueField?.value || '';
-  const switchValueType: ValueMode =
-    (valueField?.valueType as ValueMode) || 'immediate';
-  const switchValueTypeHint =
-    (valueField?.typeHint as ValueType) || 'string';
+  const switchValueTypeHint = (valueField?.typeHint as ValueType) || 'string';
   const casesArray = Array.isArray(casesField?.value) ? casesField.value : [];
-  const defaultOutput = defaultField?.value || {};
+  // The default output is optional: an absent entry means "no match fails the
+  // step" at runtime, so its mere presence is meaningful.
+  const hasDefaultOutput = defaultField !== undefined;
+  const defaultOutput = defaultField?.value;
   const isRoutingMode = routingModeField?.value === true;
 
   // Initialize the inputMapping structure if empty (only for new nodes, not when editing)
   useEffect(() => {
-    // Only initialize if we're creating a new node (no nodeId) and the array is empty
+    // Only initialize if we're creating a new node (no nodeId) and the array
+    // is empty. Deliberately no 'default' entry: a default output must be
+    // authored explicitly (absent default = no-match is an error).
     if (!nodeId && fieldArray.length === 0) {
       setValue(name, [
-        { type: 'value', value: '', typeHint: 'string' },
+        { type: 'value', value: '', typeHint: 'auto', valueType: 'reference' },
         { type: 'cases', value: [], typeHint: 'json' },
-        { type: 'default', value: {}, typeHint: 'json' },
       ]);
     }
   }, [fieldArray.length, name, setValue, nodeId]);
@@ -231,33 +216,6 @@ export function SwitchCasesField(props: any) {
     }
   };
 
-  const updateSwitchValue = (newValue: string) => {
-    // Read the latest form state (not the stale useWatch closure) so that
-    // sequential calls from MappingValueInput (onValueTypeChange then onChange)
-    // don't overwrite each other.
-    const currentArray = getValues(name) || fieldArray;
-    const newArray = [...currentArray];
-    const valueIndex = newArray.findIndex((item: any) => item.type === 'value');
-
-    // Get the current value type
-    const currentValueType =
-      valueIndex >= 0 ? newArray[valueIndex].typeHint : 'string';
-
-    // Convert the value based on value type
-    const typedValue = convertToType(newValue, currentValueType);
-
-    if (valueIndex >= 0) {
-      newArray[valueIndex] = { ...newArray[valueIndex], value: typedValue };
-    } else {
-      newArray.push({
-        type: 'value',
-        value: typedValue,
-        typeHint: 'string',
-      });
-    }
-    setValue(name, newArray);
-  };
-
   const updateCases = (newCases: any[]) => {
     const newArray = [...fieldArray];
     const casesIndex = newArray.findIndex((item: any) => item.type === 'cases');
@@ -284,6 +242,15 @@ export function SwitchCasesField(props: any) {
       newArray.push({ type: 'default', value: newDefault, typeHint: 'json' });
     }
     setValue(name, newArray);
+  };
+
+  // Remove the default output entry entirely so the saved config carries no
+  // `default` key — at runtime an absent default makes a no-match an error.
+  const removeDefaultOutput = () => {
+    setValue(
+      name,
+      fieldArray.filter((item: any) => item.type !== 'default')
+    );
   };
 
   const updateRoutingMode = (enabled: boolean) => {
@@ -409,7 +376,7 @@ export function SwitchCasesField(props: any) {
   };
 
   const openEditDialog = (
-    type: 'value' | 'defaultOutput' | 'caseMatch' | 'caseOutput',
+    type: 'defaultOutput' | 'caseMatch' | 'caseOutput',
     currentValue: string,
     index?: number
   ) => {
@@ -421,10 +388,7 @@ export function SwitchCasesField(props: any) {
   const handleDialogSave = () => {
     if (!editingField) return;
 
-    if (editingField.type === 'value') {
-      // updateSwitchValue already handles type conversion
-      updateSwitchValue(editingValue);
-    } else if (editingField.type === 'defaultOutput') {
+    if (editingField.type === 'defaultOutput') {
       try {
         const parsed = JSON.parse(editingValue);
         updateDefaultOutput(parsed);
@@ -456,92 +420,6 @@ export function SwitchCasesField(props: any) {
     setEditingField(null);
     setEditingValue('');
   };
-
-  // Handle textarea value change for autocomplete detection
-  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
-    setEditingValue(newValue);
-
-    // Use setTimeout to ensure textarea cursor position is updated
-    setTimeout(() => {
-      const textarea = textareaRef.current;
-      if (!textarea) {
-        return;
-      }
-
-      const cursorPos = textarea.selectionStart;
-      const textBeforeCursor = newValue.substring(0, cursorPos);
-
-      // Find the last occurrence of "{{" before cursor
-      const lastTriggerIndex = textBeforeCursor.lastIndexOf('{{');
-
-      if (lastTriggerIndex !== -1) {
-        // Check if we're still inside the variable reference (no closing }})
-        const textAfterTrigger = textBeforeCursor.substring(lastTriggerIndex);
-        const hasClosing = textAfterTrigger.includes('}}');
-
-        if (!hasClosing) {
-          // Extract the query after "{{"
-          const query = textAfterTrigger.substring(2);
-
-          setAutocompleteQuery(query);
-          setTriggerIndex(lastTriggerIndex);
-          setShowAutocomplete(true);
-          return;
-        }
-      }
-
-      // If we get here, close autocomplete
-      setShowAutocomplete(false);
-      setAutocompleteQuery('');
-      setTriggerIndex(-1);
-    }, 0);
-  };
-
-  // Handle autocomplete selection
-  const handleAutocompleteSelect = (suggestion: VariableSuggestion) => {
-    if (triggerIndex === -1) {
-      return;
-    }
-
-    const textarea = textareaRef.current;
-    if (!textarea) {
-      return;
-    }
-
-    const currentValue = editingValue || '';
-    const cursorPos = textarea.selectionStart;
-
-    // Replace from "{{" to cursor position with the selected variable
-    const beforeTrigger = currentValue.substring(0, triggerIndex);
-    const afterCursor = currentValue.substring(cursorPos);
-    const newValue = `${beforeTrigger}{{${suggestion.value}}}${afterCursor}`;
-
-    setEditingValue(newValue);
-
-    // Close autocomplete
-    setShowAutocomplete(false);
-    setAutocompleteQuery('');
-    setTriggerIndex(-1);
-
-    // Set cursor position after the inserted variable
-    setTimeout(() => {
-      if (textarea) {
-        const newCursorPos = beforeTrigger.length + suggestion.value.length + 4; // 4 for {{ and }}
-        textarea.selectionStart = newCursorPos;
-        textarea.selectionEnd = newCursorPos;
-        textarea.focus();
-      }
-    }, 0);
-  };
-
-  // Generate and filter suggestions
-  const allSuggestions = composeVariableSuggestions(previousSteps);
-  const filteredSuggestions = filterSuggestions(
-    allSuggestions,
-    autocompleteQuery
-  );
-  const groupedSuggestions = groupSuggestions(filteredSuggestions);
 
   // Helper to format match value for display based on matchType
   const formatMatchValue = (match: any, matchType: MatchType): string => {
@@ -695,32 +573,16 @@ export function SwitchCasesField(props: any) {
     <div>
       <div className="mb-4">{label}</div>
 
-      {/* Value to Switch On */}
+      {/* Value to Switch On — shared source-mapping editor so reference
+          type hints, fallback defaults, and composite values round-trip
+          through the same path as Split/Filter/GroupBy. */}
       <div className="mb-4">
-        <div className="text-sm font-medium text-muted-foreground mb-2">
-          Value to Switch On
-        </div>
-        <MappingValueInput
-          value={switchValue}
-          onChange={(val) => updateSwitchValue(String(val))}
-          valueType={switchValueType}
-          onValueTypeChange={(vt) => {
-            // Read the latest form state so sequential calls from
-            // MappingValueInput don't overwrite each other.
-            const currentArray = getValues(name) || fieldArray;
-            const newArray = [...currentArray];
-            const valueIndex = newArray.findIndex(
-              (item: any) => item.type === 'value'
-            );
-            if (valueIndex >= 0) {
-              newArray[valueIndex] = {
-                ...newArray[valueIndex],
-                valueType: vt,
-              };
-            }
-            setValue(name, newArray);
-          }}
-          fieldType="string"
+        <SourceMappingValueField
+          name={name}
+          label="Value to Switch On"
+          description="The value compared against each case. Use reference mode for dynamic values from previous steps."
+          suggestions={[]}
+          fieldType="any"
           placeholder="Enter value or use reference mode..."
         />
       </div>
@@ -958,47 +820,77 @@ export function SwitchCasesField(props: any) {
         </div>
       </div>
 
-      {/* Default Output */}
+      {/* Default Output — optional. Its presence is semantically meaningful:
+          without a default, an unmatched value fails the step at runtime. */}
       <div>
         <div className="text-sm font-medium text-muted-foreground mb-2">
           Default Output
         </div>
-        <div className="flex items-center gap-1 border rounded-lg p-2">
-          <Input
-            data-testid="switch-default-output"
-            value={
-              typeof defaultOutput === 'object'
-                ? JSON.stringify(defaultOutput)
-                : defaultOutput
-            }
-            onChange={(e) => {
-              try {
-                const parsed = JSON.parse(e.target.value);
-                updateDefaultOutput(parsed);
-              } catch {
-                updateDefaultOutput(e.target.value);
-              }
-            }}
-            className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 flex-1"
-            placeholder='{"key": "value"} or simple value'
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 shrink-0"
-            onClick={() =>
-              openEditDialog(
-                'defaultOutput',
+        {hasDefaultOutput ? (
+          <div className="flex items-center gap-1 border rounded-lg p-2">
+            <Input
+              data-testid="switch-default-output"
+              value={
                 typeof defaultOutput === 'object'
-                  ? JSON.stringify(defaultOutput, null, 2)
-                  : defaultOutput
-              )
-            }
-          >
-            <Icons.edit className="h-3 w-3" />
-          </Button>
-        </div>
+                  ? JSON.stringify(defaultOutput)
+                  : String(defaultOutput ?? '')
+              }
+              onChange={(e) => {
+                try {
+                  const parsed = JSON.parse(e.target.value);
+                  updateDefaultOutput(parsed);
+                } catch {
+                  updateDefaultOutput(e.target.value);
+                }
+              }}
+              className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 flex-1"
+              placeholder='{"key": "value"} or simple value'
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              onClick={() =>
+                openEditDialog(
+                  'defaultOutput',
+                  typeof defaultOutput === 'object'
+                    ? JSON.stringify(defaultOutput, null, 2)
+                    : String(defaultOutput ?? '')
+                )
+              }
+            >
+              <Icons.edit className="h-3 w-3" />
+            </Button>
+            <Button
+              data-testid="switch-remove-default"
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              title="Remove default output (unmatched values will fail)"
+              onClick={removeDefaultOutput}
+            >
+              <Icons.remove className="h-3 w-3" />
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-2 border rounded-lg p-3">
+            <div className="text-xs text-muted-foreground">
+              No default — execution fails when no case matches.
+            </div>
+            <Button
+              data-testid="switch-add-default"
+              type="button"
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              onClick={() => updateDefaultOutput({})}
+            >
+              <Icons.add className="w-4 h-4" /> Add Default
+            </Button>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -1012,117 +904,36 @@ export function SwitchCasesField(props: any) {
           <DialogHeader>
             <DialogTitle>
               Edit{' '}
-              {editingField?.type === 'value'
-                ? 'Switch Value'
-                : editingField?.type === 'defaultOutput'
-                  ? 'Default Output'
-                  : editingField?.type === 'caseMatch'
-                    ? 'Match Pattern'
-                    : 'Case Output'}
+              {editingField?.type === 'defaultOutput'
+                ? 'Default Output'
+                : editingField?.type === 'caseMatch'
+                  ? 'Match Pattern'
+                  : 'Case Output'}
             </DialogTitle>
             <DialogDescription>
-              {editingField?.type === 'value'
-                ? 'Enter the expression to switch on. Use {{ for variable autocomplete.'
-                : editingField?.type === 'caseMatch'
-                  ? (() => {
-                      const caseItem =
-                        editingField.index !== undefined
-                          ? casesArray[editingField.index]
-                          : null;
-                      const matchType = caseItem?.matchType || 'exact';
-                      return getMatchDescription(matchType);
-                    })()
-                  : 'Enter the output value or JSON object. Use {{ for variable autocomplete.'}
+              {editingField?.type === 'caseMatch'
+                ? (() => {
+                    const caseItem =
+                      editingField.index !== undefined
+                        ? casesArray[editingField.index]
+                        : null;
+                    const matchType = caseItem?.matchType || 'exact';
+                    return getMatchDescription(matchType);
+                  })()
+                : 'Enter the output value or JSON object. Moustache templates are not resolved here; for a dynamic value use a {"valueType": "reference", "value": "path.to.value"} object.'}
             </DialogDescription>
           </DialogHeader>
-          <div className="py-4 relative">
+          <div className="py-4">
             <Textarea
-              ref={textareaRef}
               value={editingValue}
-              onChange={handleTextareaChange}
+              onChange={(e) => setEditingValue(e.target.value)}
               className="font-mono text-sm min-h-[200px]"
               placeholder={
                 editingField?.type === 'caseMatch'
                   ? 'Enter match pattern (e.g., US or DE, FR, IT)'
-                  : 'Enter value (type {{ for autocomplete)'
+                  : 'Enter value or JSON object'
               }
             />
-
-            {/* Autocomplete Popover - positioned absolutely */}
-            {showAutocomplete && editingField?.type !== 'caseMatch' && (
-              <div className="absolute left-0 top-full mt-1 w-80 z-50 rounded-sm border bg-popover text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95 max-h-[300px] overflow-y-auto">
-                {filteredSuggestions.length === 0 ? (
-                  <div className="py-6 text-center text-sm">
-                    No variables found.
-                  </div>
-                ) : (
-                  <>
-                    {groupedSuggestions['Workflow Inputs'].length > 0 && (
-                      <div className="p-1">
-                        <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                          Workflow Inputs
-                        </div>
-                        {groupedSuggestions['Workflow Inputs'].map(
-                          (suggestion) => (
-                            <div
-                              key={suggestion.value}
-                              onClick={() =>
-                                handleAutocompleteSelect(suggestion)
-                              }
-                              onMouseDown={(e) => e.preventDefault()}
-                              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
-                            >
-                              <div className="flex flex-col">
-                                <span className="font-mono text-sm">
-                                  {suggestion.label}
-                                </span>
-                                {suggestion.description && (
-                                  <span className="text-xs text-muted-foreground">
-                                    {suggestion.description}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    )}
-
-                    {groupedSuggestions['Step Outputs'].length > 0 && (
-                      <div className="p-1">
-                        <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                          Step Outputs
-                        </div>
-                        {groupedSuggestions['Step Outputs'].map(
-                          (suggestion) => (
-                            <div
-                              key={suggestion.value}
-                              onClick={() =>
-                                handleAutocompleteSelect(suggestion)
-                              }
-                              onMouseDown={(e) => e.preventDefault()}
-                              className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
-                            >
-                              <div className="flex flex-col">
-                                <span className="font-mono text-sm">
-                                  {suggestion.label}
-                                </span>
-                                {suggestion.description && (
-                                  <span className="text-xs text-muted-foreground">
-                                    {suggestion.description}
-                                    {suggestion.type && ` • ${suggestion.type}`}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>

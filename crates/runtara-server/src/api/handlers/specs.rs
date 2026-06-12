@@ -15,7 +15,7 @@ const DSL_CHANGELOG: &str = include_str!(concat!(env!("OUT_DIR"), "/specs/dsl_ch
 /// Get the current DSL specification
 ///
 /// Returns the JSON Schema for the core DSL structure including:
-/// - Step types (7 types after GroupBy removal)
+/// - Registered step types
 /// - Execution graph format
 /// - Data mapping DSL
 #[utoipa::path(

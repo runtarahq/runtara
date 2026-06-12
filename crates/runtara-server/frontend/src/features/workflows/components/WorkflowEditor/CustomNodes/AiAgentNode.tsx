@@ -162,7 +162,8 @@ function AiAgentNodeComponent({
     );
     if (strategyField?.value === 'slidingWindow') return 'Window';
     if (strategyField?.value === 'summarize') return 'Summary';
-    return 'Buffer';
+    // Unset strategy means the DSL default (SlidingWindow) applies
+    return 'Window';
   }, [data.inputMapping]);
 
   const setPendingNewNode = useWorkflowStore(
@@ -379,7 +380,8 @@ function AiAgentNodeComponent({
       setOrAdd('memoryProviderStepId', newNodeId, 'string');
       setOrAdd('memoryConversationId', '', 'string', 'reference');
       setOrAdd('memoryMaxMessages', 50, 'integer');
-      setOrAdd('memoryStrategy', 'summarize', 'string');
+      // No memoryStrategy here: leave compaction strategy unset so the DSL
+      // default (SlidingWindow, see CompactionConfig in runtara-dsl) applies.
 
       // Update AI Agent node data
       const latestNodes = useWorkflowStore.getState().nodes;
@@ -587,7 +589,9 @@ function AiAgentNodeComponent({
           </div>
         </div>
 
-        {/* Only source (next) and target handles */}
+        {/* Source (next), target and onError handles. Tool/memory/mcp edges
+            stay hidden, but onError is a normal error route whose edge is
+            visible on the canvas and needs an anchor. */}
         <Handle
           id="source"
           type="source"
@@ -600,6 +604,13 @@ function AiAgentNodeComponent({
           id="target"
           position={Position.Left}
           className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          isConnectable={isConnectable && !isExecuting}
+        />
+        <Handle
+          id="onError"
+          type="source"
+          position={Position.Bottom}
+          className="!w-2 !h-2 !rounded-full !bg-destructive/40 !border-0"
           isConnectable={isConnectable && !isExecuting}
         />
       </BaseNode>

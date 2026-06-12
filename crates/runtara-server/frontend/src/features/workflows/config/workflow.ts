@@ -29,6 +29,9 @@ export const STEP_TYPES: Record<string, string> = {
   'AI Agent': NODE_TYPES.AiAgentNode, // Backend format (with space)
   WaitForSignal: NODE_TYPES.BasicNode,
   'Wait For Signal': NODE_TYPES.BasicNode, // Backend format (with space)
+  Delay: NODE_TYPES.BasicNode,
+  Log: NODE_TYPES.BasicNode,
+  Error: NODE_TYPES.BasicNode,
 };
 
 // All node sizes must be multiples of 12px grid for proper alignment

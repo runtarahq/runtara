@@ -49,6 +49,8 @@ export function StepTypeIcon(props: Props) {
     case 'WaitForSignal':
     case 'Wait For Signal':
       return <Icons.wait className={iconClassName} />;
+    case 'Delay':
+      return <Icons.wait className={iconClassName} />;
     default:
       return <Icons.gear className={iconClassName} />;
   }

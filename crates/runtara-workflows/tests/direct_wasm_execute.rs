@@ -35,9 +35,13 @@ const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
+const AGENT_EDGE_CONDITION: &str = include_str!("fixtures/agent_edge_condition.json");
+const WAIT_TIMEOUT_ON_ERROR: &str = include_str!("fixtures/wait_timeout_on_error.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
+const CONDITIONAL_QUERY_ONLY_OPERATOR: &str =
+    include_str!("fixtures/conditional_query_only_operator.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
   "durable": true,
   "steps": {
@@ -190,6 +194,76 @@ const FANOUT_DIAMOND_NO_FINISH: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// Cross-linked fan-out inside a Conditional branch (the distilled
+/// CategorizeViaUnspsc miss-path): `gate` fans out to `left` and `right`, and
+/// `after_left` — downstream of `left` — consumes `right`'s output. The region's
+/// topological order must run `right` before `after_left`; the per-fan-out merge
+/// recursion this replaced ran branch 0's whole chain first, so the cross
+/// reference resolved to null (and a failure there meant `right` never ran at
+/// all — the reported "second fan-out edge silently dropped").
+const FANOUT_CROSS_BRANCH_REFERENCE: &str = r#"{
+  "durable": false,
+  "steps": {
+    "cond": {
+      "stepType": "Conditional", "id": "cond",
+      "condition": {
+        "type": "operation", "op": "EQ",
+        "arguments": [
+          {"value": "x", "valueType": "immediate"},
+          {"value": "y", "valueType": "immediate"}
+        ]
+      }
+    },
+    "hit": {
+      "stepType": "Agent", "id": "hit", "name": "Hit",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "H"}}
+    },
+    "gate": {
+      "stepType": "Agent", "id": "gate", "name": "Gate",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "G"}}
+    },
+    "left": {
+      "stepType": "Agent", "id": "left", "name": "Left",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "L"}}
+    },
+    "right": {
+      "stepType": "Agent", "id": "right", "name": "Right",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "immediate", "value": "R"}}
+    },
+    "after_left": {
+      "stepType": "Agent", "id": "after_left", "name": "After Left",
+      "agentId": "utils", "capabilityId": "return-input",
+      "inputMapping": {"value": {"valueType": "reference", "value": "steps.right.outputs"}}
+    },
+    "finish": {
+      "stepType": "Finish", "id": "finish",
+      "inputMapping": {
+        "crossed": {"valueType": "reference", "value": "steps.after_left.outputs"},
+        "left":    {"valueType": "reference", "value": "steps.left.outputs"},
+        "right":   {"valueType": "reference", "value": "steps.right.outputs"}
+      }
+    }
+  },
+  "entryPoint": "cond",
+  "executionPlan": [
+    { "fromStep": "cond", "label": "true",  "toStep": "hit" },
+    { "fromStep": "cond", "label": "false", "toStep": "gate" },
+    { "fromStep": "gate", "toStep": "left" },
+    { "fromStep": "gate", "toStep": "right" },
+    { "fromStep": "left", "toStep": "after_left" },
+    { "fromStep": "after_left", "toStep": "finish" },
+    { "fromStep": "right", "toStep": "finish" },
+    { "fromStep": "hit", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 #[derive(Debug)]
 struct Completed {
     output_json: Value,
@@ -240,6 +314,8 @@ struct CapturedRun {
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
     checkpoints: Vec<CheckpointRequest>,
+    /// LLM-proxy request envelopes the workflow sent (one per model call).
+    llm_requests: Vec<Value>,
     status_success: bool,
     stderr: String,
 }
@@ -256,6 +332,12 @@ enum CapturedMessage {
 #[derive(Debug, Default)]
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Scripted LLM-proxy responses, served front-to-back to POST /llm-proxy.
+    /// Each entry is the proxy envelope `{status, headers, body}` the
+    /// workflow's `call_agent()` will deserialize into an HttpResponse.
+    llm_responses: Mutex<Vec<Value>>,
+    /// Proxy request envelopes received on POST /llm-proxy, in order.
+    llm_requests: Mutex<Vec<Value>>,
 }
 
 fn e2e_enabled() -> bool {
@@ -326,8 +408,8 @@ fn shared_components_dir() -> Option<PathBuf> {
     }
 }
 
-/// Mirror `WasmRunner::from_env`: honor `WASMTIME_PATH`, then
-/// `~/.wasmtime/bin/wasmtime`, then PATH.
+/// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
+/// then `~/.wasmtime/bin/wasmtime`, then PATH.
 fn wasmtime_binary() -> PathBuf {
     if let Ok(path) = std::env::var("WASMTIME_PATH") {
         return PathBuf::from(path);
@@ -461,6 +543,34 @@ fn route(
 
     if method == "GET" && path == "/health" {
         return (200, serde_json::json!({"ok": true}));
+    }
+
+    // Hermetic LLM stub: `call_agent()` forwards provider requests here when
+    // RUNTARA_HTTP_PROXY_URL points at the mock server. Pop the next scripted
+    // proxy envelope; running out of script is a test bug, surfaced as 599
+    // so the workflow fails loudly instead of hanging on `{success: true}`.
+    if method == "POST" && path == "/llm-proxy" {
+        let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        server_state
+            .llm_requests
+            .lock()
+            .expect("llm_requests lock")
+            .push(envelope);
+        let mut responses = server_state
+            .llm_responses
+            .lock()
+            .expect("llm_responses lock");
+        if responses.is_empty() {
+            return (
+                200,
+                serde_json::json!({
+                    "status": 599,
+                    "headers": {},
+                    "body": {"error": "llm stub script exhausted"}
+                }),
+            );
+        }
+        return (200, responses.remove(0));
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -664,8 +774,8 @@ fn direct_e2e_components_dir() -> Option<PathBuf> {
         eprintln!("SKIP: wac not installed.");
         return None;
     }
-    if !wasmtime_installed() {
-        eprintln!("SKIP: wasmtime not installed.");
+    if !embedded_executor_mode() && !wasmtime_installed() {
+        eprintln!("SKIP: RUNTARA_DIRECT_WASM_EXECUTOR=cli but wasmtime is not installed.");
         return None;
     }
     let components_dir = shared_components_dir()?;
@@ -778,9 +888,32 @@ fn run_direct_workflow_capture(
         workflow_input,
         track_events,
         Vec::new(),
+        Vec::new(),
     )
 }
 
+/// Run a workflow whose AiAgent steps call the scripted LLM stub. Each script
+/// entry is a proxy envelope `{status, headers, body}` served in order to the
+/// workflow's model calls; the returned run carries the recorded requests.
+fn run_direct_workflow_with_llm_script(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    llm_script: Vec<Value>,
+) -> CapturedRun {
+    run_direct_workflow_capture_with_preloaded_checkpoints(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+        Vec::new(),
+        llm_script,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_direct_workflow_capture_with_preloaded_checkpoints(
     components_dir: &Path,
     workflow_id: &str,
@@ -788,6 +921,79 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     workflow_input: &[u8],
     track_events: bool,
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+) -> CapturedRun {
+    run_direct_workflow_capture_full(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_full(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
+) -> CapturedRun {
+    let first = run_direct_workflow_capture_attempt(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints.clone(),
+        llm_script.clone(),
+        extra_env.clone(),
+    );
+    // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
+    // TCP listeners) a run occasionally dies before reaching the mock runtime
+    // at all: non-zero exit, EMPTY stderr, and zero captured traffic. That
+    // signature is infrastructure (spawn/connect), not workflow behavior —
+    // retry once so a 1-in-N-suites flake doesn't fail the suite. Real
+    // failures always leave stderr or a /failed capture and are NOT retried.
+    let infra_flake = !first.status_success
+        && first.stderr.trim().is_empty()
+        && first.output_json.is_none()
+        && first.error_json.is_none()
+        && first.events.is_empty()
+        && first.checkpoints.is_empty();
+    if !infra_flake {
+        return first;
+    }
+    eprintln!("retrying '{workflow_id}': wasmtime spawn/connect flake (empty stderr, no traffic)");
+    run_direct_workflow_capture_attempt(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        extra_env,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_attempt(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -801,7 +1007,6 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         components_dir,
     )
@@ -815,33 +1020,39 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
     let workflow_input = Arc::new(workflow_input.to_vec());
     let server_state = Arc::new(ServerState {
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
+        llm_responses: Mutex::new(llm_script),
+        llm_requests: Mutex::new(Vec::new()),
     });
+    let server_state_for_assertions = server_state.clone();
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    let output = Command::new(wasmtime_binary())
-        .arg("run")
-        .arg("--wasi")
-        .arg("http")
-        .arg("--wasi")
-        .arg("inherit-network")
-        .arg("--env")
-        .arg(format!("RUNTARA_HTTP_URL=http://{addr}"))
-        .arg("--env")
-        .arg(format!("RUNTARA_SERVER_ADDR={addr}"))
-        .arg("--env")
-        .arg(format!("RUNTARA_INSTANCE_ID={workflow_id}"))
-        .arg("--env")
-        .arg("RUNTARA_TENANT_ID=direct-wasm-execute")
-        .arg("--env")
-        .arg("RUST_LOG=warn")
-        .arg(&compiled.wasm_path)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .expect("spawn wasmtime");
+    // Env contract shared by both execution paths. The object-model URL keeps
+    // that traffic hermetic: its default base URL points at a live local
+    // environment (127.0.0.1:7002); route it to the mock, whose generic
+    // `{"success": true}` fallback answers internal calls.
+    let mut env_pairs: Vec<(String, String)> = vec![
+        ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
+        (
+            "RUNTARA_HTTP_PROXY_URL".into(),
+            format!("http://{addr}/llm-proxy"),
+        ),
+        (
+            "RUNTARA_OBJECT_MODEL_URL".into(),
+            format!("http://{addr}/object-model"),
+        ),
+        ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
+        ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
+        ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
+        ("RUST_LOG".into(), "warn".into()),
+    ];
+    env_pairs.extend(extra_env.iter().cloned());
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (status_success, stderr) = if embedded_executor_mode() {
+        execute_via_embedded(&compiled.wasm_path, &env_pairs)
+    } else {
+        execute_via_cli(&compiled.wasm_path, &env_pairs)
+    };
     let _ = stop_tx.send(());
     let _ = server_handle.join();
 
@@ -859,14 +1070,82 @@ fn run_direct_workflow_capture_with_preloaded_checkpoints(
             CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
         }
     }
+    let llm_requests = server_state_for_assertions
+        .llm_requests
+        .lock()
+        .expect("llm_requests lock")
+        .clone();
     CapturedRun {
         output_json,
         error_json,
         events,
         sleeps,
         checkpoints,
-        status_success: output.status.success(),
-        stderr: stderr.into_owned(),
+        llm_requests,
+        status_success,
+        stderr,
+    }
+}
+
+/// Battery-wide executor selection. The in-process WorkflowExecutor is the
+/// default (it is the only production runner); `RUNTARA_DIRECT_WASM_EXECUTOR=cli`
+/// opts into the reference wasmtime CLI for A/B cross-checks of the composed
+/// component against the upstream runtime.
+fn embedded_executor_mode() -> bool {
+    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() != Ok("cli")
+}
+
+/// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.
+fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
+    let mut command = Command::new(wasmtime_binary());
+    command
+        .arg("run")
+        .arg("--wasi")
+        .arg("http")
+        .arg("--wasi")
+        .arg("inherit-network");
+    for (key, value) in env_pairs {
+        command.arg("--env").arg(format!("{key}={value}"));
+    }
+    let output = command
+        .arg(wasm_path)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .expect("spawn wasmtime");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Embedded path: same component, same env, executed in-process.
+fn execute_via_embedded(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load(wasm_path)
+            .await
+            .expect("load composed workflow component");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: env_pairs.iter().cloned().collect(),
+                    stderr: None,
+                    timeout: Duration::from_secs(300),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                },
+            )
+            .await
+    });
+    match result.exit {
+        runtara_component_host::WorkflowExit::Completed => (true, String::new()),
+        runtara_component_host::WorkflowExit::GuestError => (false, String::new()),
+        runtara_component_host::WorkflowExit::Failed { reason } => (false, reason),
+        other => (false, format!("embedded run interrupted: {other:?}")),
     }
 }
 
@@ -895,7 +1174,6 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
-            connection_integration_ids: std::collections::HashMap::new(),
         },
         DirectWorkflowCompileOptions {
             output_dir: temp.path().to_path_buf(),
@@ -918,7 +1196,6 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
     );
     assert_eq!(compiled.binary_checksum.len(), 64);
     assert!(compiled.package_size > 0);
-    assert!(!compiled.has_side_effects);
     assert!(compiled.child_dependencies.is_empty());
     assert_eq!(compiled.default_variables, serde_json::json!({}));
     assert_eq!(compiled.compiler_mode, WorkflowCompilerMode::DirectWasm);
@@ -966,7 +1243,6 @@ fn direct_compile_measures_json_to_ready_bundle_latency() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
-        connection_integration_ids: std::collections::HashMap::new(),
     })
     .expect("direct emit succeeds");
     let emit_elapsed = emit_start.elapsed();
@@ -1062,6 +1338,58 @@ fn direct_wasm_execute_fanout_diamond_without_finish_returns_null() {
     );
 
     assert_eq!(output, Value::Null);
+}
+
+#[test]
+fn direct_wasm_execute_fanout_cross_branch_reference_runs_producer_first() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Off-backbone fan-out (inside the Conditional's false branch) where a step
+    // downstream of one branch consumes the other branch's output. Both branches
+    // must run, exactly once each, with `right` ordered before its consumer
+    // `after_left` — the regression that dropped the second fan-out edge in the
+    // CategorizeViaUnspsc repro.
+    let result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-fanout-cross-branch-reference",
+        FANOUT_CROSS_BRANCH_REFERENCE,
+        br#"{}"#,
+        true,
+    );
+
+    assert_eq!(
+        result.output_json,
+        serde_json::json!({ "crossed": "R", "left": "L", "right": "R" })
+    );
+
+    let ended: Vec<&str> = result
+        .events
+        .iter()
+        .filter(|event| event.subtype == "step_debug_end")
+        .filter_map(|event| event.payload_json["step_id"].as_str())
+        .collect();
+    for step_id in ["gate", "left", "right", "after_left", "finish"] {
+        assert_eq!(
+            ended
+                .iter()
+                .filter(|ended_id| **ended_id == step_id)
+                .count(),
+            1,
+            "step '{step_id}' should run exactly once: {ended:?}"
+        );
+    }
+    assert!(
+        !ended.contains(&"hit"),
+        "the untaken Conditional branch must not run: {ended:?}"
+    );
+    let right_position = ended.iter().position(|step_id| *step_id == "right");
+    let consumer_position = ended.iter().position(|step_id| *step_id == "after_left");
+    assert!(
+        right_position < consumer_position,
+        "producer 'right' must run before its consumer 'after_left': {ended:?}"
+    );
 }
 
 #[test]
@@ -1336,6 +1664,1046 @@ fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
 }
 
 #[test]
+fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-01: MATCH (like SIMILARITY_GTE / COSINE_DISTANCE_LTE /
+    // L2_DISTANCE_LTE) is an object-model query operator with no workflow
+    // evaluator. Validation rejects new workflows up front (E027); this
+    // compiles the graph directly (bypassing validation, as any workflow
+    // registered before E027 existed would have) and proves the runtime now
+    // fails loudly instead of silently evaluating the condition to false and
+    // taking the false branch.
+    let result = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-query-only-operator",
+        CONDITIONAL_QUERY_ONLY_OPERATOR,
+        br#"{"text":"haystack with needle"}"#,
+    );
+
+    // Unhandled stdlib errors surface through `runtime.fail` as a bare message
+    // string (not an Error-step envelope object).
+    let message = result.error_json.as_str().unwrap_or_default();
+    assert!(
+        message.contains("MATCH") && message.contains("object-model"),
+        "expected loud query-only-operator failure, got: {}",
+        result.error_json
+    );
+}
+
+fn single_shot_ai_agent_graph_json(retry_config: &str) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You are a test stub caller"}},
+          "userPrompt":{{"valueType":"immediate","value":"Say hello"}},
+          "provider":"openai",
+          "model":"gpt-4o"{retry_config}}}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+fn llm_ok(content: &str) -> Value {
+    serde_json::json!({
+        "status": 200,
+        "headers": {},
+        "body": {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }
+    })
+}
+
+fn llm_http_500() -> Value {
+    serde_json::json!({
+        "status": 500,
+        "headers": {},
+        "body": {"error": {"message": "stubbed provider outage"}}
+    })
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Baseline for the hermetic LLM stub: a single-shot AiAgent drives one
+    // chat-completion through the proxy and finishes with the stubbed text.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-stub",
+        &single_shot_ai_agent_graph_json(""),
+        br#"{}"#,
+        vec![llm_ok("hello from stub")],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    let output = result.output_json.expect("workflow completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello from stub"),
+        "{output}"
+    );
+    assert_eq!(result.llm_requests.len(), 1, "exactly one model call");
+    // The proxy envelope carries the OpenAI-shaped request.
+    let request = &result.llm_requests[0];
+    assert_eq!(
+        request.get("url").and_then(Value::as_str),
+        Some("/v1/chat/completions"),
+        "{request}"
+    );
+    assert_eq!(
+        request.get("ai_provider").and_then(Value::as_str),
+        Some("openai"),
+        "{request}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-06: config.maxRetries drives the existing agent retry machinery for
+    // the chat-completion invoke. Two stubbed HTTP 500s (transient) are
+    // retried; the third call succeeds.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-retries",
+        &single_shot_ai_agent_graph_json(r#","maxRetries":3,"retryDelay":10"#),
+        br#"{}"#,
+        vec![llm_http_500(), llm_http_500(), llm_ok("recovered")],
+    );
+
+    assert!(
+        result.status_success,
+        "retried workflow should complete; stderr: {}",
+        result.stderr
+    );
+    let output = result
+        .output_json
+        .expect("workflow completes after retries");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("recovered"),
+        "{output}"
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        3,
+        "two failed attempts + one success"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_default_does_not_retry() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Default stays 0 retries: re-billing an LLM call is opt-in. The first
+    // stubbed 500 fails the workflow; the scripted success is never consumed.
+    let result = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-single-shot-no-retries",
+        &single_shot_ai_agent_graph_json(""),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        vec![llm_http_500(), llm_ok("never reached")],
+    );
+
+    assert!(
+        !result.status_success,
+        "default must fail on the first provider error"
+    );
+    assert_eq!(result.llm_requests.len(), 1, "no retry call may happen");
+    let error = result.error_json.expect("failure is posted");
+    let message = error.to_string();
+    assert!(
+        message.contains("500") || message.contains("provider outage"),
+        "unexpected failure payload: {message}"
+    );
+}
+
+fn ai_agent_tool_loop_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"echo_tool","label":"echo"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","breakpoint":true,"config":{
+          "systemPrompt":{"valueType":"immediate","value":"You call tools"},
+          "userPrompt":{"valueType":"immediate","value":"Use the echo tool"},
+          "provider":"openai",
+          "model":"gpt-4o"}},
+        "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
+    .to_string()
+}
+
+fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
+    serde_json::json!({
+        "status": 200,
+        "headers": {},
+        "body": {
+            "choices": [{"message": {"tool_calls": [{
+                "id": "call_1",
+                "function": {"name": tool_name, "arguments": arguments}
+            }]}}]
+        }
+    })
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-08: with debug mode on, a breakpoint on a tool-loop AiAgent pauses
+    // BEFORE any loop work - no memory load, no model call. The run exits
+    // cleanly without /completed or /failed, stores the breakpoint-hit
+    // checkpoint, and emits the breakpoint_hit event. The empty LLM script
+    // proves zero model calls (any call would fail loudly on script
+    // exhaustion).
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-breakpoint-pause",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        vec![("DEBUG_MODE".to_string(), "true".to_string())],
+    );
+
+    assert!(
+        result.status_success,
+        "breakpoint pause is a clean exit; stderr: {}",
+        result.stderr
+    );
+    assert!(result.output_json.is_none(), "paused run must not complete");
+    assert!(result.error_json.is_none(), "paused run must not fail");
+    assert_eq!(result.llm_requests.len(), 0, "paused before any model call");
+    assert!(
+        result
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id == "breakpoint::ai"),
+        "breakpoint-hit checkpoint must be stored: {:?}",
+        result
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| event.subtype == "breakpoint_hit"),
+        "breakpoint_hit event must be emitted: {:?}",
+        result.events.iter().map(|e| &e.subtype).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Resume: the breakpoint-hit checkpoint short-circuits the pause and the
+    // tool loop runs to completion - one tool-call turn against the echo
+    // tool, then a completing turn.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-breakpoint-resume",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        false,
+        vec![(
+            "breakpoint::ai".to_string(),
+            br#""breakpoint_hit""#.to_vec(),
+        )],
+        vec![
+            llm_tool_call("echo", r#"{"value":42}"#),
+            llm_ok("loop finished"),
+        ],
+        vec![("DEBUG_MODE".to_string(), "true".to_string())],
+    );
+
+    assert!(
+        result.status_success,
+        "resumed run should complete; stderr: {}",
+        result.stderr
+    );
+    let output = result.output_json.expect("resumed run completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("loop finished"),
+        "{output}"
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        2,
+        "tool-call turn + completing turn"
+    );
+}
+
+fn ai_agent_tool_only_no_next_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"echo_tool","label":"echo"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You call tools"},
+          "userPrompt":{"valueType":"immediate","value":"List all tools you have"},
+          "provider":"openai",
+          "model":"gpt-4o"}},
+        "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{}}
+      }
+    }"##
+    .to_string()
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_without_next_edge_runs_loop() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Regression: a tool-loop AiAgent whose ONLY outgoing edge is the tool
+    // edge (no "next" edge, no Finish step) ran the loop but emitted no step
+    // events at all — the UI showed the step as never executed. Mirrors a
+    // UI-authored workflow where the agent is terminal.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-no-next",
+        &ai_agent_tool_only_no_next_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![
+            llm_tool_call("echo", r#"{"value":42}"#),
+            llm_ok("loop finished"),
+        ],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should not crash; stderr: {}",
+        result.stderr
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        2,
+        "tool-call turn + completing turn; events: {:?}, stderr: {}",
+        result.events.iter().map(|e| &e.subtype).collect::<Vec<_>>(),
+        result.stderr
+    );
+
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+
+    // The AiAgent step itself emits paired debug events.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai".to_string())),
+        "AI step must emit step_debug_start: {event_keys:?}"
+    );
+    assert!(
+        event_keys.contains(&("step_debug_end".to_string(), "ai".to_string())),
+        "AI step must emit step_debug_end: {event_keys:?}"
+    );
+
+    // The dispatched tool call appears as a synthetic AiAgentToolCall step,
+    // matching the generated compiler's "{step}.tool.{name}.{call}" events.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai.tool.echo.1".to_string())),
+        "tool call must emit step_debug_start: {event_keys:?}"
+    );
+    let tool_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str)
+                    == Some("ai.tool.echo.1")
+        })
+        .expect("tool call must emit step_debug_end");
+    assert_eq!(
+        tool_end.payload_json["step_type"],
+        serde_json::json!("AiAgentToolCall")
+    );
+    assert_eq!(
+        tool_end.payload_json["outputs"]["outputs"]["tool_name"],
+        serde_json::json!("echo")
+    );
+
+    // The AI step's debug-end carries the legacy {response, iterations,
+    // toolCalls} envelope.
+    let ai_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str) == Some("ai")
+        })
+        .expect("AI step debug end");
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["response"],
+        serde_json::json!("loop finished")
+    );
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["toolCalls"][0]["tool_name"],
+        serde_json::json!("echo")
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_with_next_edge_emits_debug_events() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Control for the no-next-edge case: same tool loop with a "next" edge
+    // and Finish, trackEvents on.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-with-next-events",
+        &ai_agent_tool_loop_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![llm_ok("loop finished")],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should not crash; stderr: {}",
+        result.stderr
+    );
+    assert_eq!(result.llm_requests.len(), 1, "model called once");
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "ai".to_string())),
+        "AI step itself must emit step_debug_start: {event_keys:?}"
+    );
+    assert!(
+        event_keys.contains(&("step_debug_end".to_string(), "ai".to_string())),
+        "AI step itself must emit step_debug_end: {event_keys:?}"
+    );
+    // The Finish step's events still follow the AI step's.
+    assert!(
+        event_keys.contains(&("step_debug_start".to_string(), "finish".to_string())),
+        "Finish step events present: {event_keys:?}"
+    );
+}
+
+fn ai_agent_memory_graph_json() -> String {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"mem","label":"memory"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You chat"},
+          "userPrompt":{"valueType":"immediate","value":"Say hello"},
+          "provider":"openai",
+          "model":"gpt-4o",
+          "memory":{
+            "conversationId":{"valueType":"immediate","value":"conv-42"},
+            "compaction":{"maxMessages":1}
+          }}},
+        "mem": {"id":"mem","stepType":"Agent","name":"Memory","agentId":"object-model",
+          "capabilityId":"load-memory","connectionId":"conn-1","inputMapping":{}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
+    .to_string()
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_memory_emits_debug_events() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Conversation memory phases must surface as synthetic AiAgentMemory*
+    // steps like the generated compiler: load before the loop, sliding-window
+    // compaction (maxMessages 1 < the 2-message history, so it fires) and
+    // save after. The object-model provider's HTTP calls hit the mock's
+    // generic `{"success": true}` fallback — an empty stored conversation.
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-memory-events",
+        &ai_agent_memory_graph_json(),
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![llm_ok("hello there")],
+        Vec::new(),
+    );
+
+    assert!(
+        result.status_success,
+        "run should complete; stderr: {}; error: {:?}; events: {:?}; llm calls: {}",
+        result.stderr,
+        result.error_json,
+        result
+            .events
+            .iter()
+            .map(|e| (
+                e.subtype.clone(),
+                e.payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string()
+            ))
+            .collect::<Vec<_>>(),
+        result.llm_requests.len(),
+    );
+    let output = result.output_json.expect("run completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello there"),
+        "{output}"
+    );
+
+    let event_keys: Vec<(String, String)> = result
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.subtype.clone(),
+                event
+                    .payload_json
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            )
+        })
+        .collect();
+    for step_id in ["ai.memory_load", "ai.memory.compact", "ai.memory_save"] {
+        for subtype in ["step_debug_start", "step_debug_end"] {
+            assert!(
+                event_keys.contains(&(subtype.to_string(), step_id.to_string())),
+                "missing {subtype} for {step_id}: {event_keys:?}"
+            );
+        }
+    }
+
+    let find_end = |step_id: &str| {
+        result
+            .events
+            .iter()
+            .find(|event| {
+                event.subtype == "step_debug_end"
+                    && event.payload_json.get("step_id").and_then(Value::as_str) == Some(step_id)
+            })
+            .unwrap_or_else(|| panic!("missing debug end for {step_id}"))
+    };
+
+    // Load: the mock has no stored conversation — empty history.
+    let load_end = find_end("ai.memory_load");
+    assert_eq!(
+        load_end.payload_json["step_type"],
+        serde_json::json!("AiAgentMemoryLoad")
+    );
+    assert_eq!(
+        load_end.payload_json["outputs"]["message_count"],
+        serde_json::json!(0)
+    );
+
+    // Compaction: the turn leaves [user, assistant]; maxMessages 1 drops one.
+    let compact_end = find_end("ai.memory.compact");
+    assert_eq!(
+        compact_end.payload_json["outputs"]["outputs"],
+        serde_json::json!({
+            "strategy": "sliding_window",
+            "success": true,
+            "messages_before": 2,
+            "messages_after": 1,
+            "messages_dropped": 1
+        })
+    );
+
+    // Save: the compacted single-message history is persisted.
+    let save_end = find_end("ai.memory_save");
+    assert_eq!(
+        save_end.payload_json["outputs"]["success"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        save_end.payload_json["outputs"]["message_count"],
+        serde_json::json!(1)
+    );
+}
+
+fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}},
+        {{"fromStep":"ai","toStep":"echo_tool","label":"echo"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","durable":{durable},"config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
+          "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
+          "provider":"openai",
+          "model":"gpt-4o"}}}},
+        "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{{}}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-04: each completed turn is checkpointed under {step}.turn.{n}.
+    // Run 1 completes the tool-call turn (turn 1: LLM + echo tool dispatch)
+    // and then dies on a provider error at turn 2 - a mid-loop crash.
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-durability",
+        &ai_agent_tool_loop_durable_graph_json(true),
+        br#"{}"#,
+        vec![llm_tool_call("echo", r#"{"value":42}"#), llm_http_500()],
+    );
+    assert!(
+        !crashed.status_success,
+        "run 1 must fail at the second turn"
+    );
+    assert_eq!(crashed.llm_requests.len(), 2, "turn 1 + failed turn 2");
+    // The capture stream includes the empty lookup PROBES as well as the
+    // saves; only non-empty states are real stored checkpoints.
+    let turn_checkpoints: Vec<(String, Vec<u8>)> = crashed
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.checkpoint_id.starts_with("ai.turn.") && !checkpoint.state.is_empty()
+        })
+        .map(|checkpoint| (checkpoint.checkpoint_id.clone(), checkpoint.state.clone()))
+        .collect();
+    assert!(
+        turn_checkpoints.iter().any(|(id, _)| id == "ai.turn.1"),
+        "turn 1 must be checkpointed before the crash: {:?}",
+        crashed
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+
+    // Run 2 (replay after the crash): the preloaded turn-1 snapshot restores
+    // the conversation + tool results WITHOUT a model call or tool dispatch;
+    // only the failed turn 2 runs live. Exactly ONE model call - turn 1 is
+    // not re-billed.
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-loop-durability",
+        &ai_agent_tool_loop_durable_graph_json(true),
+        br#"{}"#,
+        false,
+        turn_checkpoints,
+        vec![llm_ok("done after resume")],
+    );
+    assert!(
+        resumed.status_success,
+        "replay must complete; error: {:?}; events: {:?}; stderr: {}",
+        resumed.error_json,
+        resumed
+            .events
+            .iter()
+            .map(|event| &event.subtype)
+            .collect::<Vec<_>>(),
+        resumed.stderr
+    );
+    let output = resumed.output_json.expect("replay completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("done after resume"),
+        "{output}"
+    );
+    assert_eq!(
+        resumed.llm_requests.len(),
+        1,
+        "completed turn 1 must NOT be re-billed on replay"
+    );
+    // The replayed turn-2 request must carry turn 1's tool result in the
+    // conversation - the restored snapshot, not a fresh conversation.
+    let request_body = resumed.llm_requests[0].to_string();
+    assert!(
+        request_body.contains("42"),
+        "replayed turn must see turn 1's tool result: {request_body}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // durable:false opts the loop out of per-turn checkpoints entirely.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-non-durable",
+        &ai_agent_tool_loop_durable_graph_json(false),
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_ok("non-durable done"),
+        ],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    assert_eq!(result.llm_requests.len(), 2);
+    assert!(
+        !result
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id.starts_with("ai.turn.")),
+        "non-durable loop must not write turn checkpoints: {:?}",
+        result
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn ai_agent_tool_loop_on_error_graph_json(tool_capability: &str) -> String {
+    format!(
+        r##"{{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {{"fromStep":"ai","toStep":"finish","label":"next"}},
+        {{"fromStep":"ai","toStep":"echo_tool","label":"echo"}},
+        {{"fromStep":"ai","toStep":"handler_finish","label":"onError"}}
+      ],
+      "steps": {{
+        "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
+          "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
+          "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
+          "provider":"openai",
+          "model":"gpt-4o"}}}},
+        "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
+          "agentId":"utils","capabilityId":"{tool_capability}","inputMapping":{{}}}},
+        "handler_finish": {{"id":"handler_finish","stepType":"Finish","inputMapping":{{
+          "handled": {{"valueType":"immediate","value":true}},
+          "code": {{"valueType":"reference","value":"steps.__error.code"}}
+        }}}},
+        "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
+          "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
+        }}}}
+      }}
+    }}"##
+    )
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_provider_error_routes_to_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-05: a chat-turn (provider) failure inside the tool loop routes to
+    // the step's onError handler instead of failing the workflow. The handler
+    // Finish reads steps.__error, so the workflow COMPLETES with the handler
+    // output.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-on-error-provider",
+        &ai_agent_tool_loop_on_error_graph_json("return-input"),
+        br#"{}"#,
+        vec![llm_http_500()],
+    );
+
+    assert!(
+        result.status_success,
+        "handler completion is a clean exit; error: {:?}; stderr: {}",
+        result.error_json, result.stderr
+    );
+    let output = result.output_json.expect("handler Finish completes");
+    assert_eq!(
+        output.get("handled").and_then(Value::as_bool),
+        Some(true),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("code").and_then(Value::as_str),
+        Some("AI_TURN_COMPLETION_FAILED"),
+        "handler must see the chat-turn error envelope: {output}"
+    );
+    assert_eq!(result.llm_requests.len(), 1);
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_loop_tool_error_feeds_back_not_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Guard the unchanged semantics: an individual TOOL failure (unknown
+    // capability here) is fed back to the model as the tool result; the loop
+    // continues and the NORMAL finish runs - onError is not taken.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-tool-error-feedback",
+        &ai_agent_tool_loop_on_error_graph_json("definitely-not-a-capability"),
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_ok("recovered from tool error"),
+        ],
+    );
+
+    assert!(
+        result.status_success,
+        "error: {:?}; stderr: {}",
+        result.error_json, result.stderr
+    );
+    let output = result.output_json.expect("normal finish completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("recovered from tool error"),
+        "tool failures must not route to onError: {output}"
+    );
+    assert_eq!(result.llm_requests.len(), 2);
+    // The second model call must carry the tool error envelope as the result.
+    let second_request = result.llm_requests[1].to_string();
+    assert!(
+        second_request.to_lowercase().contains("error"),
+        "tool error envelope must feed back to the model: {second_request}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-13: conditioned normal-flow edges from an AGENT source route on the
+    // agent's own output (steps.echo.outputs.*), with priority ordering and
+    // the default fallback — and coexist with an onError edge on the same
+    // step (success path must take the EdgeRoute, not the handler).
+    for (input, expected_path) in [
+        // tier=vip outranks status=active (priority 10 > 5)
+        (r#"{"status":"active","tier":"vip"}"#, "vip"),
+        (r#"{"status":"active"}"#, "active"),
+        (r#"{"status":"dormant"}"#, "default"),
+    ] {
+        let output = run_direct_workflow(
+            &components_dir,
+            "agent-edge-condition",
+            AGENT_EDGE_CONDITION,
+            input.as_bytes(),
+        );
+        assert_eq!(
+            output.get("path").and_then(Value::as_str),
+            Some(expected_path),
+            "input {input} routed wrong: {output}"
+        );
+    }
+}
+
+#[test]
+fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
+    // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
+    // which completes the workflow reading steps.__error.*.
+    let output = run_direct_workflow(
+        &components_dir,
+        "wait-timeout-on-error",
+        WAIT_TIMEOUT_ON_ERROR,
+        br#"{}"#,
+    );
+
+    assert_eq!(
+        output.get("handled").and_then(Value::as_bool),
+        Some(true),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("code").and_then(Value::as_str),
+        Some("WAIT_TIMEOUT"),
+        "{output}"
+    );
+    assert_eq!(
+        output.get("category").and_then(Value::as_str),
+        Some("timeout"),
+        "{output}"
+    );
+}
+
+#[test]
+fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // GAP-07: a single-shot AiAgent's onError handler is lowered live, so the
+    // support gate must shape-check it. A handler whose Conditional lacks a
+    // `false` branch is rejected AT THE GATE with a per-feature report (it
+    // previously slipped through and died at plan build); the same workflow
+    // with a well-formed handler compiles and composes to a runnable wasm.
+    let malformed = r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"handler_check","label":"onError"},
+        {"fromStep":"handler_check","toStep":"handler_finish","label":"true"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"sys"},
+          "userPrompt":{"valueType":"immediate","value":"go"},
+          "provider":"openai"}},
+        "handler_check": {"id":"handler_check","stepType":"Conditional","condition":{
+          "type":"operation","op":"EQ","arguments":[
+            {"valueType":"immediate","value":1},
+            {"valueType":"immediate","value":1}]}},
+        "handler_finish": {"id":"handler_finish","stepType":"Finish"},
+        "finish": {"id":"finish","stepType":"Finish"}
+      }
+    }"##;
+    let graph: ExecutionGraph = serde_json::from_str(malformed).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let error = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "ai-gate-malformed-handler".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        &components_dir,
+    )
+    .expect_err("malformed single-shot handler must fail at the gate");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not support this graph"),
+        "expected a gate Unsupported error, got: {message}"
+    );
+
+    let well_formed = r##"{
+      "entryPoint": "ai",
+      "executionPlan": [
+        {"fromStep":"ai","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"handler_finish","label":"onError"}
+      ],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"sys"},
+          "userPrompt":{"valueType":"immediate","value":"go"},
+          "provider":"openai"}},
+        "handler_finish": {"id":"handler_finish","stepType":"Finish"},
+        "finish": {"id":"finish","stepType":"Finish"}
+      }
+    }"##;
+    let graph: ExecutionGraph = serde_json::from_str(well_formed).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "ai-gate-well-formed-handler".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        &components_dir,
+    )
+    .expect("well-formed single-shot handler must compile and compose");
+    assert!(
+        fs::metadata(&compiled.wasm_path)
+            .expect("composed wasm exists")
+            .len()
+            > 0
+    );
+}
+
+#[test]
 fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;
@@ -1530,6 +2898,7 @@ fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
         br#"{"value":"fresh-agent"}"#,
         false,
         vec![(checkpoint_id.clone(), br#""cached-agent""#.to_vec())],
+        Vec::new(),
     );
 
     assert!(
@@ -2102,4 +3471,225 @@ fn fixture_execution_smoke_battery() {
         failures.len(),
         failures.join("\n"),
     );
+}
+
+// ===========================================================================
+// Embedded execution — runtara-component-host's WorkflowExecutor instead of
+// the wasmtime CLI process. Same in-process compile path, same hermetic core
+// stub; proves the composed component behaves identically under the embedded
+// engine before the runner migration switches over to it.
+// ===========================================================================
+
+fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
+    static EXECUTOR: std::sync::OnceLock<runtara_component_host::WorkflowExecutor> =
+        std::sync::OnceLock::new();
+    EXECUTOR.get_or_init(|| {
+        let engine =
+            runtara_component_host::build_engine(&runtara_component_host::EngineConfig::default())
+                .expect("build embedded engine");
+        runtara_component_host::spawn_epoch_ticker(Arc::clone(&engine));
+        runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor")
+    })
+}
+
+fn run_direct_workflow_embedded(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+) -> CapturedRun {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        components_dir,
+    )
+    .expect("direct composed compile");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+    let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let input_arc = Arc::new(workflow_input.to_vec());
+    let server_state = Arc::new(ServerState::default());
+    let server_state_for_assertions = server_state.clone();
+    let server_handle =
+        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
+
+    // Same env contract the CLI variant passes via --env flags.
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
+    env.insert(
+        "RUNTARA_HTTP_PROXY_URL".to_string(),
+        format!("http://{addr}/llm-proxy"),
+    );
+    env.insert(
+        "RUNTARA_OBJECT_MODEL_URL".to_string(),
+        format!("http://{addr}/object-model"),
+    );
+    env.insert("RUNTARA_SERVER_ADDR".to_string(), addr.to_string());
+    env.insert("RUNTARA_INSTANCE_ID".to_string(), workflow_id.to_string());
+    env.insert(
+        "RUNTARA_TENANT_ID".to_string(),
+        "direct-wasm-execute".to_string(),
+    );
+    env.insert("RUST_LOG".to_string(), "warn".to_string());
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load(&compiled.wasm_path)
+            .await
+            .expect("load composed workflow component");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(120),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                },
+            )
+            .await
+    });
+
+    let _ = stop_tx.send(());
+    let _ = server_handle.join();
+
+    let mut output_json = None;
+    let mut error_json = None;
+    let mut events = Vec::new();
+    let mut sleeps = Vec::new();
+    let mut checkpoints = Vec::new();
+    for message in capture_rx.try_iter() {
+        match message {
+            CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
+            CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
+            CapturedMessage::Event(event) => events.push(event),
+            CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
+            CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
+        }
+    }
+    let llm_requests = server_state_for_assertions
+        .llm_requests
+        .lock()
+        .expect("llm_requests lock")
+        .clone();
+    let stderr = match &result.exit {
+        runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
+        _ => String::new(),
+    };
+    CapturedRun {
+        output_json,
+        error_json,
+        events,
+        sleeps,
+        checkpoints,
+        llm_requests,
+        status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
+        stderr,
+    }
+}
+
+#[test]
+fn embedded_execute_finish_passthrough_reports_completion() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let captured = run_direct_workflow_embedded(
+        &components_dir,
+        "embedded-finish-passthrough",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"direct-finish"}"#,
+    );
+
+    assert!(
+        captured.status_success,
+        "embedded run failed: {}",
+        captured.stderr
+    );
+    assert_eq!(
+        captured.output_json,
+        Some(serde_json::json!({ "result": "direct-finish" }))
+    );
+    assert!(captured.error_json.is_none());
+}
+
+#[test]
+fn embedded_execute_error_workflow_reports_failure() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let captured = run_direct_workflow_embedded(
+        &components_dir,
+        "embedded-error",
+        ERROR_DIRECT_SIMPLE,
+        br#"{"requestId":"req-123"}"#,
+    );
+
+    assert!(
+        !captured.status_success,
+        "Error workflow must surface a failed run result"
+    );
+    assert!(
+        captured.output_json.is_none(),
+        "Error workflow must not POST /completed"
+    );
+    assert_eq!(
+        captured.error_json,
+        Some(serde_json::json!({
+            "stepId": "fail",
+            "stepName": "Fail Fast",
+            "category": "permanent",
+            "code": "DIRECT_FAILURE",
+            "message": "Direct workflow failure",
+            "severity": "critical",
+            "context": {
+                "requestId": "req-123",
+                "reason": "fixture"
+            }
+        }))
+    );
+}
+
+#[test]
+fn embedded_execute_is_repeatable_across_runs() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Two full runs back to back: each gets a fresh Store from the shared
+    // executor, so state must not leak between instances.
+    for round in 0..2 {
+        let captured = run_direct_workflow_embedded(
+            &components_dir,
+            &format!("embedded-repeat-{round}"),
+            SIMPLE_PASSTHROUGH,
+            br#"{"input":"direct-finish"}"#,
+        );
+        assert!(
+            captured.status_success,
+            "round {round} failed: {}",
+            captured.stderr
+        );
+        assert_eq!(
+            captured.output_json,
+            Some(serde_json::json!({ "result": "direct-finish" })),
+            "round {round} output mismatch"
+        );
+    }
 }

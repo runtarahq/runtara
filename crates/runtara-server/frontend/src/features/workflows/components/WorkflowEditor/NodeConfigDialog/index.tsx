@@ -16,7 +16,7 @@ import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 /** Simple variable type matching the WorkflowEditor prop type */
 interface SimpleVariable {
   name: string;
-  value: string;
+  value: unknown;
   type: string;
   description?: string | null;
 }

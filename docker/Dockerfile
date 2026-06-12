@@ -5,10 +5,10 @@
 # Built FROM a pre-built, smoke-tested release bundle (the same
 # runtara-<ver>-<arch>-linux.tar.gz published to GitHub Releases) rather than
 # compiled from source — the image ships exactly what the release pipeline
-# already verified. The bundle embeds wasmtime + the prebuilt agent/shared
-# WASM components (workflow compilation is fully in-process), so this image is
-# arch-specific: each platform consumes its own-arch bundle and the multi-arch
-# manifest is merged in CI.
+# already verified. The bundle carries the prebuilt agent/shared WASM
+# components (workflow compilation and execution are fully in-process — the
+# server embeds wasmtime), so this image is arch-specific: each platform
+# consumes its own-arch bundle and the multi-arch manifest is merged in CI.
 #
 # The CI step stages the extracted bundle into ./runtara/ (tar
 # --strip-components=1) before building, so the layout below is deterministic
@@ -27,9 +27,9 @@ RUN apt-get update \
 
 # Unprivileged runtime user whose primary group is root (GID 0). The bundle
 # under /opt/runtara stays root-owned and read-only; everything the server
-# writes goes to $HOME (cargo cache) and $DATA_DIR (workflow build cache +
-# runtime state). Making those dirs GID-0-owned and group-writable (g=u) is the
-# OpenShift "arbitrary uid" pattern: the container runs cleanly as the default
+# writes goes to $DATA_DIR (workflow build cache + runtime state). Making
+# those dirs GID-0-owned and group-writable (g=u) is the OpenShift
+# "arbitrary uid" pattern: the container runs cleanly as the default
 # uid 10001 AND under `--user <any-uid>` (Docker assigns GID 0 to unknown
 # uids), so bind mounts work without a host-side chown.
 RUN useradd --system --create-home --home-dir /home/runtara --uid 10001 --gid 0 runtara \
@@ -42,7 +42,6 @@ COPY runtara/ /opt/runtara/
 # Same env contract as scripts/install.sh and e2e/install-test/Dockerfile,
 # rebased onto /opt/runtara.
 ENV PATH="/opt/runtara/bin:${PATH}" \
-    WASMTIME_PATH="/opt/runtara/bin/wasmtime" \
     RUNTARA_AGENT_COMPONENTS_DIR="/opt/runtara/agents" \
     HOME="/home/runtara" \
     DATA_DIR="/data" \

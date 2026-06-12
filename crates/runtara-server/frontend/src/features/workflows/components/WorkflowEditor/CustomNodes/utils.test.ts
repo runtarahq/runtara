@@ -10,6 +10,7 @@ import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
 } from '@/features/workflows/config/workflow.ts';
+import { normalizeMappingObject } from '../NodeForm/InputMappingField/mapping-entries';
 
 /**
  * Round-trip tests for the workflow editor's save/load conversion.
@@ -330,6 +331,42 @@ describe('MappingValue round-trip', () => {
     ]);
   });
 
+  it('preserves a template nested inside a composite object', () => {
+    // The composite editors create nested templates (CompositeValueItem /
+    // CompositeArrayEditor); this locks the save/load contract they rely on.
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'request',
+      inputMapping: {
+        headers: {
+          valueType: 'composite',
+          value: {
+            authorization: {
+              valueType: 'template',
+              value: 'Bearer {{ steps.conn.outputs.api_key }}',
+            },
+            accept: { valueType: 'immediate', value: 'application/json' },
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.headers).toEqual({
+      valueType: 'composite',
+      value: {
+        authorization: {
+          valueType: 'template',
+          value: 'Bearer {{ steps.conn.outputs.api_key }}',
+        },
+        accept: { valueType: 'immediate', value: 'application/json' },
+      },
+    });
+  });
+
   it('preserves template valueType', () => {
     const graph = makeGraph({
       id: 's1',
@@ -486,6 +523,142 @@ describe('Form-input coercion on save', () => {
 });
 
 describe('Backend DSL serialization', () => {
+  it('serializes graph metadata supplied by workflow settings', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+      ] as any,
+      [],
+      {
+        name: 'metadata-workflow',
+        description: '',
+        variables: {
+          limit: {
+            type: 'integer',
+            value: 10,
+            description: 'Max rows',
+          },
+        },
+        inputSchema: {
+          order_id: {
+            type: 'string',
+            required: true,
+            default: 'ord_1',
+            format: 'uuid',
+          },
+        },
+        outputSchema: {
+          ok: { type: 'boolean', required: true },
+        },
+        executionTimeoutSeconds: 120,
+        rateLimitBudgetMs: 30_000,
+        durable: false,
+        entryPoint: 'agent',
+      }
+    );
+
+    expect(graph).toMatchObject({
+      name: 'metadata-workflow',
+      description: '',
+      variables: {
+        limit: {
+          type: 'integer',
+          value: 10,
+          description: 'Max rows',
+        },
+      },
+      inputSchema: {
+        order_id: {
+          type: 'string',
+          required: true,
+          default: 'ord_1',
+          format: 'uuid',
+        },
+      },
+      outputSchema: {
+        ok: { type: 'boolean', required: true },
+      },
+      executionTimeoutSeconds: 120,
+      rateLimitBudgetMs: 30_000,
+      durable: false,
+      entryPoint: 'agent',
+    });
+  });
+
+  it('serializes execution-plan edge conditions and priority', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'start',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'start',
+            stepType: 'Agent',
+            name: 'Start',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+        {
+          id: 'next',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 240, y: 0 },
+          data: {
+            id: 'next',
+            stepType: 'Agent',
+            name: 'Next',
+            agentId: 'utils',
+            capabilityId: 'noop',
+            inputMapping: [],
+          },
+        },
+      ] as any,
+      [
+        {
+          id: 'start-next',
+          source: 'start',
+          target: 'next',
+          sourceHandle: 'source',
+          data: {
+            condition: {
+              type: 'operation',
+              op: 'EQ',
+              arguments: ['data.status', 'ready'],
+            },
+            priority: 5,
+          },
+        },
+      ] as any,
+      { name: 'conditional-edge-workflow' }
+    );
+
+    expect(graph!.executionPlan?.[0]).toMatchObject({
+      fromStep: 'start',
+      toStep: 'next',
+      label: 'next',
+      condition: {
+        type: 'operation',
+        op: 'EQ',
+        arguments: ['data.status', 'ready'],
+      },
+      priority: 5,
+    });
+  });
+
   it('does not emit backend type hints for immediate Finish outputs', () => {
     const graph = composeExecutionGraph(
       [
@@ -696,6 +869,50 @@ describe('Backend DSL serialization', () => {
     expect((graph as any).nodes[0].position).toEqual({ x: 24, y: 48 });
   });
 
+  it('round-trips Agent retry, timeout, and compensation fields', () => {
+    const graph = makeGraph({
+      id: 'agent',
+      stepType: 'Agent',
+      agentId: 'payments',
+      capabilityId: 'charge-card',
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 30_000,
+      compensation: {
+        compensationStep: 'refund',
+        compensationData: {
+          chargeId: {
+            valueType: 'reference',
+            value: "steps['agent'].outputs.chargeId",
+            type: 'string',
+          },
+        },
+        trigger: 'on_downstream_error',
+        order: 10,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 30_000,
+      compensation: {
+        compensationStep: 'refund',
+        compensationData: {
+          chargeId: {
+            valueType: 'reference',
+            value: "steps['agent'].outputs.chargeId",
+            type: 'string',
+          },
+        },
+        trigger: 'on_downstream_error',
+        order: 10,
+      },
+    });
+  });
+
   it('does not preserve stale direct Error fields after form values are cleared', () => {
     const graph = composeExecutionGraph(
       [
@@ -865,6 +1082,732 @@ describe('Backend DSL serialization', () => {
     expect(step).not.toHaveProperty('switchRoutingMode');
     expect(step).not.toHaveProperty('inputMapping');
   });
+
+  it('round-trips Switch value reference type hint and default', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.country',
+          type: 'string',
+          default: 'US',
+        },
+        cases: [{ match: 'US', matchType: 'EQ', output: { region: 'NA' } }],
+        default: { region: 'OTHER' },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.country',
+      type: 'string',
+      default: 'US',
+    });
+    expect(step.config.cases).toEqual([
+      { match: 'US', matchType: 'EQ', output: { region: 'NA' } },
+    ]);
+  });
+
+  it('does not fabricate a Switch default output on round-trip', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: { valueType: 'reference', value: 'data.status' },
+        cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+        // No default: at runtime an unmatched value must fail the step.
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).not.toHaveProperty('default');
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.status',
+    });
+  });
+
+  it('round-trips an authored Switch default output (including {})', () => {
+    const emptyDefault = roundTripStep(
+      makeGraph({
+        id: 'sw',
+        stepType: 'Switch',
+        config: {
+          value: { valueType: 'reference', value: 'data.status' },
+          cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+          default: {},
+        },
+        renderingParameters: { x: 0, y: 0 },
+      })
+    );
+    expect(emptyDefault.config.default).toEqual({});
+
+    const objectDefault = roundTripStep(
+      makeGraph({
+        id: 'sw',
+        stepType: 'Switch',
+        config: {
+          value: { valueType: 'reference', value: 'data.status' },
+          cases: [{ match: 'approved', matchType: 'EQ', output: 'ok' }],
+          default: { state: 'unknown' },
+        },
+        renderingParameters: { x: 0, y: 0 },
+      })
+    );
+    expect(objectDefault.config.default).toEqual({ state: 'unknown' });
+  });
+
+  it('round-trips a composite Switch value', () => {
+    const graph = makeGraph({
+      id: 'sw',
+      stepType: 'Switch',
+      config: {
+        value: {
+          valueType: 'composite',
+          value: {
+            country: { valueType: 'reference', value: 'data.country' },
+            tier: { valueType: 'immediate', value: 'gold' },
+          },
+        },
+        cases: [
+          {
+            match: { country: 'US', tier: 'gold' },
+            matchType: 'EQ',
+            output: 'vip',
+          },
+        ],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'composite',
+      value: {
+        country: { valueType: 'reference', value: 'data.country' },
+        tier: { valueType: 'immediate', value: 'gold' },
+      },
+    });
+  });
+
+  it('never emits a Switch config object lacking value', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'sw',
+          type: NODE_TYPES.SwitchNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'sw',
+            stepType: 'Switch',
+            name: 'Route',
+            inputMapping: [
+              { type: 'value', value: '', typeHint: 'auto' },
+              {
+                type: 'cases',
+                value: [{ match: 'a', matchType: 'exact', output: 'a' }],
+              },
+              { type: 'default', value: {} },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'switch-empty-value' }
+    );
+
+    // SwitchConfig.value is mandatory on the backend (deny_unknown_fields);
+    // a config without it would be rejected by serde at save time.
+    const step = (graph!.steps as Record<string, any>).sw;
+    expect(step).not.toHaveProperty('config');
+  });
+
+  it('round-trips Delay duration MappingValue', () => {
+    const graph = makeGraph({
+      id: 'delay',
+      stepType: 'Delay',
+      durationMs: {
+        valueType: 'reference',
+        value: 'variables.delayMs',
+        type: 'integer',
+        default: 500,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.durationMs).toEqual({
+      valueType: 'reference',
+      value: 'variables.delayMs',
+      type: 'integer',
+      default: 500,
+    });
+    expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('round-trips Split source template MappingValue', () => {
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'template',
+          value: '{{ data.dynamicItems }}',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'template',
+      value: '{{ data.dynamicItems }}',
+    });
+  });
+
+  it('round-trips Filter source reference metadata', () => {
+    const graph = makeGraph({
+      id: 'filter',
+      stepType: 'Filter',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+          type: 'json',
+          default: [],
+        },
+        condition: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { valueType: 'reference', value: 'item.active' },
+            { valueType: 'immediate', value: true },
+          ],
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'reference',
+      value: 'data.items',
+      type: 'json',
+      default: [],
+    });
+  });
+
+  it('round-trips Filter source immediate array MappingValue', () => {
+    const graph = makeGraph({
+      id: 'filter',
+      stepType: 'Filter',
+      config: {
+        value: {
+          valueType: 'immediate',
+          value: [{ status: 'active' }, { status: 'pending' }],
+        },
+        condition: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { valueType: 'reference', value: 'item.status' },
+            { valueType: 'immediate', value: 'active' },
+          ],
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'immediate',
+      value: [{ status: 'active' }, { status: 'pending' }],
+    });
+  });
+
+  it('round-trips GroupBy source composite MappingValue', () => {
+    const graph = makeGraph({
+      id: 'group',
+      stepType: 'GroupBy',
+      config: {
+        value: {
+          valueType: 'composite',
+          value: [
+            {
+              valueType: 'reference',
+              value: 'data.primary',
+              type: 'json',
+              default: [],
+            },
+            {
+              valueType: 'reference',
+              value: 'data.secondary',
+              type: 'json',
+            },
+          ],
+        },
+        key: 'status',
+        expectedKeys: ['active', 'pending'],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toEqual({
+      valueType: 'composite',
+      value: [
+        {
+          valueType: 'reference',
+          value: 'data.primary',
+          type: 'json',
+          default: [],
+        },
+        {
+          valueType: 'reference',
+          value: 'data.secondary',
+          type: 'json',
+        },
+      ],
+    });
+    expect(step.config.expectedKeys).toEqual(['active', 'pending']);
+  });
+
+  it('round-trips rich Split input and output schemas', () => {
+    const inputSchema = {
+      item: {
+        type: 'object',
+        required: true,
+        description: 'Item payload',
+        example: { sku: 'sku_1', quantity: 2 },
+        properties: {
+          sku: { type: 'string', required: true, pattern: '^sku_' },
+          quantity: { type: 'integer', required: true, min: 1 },
+        },
+        visibleWhen: { field: 'mode', equals: 'manual' },
+        'x-runtime': { source: 'input' },
+      },
+    };
+    const outputSchema = {
+      accepted: {
+        type: 'boolean',
+        required: true,
+        label: 'Accepted',
+        placeholder: 'true',
+        order: 1,
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      inputSchema,
+      outputSchema,
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputSchema).toEqual(inputSchema);
+    expect(step.outputSchema).toEqual(outputSchema);
+  });
+
+  it('round-trips rich AiAgent structured output schema', () => {
+    const outputSchema = {
+      decision: {
+        type: 'string',
+        required: true,
+        description: 'Routing decision',
+        enum: ['approve', 'reject', { route: 'manual' }],
+        example: 'approve',
+        label: 'Decision',
+        order: 1,
+        'x-agent': { source: 'fixture' },
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'ai',
+      stepType: 'AiAgent',
+      config: {
+        systemPrompt: { valueType: 'immediate', value: 'You help.' },
+        userPrompt: { valueType: 'template', value: '{{ data.prompt }}' },
+        outputSchema,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.outputSchema).toEqual(outputSchema);
+  });
+
+  it('round-trips rich WaitForSignal response schema', () => {
+    const responseSchema = {
+      files: {
+        type: 'array',
+        required: false,
+        description: 'Uploaded evidence',
+        items: { type: 'file' },
+        example: [{ name: 'invoice.pdf' }],
+        nullable: true,
+        min: 0,
+        max: 3,
+      },
+    };
+
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      responseSchema,
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.responseSchema).toEqual(responseSchema);
+  });
+
+  it('round-trips AiAgent retry settings in config', () => {
+    const graph = makeGraph({
+      id: 'ai',
+      stepType: 'AiAgent',
+      config: {
+        systemPrompt: { valueType: 'immediate', value: 'You help.' },
+        userPrompt: { valueType: 'template', value: '{{ data.prompt }}' },
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        maxRetries: 3,
+        retryDelay: 250,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      maxRetries: 3,
+      retryDelay: 250,
+    });
+  });
+
+  it('round-trips WaitForSignal action metadata without synthesizing poll interval', () => {
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      action: {
+        key: 'approve-order',
+        correlation: {
+          orderId: {
+            valueType: 'reference',
+            value: 'data.orderId',
+            type: 'string',
+          },
+        },
+        context: {
+          requester: {
+            valueType: 'reference',
+            value: 'data.requester',
+            type: 'string',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.action).toEqual({
+      key: 'approve-order',
+      correlation: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      context: {
+        requester: {
+          valueType: 'reference',
+          value: 'data.requester',
+          type: 'string',
+        },
+      },
+    });
+    expect(step).not.toHaveProperty('pollIntervalMs');
+  });
+
+  it('round-trips WaitForSignal onWait graph', () => {
+    const onWait = {
+      entryPoint: 'notify',
+      steps: {
+        notify: {
+          id: 'notify',
+          stepType: 'Log',
+          message: 'waiting for approval',
+          level: 'info',
+        },
+        done: {
+          id: 'done',
+          stepType: 'Finish',
+          outputs: {},
+        },
+      },
+      executionPlan: [
+        {
+          fromStep: 'notify',
+          toStep: 'done',
+          label: 'next',
+        },
+      ],
+    };
+    const graph = makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      onWait,
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.onWait).toEqual(onWait);
+  });
+
+  it('round-trips Log context metadata', () => {
+    const graph = makeGraph({
+      id: 'log',
+      stepType: 'Log',
+      message: 'created',
+      level: 'info',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      message: 'created',
+      level: 'info',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+    });
+  });
+
+  it('round-trips Error context metadata', () => {
+    const graph = makeGraph({
+      id: 'error',
+      stepType: 'Error',
+      code: 'ORDER_INVALID',
+      message: 'Order is invalid',
+      category: 'permanent',
+      severity: 'error',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step).toMatchObject({
+      code: 'ORDER_INVALID',
+      message: 'Order is invalid',
+      category: 'permanent',
+      severity: 'error',
+      context: {
+        orderId: {
+          valueType: 'reference',
+          value: 'data.orderId',
+          type: 'string',
+        },
+      },
+    });
+  });
+});
+
+describe('WaitForSignal onWait container round-trip', () => {
+  const richOnWait = {
+    entryPoint: 'notify',
+    variables: {
+      greeting: { type: 'string', value: 'hello' },
+    },
+    steps: {
+      notify: {
+        id: 'notify',
+        stepType: 'Log',
+        message: 'about to suspend',
+        level: 'info',
+      },
+      nf: {
+        id: 'nf',
+        stepType: 'Finish',
+        outputs: {},
+      },
+    },
+    executionPlan: [{ fromStep: 'notify', toStep: 'nf', label: 'next' }],
+  };
+
+  function makeWaitGraph(onWait?: unknown) {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      ...(onWait !== undefined ? { onWait } : {}),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  it('loads a non-empty onWait as a container with parented children and no raw onWait in node data', () => {
+    const { nodes } = executionGraphToReactFlow(makeWaitGraph(richOnWait));
+
+    const waitNode = nodes.find((node) => node.id === 'wait')!;
+    expect(waitNode).toBeDefined();
+    expect(waitNode.type).toBe(NODE_TYPES.ContainerNode);
+    // The raw key must not linger in node.data — restData spread or the old
+    // JSON editor would resurrect it next to the container on save.
+    expect(waitNode.data).not.toHaveProperty('onWait');
+    // Graph-level fields ride the subgraphMeta carrier.
+    expect((waitNode.data as any).subgraphMeta).toEqual({
+      entryPoint: 'notify',
+      variables: { greeting: { type: 'string', value: 'hello' } },
+    });
+
+    const notify = nodes.find((node) => node.id === 'notify')!;
+    const nf = nodes.find((node) => node.id === 'nf')!;
+    expect(notify.parentId).toBe('wait');
+    expect(nf.parentId).toBe('wait');
+  });
+
+  it('round-trips onWait steps, edges, entryPoint and graph-level variables byte-identically', () => {
+    const step = roundTripStep(makeWaitGraph(richOnWait));
+
+    expect(step.onWait).toEqual(richOnWait);
+    // The rebuilt graph is written to the DSL field, never to `subgraph`.
+    expect(step).not.toHaveProperty('subgraph');
+    expect(step).not.toHaveProperty('subgraphMeta');
+    expect(step.signal).toBe('approval');
+  });
+
+  it('keeps an empty onWait graph on the JSON path (no container) and round-trips it untouched', () => {
+    const emptyOnWait = { entryPoint: '', steps: {}, executionPlan: [] };
+    const graph = makeWaitGraph(emptyOnWait);
+
+    const { nodes } = executionGraphToReactFlow(graph);
+    const waitNode = nodes.find((node) => node.id === 'wait')!;
+    expect(waitNode.type).toBe(NODE_TYPES.BasicNode);
+    expect((waitNode.data as any).onWait).toEqual(emptyOnWait);
+
+    const step = roundTripStep(graph);
+    expect(step.onWait).toEqual(emptyOnWait);
+  });
+
+  it('drops the onWait key entirely when the container has no children', () => {
+    // A converted container whose children were all deleted (or never added):
+    // an empty onWait graph has no meaning, so the key is removed on save.
+    const containerSize = NODE_TYPE_SIZES[NODE_TYPES.ContainerNode];
+    const waitNode = {
+      id: 'wait',
+      type: NODE_TYPES.ContainerNode,
+      position: { x: 0, y: 0 },
+      data: {
+        id: 'wait',
+        name: 'wait',
+        stepType: 'WaitForSignal',
+        inputMapping: [],
+        subgraphMeta: { entryPoint: 'gone' },
+      },
+      width: containerSize.width,
+      height: containerSize.height,
+    } as unknown as Node;
+    const finishNode = makeLayoutNode('finish');
+    finishNode.data = { id: 'finish', name: 'finish', stepType: 'Finish' };
+
+    const graph = composeExecutionGraph(
+      [waitNode, finishNode],
+      [makeLayoutEdge('wait-finish', 'wait', 'finish')],
+      { name: 'empty-on-wait' }
+    );
+
+    expect(graph).not.toBeNull();
+    const step = (graph!.steps as Record<string, any>).wait;
+    expect(step).not.toHaveProperty('onWait');
+    expect(step).not.toHaveProperty('subgraph');
+    expect(step).not.toHaveProperty('subgraphMeta');
+  });
+
+  it('maintains the onWait entryPoint when the entry child is rewired', () => {
+    // Drop the meta-carried entryPoint by pointing it at a missing step:
+    // addStarts must recurse into onWait and repair it from the edges.
+    const onWait = {
+      ...richOnWait,
+      entryPoint: 'missing_step',
+    };
+    const step = roundTripStep(makeWaitGraph(onWait));
+
+    expect(step.onWait.entryPoint).toBe('notify');
+  });
+
+  it('round-trips a nested onWait inside a Split subgraph', () => {
+    // Legal per the validator: validate_data_and_variable_references_with_context
+    // recurses Split → subgraph → WaitForSignal → onWait.
+    const graph = makeGraph({
+      id: 'split',
+      stepType: 'Split',
+      config: {
+        value: { valueType: 'reference', value: 'data.items' },
+      },
+      subgraph: {
+        entryPoint: 'inner_wait',
+        steps: {
+          inner_wait: {
+            id: 'inner_wait',
+            stepType: 'WaitForSignal',
+            onWait: richOnWait,
+          },
+          inner_finish: {
+            id: 'inner_finish',
+            stepType: 'Finish',
+          },
+        },
+        executionPlan: [
+          { fromStep: 'inner_wait', toStep: 'inner_finish', label: 'next' },
+        ],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+
+    const innerWait = step.subgraph.steps.inner_wait;
+    expect(innerWait.onWait).toEqual(richOnWait);
+    expect(innerWait).not.toHaveProperty('subgraph');
+    expect(step.subgraph.entryPoint).toBe('inner_wait');
+    expect(step.subgraph.executionPlan).toEqual([
+      { fromStep: 'inner_wait', toStep: 'inner_finish', label: 'next' },
+    ]);
+  });
 });
 
 describe('Split variable round-trip', () => {
@@ -1025,6 +1968,367 @@ describe('Split variable round-trip', () => {
       valueType: 'reference',
       value: 'data.items',
       type: 'json',
+    });
+  });
+
+  it('round-trips advanced execution options', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        parallelism: 4,
+        sequential: true,
+        dontStopOnFailed: true,
+        maxRetries: 2,
+        retryDelay: 500,
+        timeout: 10_000,
+        allowNull: true,
+        convertSingleValue: true,
+        batchSize: 25,
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).toMatchObject({
+      parallelism: 4,
+      sequential: true,
+      dontStopOnFailed: true,
+      maxRetries: 2,
+      retryDelay: 500,
+      timeout: 10_000,
+      allowNull: true,
+      convertSingleValue: true,
+      batchSize: 25,
+    });
+  });
+
+  it('round-trips a template variable', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          greeting: {
+            valueType: 'template',
+            value: 'Hello {{ data.name }}',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hello {{ data.name }}',
+    });
+  });
+
+  it('serializes form-state template variables as template MappingValues', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'greeting',
+                value: 'Hi {{ data.name }}',
+                valueType: 'template',
+                type: 'string',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-template-variable-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).split;
+    expect(step.config.variables.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hi {{ data.name }}',
+    });
+  });
+
+  it('coerces typed immediate variables from their form strings', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'count',
+                value: '5',
+                valueType: 'immediate',
+                type: 'number',
+              },
+              {
+                name: 'flag',
+                value: 'true',
+                valueType: 'immediate',
+                type: 'boolean',
+              },
+              {
+                name: 'label',
+                value: 'plain',
+                valueType: 'immediate',
+                type: 'string',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-typed-immediates-fixture' }
+    );
+
+    const variables = (graph!.steps as Record<string, any>).split.config
+      .variables;
+    expect(variables.count).toEqual({ valueType: 'immediate', value: 5 });
+    expect(variables.flag).toEqual({ valueType: 'immediate', value: true });
+    expect(variables.label).toEqual({
+      valueType: 'immediate',
+      value: 'plain',
+    });
+  });
+
+  it('never emits non-ValueType variable types as backend reference hints', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'split',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'split',
+            stepType: 'Split',
+            name: 'Split',
+            inputMapping: [
+              { type: 'value', value: 'data.items', valueType: 'reference' },
+            ],
+            splitVariablesFields: [
+              {
+                name: 'payload',
+                value: 'data.payload',
+                valueType: 'reference',
+                // 'object' is a UI variable type but not a legal backend
+                // ValueType — emitting it as `type` fails serde.
+                type: 'object',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'split-illegal-type-hint-fixture' }
+    );
+
+    const variables = (graph!.steps as Record<string, any>).split.config
+      .variables;
+    expect(variables.payload).toEqual({
+      valueType: 'reference',
+      value: 'data.payload',
+    });
+  });
+});
+
+describe('Empty-string immediate preservation', () => {
+  it('round-trips a JSON-authored immediate empty string on an Agent input', () => {
+    const graph = makeGraph({
+      id: 'agent',
+      stepType: 'Agent',
+      agentId: 'text',
+      capabilityId: 'concat',
+      inputMapping: {
+        separator: { valueType: 'immediate', value: '' },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: '',
+    });
+  });
+
+  it('keeps an explicit (unflagged) immediate empty string from form state', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: '',
+                typeHint: 'text',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'explicit-empty-string-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: '',
+    });
+  });
+
+  it('drops auto-seeded rows the user never filled in', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: '',
+                typeHint: 'text',
+                valueType: 'immediate',
+                autoSeeded: true,
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'auto-seeded-empty-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('keeps filled auto-seeded rows without leaking the marker', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'agent',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'agent',
+            stepType: 'Agent',
+            name: 'Agent',
+            agentId: 'text',
+            capabilityId: 'concat',
+            inputMapping: [
+              {
+                type: 'separator',
+                value: ', ',
+                typeHint: 'text',
+                valueType: 'immediate',
+                autoSeeded: true,
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'auto-seeded-filled-fixture' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).agent;
+    expect(step.inputMapping.separator).toEqual({
+      valueType: 'immediate',
+      value: ', ',
+    });
+    expect(JSON.stringify(graph)).not.toContain('autoSeeded');
+  });
+});
+
+describe('Finish object/array immediate outputs', () => {
+  it('parses object/array hinted immediates into real JSON values', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'finish',
+          type: NODE_TYPES.BasicNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'finish',
+            stepType: 'Finish',
+            name: 'Finish',
+            inputMapping: [
+              {
+                type: 'payload',
+                value: '{"a": 1}',
+                typeHint: 'object',
+                valueType: 'immediate',
+              },
+              {
+                type: 'list',
+                value: '[1, 2, 3]',
+                typeHint: 'array',
+                valueType: 'immediate',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'finish-object-array-fixture' }
+    );
+
+    const mapping = (graph!.steps as Record<string, any>).finish.inputMapping;
+    // Values are real JSON, and the form-level object/array hints are never
+    // emitted as backend type hints (they are not legal ValueTypes).
+    expect(mapping.payload).toEqual({
+      valueType: 'immediate',
+      value: { a: 1 },
+    });
+    expect(mapping.list).toEqual({
+      valueType: 'immediate',
+      value: [1, 2, 3],
     });
   });
 });
@@ -1266,5 +2570,656 @@ describe('Workflow canvas auto-layout', () => {
 
     expect(splitSize.width).toBeGreaterThan(childRight);
     expect(splitSize.height).toBeGreaterThan(childBottom);
+  });
+});
+
+describe('Subgraph-level ExecutionGraph field round-trip', () => {
+  it('preserves Split subgraph variables, schemas, and metadata through load→save', () => {
+    const graph = {
+      name: 'subgraph-meta-fixture',
+      entryPoint: 'split',
+      executionPlan: [],
+      steps: {
+        split: {
+          id: 'split',
+          stepType: 'Split',
+          config: {
+            value: { valueType: 'reference', value: 'data.items' },
+          },
+          subgraph: {
+            name: 'per-item',
+            description: 'runs once per item',
+            entryPoint: 'finish',
+            variables: {
+              threshold: { type: 'number', value: 5 },
+            },
+            inputSchema: { fields: [{ name: 'sku', type: 'string' }] },
+            outputSchema: { fields: [{ name: 'ok', type: 'boolean' }] },
+            steps: {
+              finish: {
+                id: 'finish',
+                stepType: 'Finish',
+                inputMapping: {
+                  ok: { valueType: 'immediate', value: true },
+                },
+              },
+            },
+            executionPlan: [],
+          },
+        },
+      },
+    };
+
+    const { nodes, edges } = executionGraphToReactFlow(graph as any);
+    const round = composeExecutionGraph(nodes, edges, { name: graph.name });
+    expect(round).not.toBeNull();
+
+    const split = (round!.steps as Record<string, any>)['split'];
+    expect(split).toBeDefined();
+    expect(split.subgraph).toBeDefined();
+    // Graph-level fields must survive the rebuild from child nodes.
+    expect(split.subgraph.name).toBe('per-item');
+    expect(split.subgraph.description).toBe('runs once per item');
+    expect(split.subgraph.variables).toEqual({
+      threshold: { type: 'number', value: 5 },
+    });
+    expect(split.subgraph.inputSchema).toEqual({
+      fields: [{ name: 'sku', type: 'string' }],
+    });
+    expect(split.subgraph.outputSchema).toEqual({
+      fields: [{ name: 'ok', type: 'boolean' }],
+    });
+    // Children are still rebuilt correctly.
+    expect(split.subgraph.steps.finish).toBeDefined();
+    expect(split.subgraph.steps.finish.stepType).toBe('Finish');
+    // The UI-only carrier must not leak into the saved step.
+    expect(split.subgraphMeta).toBeUndefined();
+    expect(split.subgraph.subgraphMeta).toBeUndefined();
+  });
+
+  it('does not invent subgraph fields for fresh containers', () => {
+    const container = makeLayoutNode('split', NODE_TYPES.ContainerNode);
+    const child = makeLayoutNode('inner', NODE_TYPES.BasicNode, 'split');
+    const round = composeExecutionGraph([container, child], [], {
+      name: 'fresh-split',
+    });
+    expect(round).not.toBeNull();
+    const split = (round!.steps as Record<string, any>)['split'];
+    expect(split.subgraph).toBeDefined();
+    expect(split.subgraph.name).toBeUndefined();
+    expect(split.subgraph.variables).toBeUndefined();
+    expect(split.subgraph.steps.inner).toBeDefined();
+  });
+});
+
+describe('AiAgent onError and mcp.<toolset> edge round-trip', () => {
+  /**
+   * AiAgent error routing (`onError` label) and MCP toolset edges
+   * (`mcp.<toolset>` label) are plain labelled edges in the DSL. The editor
+   * must load them back into edges with the matching sourceHandle and
+   * serialize them out unchanged — nothing may strip or rewrite the labels.
+   */
+  function makeAiAgentEdgeGraph(): ExecutionGraphDto & { entryPoint: string } {
+    return {
+      name: 'ai-agent-edge-fixture',
+      steps: {
+        ai: {
+          id: 'ai',
+          stepType: 'AiAgent',
+          name: 'Assistant',
+          connectionId: 'conn-1',
+          config: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            userPrompt: { valueType: 'immediate', value: 'hi' },
+          },
+        },
+        handler: {
+          id: 'handler',
+          stepType: 'Error',
+          name: 'Error handler',
+          inputMapping: [],
+        },
+        linear_mcp: {
+          id: 'linear_mcp',
+          stepType: 'Agent',
+          name: 'Linear MCP toolset',
+          agentId: 'mcp',
+          capabilityId: 'mcp-tool-invoke',
+          inputMapping: [],
+        },
+        finish: {
+          id: 'finish',
+          stepType: 'Finish',
+          name: 'Finish',
+          outputMapping: [],
+        },
+      } as any,
+      executionPlan: [
+        { fromStep: 'ai', toStep: 'finish', label: 'next' },
+        { fromStep: 'ai', toStep: 'handler', label: 'onError' },
+        { fromStep: 'ai', toStep: 'linear_mcp', label: 'mcp.linear' },
+      ] as any,
+      entryPoint: 'ai',
+    };
+  }
+
+  it('loads onError and mcp.<toolset> labels into matching sourceHandles', () => {
+    const { edges } = executionGraphToReactFlow(makeAiAgentEdgeGraph() as any);
+
+    const onErrorEdge = edges.find(
+      (edge) => edge.source === 'ai' && edge.sourceHandle === 'onError'
+    );
+    expect(onErrorEdge).toBeDefined();
+    expect(onErrorEdge!.target).toBe('handler');
+
+    const mcpEdge = edges.find(
+      (edge) => edge.source === 'ai' && edge.sourceHandle === 'mcp.linear'
+    );
+    expect(mcpEdge).toBeDefined();
+    expect(mcpEdge!.target).toBe('linear_mcp');
+  });
+
+  it('does not classify the onError route as an AiAgent tool on load', () => {
+    const { nodes } = executionGraphToReactFlow(makeAiAgentEdgeGraph() as any);
+    const aiNode = nodes.find((node) => node.id === 'ai');
+    expect(aiNode).toBeDefined();
+
+    const toolsField = ((aiNode!.data as any).inputMapping || []).find(
+      (item: any) => item.type === 'tools'
+    );
+    const toolNames: string[] = Array.isArray(toolsField?.value)
+      ? toolsField.value
+      : [];
+    expect(toolNames).not.toContain('onError');
+  });
+
+  it('round-trips onError and mcp.<toolset> edges through save', () => {
+    const { nodes, edges } = executionGraphToReactFlow(
+      makeAiAgentEdgeGraph() as any
+    );
+    const round = composeExecutionGraph(nodes, edges, {
+      name: 'ai-agent-edge-fixture',
+    });
+    expect(round).not.toBeNull();
+
+    const plan = (round!.executionPlan || []) as Array<{
+      fromStep: string;
+      toStep: string;
+      label?: string;
+    }>;
+
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'handler',
+        label: 'onError',
+      })
+    );
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'linear_mcp',
+        label: 'mcp.linear',
+      })
+    );
+    expect(plan).toContainEqual(
+      expect.objectContaining({
+        fromStep: 'ai',
+        toStep: 'finish',
+        label: 'next',
+      })
+    );
+
+    // The loaded steps survive the round-trip too.
+    expect((round!.steps as Record<string, any>).handler.stepType).toBe(
+      'Error'
+    );
+    expect((round!.steps as Record<string, any>).linear_mcp.agentId).toBe(
+      'mcp'
+    );
+  });
+});
+
+describe('WaitForSignal clear-field round-trip', () => {
+  /**
+   * Clearing a WaitForSignal field in the form must actually remove the
+   * corresponding top-level key on save. Loaded step data is spread into
+   * node.data, so without an explicit delete the stale key resurrects
+   * through the `...filteredRestData` spread (load → edit → save).
+   */
+  function makeWaitGraph(): ExecutionGraphDto & { entryPoint: string } {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      responseSchema: {
+        approved: { type: 'boolean', required: true },
+      },
+      timeoutMs: { valueType: 'immediate', value: 60000 },
+      pollIntervalMs: 500,
+      action: {
+        key: 'approve-order',
+        correlation: {
+          orderId: {
+            valueType: 'reference',
+            value: 'data.orderId',
+            type: 'string',
+          },
+        },
+        context: {
+          requester: {
+            valueType: 'reference',
+            value: 'data.requester',
+            type: 'string',
+          },
+        },
+      },
+      onWait: {
+        entryPoint: 'notify',
+        steps: {
+          notify: {
+            id: 'notify',
+            stepType: 'Log',
+            message: 'waiting',
+            level: 'info',
+          },
+        },
+        executionPlan: [],
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  /** Patch an inputMapping entry on a loaded node, simulating a form edit. */
+  function editEntry(
+    node: Node,
+    type: string,
+    patch: Record<string, unknown>
+  ) {
+    const mapping = ((node.data as any).inputMapping || []) as any[];
+    const idx = mapping.findIndex((item) => item.type === type);
+    expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
+      0
+    );
+    mapping[idx] = { ...mapping[idx], ...patch };
+  }
+
+  it('removes every cleared field key after load → clear → save', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+    expect(waitNode).toBeDefined();
+
+    // Simulate the user clearing every optional field in the form
+    editEntry(waitNode, 'responseSchema', { value: [] });
+    editEntry(waitNode, 'timeoutMs', { value: '', valueType: 'immediate' });
+    editEntry(waitNode, 'pollIntervalMs', { value: '' });
+    editEntry(waitNode, 'actionKey', { value: '' });
+    editEntry(waitNode, 'actionCorrelation', { value: '' });
+    editEntry(waitNode, 'actionContext', { value: '' });
+    // onWait is container-edited now: clearing the flow means deleting the
+    // child steps. An empty container drops the onWait key on save.
+    const remainingNodes = nodes.filter((n) => n.parentId !== 'wait');
+
+    const round = composeExecutionGraph(remainingNodes, edges, {
+      name: 'wait-clear',
+    });
+    expect(round).not.toBeNull();
+    const step = (round!.steps as Record<string, any>).wait;
+
+    expect(step).not.toHaveProperty('responseSchema');
+    expect(step).not.toHaveProperty('timeoutMs');
+    expect(step).not.toHaveProperty('pollIntervalMs');
+    expect(step).not.toHaveProperty('action');
+    expect(step).not.toHaveProperty('onWait');
+    // Non-cleared fields survive
+    expect(step.signal).toBe('approval');
+  });
+
+  it('keeps populated fields intact across an untouched round-trip', () => {
+    const step = roundTripStep(makeWaitGraph());
+    expect(step.responseSchema).toEqual({
+      approved: { type: 'boolean', required: true },
+    });
+    expect(step.timeoutMs).toEqual({ valueType: 'immediate', value: 60000 });
+    expect(step.pollIntervalMs).toBe(500);
+    expect(step.action.key).toBe('approve-order');
+    expect(step.onWait.entryPoint).toBe('notify');
+  });
+
+  it('serializes reference-mode timeoutMs as a reference MappingValue', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'timeoutMs', {
+      value: 'data.timeoutMs',
+      valueType: 'reference',
+    });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-ref' });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step.timeoutMs).toEqual({
+      valueType: 'reference',
+      value: 'data.timeoutMs',
+    });
+  });
+
+  it('never emits invalid JSON for a template-mode timeoutMs', () => {
+    // The runtime requires timeoutMs to resolve to a number; a template
+    // renders to a string and previously serialized as
+    // {valueType:'template', value:NaN→null}, which serde rejects. The
+    // serializer now drops the unrepresentable value entirely.
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'timeoutMs', {
+      value: '{{ data.timeout }}',
+      valueType: 'template',
+    });
+
+    const round = composeExecutionGraph(nodes, edges, {
+      name: 'wait-template',
+    });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step).not.toHaveProperty('timeoutMs');
+  });
+
+  it('rounds decimal pollIntervalMs to an integer (backend u64)', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const waitNode = nodes.find((n) => n.id === 'wait')!;
+
+    editEntry(waitNode, 'pollIntervalMs', { value: '500.5' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-poll' });
+    const step = (round!.steps as Record<string, any>).wait;
+    expect(step.pollIntervalMs).toBe(501);
+    expect(Number.isInteger(step.pollIntervalMs)).toBe(true);
+  });
+});
+
+describe('AiAgent memory removal round-trip', () => {
+  const MEMORY_FIELD_TYPES = new Set([
+    'memoryEnabled',
+    'memoryConversationId',
+    'memoryMaxMessages',
+    'memoryStrategy',
+    'memoryProviderStepId',
+  ]);
+
+  function makeMemoryGraph(
+    compaction?: Record<string, unknown>
+  ): ExecutionGraphDto & { entryPoint: string } {
+    return {
+      name: 'ai-memory-fixture',
+      steps: {
+        ai: {
+          id: 'ai',
+          stepType: 'AiAgent',
+          name: 'Assistant',
+          connectionId: 'conn-1',
+          config: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            userPrompt: { valueType: 'immediate', value: 'hi' },
+            memory: {
+              conversationId: {
+                valueType: 'reference',
+                value: 'data.sessionId',
+              },
+              ...(compaction ? { compaction } : {}),
+            },
+          },
+        },
+        mem: {
+          id: 'mem',
+          stepType: 'Agent',
+          name: 'Memory provider',
+          agentId: 'object-model',
+          capabilityId: 'conversation-memory',
+          inputMapping: [],
+        },
+        finish: {
+          id: 'finish',
+          stepType: 'Finish',
+          name: 'Finish',
+          outputMapping: [],
+        },
+      } as any,
+      executionPlan: [
+        { fromStep: 'ai', toStep: 'finish', label: 'next' },
+        { fromStep: 'ai', toStep: 'mem', label: 'memory' },
+      ] as any,
+      entryPoint: 'ai',
+    };
+  }
+
+  it('omits config.memory after the memory entries and provider are removed', () => {
+    const { nodes, edges } = executionGraphToReactFlow(
+      makeMemoryGraph({ maxMessages: 50, strategy: 'summarize' }) as any
+    );
+
+    const aiNode = nodes.find((n) => n.id === 'ai')!;
+    expect(aiNode).toBeDefined();
+    // Sanity: memory was loaded into the form entries
+    const loadedMapping = (aiNode.data as any).inputMapping as any[];
+    expect(
+      loadedMapping.find((item) => item.type === 'memoryEnabled')?.value
+    ).toBe(true);
+    // The stale config (incl. memory) is still spread into node.data — the
+    // serializer must rebuild config from the entries, not resurrect it.
+    expect((aiNode.data as any).config?.memory).toBeDefined();
+
+    // Simulate the form's "Remove memory": strip memory entries, drop the
+    // memory edge and the hidden provider node.
+    (aiNode.data as any).inputMapping = loadedMapping.filter(
+      (item) => !MEMORY_FIELD_TYPES.has(item.type)
+    );
+    const remainingEdges = edges.filter(
+      (e) => !(e.source === 'ai' && e.sourceHandle === 'memory')
+    );
+    const remainingNodes = nodes.filter((n) => n.id !== 'mem');
+
+    const round = composeExecutionGraph(remainingNodes, remainingEdges, {
+      name: 'ai-memory-removed',
+    });
+    expect(round).not.toBeNull();
+
+    const step = (round!.steps as Record<string, any>).ai;
+    expect(step.config).not.toHaveProperty('memory');
+    // The rest of the config survives
+    expect(step.config).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+    // Provider step and memory edge are gone from the saved graph
+    expect(round!.steps).not.toHaveProperty('mem');
+    expect(round!.executionPlan).not.toContainEqual(
+      expect.objectContaining({ label: 'memory' })
+    );
+  });
+
+  it('round-trips memory without a compaction strategy and does not invent one', () => {
+    // DSL default for CompactionConfig.strategy is SlidingWindow; the editor
+    // must not silently materialize a different strategy on save.
+    const step = roundTripStep(makeMemoryGraph({ maxMessages: 50 }) as any);
+    expect(step.config.memory.conversationId).toEqual({
+      valueType: 'reference',
+      value: 'data.sessionId',
+    });
+    expect(step.config.memory.compaction).toEqual({ maxMessages: 50 });
+    expect(step.config.memory.compaction).not.toHaveProperty('strategy');
+  });
+});
+
+describe('Mapping-object round-trip (Log/Error/WaitForSignal contexts)', () => {
+  /**
+   * Finding 29: the four InputMapping-shaped JSON fields (Log.context,
+   * Error.context, WaitForSignal.action.correlation/.context) are now edited
+   * by MappingObjectField, which writes back the UI-format object produced by
+   * normalizeMappingObject. These tests pin two contracts:
+   *   1. a rich mapping object (reference with type+default, template,
+   *      nested composite) survives load → save unchanged;
+   *   2. writing the normalized UI-format object back into form state (what a
+   *      structured edit does) serializes to the identical DSL output; and
+   *   3. an empty editor value ({}) clears the key, like the empty textarea.
+   */
+  const RICH_MAPPING = {
+    caseId: {
+      valueType: 'reference',
+      value: 'data.caseId',
+      type: 'string',
+      default: 'unknown-case',
+    },
+    summary: { valueType: 'template', value: 'Case {{ data.caseId }}' },
+    meta: {
+      valueType: 'composite',
+      value: {
+        flag: { valueType: 'immediate', value: true },
+        nested: {
+          valueType: 'composite',
+          value: {
+            inner: { valueType: 'reference', value: 'data.x' },
+          },
+        },
+      },
+    },
+    count: { valueType: 'immediate', value: 5 },
+  };
+
+  function makeLogGraph() {
+    return makeGraph({
+      id: 'log',
+      stepType: 'Log',
+      message: 'hello',
+      level: 'info',
+      context: structuredClone(RICH_MAPPING),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function makeErrorGraph() {
+    return makeGraph({
+      id: 'err',
+      stepType: 'Error',
+      code: 'E_TEST',
+      message: 'boom',
+      category: 'permanent',
+      severity: 'error',
+      context: structuredClone(RICH_MAPPING),
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function makeWaitGraph() {
+    return makeGraph({
+      id: 'wait',
+      stepType: 'WaitForSignal',
+      signal: 'approval',
+      action: {
+        key: 'approve',
+        correlation: structuredClone(RICH_MAPPING),
+        context: structuredClone(RICH_MAPPING),
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+  }
+
+  function editEntry(node: Node, type: string, patch: Record<string, unknown>) {
+    const mapping = ((node.data as any).inputMapping || []) as any[];
+    const idx = mapping.findIndex((item) => item.type === type);
+    expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
+      0
+    );
+    mapping[idx] = { ...mapping[idx], ...patch };
+  }
+
+  it('round-trips a rich Log.context unchanged', () => {
+    const step = roundTripStep(makeLogGraph());
+    expect(step.context).toEqual(RICH_MAPPING);
+  });
+
+  it('round-trips a rich Error.context unchanged', () => {
+    const step = roundTripStep(makeErrorGraph());
+    expect(step.context).toEqual(RICH_MAPPING);
+  });
+
+  it('round-trips rich WaitForSignal action correlation/context unchanged', () => {
+    const step = roundTripStep(makeWaitGraph());
+    expect(step.action.key).toBe('approve');
+    expect(step.action.correlation).toEqual(RICH_MAPPING);
+    expect(step.action.context).toEqual(RICH_MAPPING);
+  });
+
+  it('structured-editor write-back (normalized UI object) serializes identically', () => {
+    // Simulate MappingObjectField: normalize the loaded value and write the
+    // normalized object back into form state, then save.
+    for (const [graph, stepId, entryType, extract] of [
+      [makeLogGraph(), 'log', 'context', (s: any) => s.context],
+      [makeErrorGraph(), 'err', 'context', (s: any) => s.context],
+      [
+        makeWaitGraph(),
+        'wait',
+        'actionCorrelation',
+        (s: any) => s.action.correlation,
+      ],
+      [makeWaitGraph(), 'wait', 'actionContext', (s: any) => s.action.context],
+    ] as const) {
+      const { nodes, edges } = executionGraphToReactFlow(graph as any);
+      const node = nodes.find((n) => n.id === stepId)!;
+      const mapping = ((node.data as any).inputMapping || []) as any[];
+      const entry = mapping.find((item) => item.type === entryType);
+      expect(entry, `${stepId}.${entryType} entry missing`).toBeDefined();
+
+      const normalized = normalizeMappingObject(entry.value);
+      expect(normalized, `${stepId}.${entryType} not normalizable`).not.toBeNull();
+      editEntry(node, entryType, { value: normalized, valueType: 'composite' });
+
+      const round = composeExecutionGraph(nodes, edges, { name: 'norm' });
+      expect(round).not.toBeNull();
+      const step = (round!.steps as Record<string, any>)[stepId];
+      expect(extract(step), `${stepId}.${entryType} drifted`).toEqual(
+        RICH_MAPPING
+      );
+    }
+  });
+
+  it('an empty mapping editor ({}) clears Log.context like the empty textarea', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeLogGraph() as any);
+    const node = nodes.find((n) => n.id === 'log')!;
+    editEntry(node, 'context', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'log-clear' });
+    const step = (round!.steps as Record<string, any>).log;
+    expect(step).not.toHaveProperty('context');
+    expect(step.message).toBe('hello');
+  });
+
+  it('an empty mapping editor ({}) clears Error.context like the empty textarea', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeErrorGraph() as any);
+    const node = nodes.find((n) => n.id === 'err')!;
+    editEntry(node, 'context', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'err-clear' });
+    const step = (round!.steps as Record<string, any>).err;
+    expect(step).not.toHaveProperty('context');
+    expect(step.code).toBe('E_TEST');
+  });
+
+  it('empty mapping editors ({}) clear WaitForSignal action keys', () => {
+    const { nodes, edges } = executionGraphToReactFlow(makeWaitGraph() as any);
+    const node = nodes.find((n) => n.id === 'wait')!;
+    editEntry(node, 'actionCorrelation', { value: {}, valueType: 'composite' });
+    editEntry(node, 'actionContext', { value: {}, valueType: 'composite' });
+
+    const round = composeExecutionGraph(nodes, edges, { name: 'wait-clear' });
+    const step = (round!.steps as Record<string, any>).wait;
+    // Key survives, the two cleared mapping objects are gone entirely.
+    expect(step.action).toEqual({ key: 'approve' });
+
+    // Clearing the key as well removes the whole action object.
+    editEntry(node, 'actionKey', { value: '' });
+    const round2 = composeExecutionGraph(nodes, edges, { name: 'wait-clear2' });
+    const step2 = (round2!.steps as Record<string, any>).wait;
+    expect(step2).not.toHaveProperty('action');
   });
 });

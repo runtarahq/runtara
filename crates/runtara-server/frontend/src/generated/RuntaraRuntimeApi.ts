@@ -372,7 +372,9 @@ export interface AgentStep {
   capabilityId: string;
   /**
    * Compensation configuration for saga pattern support.
-   * Defines what step to execute to rollback this step's effects on failure.
+   *
+   * **Not enforced** — accepted and ignored end-to-end; no rollback runs
+   * (validation warns with W070). Use `onError` routing for rollback logic.
    */
   compensation?: null | CompensationConfig;
   /** Connection ID for agents requiring authentication */
@@ -402,7 +404,12 @@ export interface AgentStep {
    */
   retryDelay?: number | null;
   /**
-   * Step timeout in milliseconds. If exceeded, step fails.
+   * Step timeout in milliseconds.
+   *
+   * **Not enforced** — a running capability invoke cannot be preempted in
+   * the synchronous component model, so this value is accepted and ignored
+   * (validation warns with W071). Split, While, and WaitForSignal timeouts
+   * are enforced.
    * @format int64
    * @min 0
    */
@@ -499,6 +506,17 @@ export interface AiAgentConfig {
    */
   maxIterations?: number | null;
   /**
+   * Maximum retry attempts for the LLM call (default: 0 — no retries).
+   *
+   * Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
+   * because every retry re-bills the model call. Applies to the
+   * single-shot (chat-completion) path; per-turn retry inside the tool
+   * loop is deliberately deferred until per-turn durability lands.
+   * @format int32
+   * @min 0
+   */
+  maxRetries?: number | null;
+  /**
    * Maximum tokens per LLM call
    * @format int64
    * @min 0
@@ -534,6 +552,12 @@ export interface AiAgentConfig {
   outputSchema?: Partial<Record<string, SchemaField>> | null;
   /** LLM provider to use for the agent brain. */
   provider: AiAgentProvider;
+  /**
+   * Base delay between retries in milliseconds (default: 1000).
+   * @format int64
+   * @min 0
+   */
+  retryDelay?: number | null;
   /** System prompt / instructions for the LLM */
   systemPrompt: MappingValue;
   /**
@@ -1225,8 +1249,11 @@ export interface CompactionConfig {
 /**
  * Compensation configuration for saga pattern support.
  *
- * Defines what compensation step to execute if a downstream step fails,
- * enabling distributed transaction rollback.
+ * **Not enforced.** This configuration is parsed and stored but the compiler
+ * never emits it, the SDK never receives it, and the host never triggers it —
+ * no compensation step will run on failure (validation flags it with W070).
+ * Model rollback explicitly with `onError` routing instead, which is
+ * enforced end-to-end.
  */
 export interface CompensationConfig {
   /** Data to pass to compensation step (maps from current step's context) */
@@ -1781,7 +1808,11 @@ export interface EmbedWorkflowStep {
    */
   retryDelay?: number | null;
   /**
-   * Step timeout in milliseconds. If exceeded, step fails.
+   * Step timeout in milliseconds.
+   *
+   * **Not enforced** — no deadline exists for a running child workflow, so
+   * this value is accepted and ignored (validation warns with W071).
+   * Split, While, and WaitForSignal timeouts are enforced.
    * @format int64
    * @min 0
    */
@@ -1837,14 +1868,21 @@ export interface ErrorResponse {
  * with structured metadata. This is the primary mechanism for business
  * logic errors that should be distinguishable from technical errors.
  *
+ * `message` is a verbatim string — no interpolation is performed. Put
+ * dynamic values in `context`, which is a regular input mapping:
+ *
  * Example:
  * ```json
  * {
  *   "stepType": "Error",
  *   "id": "credit_limit_error",
- *   "category": "business",
+ *   "category": "permanent",
  *   "code": "CREDIT_LIMIT_EXCEEDED",
- *   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
+ *   "message": "Order total exceeds credit limit",
+ *   "context": {
+ *     "total": { "valueType": "reference", "value": "data.total" },
+ *     "limit": { "valueType": "reference", "value": "data.limit" }
+ *   }
  * }
  * ```
  */
@@ -1883,49 +1921,6 @@ export interface ErrorStep {
    * - "critical": Critical (system-level failure)
    */
   severity?: null | ErrorSeverity;
-}
-
-/** Error response from agent execution */
-export interface ExecuteAgentErrorResponse {
-  error: string;
-  message?: string | null;
-  success: boolean;
-}
-
-/**
- * Request body for executing an agent capability on the host
- * @example {"connectionId":"conn_shopify_main","inputs":{"method":"GET","url":"https://api.example.com/data"},"instanceId":"inst-abc-123","tenantId":"org_example_tenant"}
- */
-export interface ExecuteAgentRequest {
-  /**
-   * Optional connection ID for agents that require credentials.
-   * The host resolves the connection and injects it as `_connection` in agent input.
-   */
-  connectionId?: string | null;
-  /** Agent-specific input data (structure depends on the agent/capability). */
-  inputs: any;
-  /** Instance ID of the calling workflow (for tracing/logging). */
-  instanceId?: string | null;
-  /**
-   * Tenant ID of the calling workflow.
-   * Used as fallback if not available from auth context.
-   */
-  tenantId?: string | null;
-}
-
-/** Successful response from agent execution */
-export interface ExecuteAgentResponse {
-  /** Error message (present on failure) */
-  error?: string | null;
-  /**
-   * Execution time in milliseconds
-   * @format double
-   */
-  executionTimeMs: number;
-  /** Agent output (present on success) */
-  output?: any;
-  /** Whether the agent executed successfully */
-  success: boolean;
 }
 
 export interface ExecuteWorkflowRequest {
@@ -2045,7 +2040,9 @@ export interface ExecutionPlanEdge {
    * - `data.*` - Input data
    * - `steps.<stepId>.outputs.*` - Previous step outputs
    * - `variables.*` - Workflow variables
-   * - `__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+   * - `steps.__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+   *   (alias: `steps.error.*`). The bare `__error.*` root also resolves for
+   *   back-compat, but `steps.__error.*` is canonical and typo-checked.
    *
    * Example for onError routing:
    * ```json
@@ -2054,7 +2051,7 @@ export interface ExecutionPlanEdge {
    *     "type": "operation",
    *     "op": "EQ",
    *     "arguments": [
-   *       { "valueType": "reference", "value": "__error.category" },
+   *       { "valueType": "reference", "value": "steps.__error.category" },
    *       { "valueType": "immediate", "value": "transient" }
    *     ]
    *   }
@@ -4281,7 +4278,10 @@ export interface SplitConfig {
    */
   maxRetries?: number | null;
   /**
-   * Maximum concurrent iterations (0 = unlimited)
+   * Maximum concurrent iterations (0 = unlimited).
+   *
+   * **Ignored** — Split iterations execute strictly sequentially in the
+   * WASM runtime; any value other than 1 triggers validation warning W073.
    * @format int32
    * @min 0
    */
@@ -4292,7 +4292,12 @@ export interface SplitConfig {
    * @min 0
    */
   retryDelay?: number | null;
-  /** Execute iterations sequentially instead of in parallel */
+  /**
+   * Execute iterations sequentially instead of in parallel.
+   *
+   * **Redundant** — sequential execution is the only mode the WASM runtime
+   * supports, so this flag changes nothing.
+   */
   sequential?: boolean | null;
   /**
    * Step timeout in milliseconds. If exceeded, step fails.
@@ -5106,6 +5111,10 @@ export interface WaitForSignalStep {
    * This runs before suspending and is typically used to notify
    * external systems of the signal_id they should use.
    * The subgraph has access to `variables._signal_id` and `variables._instance_id`.
+   *
+   * **Ignored when this step is used as an AiAgent tool** (reached via a
+   * tool-labelled edge): the tool lowering emits the durable wait but never
+   * runs `onWait` (validation warns with W072).
    */
   onWait?: null | ExecutionGraph;
   /**
@@ -5763,29 +5772,6 @@ export class Api<
       this.request<ListAgentsResponse, any>({
         path: `/api/runtime/agents`,
         method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Workflow instances call this endpoint to delegate I/O-heavy agent work (HTTP requests, database queries, SFTP operations, etc.) to the host process. The host resolves connections, executes the agent, and returns the result. Pure computation agents (transform, csv, xml, utils, text) can still run in-process in the workflow binary — this endpoint is for agents that require network access or platform-specific dependencies.
-     *
-     * @tags agents-controller
-     * @name ExecuteAgentHandler
-     * @summary Execute an agent capability on the host
-     * @request POST:/api/runtime/agents/{agent_id}/capabilities/{capability_id}/execute
-     */
-    executeAgentHandler: (
-      agentId: string,
-      capabilityId: string,
-      data: ExecuteAgentRequest,
-      params: RequestParams = {},
-    ) =>
-      this.request<ExecuteAgentResponse, ExecuteAgentErrorResponse>({
-        path: `/api/runtime/agents/${agentId}/capabilities/${capabilityId}/execute`,
-        method: "POST",
-        body: data,
-        type: ContentType.Json,
         format: "json",
         ...params,
       }),

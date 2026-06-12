@@ -6,6 +6,10 @@ import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Loader } from '@/shared/components/loader.tsx';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { scheduleToCron } from '@/features/triggers/utils/cron';
+import {
+  buildCronConfiguration,
+  buildWebhookConfiguration,
+} from '@/features/triggers/utils/trigger-configuration';
 import { createInvocationTrigger } from '@/features/triggers/queries';
 import { getWorkflows } from '@/features/workflows/queries';
 import { getConnections } from '@/features/connections/queries';
@@ -24,6 +28,8 @@ export function CreateTrigger() {
       return workflowsData.map((workflow: WorkflowDto) => ({
         id: workflow.id,
         name: workflow.name,
+        // CronInputsField renders this as a structured static-inputs form
+        inputSchema: workflow.inputSchema,
       }));
     },
   });
@@ -54,13 +60,30 @@ export function CreateTrigger() {
       triggerType,
       connectionId,
       sessionMode,
+      cronInputs,
+      cronDebug,
+      webhookDebug,
+      webhookConnectionId,
       ...restTrigger
     } = data;
 
     // Build configuration based on trigger type
-    let configuration = null;
+    let configuration: Record<string, unknown> | null = null;
     if (triggerType === 'CRON' && scheduleConfig) {
-      configuration = { expression: scheduleToCron(scheduleConfig) };
+      configuration = buildCronConfiguration({
+        expression: scheduleToCron(scheduleConfig),
+        inputsText: cronInputs,
+        debug: cronDebug,
+      });
+    } else if (triggerType === 'HTTP' || triggerType === 'EMAIL') {
+      const webhookConfiguration = buildWebhookConfiguration({
+        debug: webhookDebug,
+        connectionId: webhookConnectionId,
+      });
+      configuration =
+        Object.keys(webhookConfiguration).length > 0
+          ? webhookConfiguration
+          : null;
     } else if (triggerType === 'CHANNEL' && connectionId) {
       configuration = {
         connection_id: connectionId,
@@ -107,6 +130,10 @@ export function CreateTrigger() {
             isLoading={isPending}
             submitLabel="Create trigger"
             loadingLabel="Creating..."
+            // The platform never fires Application triggers (no server code
+            // path constructs an Application trigger event), so don't offer
+            // the type for new triggers. Existing ones stay editable.
+            hiddenTriggerTypes={['APPLICATION']}
             onSubmit={handleSubmit}
           />
         </section>

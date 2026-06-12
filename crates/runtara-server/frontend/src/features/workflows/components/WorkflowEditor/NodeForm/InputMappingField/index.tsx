@@ -9,6 +9,7 @@ import { useContext, useEffect, useMemo, useRef } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { SwitchCasesField } from '../SwitchCasesField';
 import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
+import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
 import { ValueType } from '../TypeHintSelector';
 import { parseSchema } from '@/features/workflows/utils/schema';
 
@@ -49,7 +50,7 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
 export function InputMappingField(props: any) {
   const { label, name } = props;
   const { watch, setValue } = useFormContext();
-  const { agents, workflows, previousSteps, nodeId } =
+  const { agents, workflows, previousSteps, nodeId, inputSchemaFields, variables } =
     useContext(NodeFormContext);
   // We're in edit mode only if we have a nodeId (not parentNodeId)
   // parentNodeId means we're creating a child node, not editing
@@ -204,7 +205,10 @@ export function InputMappingField(props: any) {
         (fieldArray.length === 0 || !fieldsMatch);
 
       if (shouldAutoPopulate) {
-        // Include all fields - objects can be used with JSON type hint
+        // Include all fields - objects can be used with JSON type hint.
+        // Mark rows as autoSeeded: schema-populated rows the user never fills
+        // in are dropped on save, while explicit immediate '' values (loaded
+        // from the step JSON or typed by the user) are preserved.
         const newFields = parsedFields.map((field) => ({
           type: field.name,
           value:
@@ -212,6 +216,7 @@ export function InputMappingField(props: any) {
             (field.enum && field.enum.length > 0 ? field.enum[0] : ''),
           typeHint: getValueTypeFromSchemaType(field.type),
           valueType: 'immediate' as const,
+          autoSeeded: true,
         }));
 
         if (newFields.length > 0) {
@@ -382,6 +387,8 @@ export function InputMappingField(props: any) {
           value={conditionValue}
           onChange={handleConditionChange}
           previousSteps={previousSteps}
+          inputSchemaFields={inputSchemaFields}
+          variables={variables}
         />
         {error && (
           <div className="text-[0.8rem] mt-2 font-medium text-destructive">
@@ -403,14 +410,10 @@ export function InputMappingField(props: any) {
 
   // Sync Zustand store changes back to react-hook-form
   const handleSimpleEditorDataChange = (entries: any[]) => {
-    // Convert entries to the format expected by react-hook-form
-    // Include typeHint to ensure proper type conversion when saving
-    const formEntries = entries.map((entry) => ({
-      type: entry.type,
-      value: entry.value,
-      valueType: entry.valueType,
-      typeHint: entry.typeHint,
-    }));
+    // Convert entries to the format expected by react-hook-form.
+    // Include typeHint for proper type conversion and preserve defaultValue
+    // (ReferenceValue.default) so saving the form doesn't destroy it.
+    const formEntries = toFormMappingEntries(entries);
     // Use shouldValidate to ensure validation runs with the new values
     setValue(name, formEntries, {
       shouldDirty: true,
@@ -427,12 +430,8 @@ export function InputMappingField(props: any) {
     }
 
     // Convert current form data to initial data format
-    const initialData = fieldArray.map((item: any) => ({
-      type: item.type,
-      value: item.value ?? '',
-      valueType: item.valueType ?? 'immediate',
-      typeHint: item.typeHint,
-    }));
+    // (preserves defaultValue for reference entries)
+    const initialData = toEditorInitialData(fieldArray);
 
     // Use actual nodeId for edit mode, or a temporary ID for create mode
     const editorNodeId = nodeId || '__temp_create_node__';
@@ -498,12 +497,8 @@ export function InputMappingField(props: any) {
 
     // Convert current form data to initial data format
     // Include typeHint to ensure proper type conversion when saving
-    const initialData = fieldArray.map((item: any) => ({
-      type: item.type,
-      value: item.value ?? '',
-      valueType: item.valueType ?? 'immediate',
-      typeHint: item.typeHint,
-    }));
+    // (preserves defaultValue for reference entries)
+    const initialData = toEditorInitialData(fieldArray);
 
     // Use actual nodeId for edit mode, or a temporary ID for create mode
     const editorNodeId = nodeId || '__temp_create_node__';

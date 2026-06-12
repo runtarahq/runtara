@@ -12,12 +12,12 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::wasm::WasmRunner;
+//! use runtara_environment::runner::runner_from_env;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let runner = Arc::new(WasmRunner::from_env());
+//!     let runner = runner_from_env(persistence.clone())?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
@@ -44,13 +44,13 @@
 //! use std::sync::Arc;
 //! use runtara_core::persistence::PostgresPersistence;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::wasm::WasmRunner;
+//! use runtara_environment::runner::runner_from_env;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
 //!     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-//!     let runner = Arc::new(WasmRunner::from_env());
+//!     let runner = runner_from_env(persistence.clone())?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
@@ -549,8 +549,9 @@ impl EnvironmentRuntime {
     /// every active instance so its SDK suspends at the next checkpoint,
     /// then polls up to `grace` for each one to reach a terminal status.
     /// Any stragglers are force-stopped via `Runner::stop()` and persisted
-    /// as `suspended + shutdown_requested` — the restart-time heartbeat
-    /// monitor then resumes them from their last checkpoint.
+    /// as `suspended + shutdown_requested` with `sleep_until = now` — the
+    /// wake scheduler then relaunches them after restart (replaying from
+    /// their last checkpoint, or from the start when none exists).
     ///
     /// Returns when all tracked instances are terminal or the grace period
     /// expires, whichever comes first. Safe to call multiple times.
@@ -645,7 +646,7 @@ impl EnvironmentRuntime {
                     "Runner::stop() failed during drain"
                 );
             }
-            if let Err(e) = self
+            match self
                 .state
                 .persistence
                 .complete_instance(
@@ -656,11 +657,34 @@ impl EnvironmentRuntime {
                 )
                 .await
             {
-                warn!(
-                    instance_id = %info.instance_id,
-                    error = %e,
-                    "Failed to persist suspended-on-shutdown state"
-                );
+                Ok(applied) => {
+                    if applied {
+                        // Mark as immediately due for wake so the wake scheduler
+                        // relaunches the instance after restart. Without this a
+                        // force-stopped instance (e.g. blocked in a non-durable
+                        // agent call) stays suspended forever: it has no
+                        // checkpoint and nothing else picks it up.
+                        if let Err(e) = self
+                            .state
+                            .persistence
+                            .set_instance_sleep(&info.instance_id, chrono::Utc::now())
+                            .await
+                        {
+                            warn!(
+                                instance_id = %info.instance_id,
+                                error = %e,
+                                "Failed to schedule post-restart wake"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        instance_id = %info.instance_id,
+                        error = %e,
+                        "Failed to persist suspended-on-shutdown state"
+                    );
+                }
             }
         }
 

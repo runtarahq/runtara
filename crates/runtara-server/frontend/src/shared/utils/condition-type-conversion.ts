@@ -212,11 +212,18 @@ export function convertOperandValue(
 }
 
 /**
- * Check if an argument is a ConditionArgument with valueType metadata
+ * Check if an argument is a ConditionArgument (MappingValue-shaped) with
+ * valueType metadata. Matches all four DSL MappingValue kinds — template and
+ * composite arguments are legal condition arguments evaluated by the runtime
+ * and must pass through conversion untouched.
  */
-function isConditionArgument(
-  arg: any
-): arg is { valueType: 'immediate' | 'reference'; value: string } {
+function isConditionArgument(arg: any): arg is {
+  valueType: 'immediate' | 'reference' | 'template' | 'composite';
+  value: any;
+  immediateType?: 'string' | 'number' | 'boolean';
+  type?: string;
+  default?: any;
+} {
   return (
     typeof arg === 'object' &&
     arg !== null &&
@@ -227,12 +234,67 @@ function isConditionArgument(
 }
 
 /**
+ * Options controlling save-time-only conversions.
+ */
+export interface ConvertConditionOptions {
+  /**
+   * Parse a string immediate on the right-hand side of IN/NOT_IN into a real
+   * JSON array (the runtime requires an array; a string RHS makes IN always
+   * false and NOT_IN always true). Enabled on the save path only so live
+   * typing in the editor isn't disrupted.
+   */
+  parseInLists?: boolean;
+}
+
+/**
+ * Parse a list-typed immediate for IN/NOT_IN right-hand sides.
+ * Arrays pass through; strings are parsed as JSON arrays when they look like
+ * one, otherwise split on commas. Returns undefined when no sensible list can
+ * be produced (caller keeps the value as-is).
+ */
+function parseListImmediate(value: any): any[] | undefined {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return undefined;
+  }
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // fall through to comma splitting
+    }
+  }
+  return trimmed
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+}
+
+/**
  * Process all arguments in a condition to apply type conversion.
  * This should be called before saving a condition to ensure proper types.
+ *
+ * Fidelity guarantees (the conversion must be lossless and idempotent — it
+ * runs on every save, including for steps the user never opened):
+ * - reference arguments keep their `type` hint and `default` fallback
+ * - template/composite arguments pass through untouched
+ * - already-typed immediate values (boolean/number/array/null from a stored
+ *   definition) are never stringified
+ * - the editor's explicit immediate-type selector wins over inference
  *
  * @param operator - The condition operator
  * @param args - Array of arguments (may contain nested conditions, strings, or ConditionArguments)
  * @param schemaDefinition - Optional schema definition for field type lookups
+ * @param options - Save-path-only conversions (see ConvertConditionOptions)
  * @returns Array of arguments with proper type conversion applied
  *
  * @example
@@ -244,7 +306,8 @@ function isConditionArgument(
 export function convertConditionArguments(
   operator: string,
   args: any[],
-  schemaDefinition?: Record<string, FieldTypeInfo>
+  schemaDefinition?: Record<string, FieldTypeInfo>,
+  options?: ConvertConditionOptions
 ): any[] {
   // Resolve the field data type from the first argument (field name) for binary operators
   const fieldDataType = resolveFieldDataType(args, schemaDefinition);
@@ -252,18 +315,45 @@ export function convertConditionArguments(
   return args.map((arg, index) => {
     // Handle ConditionArgument with valueType metadata
     if (isConditionArgument(arg)) {
-      // For reference types, don't do type conversion - keep as ConditionArgument
+      // For reference types, don't do type conversion — but keep the type
+      // hint and default fallback, which the runtime honors.
       if (arg.valueType === 'reference') {
-        return { valueType: 'reference', value: arg.value };
+        return {
+          valueType: 'reference',
+          value: arg.value,
+          ...(arg.type !== undefined ? { type: arg.type } : {}),
+          ...(arg.default !== undefined ? { default: arg.default } : {}),
+        };
       }
-      // For immediate types, apply type conversion to the value
-      const inferredType = inferOperandType(
-        operator,
-        index,
-        arg.value,
-        fieldDataType
-      );
-      const convertedValue = convertOperandValue(arg.value, inferredType);
+      // Template and composite arguments are evaluated by the runtime as-is;
+      // rewriting them to immediates would turn them into dead literals.
+      if (arg.valueType === 'template' || arg.valueType === 'composite') {
+        return arg;
+      }
+
+      // Immediate: IN/NOT_IN right-hand sides must be real arrays at runtime.
+      if (
+        options?.parseInLists &&
+        (operator === 'IN' || operator === 'NOT_IN') &&
+        index === 1
+      ) {
+        const parsed = parseListImmediate(arg.value);
+        if (parsed !== undefined) {
+          return { valueType: 'immediate', value: parsed };
+        }
+      }
+
+      // The editor's explicit type selector wins over inference.
+      const explicitType = arg.immediateType;
+      if (explicitType === undefined && typeof arg.value !== 'string') {
+        // Already-typed JSON value from a stored definition (boolean, number,
+        // array, null, object) — preserve it verbatim.
+        return { valueType: 'immediate', value: arg.value };
+      }
+      const targetType =
+        explicitType ??
+        inferOperandType(operator, index, arg.value, fieldDataType);
+      const convertedValue = convertOperandValue(arg.value, targetType);
       return { valueType: 'immediate', value: convertedValue };
     }
 
@@ -272,12 +362,19 @@ export function convertConditionArguments(
       return {
         ...arg,
         arguments: arg.arguments
-          ? convertConditionArguments(arg.op, arg.arguments, schemaDefinition)
+          ? convertConditionArguments(
+              arg.op,
+              arg.arguments,
+              schemaDefinition,
+              options
+            )
           : [],
       };
     }
 
-    // Infer the type for this argument
+    // Bare (non-object) arguments are left to the legacy inference path.
+    // Note: bare strings can carry reference-path semantics, so they are
+    // never converted into immediate lists here.
     const inferredType = inferOperandType(operator, index, arg, fieldDataType);
 
     // Convert the value

@@ -92,8 +92,14 @@ export function VariablePickerModal({
   onSelect,
 }: VariablePickerModalProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const { previousSteps, inputSchemaFields, variables, isInsideWhileLoop } =
-    useContext(NodeFormContext);
+  const {
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+  } = useContext(NodeFormContext);
 
   // Generate and filter suggestions
   const allSuggestions = useMemo(
@@ -102,9 +108,18 @@ export function VariablePickerModal({
         previousSteps,
         inputSchemaFields,
         variables,
-        isInsideWhileLoop
+        isInsideWhileLoop,
+        isInsideSplit,
+        isInsideWaitScope
       ),
-    [previousSteps, inputSchemaFields, variables, isInsideWhileLoop]
+    [
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideWhileLoop,
+      isInsideSplit,
+      isInsideWaitScope,
+    ]
   );
 
   const filteredSuggestions = useMemo(
@@ -155,6 +170,33 @@ export function VariablePickerModal({
 
           {/* Variable list */}
           <div className="max-h-[400px] overflow-y-auto space-y-4">
+            {/* Free-text path entry: any legal reference path can be used
+                even when it is not in the suggestion list */}
+            {searchQuery.trim() !== '' &&
+              !allSuggestions.some(
+                (suggestion) => suggestion.value === searchQuery.trim()
+              ) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSelect({
+                      label: searchQuery.trim(),
+                      value: searchQuery.trim(),
+                      group: 'Workflow Inputs',
+                    })
+                  }
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded border border-dashed hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="font-mono text-sm truncate">
+                      {searchQuery.trim()}
+                    </p>
+                    <p className="text-xs truncate opacity-70">
+                      Use as custom reference path
+                    </p>
+                  </div>
+                </button>
+              )}
             {filteredSuggestions.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Icons.inbox className="h-8 w-8 mx-auto mb-2 opacity-50" />
@@ -162,6 +204,114 @@ export function VariablePickerModal({
               </div>
             ) : (
               <>
+                {/* Loop Context (While loop scope) */}
+                {groupedSuggestions['Loop Context'].length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Loop Context
+                    </h4>
+                    <div className="space-y-0.5">
+                      {groupedSuggestions['Loop Context'].map((suggestion) => (
+                        <button
+                          key={suggestion.value}
+                          type="button"
+                          onClick={() => handleSelect(suggestion)}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                        >
+                          {getIconForType(suggestion.type, suggestion.value)}
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-sm truncate">
+                              {suggestion.label}
+                            </p>
+                            {suggestion.description && (
+                              <p className="text-xs truncate opacity-70">
+                                {suggestion.description}
+                              </p>
+                            )}
+                          </div>
+                          {suggestion.type && (
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              {suggestion.type}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Split Scope (Split iteration variables) */}
+                {groupedSuggestions['Split Scope'].length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Split Scope
+                    </h4>
+                    <div className="space-y-0.5">
+                      {groupedSuggestions['Split Scope'].map((suggestion) => (
+                        <button
+                          key={suggestion.value}
+                          type="button"
+                          onClick={() => handleSelect(suggestion)}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                        >
+                          {getIconForType(suggestion.type, suggestion.value)}
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-sm truncate">
+                              {suggestion.label}
+                            </p>
+                            {suggestion.description && (
+                              <p className="text-xs truncate opacity-70">
+                                {suggestion.description}
+                              </p>
+                            )}
+                          </div>
+                          {suggestion.type && (
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              {suggestion.type}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Wait Scope (WaitForSignal onWait variables) */}
+                {groupedSuggestions['Wait Scope'].length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Wait Scope
+                    </h4>
+                    <div className="space-y-0.5">
+                      {groupedSuggestions['Wait Scope'].map((suggestion) => (
+                        <button
+                          key={suggestion.value}
+                          type="button"
+                          onClick={() => handleSelect(suggestion)}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                        >
+                          {getIconForType(suggestion.type, suggestion.value)}
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-sm truncate">
+                              {suggestion.label}
+                            </p>
+                            {suggestion.description && (
+                              <p className="text-xs truncate opacity-70">
+                                {suggestion.description}
+                              </p>
+                            )}
+                          </div>
+                          {suggestion.type && (
+                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              {suggestion.type}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Workflow Inputs */}
                 {groupedSuggestions['Workflow Inputs'].length > 0 && (
                   <div>

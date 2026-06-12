@@ -52,14 +52,7 @@ impl DirectCoreConfig {
         manifest_json: &[u8],
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
-        // Test/internal entry: no pre-resolved connection integration ids.
-        Self::new_inner(
-            manifest,
-            manifest_json,
-            track_events,
-            None,
-            &std::collections::HashMap::new(),
-        )
+        Self::new_inner(manifest, manifest_json, track_events, None)
     }
 
     pub(super) fn new_with_workflow_id(
@@ -67,15 +60,8 @@ impl DirectCoreConfig {
         manifest_json: &[u8],
         track_events: bool,
         workflow_id: &str,
-        connection_integration_ids: &std::collections::HashMap<String, String>,
     ) -> Result<Self, DirectCompileError> {
-        Self::new_inner(
-            manifest,
-            manifest_json,
-            track_events,
-            Some(workflow_id),
-            connection_integration_ids,
-        )
+        Self::new_inner(manifest, manifest_json, track_events, Some(workflow_id))
     }
 
     fn new_inner(
@@ -83,7 +69,6 @@ impl DirectCoreConfig {
         manifest_json: &[u8],
         track_events: bool,
         workflow_id: Option<&str>,
-        connection_integration_ids: &std::collections::HashMap<String, String>,
     ) -> Result<Self, DirectCompileError> {
         let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
@@ -94,7 +79,6 @@ impl DirectCoreConfig {
                 manifest_json,
                 &variables_json,
                 DIRECT_EMPTY_STEPS_CONTEXT,
-                connection_integration_ids,
             )?,
             track_events,
         })

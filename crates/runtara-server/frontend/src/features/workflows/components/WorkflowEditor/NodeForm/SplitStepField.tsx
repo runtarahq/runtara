@@ -37,12 +37,18 @@ import type {
   CompositeObjectValue,
 } from '@/features/workflows/stores/nodeFormStore';
 import type { VariableSuggestion } from './InputMappingValueField/VariableSuggestions';
+import { SourceMappingValueField } from './SourceMappingValueField';
+import { SchemaFieldsEditor } from '../EditorSidebar/SchemaFieldsEditor';
 
 type SplitStepFieldProps = {
   name: string;
 };
 
-type SplitVariableValueType = 'reference' | 'immediate' | 'composite';
+type SplitVariableValueType =
+  | 'reference'
+  | 'immediate'
+  | 'composite'
+  | 'template';
 
 type SplitVariableField = {
   name?: string;
@@ -50,14 +56,6 @@ type SplitVariableField = {
   type?: string;
   valueType?: SplitVariableValueType;
 };
-
-const SUPPORTED_TYPES: { label: string; value: string }[] = [
-  { label: 'String', value: 'string' },
-  { label: 'Number', value: 'number' },
-  { label: 'Boolean', value: 'boolean' },
-  { label: 'Object', value: 'object' },
-  { label: 'Array', value: 'array' },
-];
 
 const SPLIT_VARIABLE_TYPES: { label: string; value: string }[] = [
   { label: 'String', value: 'string' },
@@ -72,7 +70,6 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
   const form = useFormContext();
   const { previousSteps, inputSchemaFields: workflowInputFields } =
     useContext(NodeFormContext);
-  const inputMapping = useWatch({ name, control: form.control });
   const [editingVariableIndex, setEditingVariableIndex] = useState<
     number | null
   >(null);
@@ -80,26 +77,6 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
     number | null
   >(null);
   const stepType = useWatch({ name: 'stepType', control: form.control });
-
-  // Input schema fields (item schema for each iteration)
-  const {
-    fields: inputSchemaFields,
-    append: appendInputField,
-    remove: removeInputField,
-  } = useFieldArray({
-    name: 'splitInputSchemaFields',
-    control: form.control,
-  });
-
-  // Output schema fields (what each iteration produces)
-  const {
-    fields: outputSchemaFields,
-    append: appendOutputField,
-    remove: removeOutputField,
-  } = useFieldArray({
-    name: 'splitOutputSchemaFields',
-    control: form.control,
-  });
 
   // Variables fields (variables to pass to subgraph)
   const {
@@ -118,6 +95,34 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
   });
   const splitDontStopOnFailed = useWatch({
     name: 'splitDontStopOnFailed',
+    control: form.control,
+  });
+  const splitParallelism = useWatch({
+    name: 'splitParallelism',
+    control: form.control,
+  });
+  const splitMaxRetries = useWatch({
+    name: 'splitMaxRetries',
+    control: form.control,
+  });
+  const splitRetryDelay = useWatch({
+    name: 'splitRetryDelay',
+    control: form.control,
+  });
+  const splitTimeout = useWatch({
+    name: 'splitTimeout',
+    control: form.control,
+  });
+  const splitAllowNull = useWatch({
+    name: 'splitAllowNull',
+    control: form.control,
+  });
+  const splitConvertSingleValue = useWatch({
+    name: 'splitConvertSingleValue',
+    control: form.control,
+  });
+  const splitBatchSize = useWatch({
+    name: 'splitBatchSize',
     control: form.control,
   });
 
@@ -242,21 +247,11 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
 
   // Sync schema fields to form values
   const inputSchemaSignature = useMemo(() => {
-    return JSON.stringify(
-      (inputSchemaValues as SchemaField[]).map((f) => ({
-        name: f?.name || '',
-        type: f?.type || 'string',
-      }))
-    );
+    return JSON.stringify(inputSchemaValues || []);
   }, [inputSchemaValues]);
 
   const outputSchemaSignature = useMemo(() => {
-    return JSON.stringify(
-      (outputSchemaValues as SchemaField[]).map((f) => ({
-        name: f?.name || '',
-        type: f?.type || 'string',
-      }))
-    );
+    return JSON.stringify(outputSchemaValues || []);
   }, [outputSchemaValues]);
 
   const lastInputSignature = useRef<string | null>(null);
@@ -292,162 +287,33 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
 
   return (
     <div className="space-y-6">
-      {/* Array Source Selection */}
-      <div className="space-y-2">
-        <Label className="text-sm font-medium">Array Source</Label>
-        <p className="text-xs text-muted-foreground">
-          Select the array to iterate over. Each item will be processed by the
-          subgraph.
-        </p>
-        <Select
-          value={inputMapping?.[0]?.value || ''}
-          onValueChange={(value) => {
-            form.setValue(
-              name,
-              [
-                {
-                  type: 'value',
-                  value,
-                  typeHint: 'auto',
-                  valueType: 'reference',
-                },
-              ],
-              { shouldDirty: true }
-            );
-          }}
-        >
-          <SelectTrigger>
-            <SelectValue placeholder="Select array source..." />
-          </SelectTrigger>
-          <SelectContent>
-            {arraySuggestions.map((suggestion) => (
-              <SelectItem key={suggestion.value} value={suggestion.value}>
-                {suggestion.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Or enter a custom path:{' '}
-          <Input
-            className="mt-1"
-            placeholder="e.g., steps['fetch'].outputs.items"
-            value={inputMapping?.[0]?.value || ''}
-            onChange={(e) => {
-              form.setValue(
-                name,
-                [
-                  {
-                    type: 'value',
-                    value: e.target.value,
-                    typeHint: 'auto',
-                    valueType: 'reference',
-                  },
-                ],
-                { shouldDirty: true }
-              );
-            }}
-          />
-        </p>
-      </div>
+      <SourceMappingValueField
+        name={name}
+        label="Array Source"
+        description="Select the array to iterate over. Each item will be processed by the subgraph."
+        suggestions={arraySuggestions}
+        placeholder="e.g., steps['fetch'].outputs.items"
+      />
 
       {/* Input Schema (Item Schema) */}
       <div className="space-y-2">
-        <Label className="text-sm font-medium">Item Schema (Input)</Label>
         <p className="text-xs text-muted-foreground">
           Define the structure of each item in the array. This will be available
           as <code className="text-xs bg-muted px-1 rounded">data.*</code>{' '}
           inside the subgraph.
         </p>
-        <div className="border rounded-lg">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b">
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
-                  Field Name
-                </th>
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
-                  Type
-                </th>
-                <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {inputSchemaFields.map((field, index) => (
-                <tr key={field.id} className="border-b hover:bg-muted/30">
-                  <td className="p-2">
-                    <Input
-                      {...form.register(`splitInputSchemaFields.${index}.name`)}
-                      placeholder="fieldName"
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0"
-                    />
-                  </td>
-                  <td className="p-2">
-                    <Select
-                      value={
-                        form.getValues(
-                          `splitInputSchemaFields.${index}.type`
-                        ) || 'string'
-                      }
-                      onValueChange={(value) =>
-                        form.setValue(
-                          `splitInputSchemaFields.${index}.type`,
-                          value,
-                          { shouldDirty: true }
-                        )
-                      }
-                    >
-                      <SelectTrigger className="h-7 border-0 focus:ring-0">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {SUPPORTED_TYPES.map((type) => (
-                          <SelectItem key={type.value} value={type.value}>
-                            {type.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </td>
-                  <td className="w-16 text-center p-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeInputField(index)}
-                      className="h-6 w-6 p-0"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-              {inputSchemaFields.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={3}
-                    className="p-4 text-center text-sm text-muted-foreground"
-                  >
-                    No fields defined. Add fields to describe the item
-                    structure.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => appendInputField({ name: '', type: 'string' })}
-          className="w-full"
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Add Input Field
-        </Button>
+        <SchemaFieldsEditor
+          label="Item Schema (Input)"
+          fields={(inputSchemaValues || []) as any}
+          onChange={(fields) =>
+            form.setValue('splitInputSchemaFields', fields, {
+              shouldDirty: true,
+              shouldTouch: true,
+            })
+          }
+          emptyMessage="No fields defined. Add fields to describe the item structure."
+          showEnum
+        />
         <SchemaPreview
           title="Item input schema"
           schema={buildSchemaFromFields(inputSchemaValues as SchemaField[])}
@@ -457,7 +323,6 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
 
       {/* Output Schema */}
       <div className="space-y-2">
-        <Label className="text-sm font-medium">Output Schema</Label>
         <p className="text-xs text-muted-foreground">
           Define what each iteration produces. Results will be collected into an
           array available as{' '}
@@ -466,96 +331,18 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           </code>
           .
         </p>
-        <div className="border rounded-lg">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b">
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
-                  Field Name
-                </th>
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
-                  Type
-                </th>
-                <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {outputSchemaFields.map((field, index) => (
-                <tr key={field.id} className="border-b hover:bg-muted/30">
-                  <td className="p-2">
-                    <Input
-                      {...form.register(
-                        `splitOutputSchemaFields.${index}.name`
-                      )}
-                      placeholder="resultField"
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0"
-                    />
-                  </td>
-                  <td className="p-2">
-                    <Select
-                      value={
-                        form.getValues(
-                          `splitOutputSchemaFields.${index}.type`
-                        ) || 'string'
-                      }
-                      onValueChange={(value) =>
-                        form.setValue(
-                          `splitOutputSchemaFields.${index}.type`,
-                          value,
-                          { shouldDirty: true }
-                        )
-                      }
-                    >
-                      <SelectTrigger className="h-7 border-0 focus:ring-0">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {SUPPORTED_TYPES.map((type) => (
-                          <SelectItem key={type.value} value={type.value}>
-                            {type.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </td>
-                  <td className="w-16 text-center p-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeOutputField(index)}
-                      className="h-6 w-6 p-0"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-              {outputSchemaFields.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={3}
-                    className="p-4 text-center text-sm text-muted-foreground"
-                  >
-                    No output fields defined.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => appendOutputField({ name: '', type: 'string' })}
-          className="w-full"
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Add Output Field
-        </Button>
+        <SchemaFieldsEditor
+          label="Output Schema"
+          fields={(outputSchemaValues || []) as any}
+          onChange={(fields) =>
+            form.setValue('splitOutputSchemaFields', fields, {
+              shouldDirty: true,
+              shouldTouch: true,
+            })
+          }
+          emptyMessage="No output fields defined."
+          showEnum
+        />
         <SchemaPreview
           title="Iteration output schema"
           schema={buildSchemaFromFields(outputSchemaValues as SchemaField[])}
@@ -606,10 +393,16 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                     : variable.value === undefined || variable.value === null
                       ? ''
                       : JSON.stringify(variable.value);
+                // Pass template through so MappingValueInput renders its
+                // template input and the mode toggle can cycle out of it —
+                // clamping it to 'immediate' left the form stuck holding a
+                // valueType the UI never displayed.
                 const scalarValueType: ValueMode =
                   variable.valueType === 'reference'
                     ? 'reference'
-                    : 'immediate';
+                    : variable.valueType === 'template'
+                      ? 'template'
+                      : 'immediate';
 
                 return (
                   <Fragment key={field.id}>
@@ -769,6 +562,22 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                                 form.formState
                               ).error?.message
                             }
+                          </p>
+                        )}
+                        {/* Visible fallback for valueType (enum) failures —
+                            without it a rejected mode silently dead-ends the
+                            Save button with no rendered error. */}
+                        {form.getFieldState(
+                          `splitVariablesFields.${index}.valueType`,
+                          form.formState
+                        ).error?.message && (
+                          <p className="text-xs text-destructive mt-1">
+                            {`Unsupported value mode: ${
+                              form.getFieldState(
+                                `splitVariablesFields.${index}.valueType`,
+                                form.formState
+                              ).error?.message
+                            }`}
                           </p>
                         )}
                       </td>
@@ -941,11 +750,103 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
       <div className="space-y-4">
         <Label className="text-sm font-medium">Execution Options</Label>
 
+        <div className="grid grid-cols-3 gap-3">
+          <div className="space-y-1">
+            <Label className="text-sm">Parallelism</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitParallelism ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitParallelism',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Runtime currently warns when this is not 1.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Retries</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitMaxRetries ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitMaxRetries',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Retry delay (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitRetryDelay ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitRetryDelay',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Timeout (ms)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={splitTimeout ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitTimeout',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Batch size</Label>
+            <Input
+              type="number"
+              min={1}
+              value={splitBatchSize ?? ''}
+              onChange={(event) =>
+                form.setValue(
+                  'splitBatchSize',
+                  event.target.value === ''
+                    ? undefined
+                    : Number(event.target.value),
+                  { shouldDirty: true }
+                )
+              }
+            />
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
           <div className="space-y-0.5">
             <Label className="text-sm">Sequential Execution</Label>
             <p className="text-xs text-muted-foreground">
-              Execute iterations one at a time instead of in parallel
+              Iterations always run one at a time in the current runtime; this flag is
+              informational and does not change execution
             </p>
           </div>
           <Switch
@@ -967,6 +868,38 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
             checked={splitDontStopOnFailed ?? false}
             onCheckedChange={(checked) =>
               form.setValue('splitDontStopOnFailed', checked, {
+                shouldDirty: true,
+              })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Allow Null Input</Label>
+            <p className="text-xs text-muted-foreground">
+              Treat null input as an empty array.
+            </p>
+          </div>
+          <Switch
+            checked={splitAllowNull ?? false}
+            onCheckedChange={(checked) =>
+              form.setValue('splitAllowNull', checked, { shouldDirty: true })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-sm">Convert Single Value</Label>
+            <p className="text-xs text-muted-foreground">
+              Wrap a non-array input in a single-item array.
+            </p>
+          </div>
+          <Switch
+            checked={splitConvertSingleValue ?? false}
+            onCheckedChange={(checked) =>
+              form.setValue('splitConvertSingleValue', checked, {
                 shouldDirty: true,
               })
             }

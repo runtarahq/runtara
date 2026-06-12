@@ -6,47 +6,65 @@ embedded WASM runner and Postgres.
 > **Compilation is in-process.** The standalone `runtara-compile` CLI has been
 > removed. Workflows are compiled by the **server**: the direct emitter
 > byte-emits the workflow-logic module and composes the final `workflow.wasm`
-> in-process via `wac-graph` — no `cargo component build`, no `wac` CLI. The
-> canonical automated execution coverage is the cargo test
-> `RUNTARA_RUN_DIRECT_WASM_E2E=1 RUNTARA_AGENT_COMPONENTS_DIR=target/wasm32-wasip2/release
-> cargo test -p runtara-workflows --test direct_wasm_execute`. The manual
-> upload/start/status walkthrough below (steps 6–9) is still valid once the
-> server has produced and registered an image; the old "compile to a file with
-> `runtara-compile`" steps (1 and 5) no longer apply.
+> in-process via `wac-graph` — no `cargo component build`, no `wac` CLI, no
+> compile-to-file step, no manual image upload, no `runtara-ctl`. The whole
+> loop is driven through the server HTTP API (steps 5–7 below).
+
+A complete, self-contained working example of this entire guide is
+[`e2e/test_obm_query_by_id_workflow.sh`](../e2e/test_obm_query_by_id_workflow.sh)
+— own databases, isolated Valkey, server API end to end, with assertions.
+
+For an *automated* check of the emit→compose→execute path against the staged
+components, there is also the cargo test battery:
+
+```bash
+RUNTARA_RUN_DIRECT_WASM_E2E=1 \
+RUNTARA_AGENT_COMPONENTS_DIR=target/wasm32-wasip2/release \
+cargo test -p runtara-workflows --test direct_wasm_execute -- --test-threads=1
+```
 
 ## Prerequisites
 
 - Docker with a running Postgres container (any version 14+). The dev
   `runtara-dev-postgres` container is fine — e2e uses its own databases.
+- Docker also runs the **isolated Valkey**: the trigger publisher hardcodes its
+  stream, so a second server must never share the dev Valkey.
 - `wasm32-wasip2` Rust target (`rustup target add wasm32-wasip2`) — for building
   the agent components (below), not for compiling workflows.
-- `wasmtime` CLI (`curl https://wasmtime.dev/install.sh -sSf | bash`)
-- `cargo-component` (`cargo install cargo-component --locked`) — used by
-  `scripts/build-agent-components.sh` to build the agent/shared components.
-- Pre-built agent components staged at `target/wasm32-wasip2/release/` — run
-  `scripts/build-agent-components.sh` once. The server composes these prebuilt
-  `.wasm` components into every `workflow.wasm` in-process (no `wac` CLI).
+- `cargo-component` — used by `scripts/build-agent-components.sh` (the script
+  auto-installs its own tools unless `RUNTARA_NO_INSTALL_TOOLS=1`).
+- Pre-built agent + shared workflow components staged at
+  `target/wasm32-wasip2/release/` — run `scripts/build-agent-components.sh`
+  once. The server composes these prebuilt `.wasm` components into every
+  `workflow.wasm` in-process.
 
-## 1. Build binaries
+## 0. Kill stale e2e servers by port
 
-`--bin` is a **global** target filter — it is *not* scoped to the `-p` it
-follows. A single combined command therefore silently drops any package whose
-bin isn't named, and `runtara-server` never gets built. Build the server with
-its own command:
+A leftover e2e server from a previous run makes the next boot die with
+`AddrInUse` — and the health check then **passes against the stale process**,
+so you end up testing an old binary without noticing. Before rerunning:
 
 ```bash
-cargo build -p runtara-management-sdk --bin runtara-ctl
+kill -9 $(lsof -ti tcp:17001) 2>/dev/null || true
+```
 
+Never `pkill runtara-server` — that takes down the dev server too. Always kill
+by the port your e2e server is bound to.
+
+## 1. Build the server
+
+```bash
 cargo build -p runtara-server --bin runtara-server
 ```
 
 (There is no separate compiler binary — the server compiles workflows
-in-process.)
+in-process. `runtara-ctl` is not needed for this flow either.)
 
 ## 2. Build agent components
 
-A workflow's compile composes a prebuilt component for each agent it uses. The
-compiler looks in `target/wasm32-wasip2/release/` by default (override with
+A workflow's compile composes a prebuilt component for each agent it uses,
+plus the shared `runtara_workflow_stdlib.wasm` / `runtara_workflow_runtime.wasm`.
+The server looks in `target/wasm32-wasip2/release/` by default (override with
 `RUNTARA_AGENT_COMPONENTS_DIR`). If a component is missing you get:
 
 ```
@@ -60,19 +78,24 @@ Build them all (also emits the sibling `.meta.json` files):
 scripts/build-agent-components.sh
 ```
 
-Or just the one agent you changed, then refresh the meta sidecars:
+Faster partial rebuilds:
 
 ```bash
+# Just the one agent you changed, then refresh the meta sidecars:
 cargo component build --release --target wasm32-wasip2 -p runtara-agent-<id>
 cargo run -p runtara-agent-bundle-emit --bin emit-meta -- target/wasm32-wasip2/release
+
+# Stdlib/runtime components only — use the script, never plain cargo component build:
+RUNTARA_ONLY_WORKFLOW_COMPONENTS=1 scripts/build-agent-components.sh
 ```
 
 The **server** needs this components dir at *compile* time (it composes the
 prebuilt components into each `workflow.wasm` in-process). The composed
 `workflow.wasm` is self-contained, so nothing needs the components dir to
-*execute* an already-built image.
+*execute* an already-built image. The flip side: after rebuilding a component
+you must **recompile the workflow**, or it keeps executing the old logic.
 
-## 3. Create test databases
+## 3. Create test databases and an isolated Valkey
 
 The server and environment use **separate databases** to avoid migration
 version collisions (both have a `20250101000000` migration with different
@@ -80,124 +103,129 @@ content). Use your Postgres credentials:
 
 ```bash
 DB_URL="postgres://user:pass@localhost:5432/postgres"
+psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_server;"  # server + object model
 psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_test;"    # core + environment
-psql "$DB_URL" -c "CREATE DATABASE runtara_e2e_server;"  # server tables
+```
+
+Start a Valkey just for this server (the trigger publisher hardcodes its
+stream — sharing the dev Valkey corrupts both servers' trigger handling):
+
+```bash
+docker run -d --rm --name runtara-e2e-valkey -p 16390:6379 valkey/valkey:8-alpine
 ```
 
 ## 4. Start the server (coexisting with a dev server)
 
 All ports are configurable. A running dev `runtara-server` already holds the
-defaults: `RUNTARA_CORE_PORT` (8001), `RUNTARA_ENVIRONMENT_PORT` (8002),
-`RUNTARA_CORE_HTTP_PORT` (8003), `RUNTARA_ENV_HTTP_PORT` (8004), plus
-`SERVER_PORT` (control API) and `INTERNAL_PORT`. Shift the e2e server into the
-17xxx/18xxx range to avoid collisions.
+defaults (`SERVER_PORT`/`INTERNAL_PORT` 7001/7002, `RUNTARA_CORE_PORT` 8001,
+`RUNTARA_ENVIRONMENT_PORT` 8002, `RUNTARA_CORE_HTTP_PORT` 8003,
+`RUNTARA_ENV_HTTP_PORT` 8004). Shift the e2e server into the 17xxx/18xxx range.
 
-The server **auto-loads `.env`** (`dotenvy::dotenv()`), so override every DB URL
-and port inline — otherwise the e2e server would migrate/write the dev DB.
+The server **auto-loads `.env`** (`dotenvy::dotenv()`), so override every DB
+URL and port inline — otherwise the e2e server would migrate/write the dev DB.
+
+`AUTH_PROVIDER=local` + `SESSION_TOKEN_SECRET` + `TENANT_ID` let plain curl
+talk to `/api/runtime` without a real auth provider.
 
 ```bash
 RUNTARA_SERVER_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 OBJECT_MODEL_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_server" \
 RUNTARA_DATABASE_URL="postgres://user:pass@localhost:5432/runtara_e2e_test" \
 DATA_DIR="/tmp/runtara_e2e_data" \
-SERVER_PORT=17001 INTERNAL_PORT=17002 \
+TENANT_ID=e2e_test AUTH_PROVIDER=local \
+SESSION_TOKEN_SECRET=$(openssl rand -hex 32) \
+SERVER_HOST=127.0.0.1 SERVER_PORT=17001 INTERNAL_PORT=17002 \
 RUNTARA_CORE_PORT=18001 RUNTARA_ENVIRONMENT_PORT=18002 \
 RUNTARA_CORE_HTTP_PORT=18003 RUNTARA_ENV_HTTP_PORT=18004 \
-RUST_LOG="runtara_server=info,runtara_environment=info,runtara_core=info" \
-  target/debug/runtara-server &
+RUNTARA_AGENT_COMPONENTS_DIR="$PWD/target/wasm32-wasip2/release" \
+VALKEY_HOST=127.0.0.1 VALKEY_PORT=16390 \
+OTEL_SDK_DISABLED=true RUNTARA_SDK_BACKEND=http \
+RUST_LOG="warn,runtara_server=info,runtara_environment=info,runtara_core=info" \
+  target/debug/runtara-server > /tmp/runtara_e2e.log 2>&1 &
 ```
 
-Wait for readiness on the env HTTP port:
+Wait for readiness on the **public** port:
 
 ```bash
-curl --retry 20 --retry-delay 1 --retry-connrefused \
-  http://127.0.0.1:18004/api/v1/health   # embedded environment
+curl --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:17001/health
 ```
 
-Health, image upload, and `runtara-ctl` all target **`RUNTARA_ENV_HTTP_PORT`**
-(18004 here) — the embedded `runtara-environment`'s HTTP API, served by the
-**WasmRunner** (not OCI/crun). The server derives its own
-`RUNTARA_ENVIRONMENT_ADDR` from that port, so you don't set it for the server.
+All API calls below go to `SERVER_PORT`:
+
+```bash
+API=http://127.0.0.1:17001/api/runtime
+```
 
 To stop the e2e server without touching the dev server, kill the PID bound to
-your e2e port: `kill $(lsof -ti tcp:18004)`. Never `pkill runtara-server`.
+your e2e port: `kill $(lsof -ti tcp:17001)`. Never `pkill runtara-server`.
 
-## 5. Compile a workflow
+## 5. Create, define, and compile a workflow
 
-There is no standalone compile-to-file step anymore — the server compiles a
-workflow in-process when you create/deploy it and registers the resulting image
-itself. Drive this through the workflow API or the MCP `compile_workflow` tool;
-the server reads `RUNTARA_AGENT_COMPONENTS_DIR` (step 2) at compile time and
-composes the final `workflow.wasm` via `wac-graph`.
-
-For an end-to-end *automated* check of the emit→compose→execute path against the
-staged components, prefer the cargo test:
+Create the workflow, push its definition as `executionGraph`, then compile the
+version in-process:
 
 ```bash
-RUNTARA_RUN_DIRECT_WASM_E2E=1 \
-RUNTARA_AGENT_COMPONENTS_DIR=target/wasm32-wasip2/release \
-cargo test -p runtara-workflows --test direct_wasm_execute -- --test-threads=1
+WF_ID=$(curl -s -X POST "$API/workflows/create" -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-check","description":"e2e"}' | jq -r '.data.id')
+
+curl -s -X POST "$API/workflows/$WF_ID/update" -H 'Content-Type: application/json' \
+  -d "{\"executionGraph\": $(cat my_workflow.json)}" | jq '.success'   # must be true
+
+VERSION=$(curl -s "$API/workflows/$WF_ID/versions" \
+  | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+
+curl -s --max-time 900 -X POST "$API/workflows/$WF_ID/versions/$VERSION/compile" \
+  -H 'Content-Type: application/json' -d '{}' | jq '.success'          # must be true
 ```
 
-The direct emitter produces no Rust source — there is no `--emit-source`,
-`src/lib.rs`, or `bindings.rs`. The per-build scratch (the emitted
-`workflow-logic.wasm`, `workflow.wac`, and composed `workflow.wasm`) lives under
-the server's build directory.
+`executionGraph` is the DSL graph: `steps`, `entryPoint`, `executionPlan`,
+`variables`, `inputSchema`, `outputSchema`. See the canonical script for a
+complete inline example, including agent steps bound to a connection created
+via `POST $API/connections`.
 
-## 6. Register as a WASM image
+On compile failure the response carries the error; the server log
+(`/tmp/runtara_e2e.log` above) has the full diagnostics. The direct emitter
+produces no Rust source — there is no `src/lib.rs` or `bindings.rs`; the
+per-build scratch lives under the server's `DATA_DIR`.
 
-`runtara-ctl register` works, but the multipart upload endpoint is the reliable
-path for any file size (the server sniffs the `\0asm` magic byte and tags it
-wasm):
+## 6. Execute and wait
 
 ```bash
-IMAGE_ID=$(curl -s -X POST "http://127.0.0.1:18004/api/v1/images/upload" \
-  -F "binary=@/tmp/test_binary.wasm" \
-  -F "tenant_id=e2e-test" -F "name=my-test" \
-  -F "description=test" -F "runner_type=wasm" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['image_id'])")
+INSTANCE_ID=$(curl -s -X POST "$API/workflows/$WF_ID/execute" -H 'Content-Type: application/json' \
+  -d '{"inputs":{"data":{"input":{"message":"hello"}}}}' | jq -r '.data.instanceId')
+
+for i in {1..90}; do
+  STATUS=$(curl -s "$API/workflows/instances/$INSTANCE_ID" | jq -r '.data.status')
+  case "$STATUS" in completed|failed|crashed|stopped) break ;; esac
+  sleep 2
+done
 ```
 
-## 7. Start and wait
+**Important:** the execute payload nests the workflow input envelope under
+`inputs`: `{"inputs": {"data": {...}, "variables": {...}}}`. The workflow
+reads `data` from that envelope at runtime — without the `data` wrapper, all
+`data.*` references silently resolve to `null`.
+
+## 7. Assert observable behavior
+
+Don't stop at `completed`. Pull the outputs and assert they match expectation:
 
 ```bash
-export RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18004"
-export RUNTARA_SKIP_CERT_VERIFICATION="true"
-
-INSTANCE_ID=$(target/debug/runtara-ctl start \
-  --image "$IMAGE_ID" --tenant e2e-test \
-  --input '{"data":{"input":{"message":"hello"}}}')
-
-target/debug/runtara-ctl wait "$INSTANCE_ID" --poll 200
+curl -s "$API/workflows/instances/$INSTANCE_ID" \
+  | jq '{status: .data.status, outputs: .data.outputs}'
 ```
 
-**Important:** workflow input must be wrapped in a `{"data": {...}}` envelope.
-The compiled workflow reads `input_json.get("data")` at runtime — without the
-envelope, all `data.*` references resolve to `null`.
+For agent / capability changes, confirm `outputs` reflects the logic you
+added. Remember: a rebuilt component only takes effect after the workflow is
+**recompiled** (step 5).
 
-## 8. Assert observable behavior
+## 8. Test graceful shutdown (SIGTERM)
 
-The command is `status` (there is no `get`). It always prints the full instance
-JSON to stdout; the workflow result is under the `output` key with
-`status == "completed"` on success:
-
-```bash
-target/debug/runtara-ctl status "$INSTANCE_ID" | jq '{status, output}'
-```
-
-For agent / capability changes, confirm `output` reflects the logic you added,
-not a stale cached binary.
-
-## 9. Test graceful shutdown (SIGTERM)
+Execute a workflow with a long Sleep step, then SIGTERM the e2e server by its
+port (not the dev server):
 
 ```bash
-# Start a long-running instance
-INSTANCE_ID=$(target/debug/runtara-ctl start \
-  --image "$IMAGE_ID" --tenant e2e-test \
-  --input '{"data":{"input":{"delay_ms":60000}}}')
-
-# Send SIGTERM to the e2e server by its port (not the dev server)
-kill -TERM $(lsof -ti tcp:18004)
+kill -TERM $(lsof -ti tcp:17001)
 ```
 
 ### Expected behavior
@@ -213,31 +241,33 @@ Override the grace period with `RUNTARA_SHUTDOWN_GRACE_MS`:
 RUNTARA_SHUTDOWN_GRACE_MS=5000 target/debug/runtara-server  # 5s grace
 ```
 
-After restart, the heartbeat monitor detects the suspended instance and
-resumes it from its last checkpoint.
+After a restart, suspended instances are recovered and relaunched
+automatically (checkpoint-less instances replay from the start).
 
 ## Workflow input format
 
-The compiled workflow reads `data` from the top-level input JSON envelope
-(equivalent to `input_json.get("data")`). So if your workflow references
-`data.input.foo`, send:
+The workflow reads `data` from the input envelope. The execute endpoint nests
+that envelope under `inputs`, so if your workflow references `data.input.foo`,
+send:
 
 ```json
-{"data": {"input": {"foo": "bar"}}}
+{"inputs": {"data": {"input": {"foo": "bar"}}, "variables": {}}}
 ```
 
-**Not** `{"input": {"foo": "bar"}}`.
+**Not** `{"inputs": {"input": {"foo": "bar"}}}` and **not** a bare
+`{"data": ...}` without the `inputs` wrapper.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| Built `runtara-ctl` but `runtara-server` is missing | `--bin` is a global filter — build the server separately (step 1) |
+| `AddrInUse` on boot, or health passes but behavior looks stale | A leftover e2e server still holds the port and answers health checks from the **old** process — `kill -9 $(lsof -ti tcp:17001)` first (step 0) |
 | `agent component '<x>' missing` | Build components (step 2): `scripts/build-agent-components.sh`, or the single-agent path + `emit-meta` |
-| `cargo component build returned non-zero status` (building agents) | Re-run `scripts/build-agent-components.sh`; ensure `cargo-component` is installed |
-| Health/upload hits the wrong server, or `Address already in use` | A dev server holds 8001–8004 / 7001–7002; shift the e2e server to 17xxx/18xxx and target `RUNTARA_ENV_HTTP_PORT` (step 4) |
+| Compile succeeds but output shows old agent logic | Rebuild the component + `emit-meta`, then **recompile** the workflow — components are composed in at compile time |
+| 401 / auth error from `/api/runtime` | Set `AUTH_PROVIDER=local`, `SESSION_TOKEN_SECRET`, and `TENANT_ID` in the server env (step 4) |
+| Executions never start, or the dev server's triggers misbehave | Both servers shared one Valkey — the trigger publisher hardcodes its stream; run an isolated Valkey (step 3) |
+| API hits the wrong server | A dev server holds 7001/7002 + 8001–8004; shift the e2e server to 17xxx/18xxx (step 4) |
 | e2e server migrates/writes the dev DB | The server auto-loads `.env`; override all three `*_DATABASE_URL` (and ports) inline (step 4) |
-| `runtara-ctl get: Unknown command` | It's `runtara-ctl status <instance_id>` now (step 8) |
 | `migration was previously applied but is missing` | Use separate databases for server vs environment (step 3) |
 | `migration was previously applied but has been modified` | Drop and recreate both databases |
-| `delay_in_ms: invalid type: null` or other `data.*` ref is null | Wrap input in `{"data": {...}, "variables": {}}` envelope |
+| `data.*` references resolve to null | Use the `{"inputs": {"data": {...}, "variables": {}}}` envelope (step 6) |

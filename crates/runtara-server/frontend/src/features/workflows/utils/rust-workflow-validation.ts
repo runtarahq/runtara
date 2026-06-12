@@ -59,6 +59,9 @@ function readAccessTokenFromStorage(): string | undefined {
   if (!authority || !clientId) {
     return undefined;
   }
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return undefined;
+  }
   const raw = window.localStorage.getItem(
     `oidc.user:${authority}:${clientId}`
   );
