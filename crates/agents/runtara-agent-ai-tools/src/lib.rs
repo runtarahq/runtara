@@ -130,7 +130,11 @@ pub struct RawConnection {
 
 const PROVIDER_OPENAI: &str = runtara_ai::provider::PROVIDER_OPENAI;
 const PROVIDER_BEDROCK: &str = runtara_ai::provider::PROVIDER_BEDROCK;
+// Only referenced from the host-only `agent_info()`; the wasm component
+// resolves integrations at runtime via the connection proxy.
+#[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_OPENAI_API_KEY: &str = "openai_api_key";
+#[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_AWS_CREDENTIALS: &str = "aws_credentials";
 
 fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnection, AgentError> {
