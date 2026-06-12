@@ -12,6 +12,28 @@ use tower::ServiceExt;
 use crate::auth::{AuthContext, AuthMethod};
 use crate::mcp::server::SmoMcpServer;
 
+tokio::task_local! {
+    /// The authenticated MCP caller's identity for the current tool invocation.
+    ///
+    /// Set once per tool call by [`SmoMcpServer::call_tool`] from the outer HTTP
+    /// request's [`AuthContext`] (the one the auth middleware resolved, including the
+    /// caller's per-tenant Valkey role). [`build_request`] reads it so in-process API
+    /// calls carry the caller's REAL role and `user_id` — without it, the auth
+    /// middleware would re-run against a role-less synthetic context and every
+    /// authorization gate (role checks + resource ownership) would be bypassed.
+    static CALLER_AUTH: AuthContext;
+}
+
+/// Run `fut` with the MCP caller's [`AuthContext`] bound as the ambient identity for
+/// any in-process API call it makes. Tool handlers `await` their `api_*` calls inline
+/// on this same task, so the task-local is visible at [`build_request`] time.
+pub async fn with_caller_auth<F, T>(auth: AuthContext, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CALLER_AUTH.scope(auth, fut).await
+}
+
 fn err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
 }
@@ -183,12 +205,22 @@ fn build_request(
         .body(body)
         .expect("valid request");
 
-    // Inject AuthContext so auth middleware skips validation
-    request.extensions_mut().insert(AuthContext::new(
-        tenant_id.to_string(),
-        "mcp-internal".to_string(),
-        AuthMethod::Jwt,
-    ));
+    // Pre-inject the AuthContext so the auth middleware treats this as a trusted
+    // in-process call. Use the REAL caller identity bound by `with_caller_auth` for
+    // the current tool invocation, so the caller's role and `user_id` drive route-level
+    // authorization and resource-ownership checks. Fall back to a synthetic context
+    // only when no caller is bound (non-HTTP transports, tests) — that context carries
+    // no role, which the gates treat as "enforcement dormant", matching prior behavior.
+    let auth_context = CALLER_AUTH
+        .try_with(|caller| caller.clone())
+        .unwrap_or_else(|_| {
+            AuthContext::new(
+                tenant_id.to_string(),
+                "mcp-internal".to_string(),
+                AuthMethod::Jwt,
+            )
+        });
+    request.extensions_mut().insert(auth_context);
 
     request
 }
@@ -413,11 +445,62 @@ pub async fn api_delete_with_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_path_param, normalize_json_arg, translate_api_error_response,
-        validate_identifier_param, validate_path_param,
+        build_request, encode_path_param, normalize_json_arg, translate_api_error_response,
+        validate_identifier_param, validate_path_param, with_caller_auth,
     };
-    use axum::http::StatusCode;
+    use crate::auth::{AuthContext, AuthMethod};
+    use crate::authz::Role;
+    use axum::http::{Method, StatusCode};
     use serde_json::json;
+
+    // ── caller identity propagation into in-process requests ───────────
+
+    #[tokio::test]
+    async fn build_request_uses_bound_caller_identity() {
+        // A real caller (with a resolved role) bound for the tool call must be the
+        // AuthContext on the in-process request — this is what makes the auth
+        // middleware apply the caller's role and ownership instead of bypassing.
+        let mut caller = AuthContext::new(
+            "org_real".to_string(),
+            "auth0|member1".to_string(),
+            AuthMethod::Jwt,
+        );
+        caller.role = Some(Role::Member);
+
+        with_caller_auth(caller, async {
+            let req = build_request(
+                Method::POST,
+                "/api/runtime/workflows/create",
+                None,
+                "org_real",
+            );
+            let ctx = req
+                .extensions()
+                .get::<AuthContext>()
+                .expect("AuthContext injected");
+            assert_eq!(ctx.user_id, "auth0|member1");
+            assert_eq!(ctx.org_id, "org_real");
+            assert_eq!(ctx.role, Some(Role::Member));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_request_falls_back_to_synthetic_context_without_caller() {
+        // No caller bound (non-HTTP transport / tests): the synthetic role-less
+        // context is used, preserving the prior trusted-internal behavior.
+        let req = build_request(Method::GET, "/api/runtime/workflows", None, "org_fallback");
+        let ctx = req
+            .extensions()
+            .get::<AuthContext>()
+            .expect("AuthContext injected");
+        assert_eq!(ctx.user_id, "mcp-internal");
+        assert_eq!(ctx.org_id, "org_fallback");
+        assert_eq!(
+            ctx.role, None,
+            "fallback carries no role (enforcement dormant)"
+        );
+    }
 
     // ── 403 entitlement-shape preservation ─────────────────────────────
 
