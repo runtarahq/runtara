@@ -18,9 +18,18 @@ compiler = [
     "dep:wac-parser",
     "dep:wac-resolver",
     "dep:wac-graph",
+    # AgentCatalog::from_meta_dir for the runtara-compile CLI.
+    "runtara-dsl/fs",
 ]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
+
+# Standalone compiler CLI: workflow JSON (+ --child graphs) → composed
+# workflow.wasm, no server or database. See src/bin/compile.rs.
+[[bin]]
+name = "runtara-compile"
+path = "src/bin/compile.rs"
+required-features = ["compiler"]
 
 [dependencies]
 runtara-agents = { path = "../runtara-agents", version = "8.0", default-features = false }

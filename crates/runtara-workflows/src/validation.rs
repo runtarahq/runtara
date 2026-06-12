@@ -267,6 +267,14 @@ pub enum ValidationError {
         provided_fields: Vec<String>,
     },
 
+    /// EmbedWorkflow references a child workflow that is not present in the
+    /// validation closure (e.g. it does not exist, or was not provided).
+    /// A workflow with a dangling child reference can never compile.
+    MissingChildWorkflow {
+        step_id: String,
+        child_workflow_id: String,
+    },
+
     /// Circular dependency detected between workflows.
     CircularDependency { cycle_path: Vec<String> },
 
@@ -699,6 +707,16 @@ impl std::fmt::Display for ValidationError {
                 write!(
                     f,
                     "[E054] EmbedWorkflow step '{}' provides inputs to child '{}' but child has no inputSchema defined.\n       Add inputSchema to the child workflow or remove inputMapping.",
+                    step_id, child_workflow_id
+                )
+            }
+            ValidationError::MissingChildWorkflow {
+                step_id,
+                child_workflow_id,
+            } => {
+                write!(
+                    f,
+                    "[E124] EmbedWorkflow step '{}' references child workflow '{}', which was not found.\n       The workflow cannot compile until the child exists.",
                     step_id, child_workflow_id
                 )
             }
@@ -1408,6 +1426,221 @@ pub fn validate_workflow_with_children(
     }
 
     result
+}
+
+// ============================================================================
+// Closure (recursive) Validation
+// ============================================================================
+
+/// One resolved child workflow in a validation closure.
+///
+/// Built by whoever resolves `EmbedWorkflow` references — the server loads
+/// children from the database, `runtara-compile` from `--child` files.
+#[derive(Debug, Clone)]
+pub struct ClosureChildGraph {
+    /// The child's workflow id (as referenced by `childWorkflowId`).
+    pub workflow_id: String,
+    /// The resolved version of the provided graph.
+    pub version: i32,
+    /// The child's execution graph.
+    pub execution_graph: ExecutionGraph,
+}
+
+/// Validation results for one child workflow in a closure.
+#[derive(Debug, Clone)]
+pub struct ChildValidationReport {
+    /// The child's workflow id.
+    pub workflow_id: String,
+    /// The validated version.
+    pub version: i32,
+    /// The child's own validation result, including its embed-input checks
+    /// against *its* children.
+    pub result: ValidationResult,
+}
+
+/// Attributed validation results for a workflow and its full static
+/// child-workflow closure: the root graph plus every (grand)child, each
+/// fully validated, with errors attributed to the graph they occur in.
+#[derive(Debug, Clone, Default)]
+pub struct ClosureValidationReport {
+    /// Results for the root graph (including root-level embed-input
+    /// coverage, missing-child references, and cross-workflow cycles).
+    pub root: ValidationResult,
+    /// Results per unique `(workflow_id, version)` child in the closure.
+    pub children: Vec<ChildValidationReport>,
+}
+
+impl ClosureValidationReport {
+    /// True when no graph in the closure has errors (warnings are allowed).
+    pub fn is_ok(&self) -> bool {
+        self.root.is_ok() && self.children.iter().all(|c| c.result.is_ok())
+    }
+
+    /// Total error count across the closure.
+    pub fn error_count(&self) -> usize {
+        self.root.errors.len()
+            + self
+                .children
+                .iter()
+                .map(|c| c.result.errors.len())
+                .sum::<usize>()
+    }
+
+    /// Every error in the closure with its origin; `None` means the root
+    /// graph, `Some((workflow_id, version))` a child.
+    pub fn errors(&self) -> impl Iterator<Item = (Option<(&str, i32)>, &ValidationError)> {
+        self.root
+            .errors
+            .iter()
+            .map(|e| (None, e))
+            .chain(self.children.iter().flat_map(|c| {
+                c.result
+                    .errors
+                    .iter()
+                    .map(move |e| (Some((c.workflow_id.as_str(), c.version)), e))
+            }))
+    }
+
+    /// Every warning in the closure with its origin; `None` means the root
+    /// graph, `Some((workflow_id, version))` a child.
+    pub fn warnings(&self) -> impl Iterator<Item = (Option<(&str, i32)>, &ValidationWarning)> {
+        self.root
+            .warnings
+            .iter()
+            .map(|w| (None, w))
+            .chain(self.children.iter().flat_map(|c| {
+                c.result
+                    .warnings
+                    .iter()
+                    .map(move |w| (Some((c.workflow_id.as_str(), c.version)), w))
+            }))
+    }
+}
+
+/// Recursively validate a workflow and its full static child closure.
+///
+/// Every graph in the closure — the root and each unique child at any
+/// nesting depth — gets the complete single-graph validation, plus:
+///
+/// - **Embed-input coverage at every level**: each graph's `EmbedWorkflow`
+///   steps (including inside Split/While subgraphs) are checked against the
+///   referenced child's `inputSchema`, so child→grandchild mismatches are
+///   caught, not just root→child.
+/// - **Missing children are errors** ([`ValidationError::MissingChildWorkflow`]):
+///   a dangling `childWorkflowId` reference can never compile, so it can
+///   never be valid. The error is attributed to the graph holding the
+///   reference.
+/// - **Cross-workflow cycle detection**, reported on the root.
+///
+/// This is the validation entry behind both the server's save gate and
+/// `runtara-compile`; the callers only differ in how they resolve `children`.
+pub fn validate_workflow_closure(
+    root_workflow_id: &str,
+    root: &ExecutionGraph,
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+    children: &[ClosureChildGraph],
+) -> ClosureValidationReport {
+    // Embed-input and cycle checks resolve children by workflow id (first
+    // occurrence wins), matching the compile/runtime contract. The root is
+    // part of its own closure: a child that embeds the root again must
+    // surface as a cycle, not as a missing child.
+    let mut children_map: HashMap<String, ExecutionGraph> = HashMap::new();
+    children_map.insert(root_workflow_id.to_string(), root.clone());
+    for child in children {
+        children_map
+            .entry(child.workflow_id.clone())
+            .or_insert_with(|| child.execution_graph.clone());
+    }
+
+    let mut root_result = validate_workflow(root, catalog);
+    report_missing_child_references(root, &children_map, &mut root_result);
+    validate_closure_cycles(root_workflow_id, root, &children_map, &mut root_result);
+    if !root_result
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
+    {
+        validate_embed_workflow_inputs(root, &children_map, &mut root_result);
+    }
+
+    let mut seen: HashSet<(String, i32)> = HashSet::new();
+    let mut child_reports = Vec::new();
+    for child in children {
+        if !seen.insert((child.workflow_id.clone(), child.version)) {
+            continue;
+        }
+        let mut result = validate_workflow(&child.execution_graph, catalog);
+        report_missing_child_references(&child.execution_graph, &children_map, &mut result);
+        validate_embed_workflow_inputs(&child.execution_graph, &children_map, &mut result);
+        child_reports.push(ChildValidationReport {
+            workflow_id: child.workflow_id.clone(),
+            version: child.version,
+            result,
+        });
+    }
+
+    ClosureValidationReport {
+        root: root_result,
+        children: child_reports,
+    }
+}
+
+/// Flag `EmbedWorkflow` steps (including inside Split/While subgraphs)
+/// whose referenced child is absent from the closure.
+fn report_missing_child_references(
+    graph: &ExecutionGraph,
+    children_map: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
+) {
+    for (step_id, step) in &graph.steps {
+        if let Step::EmbedWorkflow(start_step) = step
+            && !children_map.contains_key(&start_step.child_workflow_id)
+        {
+            result.errors.push(ValidationError::MissingChildWorkflow {
+                step_id: step_id.clone(),
+                child_workflow_id: start_step.child_workflow_id.clone(),
+            });
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                report_missing_child_references(&split_step.subgraph, children_map, result);
+            }
+            Step::While(while_step) => {
+                report_missing_child_references(&while_step.subgraph, children_map, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Cross-workflow cycle detection with the real root workflow id, so the
+/// reported cycle path names actual workflows.
+fn validate_closure_cycles(
+    root_workflow_id: &str,
+    root: &ExecutionGraph,
+    children_map: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
+) {
+    let mut dep_graph = DependencyGraph::new();
+    let mut visited = HashSet::new();
+
+    let root_ref = WorkflowReference {
+        workflow_id: root_workflow_id.to_string(),
+        version: 1,
+    };
+
+    build_dependency_graph(root, &root_ref, children_map, &mut dep_graph, &mut visited);
+
+    if let Err(cycle) = dep_graph.detect_cycles(&root_ref) {
+        let cycle_path: Vec<String> = cycle.iter().map(|r| r.workflow_id.clone()).collect();
+        if !cycle_path.is_empty() {
+            result
+                .errors
+                .push(ValidationError::CircularDependency { cycle_path });
+        }
+    }
 }
 
 // ============================================================================
@@ -10662,5 +10895,249 @@ mod template_validation_tests {
         let mut result = ValidationResult::default();
         validate_duplicate_target_edges(&graph, &mut result);
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+}
+
+#[cfg(test)]
+mod closure_validation_tests {
+    use super::*;
+    use runtara_dsl::agent_meta::AgentCatalog;
+
+    fn graph(json: &str) -> ExecutionGraph {
+        serde_json::from_str(json).expect("test graph parses")
+    }
+
+    fn fixture(name: &str) -> ExecutionGraph {
+        let json = match name {
+            "nested_child" => include_str!("../tests/fixtures/embed_workflow_nested_child.json"),
+            "nested_grandchild" => {
+                include_str!("../tests/fixtures/embed_workflow_nested_grandchild.json")
+            }
+            "nested_great_grandchild" => {
+                include_str!("../tests/fixtures/embed_workflow_nested_great_grandchild.json")
+            }
+            other => panic!("unknown fixture {other}"),
+        };
+        graph(json)
+    }
+
+    fn child(workflow_id: &str, execution_graph: ExecutionGraph) -> ClosureChildGraph {
+        ClosureChildGraph {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            execution_graph,
+        }
+    }
+
+    /// Root: nested_child (valid). The great-grandchild is corrupted by
+    /// dropping its inputSchema — its own `data.*` reference becomes E052
+    /// and the grandchild's inputMapping toward it becomes E054. Both must
+    /// be attributed to the graph they live in, two levels below the root.
+    #[test]
+    fn errors_deep_in_the_closure_are_caught_and_attributed() {
+        let mut broken_great = fixture("nested_great_grandchild");
+        broken_great.input_schema.clear();
+
+        let report = validate_workflow_closure(
+            "root-wf",
+            &fixture("nested_child"),
+            &AgentCatalog::new(),
+            &[
+                child("grandchild_workflow", fixture("nested_grandchild")),
+                child("great_grandchild_workflow", broken_great),
+            ],
+        );
+
+        assert!(report.root.is_ok(), "root errors: {:?}", report.root.errors);
+        assert!(!report.is_ok());
+
+        let grandchild = report
+            .children
+            .iter()
+            .find(|c| c.workflow_id == "grandchild_workflow")
+            .expect("grandchild report");
+        assert!(
+            grandchild.result.errors.iter().any(
+                |e| matches!(e, ValidationError::ChildMissingInputSchema { child_workflow_id, .. }
+                    if child_workflow_id == "great_grandchild_workflow")
+            ),
+            "grandchild errors: {:?}",
+            grandchild.result.errors
+        );
+
+        let great = report
+            .children
+            .iter()
+            .find(|c| c.workflow_id == "great_grandchild_workflow")
+            .expect("great-grandchild report");
+        assert!(
+            !great.result.errors.is_empty(),
+            "great-grandchild should fail its own validation"
+        );
+    }
+
+    /// The grandchild references a great-grandchild that is absent from the
+    /// closure — an E124 error attributed to the grandchild.
+    #[test]
+    fn missing_child_anywhere_in_the_closure_is_an_error() {
+        let report = validate_workflow_closure(
+            "root-wf",
+            &fixture("nested_child"),
+            &AgentCatalog::new(),
+            &[child("grandchild_workflow", fixture("nested_grandchild"))],
+        );
+
+        let origins: Vec<_> = report
+            .errors()
+            .filter(|(_, e)| matches!(e, ValidationError::MissingChildWorkflow { .. }))
+            .map(|(origin, e)| (origin.map(|(id, _)| id.to_string()), e.clone()))
+            .collect();
+        assert_eq!(origins.len(), 1, "errors: {:?}", origins);
+        assert_eq!(origins[0].0.as_deref(), Some("grandchild_workflow"));
+        assert!(matches!(
+            &origins[0].1,
+            ValidationError::MissingChildWorkflow { step_id, child_workflow_id }
+                if step_id == "call_greatgrandchild"
+                    && child_workflow_id == "great_grandchild_workflow"
+        ));
+    }
+
+    /// wf-a (root) embeds wf-b; wf-b embeds wf-a. Must be a cycle on the
+    /// root — and NOT a missing-child error, since the root is part of its
+    /// own closure.
+    #[test]
+    fn cycle_through_the_root_is_reported_with_real_ids() {
+        let embeds = |target: &str| {
+            graph(&format!(
+                r#"{{
+                    "steps": {{
+                        "call": {{
+                            "stepType": "EmbedWorkflow", "id": "call",
+                            "childWorkflowId": "{target}", "childVersion": "latest"
+                        }},
+                        "finish": {{ "stepType": "Finish", "id": "finish" }}
+                    }},
+                    "entryPoint": "call",
+                    "executionPlan": [{{ "fromStep": "call", "toStep": "finish" }}]
+                }}"#
+            ))
+        };
+
+        let report = validate_workflow_closure(
+            "wf-a",
+            &embeds("wf-b"),
+            &AgentCatalog::new(),
+            &[child("wf-b", embeds("wf-a"))],
+        );
+
+        assert!(
+            report.root.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::CircularDependency { cycle_path }
+                    if cycle_path.contains(&"wf-a".to_string())
+                        && cycle_path.contains(&"wf-b".to_string())
+            )),
+            "root errors: {:?}",
+            report.root.errors
+        );
+        assert!(
+            !report
+                .errors()
+                .any(|(_, e)| matches!(e, ValidationError::MissingChildWorkflow { .. })),
+            "root reference must not be reported missing"
+        );
+    }
+
+    /// A child required-input mismatch one level down: the child embeds the
+    /// grandchild without mapping its required input.
+    #[test]
+    fn child_to_grandchild_required_inputs_are_checked() {
+        let child_graph = graph(
+            r#"{
+                "steps": {
+                    "call_gc": {
+                        "stepType": "EmbedWorkflow", "id": "call_gc",
+                        "childWorkflowId": "gc", "childVersion": "latest"
+                    },
+                    "finish": { "stepType": "Finish", "id": "finish" }
+                },
+                "entryPoint": "call_gc",
+                "executionPlan": [{ "fromStep": "call_gc", "toStep": "finish" }],
+                "inputSchema": { "msg": { "type": "string", "required": true } }
+            }"#,
+        );
+        let grandchild_graph = graph(
+            r#"{
+                "steps": { "finish": { "stepType": "Finish", "id": "finish",
+                    "inputMapping": { "out": { "valueType": "reference", "value": "data.need" } } } },
+                "entryPoint": "finish",
+                "executionPlan": [],
+                "inputSchema": { "need": { "type": "string", "required": true } }
+            }"#,
+        );
+        let root = graph(
+            r#"{
+                "steps": {
+                    "call_child": {
+                        "stepType": "EmbedWorkflow", "id": "call_child",
+                        "childWorkflowId": "mid", "childVersion": "latest",
+                        "inputMapping": { "msg": { "valueType": "reference", "value": "data.msg" } }
+                    },
+                    "finish": { "stepType": "Finish", "id": "finish" }
+                },
+                "entryPoint": "call_child",
+                "executionPlan": [{ "fromStep": "call_child", "toStep": "finish" }],
+                "inputSchema": { "msg": { "type": "string", "required": true } }
+            }"#,
+        );
+
+        let report = validate_workflow_closure(
+            "root-wf",
+            &root,
+            &AgentCatalog::new(),
+            &[child("mid", child_graph), child("gc", grandchild_graph)],
+        );
+
+        let mid = report
+            .children
+            .iter()
+            .find(|c| c.workflow_id == "mid")
+            .expect("mid report");
+        assert!(
+            mid.result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::MissingChildRequiredInputs { step_id, child_workflow_id, .. }
+                    if step_id == "call_gc" && child_workflow_id == "gc"
+            )),
+            "mid errors: {:?}",
+            mid.result.errors
+        );
+    }
+
+    /// The same child referenced from two steps is validated once.
+    #[test]
+    fn duplicate_child_references_validate_once() {
+        let report = validate_workflow_closure(
+            "root-wf",
+            &fixture("nested_grandchild"),
+            &AgentCatalog::new(),
+            &[
+                child(
+                    "great_grandchild_workflow",
+                    fixture("nested_great_grandchild"),
+                ),
+                child(
+                    "great_grandchild_workflow",
+                    fixture("nested_great_grandchild"),
+                ),
+            ],
+        );
+
+        assert!(
+            report.is_ok(),
+            "errors: {:?}",
+            report.errors().collect::<Vec<_>>()
+        );
+        assert_eq!(report.children.len(), 1);
     }
 }

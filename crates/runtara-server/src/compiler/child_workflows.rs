@@ -8,8 +8,7 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
 use runtara_workflows::dependency_analysis::{
-    DependencyGraph, EmbedWorkflowStepInfo, WorkflowReference, extract_embed_workflow_steps,
-    resolve_version,
+    DependencyGraph, WorkflowReference, extract_embed_workflow_steps_recursive, resolve_version,
 };
 
 /// Information about a child workflow to be embedded
@@ -92,27 +91,61 @@ fn workflow_ref_key(workflow_id: &str, version: i32) -> String {
     format!("{}::{}", workflow_id, version)
 }
 
-/// Extracts EmbedWorkflow steps from a graph including recursively inside subgraphs.
+/// Loads the child-workflow closure for validation purposes.
 ///
-/// The upstream `extract_embed_workflow_steps` only scans top-level steps.
-/// This function recursively scans subgraphs (e.g., inside Split or While steps,
-/// including nested subgraphs like Split→Split→EmbedWorkflow) so that child
-/// workflows at any nesting depth are discovered.
-fn extract_all_embed_workflow_steps(graph: &Value) -> Result<Vec<EmbedWorkflowStepInfo>, String> {
-    let mut all_steps = extract_embed_workflow_steps(graph)?;
+/// Unlike [`load_child_workflows`], this variant does not fail fast: children
+/// that don't exist (or whose version can't be resolved) are silently skipped
+/// so the closure validator can report *all* problems in one pass —
+/// dangling references surface as `E124` and cycles as `E090` from
+/// `validate_workflow_closure`, rather than as a single opaque string error.
+/// Database errors still propagate.
+///
+/// Recursion terminates on cyclic graphs because each workflow's children
+/// are only traversed once (same dedup as the strict loader).
+pub async fn load_child_workflows_for_validation(
+    pool: &PgPool,
+    tenant_id: &str,
+    parent_graph: &Value,
+) -> Result<Vec<ChildWorkflowInfo>, String> {
+    let mut child_workflows = Vec::new();
+    let mut loaded_workflows: HashSet<String> = HashSet::new();
+    let mut workflow_cache: HashMap<String, (Value, String)> = HashMap::new();
+    let mut pending: Vec<Value> = vec![parent_graph.clone()];
 
-    // Recursively scan subgraphs inside Split/While steps
-    if let Some(steps_obj) = graph.get("steps").and_then(|v| v.as_object()) {
-        for (_step_id, step_def) in steps_obj {
-            if let Some(subgraph) = step_def.get("subgraph") {
-                // Recurse into subgraph to find EmbedWorkflow steps at any depth
-                let sub_steps = extract_all_embed_workflow_steps(subgraph)?;
-                all_steps.extend(sub_steps);
+    while let Some(graph) = pending.pop() {
+        let embed_steps = extract_embed_workflow_steps_recursive(&graph)?;
+        for step in &embed_steps {
+            match load_or_get_cached_workflow(
+                pool,
+                tenant_id,
+                &step.child_workflow_id,
+                &step.child_version_requested,
+                &step.step_id,
+                &mut workflow_cache,
+            )
+            .await
+            {
+                Ok((child_graph, version_requested, child_ref)) => {
+                    child_workflows.push(ChildWorkflowInfo {
+                        step_id: step.step_id.clone(),
+                        workflow_ref: child_ref.clone(),
+                        execution_graph: child_graph.clone(),
+                        version_requested,
+                    });
+                    let ref_key = workflow_ref_key(&child_ref.workflow_id, child_ref.version);
+                    if loaded_workflows.insert(ref_key) {
+                        pending.push(child_graph);
+                    }
+                }
+                Err(e) if e.starts_with("Database error") => return Err(e),
+                // Missing child / unresolvable version: skip — the closure
+                // validator reports these against the referencing graph.
+                Err(_) => {}
             }
         }
     }
 
-    Ok(all_steps)
+    Ok(child_workflows)
 }
 
 /// Recursively loads child workflows from a graph and its nested children
@@ -128,7 +161,7 @@ async fn load_child_workflows_recursive(
     dependency_graph: &mut DependencyGraph,
 ) -> Result<(), String> {
     // Extract EmbedWorkflow steps from this graph (including subgraphs)
-    let embed_workflow_steps = extract_all_embed_workflow_steps(graph)?;
+    let embed_workflow_steps = extract_embed_workflow_steps_recursive(graph)?;
 
     if embed_workflow_steps.is_empty() {
         return Ok(());
@@ -281,135 +314,4 @@ async fn load_or_get_cached_workflow(
             version: resolved_version,
         },
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_all_nested_split_embed_workflow() {
-        let graph = serde_json::json!({
-            "steps": {
-                "split1": {
-                    "stepType": "Split",
-                    "subgraph": {
-                        "steps": {
-                            "nested_start": {
-                                "stepType": "EmbedWorkflow",
-                                "childWorkflowId": "child-1",
-                                "childVersion": "latest"
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let steps = extract_all_embed_workflow_steps(&graph).unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "nested_start");
-        assert_eq!(steps[0].child_workflow_id, "child-1");
-        assert_eq!(steps[0].child_version_requested, "latest");
-    }
-
-    #[test]
-    fn test_extract_all_deeply_nested() {
-        // Split -> While -> EmbedWorkflow (three levels)
-        let graph = serde_json::json!({
-            "steps": {
-                "split1": {
-                    "stepType": "Split",
-                    "subgraph": {
-                        "steps": {
-                            "while1": {
-                                "stepType": "While",
-                                "subgraph": {
-                                    "steps": {
-                                        "deep_start": {
-                                            "stepType": "EmbedWorkflow",
-                                            "childWorkflowId": "deep-child",
-                                            "childVersion": 7
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let steps = extract_all_embed_workflow_steps(&graph).unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "deep_start");
-        assert_eq!(steps[0].child_workflow_id, "deep-child");
-        assert_eq!(steps[0].child_version_requested, "7");
-    }
-
-    #[test]
-    fn test_extract_all_mixed_top_and_nested() {
-        let graph = serde_json::json!({
-            "steps": {
-                "top_start": {
-                    "stepType": "EmbedWorkflow",
-                    "childWorkflowId": "top-child",
-                    "childVersion": "current"
-                },
-                "split1": {
-                    "stepType": "Split",
-                    "subgraph": {
-                        "steps": {
-                            "nested_start": {
-                                "stepType": "EmbedWorkflow",
-                                "childWorkflowId": "nested-child",
-                                "childVersion": "latest"
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let steps = extract_all_embed_workflow_steps(&graph).unwrap();
-        assert_eq!(steps.len(), 2);
-
-        let top = steps.iter().find(|s| s.step_id == "top_start").unwrap();
-        assert_eq!(top.child_workflow_id, "top-child");
-        assert_eq!(top.child_version_requested, "current");
-
-        let nested = steps.iter().find(|s| s.step_id == "nested_start").unwrap();
-        assert_eq!(nested.child_workflow_id, "nested-child");
-        assert_eq!(nested.child_version_requested, "latest");
-    }
-
-    #[test]
-    fn test_extract_all_no_embed_workflow() {
-        let graph = serde_json::json!({
-            "steps": {
-                "agent1": {
-                    "stepType": "Agent",
-                    "operatorId": "utils"
-                },
-                "cond1": {
-                    "stepType": "Conditional",
-                    "condition": "x > 0"
-                },
-                "split1": {
-                    "stepType": "Split",
-                    "subgraph": {
-                        "steps": {
-                            "agent2": {
-                                "stepType": "Agent",
-                                "operatorId": "http"
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let steps = extract_all_embed_workflow_steps(&graph).unwrap();
-        assert!(steps.is_empty());
-    }
 }

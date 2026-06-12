@@ -82,6 +82,11 @@ pub mod paths;
 /// Validation for editable workflow schema field rows.
 pub mod schema_fields_validation;
 
+/// Server-less child-workflow resolution for standalone compilation
+/// (the `runtara-compile` CLI).
+#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+pub mod standalone;
+
 /// Workflow validation for security and correctness.
 pub mod validation;
 
@@ -105,7 +110,8 @@ pub use schema_fields_validation::{
     EditableSchemaField, SchemaFieldValidationIssue, validate_schema_fields,
 };
 pub use validation::{
-    MissingInputField, ValidationError, ValidationResult, validate_workflow,
+    ChildValidationReport, ClosureChildGraph, ClosureValidationReport, MissingInputField,
+    ValidationError, ValidationResult, validate_workflow, validate_workflow_closure,
     validate_workflow_with_children,
 };
 pub use workflow_features::{

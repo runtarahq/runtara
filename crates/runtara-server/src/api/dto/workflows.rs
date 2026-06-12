@@ -29,6 +29,11 @@ pub struct ValidationErrorDto {
     /// Additional step IDs involved (for errors spanning multiple steps)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub related_step_ids: Option<Vec<String>>,
+    /// Workflow the error belongs to when validation covered the full
+    /// embed closure: absent for the saved/root workflow itself, set to the
+    /// child workflow's id when the error lives in an embedded (grand)child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
 }
 
 /// Response returned when workflow validation fails
@@ -626,6 +631,19 @@ impl ValidationErrorDto {
                 Some("executionPlan".to_string()),
                 Some(vec![missing_step.clone()]),
             ),
+            ValidationError::MissingChildWorkflow {
+                step_id,
+                child_workflow_id,
+            } => (
+                "E124".to_string(),
+                format!(
+                    "EmbedWorkflow step '{}' references child workflow '{}', which was not found. The workflow cannot compile until the child exists.",
+                    step_id, child_workflow_id
+                ),
+                Some(step_id.clone()),
+                Some("childWorkflowId".to_string()),
+                None,
+            ),
         };
 
         Self {
@@ -634,7 +652,14 @@ impl ValidationErrorDto {
             step_id,
             field_name,
             related_step_ids,
+            workflow_id: None,
         }
+    }
+
+    /// Attribute this error to a child workflow in a validated embed closure.
+    pub fn in_workflow(mut self, workflow_id: &str) -> Self {
+        self.workflow_id = Some(workflow_id.to_string());
+        self
     }
 }
 

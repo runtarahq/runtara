@@ -412,6 +412,7 @@ impl WorkflowService {
                         step_id: Some(step_id.clone()),
                         field_name: Some("config".to_string()),
                         related_step_ids: None,
+                        workflow_id: None,
                     });
                 }
             }
@@ -451,18 +452,62 @@ impl WorkflowService {
         )
         .map_err(ServiceError::EntitlementDenied)?;
 
-        // Run comprehensive workflow validation from runtara-workflows
-        // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph, &self.agent_catalog);
+        // Run recursive closure validation from runtara-workflows: the root
+        // graph plus every embedded (grand)child, loaded from the database.
+        // A saved workflow must always be compilable, so a dangling
+        // childWorkflowId reference is a blocking error (E124), as is any
+        // validation error inside an embedded child.
+        let child_infos = crate::compiler::child_workflows::load_child_workflows_for_validation(
+            self.repository.pool(),
+            tenant_id,
+            &definition,
+        )
+        .await
+        .map_err(|e| {
+            ServiceError::DatabaseError(format!("Failed to load child workflows: {}", e))
+        })?;
 
-        // Collect errors as structured DTOs (blocking)
-        if !validation_result.errors.is_empty() {
-            let structured_errors: Vec<ValidationErrorDto> = validation_result
-                .errors
-                .iter()
-                .map(ValidationErrorDto::from_runtara_error)
-                .collect();
+        let mut structured_errors: Vec<ValidationErrorDto> = Vec::new();
+        let mut closure_children: Vec<runtara_workflows::ClosureChildGraph> = Vec::new();
+        for info in child_infos {
+            match serde_json::from_value::<runtara_workflows::ExecutionGraph>(
+                info.execution_graph,
+            ) {
+                Ok(graph) => closure_children.push(runtara_workflows::ClosureChildGraph {
+                    workflow_id: info.workflow_ref.workflow_id,
+                    version: info.workflow_ref.version,
+                    execution_graph: graph,
+                }),
+                Err(e) => structured_errors.push(ValidationErrorDto {
+                    code: "E124".to_string(),
+                    message: format!(
+                        "Child workflow '{}' (referenced by step '{}') has a definition that cannot be parsed: {}",
+                        info.workflow_ref.workflow_id, info.step_id, e
+                    ),
+                    step_id: Some(info.step_id),
+                    field_name: Some("childWorkflowId".to_string()),
+                    related_step_ids: None,
+                    workflow_id: Some(info.workflow_ref.workflow_id),
+                }),
+            }
+        }
 
+        let report = runtara_workflows::validate_workflow_closure(
+            workflow_id,
+            &workflow.execution_graph,
+            &self.agent_catalog,
+            &closure_children,
+        );
+
+        structured_errors.extend(report.errors().map(|(origin, error)| {
+            let dto = ValidationErrorDto::from_runtara_error(error);
+            match origin {
+                Some((child_id, _version)) => dto.in_workflow(child_id),
+                None => dto,
+            }
+        }));
+
+        if !structured_errors.is_empty() {
             let message = structured_errors
                 .iter()
                 .map(|e| e.message.clone())
@@ -475,9 +520,15 @@ impl WorkflowService {
             });
         }
 
-        // Collect warnings (non-blocking)
-        for warning in &validation_result.warnings {
-            all_warnings.push(warning.to_string());
+        // Collect warnings (non-blocking), attributed to the graph they
+        // belong to.
+        for (origin, warning) in report.warnings() {
+            match origin {
+                Some((child_id, _version)) => {
+                    all_warnings.push(format!("in child workflow '{}': {}", child_id, warning));
+                }
+                None => all_warnings.push(warning.to_string()),
+            }
         }
 
         // Validate connection existence in database
@@ -1128,6 +1179,7 @@ mod tests {
                 step_id: Some("step1".to_string()),
                 field_name: Some("data".to_string()),
                 related_step_ids: None,
+                workflow_id: None,
             }],
         };
         assert_eq!(
@@ -1202,6 +1254,7 @@ mod tests {
                 step_id: Some("step1".to_string()),
                 field_name: Some("user.name".to_string()),
                 related_step_ids: None,
+                workflow_id: None,
             },
             ValidationErrorDto {
                 code: "E042".to_string(),
@@ -1209,6 +1262,7 @@ mod tests {
                 step_id: None,
                 field_name: None,
                 related_step_ids: Some(vec!["step2".to_string(), "step3".to_string()]),
+                workflow_id: None,
             },
         ];
 
