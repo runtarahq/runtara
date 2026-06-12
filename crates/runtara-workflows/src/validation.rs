@@ -412,6 +412,62 @@ pub struct MissingInputField {
     pub description: Option<String>,
 }
 
+impl ValidationError {
+    /// Stable machine-readable code for this error — the `[EXXX]` prefix of
+    /// the [`Display`](std::fmt::Display) message. Single source of truth:
+    /// API DTOs must derive their `code` field from this method so the
+    /// rendered text and the structured code can never disagree.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::EntryPointNotFound { .. } => "E001",
+            Self::UnreachableStep { .. } => "E002",
+            Self::UnreachableFinish { .. } => "E003",
+            Self::EmptyWorkflow => "E004",
+            Self::FinishOutputMissingName { .. } => "E117",
+            Self::FinishOutputMissingSource { .. } => "E118",
+            Self::InvalidStepReference { .. } => "E010",
+            Self::InvalidReferencePath { .. } => "E011",
+            Self::EdgeReferencesUnknownStep { .. } => "E014",
+            Self::UnknownAgent { .. } => "E020",
+            Self::UnknownCapability { .. } => "E021",
+            Self::MissingRequiredInput { .. } => "E022",
+            Self::AgentMissingConnection { .. } => "E026",
+            Self::InvalidChildVersion { .. } => "E050",
+            Self::UndefinedDataReference { .. } => "E051",
+            Self::MissingInputSchema { .. } => "E052",
+            Self::UndefinedVariableReference { .. } => "E053",
+            Self::UndefinedReferenceField { .. } => "E058",
+            Self::ReferenceNonObjectTraversal { .. } => "E059",
+            Self::ChildMissingInputSchema { .. } => "E054",
+            Self::MissingChildWorkflow { .. } => "E124",
+            Self::MissingChildRequiredInputs { .. } => "E055",
+            Self::CircularDependency { .. } => "E056",
+            Self::StepNotYetExecuted { .. } => "E012",
+            Self::UnknownVariable { .. } => "E013",
+            Self::TypeMismatch { .. } => "E023",
+            Self::InvalidEnumValue { .. } => "E024",
+            Self::InvalidConditionShape { .. } => "E025",
+            Self::QueryOnlyConditionOperator { .. } => "E027",
+            Self::DuplicateStepName { .. } => "E060",
+            Self::DuplicateEdgePriority { .. } => "E070",
+            Self::MultipleDefaultEdges { .. } => "E071",
+            Self::ParallelFanoutNoMerge { .. } => "E073",
+            Self::InvalidConditionalEdge { .. } => "E072",
+            Self::AiAgentDuplicateToolLabel { .. } => "E110",
+            Self::AiAgentInvalidToolLabel { .. } => "E111",
+            Self::AiAgentMissingConnection { .. } => "E112",
+            Self::AiAgentMultipleMemoryEdges { .. } => "E113",
+            Self::AiAgentMemoryEdgeNotAgent { .. } => "E114",
+            Self::AiAgentMemoryConfigWithoutEdge { .. } => "E115",
+            Self::AiAgentMemoryEdgeWithoutConfig { .. } => "E116",
+            Self::AiAgentMcpEdgeNotAgent { .. } => "E120",
+            Self::AiAgentMcpEdgeWrongAgentId { .. } => "E121",
+            Self::AiAgentMcpEdgeEmptySuffix { .. } => "E122",
+            Self::AiAgentMcpEdgeDuplicateSuffix { .. } => "E123",
+        }
+    }
+}
+
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -11139,5 +11195,97 @@ mod closure_validation_tests {
             report.errors().collect::<Vec<_>>()
         );
         assert_eq!(report.children.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod error_code_consistency_tests {
+    use super::*;
+
+    /// `ValidationError::code()` is the single source for machine-readable
+    /// codes — the Display message must carry the same `[EXXX]` prefix.
+    /// Covers every variant whose code historically diverged between the
+    /// Display string and the API DTO, plus representative others.
+    #[test]
+    fn display_prefix_matches_code() {
+        let samples: Vec<ValidationError> = vec![
+            ValidationError::UndefinedDataReference {
+                step_id: "s".into(),
+                reference: "data.x".into(),
+                field_name: "x".into(),
+                available_fields: vec![],
+            },
+            ValidationError::MissingInputSchema {
+                step_id: "s".into(),
+                reference: "data.x".into(),
+            },
+            ValidationError::UndefinedVariableReference {
+                step_id: "s".into(),
+                reference: "variables.x".into(),
+                variable_name: "x".into(),
+                available_variables: vec![],
+            },
+            ValidationError::ChildMissingInputSchema {
+                step_id: "s".into(),
+                child_workflow_id: "c".into(),
+            },
+            ValidationError::MissingChildRequiredInputs {
+                step_id: "s".into(),
+                child_workflow_id: "c".into(),
+                missing_fields: vec![],
+                provided_fields: vec![],
+            },
+            ValidationError::MissingChildWorkflow {
+                step_id: "s".into(),
+                child_workflow_id: "c".into(),
+            },
+            ValidationError::CircularDependency {
+                cycle_path: vec!["a".into(), "b".into()],
+            },
+            ValidationError::StepNotYetExecuted {
+                step_id: "s".into(),
+                referenced_step_id: "t".into(),
+            },
+            ValidationError::UnknownVariable {
+                step_id: "s".into(),
+                variable_name: "v".into(),
+                available_variables: vec![],
+            },
+            ValidationError::DuplicateStepName {
+                name: "n".into(),
+                step_ids: vec!["a".into(), "b".into()],
+            },
+            ValidationError::DuplicateEdgePriority {
+                from_step: "s".into(),
+                label: None,
+                priority: 1,
+                duplicate_targets: vec![],
+            },
+            ValidationError::MultipleDefaultEdges {
+                from_step: "s".into(),
+                label: None,
+                targets: vec![],
+            },
+            ValidationError::ParallelFanoutNoMerge {
+                from_step: "s".into(),
+                targets: vec![],
+            },
+            ValidationError::EmptyWorkflow,
+            ValidationError::EntryPointNotFound {
+                entry_point: "e".into(),
+                available_steps: vec![],
+            },
+        ];
+
+        for error in samples {
+            let display = error.to_string();
+            let expected_prefix = format!("[{}]", error.code());
+            assert!(
+                display.starts_with(&expected_prefix),
+                "Display/code mismatch: code()={} but Display starts with {:?}",
+                error.code(),
+                &display[..display.len().min(20)]
+            );
+        }
     }
 }
