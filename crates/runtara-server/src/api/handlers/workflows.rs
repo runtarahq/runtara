@@ -1995,8 +1995,10 @@ pub async fn set_current_version_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(catalog, body))]
+#[instrument(skip(pool, catalog, body))]
 pub async fn validate_graph_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
     State(catalog): State<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
@@ -2016,20 +2018,62 @@ pub async fn validate_graph_handler(
         "executionGraph": body.clone()
     })) {
         Ok(workflow) => {
-            let validation_result = runtara_workflows::validation::validate_workflow(
+            // Load the embed closure so validation is recursive — same
+            // semantics as the save gate: dangling child references and
+            // errors inside embedded (grand)children are real errors.
+            let child_infos =
+                match crate::compiler::child_workflows::load_child_workflows_for_validation(
+                    &pool, &tenant_id, &body,
+                )
+                .await
+                {
+                    Ok(infos) => infos,
+                    Err(e) => {
+                        let error_response = json!({
+                            "success": false,
+                            "valid": false,
+                            "error": "Failed to load child workflows",
+                            "message": e
+                        });
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
+                    }
+                };
+            let closure_children: Vec<runtara_workflows::ClosureChildGraph> = child_infos
+                .into_iter()
+                .filter_map(|info| {
+                    serde_json::from_value(info.execution_graph).ok().map(|g| {
+                        runtara_workflows::ClosureChildGraph {
+                            workflow_id: info.workflow_ref.workflow_id,
+                            version: info.workflow_ref.version,
+                            execution_graph: g,
+                        }
+                    })
+                })
+                .collect();
+
+            let root_id = workflow
+                .execution_graph
+                .name
+                .clone()
+                .unwrap_or_else(|| "root".to_string());
+            let report = runtara_workflows::validate_workflow_closure(
+                &root_id,
                 &workflow.execution_graph,
                 &catalog,
+                &closure_children,
             );
 
-            let errors: Vec<String> = validation_result
-                .errors
-                .iter()
-                .map(|e| e.to_string())
+            let attribute = |origin: Option<(&str, i32)>, text: String| match origin {
+                Some((child_id, _)) => format!("in child workflow '{}': {}", child_id, text),
+                None => text,
+            };
+            let errors: Vec<String> = report
+                .errors()
+                .map(|(origin, e)| attribute(origin, e.to_string()))
                 .collect();
-            let warnings: Vec<String> = validation_result
-                .warnings
-                .iter()
-                .map(|w| w.to_string())
+            let warnings: Vec<String> = report
+                .warnings()
+                .map(|(origin, w)| attribute(origin, w.to_string()))
                 .collect();
 
             let is_valid = errors.is_empty();

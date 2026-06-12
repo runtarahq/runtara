@@ -647,9 +647,12 @@ export interface AiAgentStep {
   /** Connection ID for the LLM provider (e.g., OpenAI, Anthropic) */
   connectionId?: string | null;
   /**
-   * Disable durability for this step when `Some(false)`. Skips checkpoint
-   * on each tool call and LLM call inside this agent's loop. Ignored when
-   * the enclosing workflow is already non-durable.
+   * Disable durability for this step when `Some(false)`. Skips the
+   * per-turn checkpoints inside the tool loop (each completed turn — LLM
+   * response plus dispatched tool results — is snapshotted under
+   * `{step}.turn.{n}` so a crash never re-runs finished turns) and the
+   * invoke checkpoint on the single-shot path. Ignored when the enclosing
+   * workflow is already non-durable.
    */
   durable?: boolean | null;
   /** Unique step identifier */
@@ -1961,6 +1964,15 @@ export interface ExecutionGraph {
   /** Ordered list of step transitions defining control flow */
   executionPlan?: ExecutionPlanEdge[];
   /**
+   * Maximum wall-clock time (in seconds) an execution of this workflow may
+   * run before the server stops it. Written by the workflow editor
+   * (validated 1-3600 in the UI) and enforced server-side when scheduling
+   * the execution — the compiler does not interpret this field.
+   * @format int32
+   * @min 0
+   */
+  executionTimeoutSeconds?: number | null;
+  /**
    * Schema defining expected input data structure for this workflow.
    * Keys are field names, values define the field type and constraints.
    */
@@ -2722,6 +2734,20 @@ export interface Note {
    * @format double
    */
   y: number;
+}
+
+/** Sizing metadata for a note, managed by the workflow editor UI */
+export interface NoteMetadata {
+  /**
+   * Note height in pixels
+   * @format double
+   */
+  height?: number | null;
+  /**
+   * Note width in pixels
+   * @format double
+   */
+  width?: number | null;
 }
 
 export interface OAuthAuthorizeResponse {
@@ -4162,9 +4188,10 @@ export interface SchemaColumnInfo {
  * ## Form rendering extensions
  *
  * The optional fields `label`, `placeholder`, `order`, `format`, `min`, `max`,
- * `pattern`, `properties`, and `visible_when` enable clients to render rich
- * forms from WaitForSignal response schemas. All are backward-compatible —
- * existing schemas without these fields continue to work unchanged.
+ * `pattern`, `properties`, `visible_when`, and `nullable` enable clients to
+ * render rich forms from WaitForSignal response schemas. All are
+ * backward-compatible — existing schemas without these fields continue to
+ * work unchanged.
  */
 export interface SchemaField {
   /** Default value if not provided */
@@ -4200,6 +4227,13 @@ export interface SchemaField {
    * @format double
    */
   min?: number | null;
+  /**
+   * Whether the field value may be `null`.
+   *
+   * Form-layer hint written by the workflow editor (rendered as a
+   * checkbox); the runtime does not enforce nullability today.
+   */
+  nullable?: boolean | null;
   /**
    * Sort order for rendering fields in forms.
    * Lower values appear first. Falls back to alphabetical order if not set.
@@ -4958,6 +4992,12 @@ export interface ValidationErrorDto {
   relatedStepIds?: string[] | null;
   /** Step ID where the error occurred (if applicable) */
   stepId?: string | null;
+  /**
+   * Workflow the error belongs to when validation covered the full
+   * embed closure: absent for the saved/root workflow itself, set to the
+   * child workflow's id when the error lives in an embedded (grand)child.
+   */
+  workflowId?: string | null;
 }
 
 /** A validation issue with structured information */
@@ -7152,7 +7192,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns the JSON Schema for the core DSL structure including: - Step types (7 types after GroupBy removal) - Execution graph format - Data mapping DSL
+     * @description Returns the JSON Schema for the core DSL structure including: - Registered step types - Execution graph format - Data mapping DSL
      *
      * @tags Specifications
      * @name GetDslSpec
@@ -7248,7 +7288,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns hardcoded metadata about available step types. No database or external dependencies - just static data.
+     * @description Returns registry-backed metadata about available step types. No database or external dependencies - just static DSL metadata.
      *
      * @tags workflow-controller
      * @name ListStepTypesHandler

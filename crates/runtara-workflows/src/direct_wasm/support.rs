@@ -62,7 +62,10 @@ pub fn analyze_direct_wasm_support(graph: &ExecutionGraph) -> DirectWorkflowSupp
     analyze_direct_wasm_support_inner(graph, DirectSupportChildWorkflows::default())
 }
 
-pub(super) fn analyze_direct_wasm_support_with_child_workflows(
+/// Child-aware variant of [`analyze_direct_wasm_support`]: receives the
+/// preloaded static child closure so `EmbedWorkflow` lowering can be gated
+/// on the children's (and grandchildren's) own feature support.
+pub fn analyze_direct_wasm_support_with_child_workflows(
     graph: &ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
 ) -> DirectWorkflowSupportReport {

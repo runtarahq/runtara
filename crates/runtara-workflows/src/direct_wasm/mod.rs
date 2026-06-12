@@ -58,4 +58,5 @@ pub use manifest::{
 };
 pub use support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
+    analyze_direct_wasm_support_with_child_workflows,
 };
