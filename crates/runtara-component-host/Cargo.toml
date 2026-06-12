@@ -30,12 +30,16 @@ wasmtime = { version = "44", default-features = false, features = [
     "backtrace",
     "addr2line",
     "demangle",
+    # On-disk compiled-artifact cache so a server restart doesn't re-pay the
+    # Cranelift compile for every deployed image (see build_engine).
+    "cache",
 ] }
 wasmtime-wasi = "44"
 wasmtime-wasi-http = "44"
 
 # Plumbing
 anyhow = "1"
+tracing = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1"
