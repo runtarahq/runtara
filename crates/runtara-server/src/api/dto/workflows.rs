@@ -599,6 +599,15 @@ impl ValidationErrorDto {
                 Some("childWorkflowId".to_string()),
                 None,
             ),
+            ValidationError::DuplicateEmbedStepId { step_id } => (
+                format!(
+                    "Step id '{}' is used by more than one EmbedWorkflow step across this workflow and its embedded children. Embed step ids must be unique across the whole closure — rename one of the steps.",
+                    step_id
+                ),
+                Some(step_id.clone()),
+                None,
+                None,
+            ),
         };
 
         Self {

@@ -275,6 +275,12 @@ pub enum ValidationError {
         child_workflow_id: String,
     },
 
+    /// The same step id is used by more than one `EmbedWorkflow` step across
+    /// the workflow closure (parent, children, grandchildren, …). The direct
+    /// emitter keys the flattened child list by embed step id, so this can
+    /// never compile (`embed-workflow-duplicate-child`).
+    DuplicateEmbedStepId { step_id: String },
+
     /// Circular dependency detected between workflows.
     CircularDependency { cycle_path: Vec<String> },
 
@@ -440,6 +446,7 @@ impl ValidationError {
             Self::ReferenceNonObjectTraversal { .. } => "E059",
             Self::ChildMissingInputSchema { .. } => "E054",
             Self::MissingChildWorkflow { .. } => "E124",
+            Self::DuplicateEmbedStepId { .. } => "E125",
             Self::MissingChildRequiredInputs { .. } => "E055",
             Self::CircularDependency { .. } => "E056",
             Self::StepNotYetExecuted { .. } => "E012",
@@ -774,6 +781,13 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E124] EmbedWorkflow step '{}' references child workflow '{}', which was not found.\n       The workflow cannot compile until the child exists.",
                     step_id, child_workflow_id
+                )
+            }
+            ValidationError::DuplicateEmbedStepId { step_id } => {
+                write!(
+                    f,
+                    "[E125] Step id '{}' is used by more than one EmbedWorkflow step across this workflow and its embedded children.\n       Embed step ids must be unique across the whole closure — rename one of the steps.",
+                    step_id
                 )
             }
             ValidationError::MissingChildRequiredInputs {
@@ -1587,6 +1601,11 @@ impl ClosureValidationReport {
 ///   never be valid. The error is attributed to the graph holding the
 ///   reference.
 /// - **Cross-workflow cycle detection**, reported on the root.
+/// - **Embed step ids must be unique across the closure**
+///   ([`ValidationError::DuplicateEmbedStepId`]): the direct emitter keys
+///   the flattened child list by embed step id, so two `EmbedWorkflow`
+///   steps with the same id anywhere in the closure cannot compile
+///   (`embed-workflow-duplicate-child`).
 ///
 /// This is the validation entry behind both the server's save gate and
 /// `runtara-compile`; the callers only differ in how they resolve `children`.
@@ -1621,6 +1640,7 @@ pub fn validate_workflow_closure(
 
     let mut seen: HashSet<(String, i32)> = HashSet::new();
     let mut child_reports = Vec::new();
+    let mut unique_child_graphs: Vec<&ExecutionGraph> = Vec::new();
     for child in children {
         if !seen.insert((child.workflow_id.clone(), child.version)) {
             continue;
@@ -1628,6 +1648,7 @@ pub fn validate_workflow_closure(
         let mut result = validate_workflow(&child.execution_graph, catalog);
         report_missing_child_references(&child.execution_graph, &children_map, &mut result);
         validate_embed_workflow_inputs(&child.execution_graph, &children_map, &mut result);
+        unique_child_graphs.push(&child.execution_graph);
         child_reports.push(ChildValidationReport {
             workflow_id: child.workflow_id.clone(),
             version: child.version,
@@ -1635,9 +1656,46 @@ pub fn validate_workflow_closure(
         });
     }
 
+    // The direct emitter keys the flattened child list by embed step id —
+    // each unique graph contributes its embed steps once, exactly like the
+    // server/CLI resolvers traverse. A step id used by two EmbedWorkflow
+    // steps anywhere in the closure can never compile
+    // (`embed-workflow-duplicate-child`), so it can never be valid.
+    let mut embed_step_counts: HashMap<String, usize> = HashMap::new();
+    count_embed_step_ids(root, &mut embed_step_counts);
+    for graph in &unique_child_graphs {
+        count_embed_step_ids(graph, &mut embed_step_counts);
+    }
+    let mut duplicate_ids: Vec<String> = embed_step_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(step_id, _)| step_id)
+        .collect();
+    duplicate_ids.sort();
+    for step_id in duplicate_ids {
+        root_result
+            .errors
+            .push(ValidationError::DuplicateEmbedStepId { step_id });
+    }
+
     ClosureValidationReport {
         root: root_result,
         children: child_reports,
+    }
+}
+
+/// Count `EmbedWorkflow` step ids in one graph, including inside
+/// Split/While subgraphs.
+fn count_embed_step_ids(graph: &ExecutionGraph, counts: &mut HashMap<String, usize>) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::EmbedWorkflow(_) => {
+                *counts.entry(step_id.clone()).or_insert(0) += 1;
+            }
+            Step::Split(split_step) => count_embed_step_ids(&split_step.subgraph, counts),
+            Step::While(while_step) => count_embed_step_ids(&while_step.subgraph, counts),
+            _ => {}
+        }
     }
 }
 
@@ -11170,6 +11228,93 @@ mod closure_validation_tests {
         );
     }
 
+    /// The same step id used by EmbedWorkflow steps at two different
+    /// nesting levels can never compile (the emitter keys the flattened
+    /// child list by embed step id) — must be rejected as E125.
+    #[test]
+    fn duplicate_embed_step_id_across_levels_is_rejected() {
+        let embeds_as = |step_id: &str, target: &str| {
+            graph(&format!(
+                r#"{{
+                    "steps": {{
+                        "{step_id}": {{
+                            "stepType": "EmbedWorkflow", "id": "{step_id}",
+                            "childWorkflowId": "{target}", "childVersion": "latest"
+                        }},
+                        "finish": {{ "stepType": "Finish", "id": "finish" }}
+                    }},
+                    "entryPoint": "{step_id}",
+                    "executionPlan": [{{ "fromStep": "{step_id}", "toStep": "finish" }}]
+                }}"#
+            ))
+        };
+        let leaf = graph(
+            r#"{
+                "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+                "entryPoint": "finish",
+                "executionPlan": []
+            }"#,
+        );
+
+        // root: step "call" embeds mid; mid: step "call" embeds leaf.
+        let report = validate_workflow_closure(
+            "root-wf",
+            &embeds_as("call", "mid"),
+            &AgentCatalog::new(),
+            &[
+                ClosureChildGraph {
+                    workflow_id: "mid".to_string(),
+                    version: 1,
+                    execution_graph: embeds_as("call", "leaf"),
+                },
+                ClosureChildGraph {
+                    workflow_id: "leaf".to_string(),
+                    version: 1,
+                    execution_graph: leaf,
+                },
+            ],
+        );
+
+        assert!(
+            report.root.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::DuplicateEmbedStepId { step_id } if step_id == "call"
+            )),
+            "root errors: {:?}",
+            report.root.errors
+        );
+
+        // Renaming one of the embed steps fixes it.
+        let report = validate_workflow_closure(
+            "root-wf",
+            &embeds_as("call_mid", "mid"),
+            &AgentCatalog::new(),
+            &[
+                ClosureChildGraph {
+                    workflow_id: "mid".to_string(),
+                    version: 1,
+                    execution_graph: embeds_as("call_leaf", "leaf"),
+                },
+                ClosureChildGraph {
+                    workflow_id: "leaf".to_string(),
+                    version: 1,
+                    execution_graph: graph(
+                        r#"{
+                            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+                            "entryPoint": "finish",
+                            "executionPlan": []
+                        }"#,
+                    ),
+                },
+            ],
+        );
+        assert!(
+            report.is_ok(),
+            "errors: {:?}",
+            report.errors().collect::<Vec<_>>()
+        );
+    }
+
     /// The same child referenced from two steps is validated once.
     #[test]
     fn duplicate_child_references_validate_once() {
@@ -11238,6 +11383,9 @@ mod error_code_consistency_tests {
             ValidationError::MissingChildWorkflow {
                 step_id: "s".into(),
                 child_workflow_id: "c".into(),
+            },
+            ValidationError::DuplicateEmbedStepId {
+                step_id: "s".into(),
             },
             ValidationError::CircularDependency {
                 cycle_path: vec!["a".into(), "b".into()],
