@@ -53,16 +53,14 @@ impl ValidationErrorDto {
     pub fn from_runtara_error(error: &runtara_workflows::validation::ValidationError) -> Self {
         use runtara_workflows::validation::ValidationError;
 
-        let (code, message, step_id, field_name, related_step_ids) = match error {
+        let (message, step_id, field_name, related_step_ids) = match error {
             ValidationError::EntryPointNotFound { entry_point, .. } => (
-                "E001".to_string(),
                 format!("Entry point '{}' not found in steps", entry_point),
                 Some(entry_point.clone()),
                 None,
                 None,
             ),
             ValidationError::UnreachableStep { step_id } => (
-                "E002".to_string(),
                 format!("Step '{}' is unreachable from the entry point", step_id),
                 Some(step_id.clone()),
                 None,
@@ -73,7 +71,6 @@ impl ValidationErrorDto {
                 entry_point,
                 ..
             } => (
-                "E003".to_string(),
                 format!(
                     "Finish step '{}' is defined but not reachable from entry point '{}'. \
                      Add an executionPlan edge ending at '{}', or remove the step.",
@@ -84,14 +81,12 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::EmptyWorkflow => (
-                "E004".to_string(),
                 "Workflow has no steps defined".to_string(),
                 None,
                 None,
                 None,
             ),
             ValidationError::FinishOutputMissingName { step_id } => (
-                "E117".to_string(),
                 format!("Finish step '{}' has an output with no name", step_id),
                 Some(step_id.clone()),
                 Some("inputMapping".to_string()),
@@ -101,7 +96,6 @@ impl ValidationErrorDto {
                 step_id,
                 output_name,
             } => (
-                "E118".to_string(),
                 format!(
                     "Finish step '{}' output '{}' is missing a source",
                     step_id, output_name
@@ -116,7 +110,6 @@ impl ValidationErrorDto {
                 referenced_step_id,
                 ..
             } => (
-                "E010".to_string(),
                 format!(
                     "Step '{}' references '{}' but step '{}' does not exist",
                     step_id, reference_path, referenced_step_id
@@ -130,7 +123,6 @@ impl ValidationErrorDto {
                 reference_path,
                 reason,
             } => (
-                "E011".to_string(),
                 format!(
                     "Step '{}' has invalid reference path '{}': {}",
                     step_id, reference_path, reason
@@ -142,7 +134,6 @@ impl ValidationErrorDto {
             ValidationError::UnknownAgent {
                 step_id, agent_id, ..
             } => (
-                "E020".to_string(),
                 format!("Step '{}' uses unknown agent '{}'", step_id, agent_id),
                 Some(step_id.clone()),
                 Some("agentId".to_string()),
@@ -154,7 +145,6 @@ impl ValidationErrorDto {
                 capability_id,
                 ..
             } => (
-                "E021".to_string(),
                 format!(
                     "Step '{}' uses unknown capability '{}' for agent '{}'",
                     step_id, capability_id, agent_id
@@ -168,7 +158,6 @@ impl ValidationErrorDto {
                 input_name,
                 ..
             } => (
-                "E022".to_string(),
                 format!(
                     "Step '{}' is missing required input '{}'",
                     step_id, input_name
@@ -182,7 +171,6 @@ impl ValidationErrorDto {
                 agent_id,
                 capability_id,
             } => (
-                "E026".to_string(),
                 format!(
                     "Step '{}' capability '{}:{}' requires connectionId",
                     step_id, agent_id, capability_id
@@ -197,7 +185,6 @@ impl ValidationErrorDto {
                 expected_type,
                 actual_type,
             } => (
-                "E023".to_string(),
                 format!(
                     "Step '{}': field '{}' expects type '{}' but got '{}'",
                     step_id, field_name, expected_type, actual_type
@@ -212,7 +199,6 @@ impl ValidationErrorDto {
                 value,
                 allowed_values,
             } => (
-                "E024".to_string(),
                 format!(
                     "Step '{}': field '{}' has invalid value '{}'. Allowed: {}",
                     step_id,
@@ -230,7 +216,6 @@ impl ValidationErrorDto {
                 path,
                 message,
             } => (
-                "E025".to_string(),
                 format!(
                     "Step '{}': condition input '{}' has invalid shape at {}: {}",
                     step_id, field_name, path, message
@@ -244,7 +229,6 @@ impl ValidationErrorDto {
                 location,
                 operator,
             } => (
-                "E027".to_string(),
                 format!(
                     "Step '{}': operator '{}' in {} is only valid inside object-model \
                      query conditions; the workflow runtime cannot evaluate it",
@@ -260,7 +244,6 @@ impl ValidationErrorDto {
                 version,
                 reason,
             } => (
-                "E050".to_string(),
                 format!(
                     "Step '{}': invalid version '{}' for child workflow '{}': {}",
                     step_id, version, child_workflow_id, reason
@@ -273,7 +256,6 @@ impl ValidationErrorDto {
                 step_id,
                 referenced_step_id,
             } => (
-                "E060".to_string(),
                 format!(
                     "Step '{}' references '{}' which hasn't executed yet",
                     step_id, referenced_step_id
@@ -287,7 +269,6 @@ impl ValidationErrorDto {
                 variable_name,
                 ..
             } => (
-                "E070".to_string(),
                 format!(
                     "Step '{}' references unknown variable '{}'",
                     step_id, variable_name
@@ -297,7 +278,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::DuplicateStepName { name, step_ids } => (
-                "E080".to_string(),
                 format!(
                     "Multiple steps have the same name '{}': {}",
                     name,
@@ -313,7 +293,6 @@ impl ValidationErrorDto {
                 duplicate_targets,
                 ..
             } => (
-                "E081".to_string(),
                 format!(
                     "Step '{}' has duplicate edge priority {} for targets: {}",
                     from_step,
@@ -327,7 +306,6 @@ impl ValidationErrorDto {
             ValidationError::MultipleDefaultEdges {
                 from_step, targets, ..
             } => (
-                "E082".to_string(),
                 format!(
                     "Step '{}' has multiple default edges to: {}",
                     from_step,
@@ -338,7 +316,6 @@ impl ValidationErrorDto {
                 Some(targets.clone()),
             ),
             ValidationError::ParallelFanoutNoMerge { from_step, targets } => (
-                "E083".to_string(),
                 format!(
                     "Step '{}' fans out to parallel branches that never re-converge ({}); \
                      re-join them at a single merge step or make the edges conditional",
@@ -355,7 +332,6 @@ impl ValidationErrorDto {
                 reason,
                 ..
             } => (
-                "E072".to_string(),
                 format!(
                     "Conditional step '{}' has invalid edge to '{}': {}",
                     from_step, to_step, reason
@@ -370,7 +346,6 @@ impl ValidationErrorDto {
                 field_name,
                 available_fields,
             } => (
-                "E012".to_string(),
                 format!(
                     "Step '{}': field '{}' references '{}' but it's not defined in inputSchema. Available fields: {}",
                     step_id,
@@ -383,7 +358,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::MissingInputSchema { step_id, reference } => (
-                "E013".to_string(),
                 format!(
                     "Step '{}' uses data reference '{}' but no inputSchema is defined",
                     step_id, reference
@@ -398,7 +372,6 @@ impl ValidationErrorDto {
                 variable_name,
                 available_variables,
             } => (
-                "E071".to_string(),
                 format!(
                     "Step '{}' references variable '{}' (from '{}') but it's not defined. Available variables: {}",
                     step_id,
@@ -417,7 +390,6 @@ impl ValidationErrorDto {
                 missing_field,
                 available_fields,
             } => (
-                "E058".to_string(),
                 format!(
                     "Step '{}' references '{}' but '{}' has no field '{}'. Available fields: {}",
                     step_id,
@@ -437,7 +409,6 @@ impl ValidationErrorDto {
                 actual_type,
                 attempted_field,
             } => (
-                "E059".to_string(),
                 format!(
                     "Step '{}' references '{}' but '{}' is '{}' and cannot be traversed to '{}'",
                     step_id, reference, known_prefix, actual_type, attempted_field
@@ -450,7 +421,6 @@ impl ValidationErrorDto {
                 step_id,
                 child_workflow_id,
             } => (
-                "E051".to_string(),
                 format!(
                     "Step '{}' provides inputs to child workflow '{}' but the child has no inputSchema defined",
                     step_id, child_workflow_id
@@ -470,7 +440,6 @@ impl ValidationErrorDto {
                     .map(|f| format!("{} ({})", f.name, f.field_type))
                     .collect();
                 (
-                    "E052".to_string(),
                     format!(
                         "Step '{}' is missing required inputs for child workflow '{}'. Missing: {}. Provided: {}",
                         step_id,
@@ -484,7 +453,6 @@ impl ValidationErrorDto {
                 )
             }
             ValidationError::CircularDependency { cycle_path } => (
-                "E090".to_string(),
                 format!(
                     "Circular dependency detected in workflow chain: {}",
                     cycle_path.join(" -> ")
@@ -494,7 +462,6 @@ impl ValidationErrorDto {
                 Some(cycle_path.clone()),
             ),
             ValidationError::AiAgentDuplicateToolLabel { step_id, label } => (
-                "E110".to_string(),
                 format!(
                     "AI Agent step '{}' has duplicate tool label '{}'",
                     step_id, label
@@ -504,7 +471,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentInvalidToolLabel { step_id, label } => (
-                "E111".to_string(),
                 format!(
                     "AI Agent step '{}' has invalid tool label '{}' (must be alphanumeric/underscore)",
                     step_id, label
@@ -514,7 +480,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentMissingConnection { step_id } => (
-                "E112".to_string(),
                 format!(
                     "AI Agent step '{}' is missing connection_id (required for LLM access)",
                     step_id
@@ -524,7 +489,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentMultipleMemoryEdges { step_id } => (
-                "E113".to_string(),
                 format!(
                     "AI Agent step '{}' has multiple 'memory' edges (at most one allowed)",
                     step_id
@@ -537,7 +501,6 @@ impl ValidationErrorDto {
                 step_id,
                 target_step_id,
             } => (
-                "E114".to_string(),
                 format!(
                     "AI Agent step '{}' has a 'memory' edge pointing to '{}', which is not an Agent step",
                     step_id, target_step_id
@@ -547,7 +510,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentMemoryConfigWithoutEdge { step_id } => (
-                "E115".to_string(),
                 format!(
                     "AI Agent step '{}' has memory config but no 'memory' edge",
                     step_id
@@ -557,7 +519,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentMemoryEdgeWithoutConfig { step_id } => (
-                "E116".to_string(),
                 format!(
                     "AI Agent step '{}' has a 'memory' edge but no memory config",
                     step_id
@@ -571,7 +532,6 @@ impl ValidationErrorDto {
                 target_step_id,
                 label,
             } => (
-                "E120".to_string(),
                 format!(
                     "AI Agent step '{}' has an '{}' edge pointing to '{}', which is not an Agent step",
                     step_id, label, target_step_id
@@ -586,7 +546,6 @@ impl ValidationErrorDto {
                 label,
                 actual_agent_id,
             } => (
-                "E121".to_string(),
                 format!(
                     "AI Agent step '{}' has an '{}' edge pointing to Agent step '{}' (agent_id = '{}'); MCP edges must target the 'mcp' agent",
                     step_id, label, target_step_id, actual_agent_id
@@ -596,7 +555,6 @@ impl ValidationErrorDto {
                 Some(vec![target_step_id.clone()]),
             ),
             ValidationError::AiAgentMcpEdgeEmptySuffix { step_id, label } => (
-                "E122".to_string(),
                 format!(
                     "AI Agent step '{}' has an MCP edge with empty toolset suffix ('{}')",
                     step_id, label
@@ -606,7 +564,6 @@ impl ValidationErrorDto {
                 None,
             ),
             ValidationError::AiAgentMcpEdgeDuplicateSuffix { step_id, toolset } => (
-                "E123".to_string(),
                 format!(
                     "AI Agent step '{}' has multiple MCP edges with the same toolset suffix '{}'",
                     step_id, toolset
@@ -622,7 +579,6 @@ impl ValidationErrorDto {
                 missing_step,
                 ..
             } => (
-                "E014".to_string(),
                 format!(
                     "Execution plan edge '{}' -> '{}' references {} '{}', which does not exist in steps",
                     from_step, to_step, endpoint, missing_step
@@ -635,7 +591,6 @@ impl ValidationErrorDto {
                 step_id,
                 child_workflow_id,
             } => (
-                "E124".to_string(),
                 format!(
                     "EmbedWorkflow step '{}' references child workflow '{}', which was not found. The workflow cannot compile until the child exists.",
                     step_id, child_workflow_id
@@ -647,7 +602,7 @@ impl ValidationErrorDto {
         };
 
         Self {
-            code,
+            code: error.code().to_string(),
             message,
             step_id,
             field_name,
