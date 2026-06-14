@@ -177,6 +177,36 @@ impl SmoMcpServer {
         tools::workflows::diff_workflow_versions(self, params.0).await
     }
 
+    #[tool(
+        description = "Move a workflow into a folder. The path must start and end with '/' (e.g. '/Sales/'); use '/' for the root folder. Use list_workflow_folders to discover existing folders."
+    )]
+    async fn move_workflow(
+        &self,
+        params: Parameters<tools::workflows::MoveWorkflowParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::move_workflow(self, params.0).await
+    }
+
+    #[tool(
+        description = "Soft-delete a workflow and all its versions. Members may delete only workflows they created; deleted workflows are recoverable by an Owner/Admin."
+    )]
+    async fn delete_workflow(
+        &self,
+        params: Parameters<tools::workflows::DeleteWorkflowParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::delete_workflow(self, params.0).await
+    }
+
+    #[tool(
+        description = "List all distinct workflow folder paths in the tenant. Use before move_workflow to discover valid folders."
+    )]
+    async fn list_workflow_folders(
+        &self,
+        params: Parameters<tools::workflows::ListWorkflowFoldersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::list_workflow_folders(self, params.0).await
+    }
+
     // ===== Execution Monitoring Tools =====
 
     #[tool(description = "List execution instances with filtering by workflow, status, and date.")]

@@ -450,6 +450,213 @@ fn extract_text(result: &rmcp::model::CallToolResult) -> &str {
     &raw.text
 }
 
+/// Exercises the new MCP workflow-organization tools end to end through the
+/// real REST routes + DB (the same in-process path production uses): the tools
+/// call `api_*` against `internal_router`, which dispatches to the actual
+/// handlers. Proves `move_workflow`, `list_workflow_folders`, and
+/// `delete_workflow` round-trip correctly. Ownership scoping is not re-asserted
+/// here — it lives in the handler and is covered by `middleware::authorization`
+/// unit tests; this env runs without `MembershipPolicy::Required` (role: None).
+#[tokio::test]
+async fn mcp_workflow_move_list_folders_delete_round_trip() {
+    use axum::Router;
+    use axum::extract::FromRef;
+    use axum::routing::{get, post, put};
+    use runtara_dsl::agent_meta::AgentCatalog;
+    use runtara_server::auth::{AuthContext, AuthMethod};
+    use runtara_server::mcp::tools::workflows::{
+        CreateWorkflowParams, DeleteWorkflowParams, GetWorkflowParams, ListWorkflowFoldersParams,
+        MoveWorkflowParams, create_workflow, delete_workflow, get_workflow, list_workflow_folders,
+        move_workflow,
+    };
+
+    let Some(fixture) = DbFixture::start().await else {
+        eprintln!("Skipping MCP workflow folders E2E: no test database configured");
+        return;
+    };
+
+    ensure_config(&fixture.object_url);
+
+    let agent_catalog = Arc::new(AgentCatalog::from_agents(Vec::new()));
+    let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+        ConnectionsConfig {
+            db_pool: fixture.server_pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            http_client: reqwest::Client::new(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::default()),
+            agent_catalog: agent_catalog.clone(),
+        },
+    )));
+    let manager = Arc::new(ObjectStoreManager::new(fixture.object_url.clone()));
+
+    // State the workflow handlers' `State<...>` extractors resolve from.
+    #[derive(Clone)]
+    struct WfState {
+        pool: PgPool,
+        connections: Arc<ConnectionsFacade>,
+        agent_catalog: Arc<AgentCatalog>,
+    }
+    impl FromRef<WfState> for PgPool {
+        fn from_ref(s: &WfState) -> PgPool {
+            s.pool.clone()
+        }
+    }
+    impl FromRef<WfState> for Arc<ConnectionsFacade> {
+        fn from_ref(s: &WfState) -> Arc<ConnectionsFacade> {
+            s.connections.clone()
+        }
+    }
+    impl FromRef<WfState> for Arc<AgentCatalog> {
+        fn from_ref(s: &WfState) -> Arc<AgentCatalog> {
+            s.agent_catalog.clone()
+        }
+    }
+
+    let wf_state = WfState {
+        pool: fixture.server_pool.clone(),
+        connections: connections.clone(),
+        agent_catalog: agent_catalog.clone(),
+    };
+
+    // Mount only the workflow routes the tools talk to. A middleware layer
+    // injects the caller's AuthContext on every request (production gets this
+    // from MCP's `build_request`, bypassed here because the tools call `api_*`).
+    let internal_router = Router::new()
+        .route(
+            "/api/runtime/workflows/create",
+            post(runtara_server::api::handlers::workflows::create_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/folders",
+            get(runtara_server::api::handlers::workflows::list_folders_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}",
+            get(runtara_server::api::handlers::workflows::get_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/move",
+            put(runtara_server::api::handlers::workflows::move_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/delete",
+            post(runtara_server::api::handlers::workflows::delete_workflow_handler),
+        )
+        .with_state(wf_state)
+        .layer(axum::middleware::from_fn(
+            |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                request.extensions_mut().insert(AuthContext::new(
+                    TENANT_ID.to_string(),
+                    "owner-user".to_string(),
+                    AuthMethod::Jwt,
+                ));
+                next.run(request).await
+            },
+        ));
+
+    let server = runtara_server::mcp::server::SmoMcpServer::new(
+        fixture.server_pool.clone(),
+        manager.clone(),
+        None,
+        TENANT_ID.to_string(),
+        internal_router,
+    );
+
+    // 1. Create a workflow at root.
+    let created = create_workflow(
+        &server,
+        CreateWorkflowParams {
+            name: "MCP Folder Test".to_string(),
+            description: "round-trip".to_string(),
+        },
+    )
+    .await
+    .expect("create_workflow");
+    let created_body: serde_json::Value =
+        serde_json::from_str(extract_text(&created)).expect("create JSON");
+    let wf_id = created_body["data"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing workflow id in create response: {created_body:#}"))
+        .to_string();
+
+    // 2. Move it into /Sales/.
+    let moved = move_workflow(
+        &server,
+        MoveWorkflowParams {
+            workflow_id: wf_id.clone(),
+            path: "/Sales/".to_string(),
+        },
+    )
+    .await
+    .expect("move_workflow");
+    // move_workflow_handler wraps MoveWorkflowResponse in the ApiResponse
+    // envelope: {success, message, data: {success, workflowId, path}}.
+    let moved_body: serde_json::Value =
+        serde_json::from_str(extract_text(&moved)).expect("move JSON");
+    assert_eq!(
+        moved_body["success"],
+        json!(true),
+        "move body: {moved_body:#}"
+    );
+    assert_eq!(
+        moved_body["data"]["path"],
+        json!("/Sales/"),
+        "move body: {moved_body:#}"
+    );
+    assert_eq!(moved_body["data"]["workflowId"], json!(wf_id));
+
+    // 3. The folder now shows up in list_workflow_folders.
+    let folders = list_workflow_folders(&server, ListWorkflowFoldersParams {})
+        .await
+        .expect("list_workflow_folders");
+    let folders_body: serde_json::Value =
+        serde_json::from_str(extract_text(&folders)).expect("folders JSON");
+    let folder_list = folders_body["folders"]
+        .as_array()
+        .unwrap_or_else(|| panic!("folders not an array: {folders_body:#}"));
+    assert!(
+        folder_list.iter().any(|p| p == &json!("/Sales/")),
+        "expected '/Sales/' in folders: {folders_body:#}"
+    );
+
+    // 4. Soft-delete the workflow.
+    let deleted = delete_workflow(
+        &server,
+        DeleteWorkflowParams {
+            workflow_id: wf_id.clone(),
+        },
+    )
+    .await
+    .expect("delete_workflow");
+    let deleted_body: serde_json::Value =
+        serde_json::from_str(extract_text(&deleted)).expect("delete JSON");
+    assert_eq!(
+        deleted_body["success"],
+        json!(true),
+        "delete body: {deleted_body:#}"
+    );
+    assert_eq!(deleted_body["workflowId"], json!(wf_id));
+
+    // 5. After deletion the workflow is no longer fetchable (404 → MCP error).
+    let after = get_workflow(
+        &server,
+        GetWorkflowParams {
+            workflow_id: wf_id.clone(),
+            version: None,
+            compact: None,
+        },
+    )
+    .await;
+    assert!(
+        after.is_err(),
+        "deleted workflow must not be fetchable, got: {after:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
 // The Phase 6 `per_op_handlers_match_edit_batched_equivalent` test
 // was deleted in Phase 8 alongside the legacy per-op REST + service
 // handlers. The dsl-level

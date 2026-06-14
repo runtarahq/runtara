@@ -5,7 +5,7 @@ use sqlx::Row;
 use std::time::Duration;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
+use super::internal_api::{api_get, api_post, api_put, normalize_json_arg, validate_path_param};
 use crate::api::repositories::workflows::WorkflowRepository;
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -327,6 +327,28 @@ pub struct SetCurrentVersionParams {
     #[schemars(description = "Version number to set as current")]
     pub version: i32,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveWorkflowParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "Target folder path. Must start and end with '/' (e.g. '/Sales/Shopify/'). Use '/' for the root folder."
+    )]
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteWorkflowParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListWorkflowFoldersParams {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -753,6 +775,43 @@ pub async fn set_current_version(
         None,
     )
     .await?;
+    json_result(result)
+}
+
+pub async fn move_workflow(
+    server: &SmoMcpServer,
+    params: MoveWorkflowParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let body = serde_json::json!({ "path": params.path });
+    let result = api_put(
+        server,
+        &format!("/api/runtime/workflows/{}/move", params.workflow_id),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn delete_workflow(
+    server: &SmoMcpServer,
+    params: DeleteWorkflowParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let result = api_post(
+        server,
+        &format!("/api/runtime/workflows/{}/delete", params.workflow_id),
+        None,
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn list_workflow_folders(
+    server: &SmoMcpServer,
+    _params: ListWorkflowFoldersParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let result = api_get(server, "/api/runtime/workflows/folders").await?;
     json_result(result)
 }
 
@@ -1686,5 +1745,44 @@ mod tests {
 
         assert_eq!(update_graph["type"], "object");
         assert_eq!(deploy_graph["type"], "object");
+    }
+
+    #[test]
+    fn move_workflow_params_schema_requires_id_and_path() {
+        let schema = serde_json::to_value(schemars::schema_for!(MoveWorkflowParams)).unwrap();
+        // deny_unknown_fields → additionalProperties: false
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        let required = schema["required"].as_array().expect("required array");
+        assert!(required.contains(&serde_json::json!("workflow_id")));
+        assert!(required.contains(&serde_json::json!("path")));
+        assert_eq!(schema["properties"]["workflow_id"]["type"], "string");
+        assert_eq!(schema["properties"]["path"]["type"], "string");
+    }
+
+    #[test]
+    fn delete_workflow_params_schema_requires_id() {
+        let schema = serde_json::to_value(schemars::schema_for!(DeleteWorkflowParams)).unwrap();
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["workflow_id"]),
+            "delete takes exactly one required field: {schema:#}"
+        );
+    }
+
+    #[test]
+    fn list_workflow_folders_params_schema_takes_no_inputs() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(ListWorkflowFoldersParams)).unwrap();
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        let has_no_required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| r.is_empty())
+            .unwrap_or(true);
+        assert!(
+            has_no_required,
+            "folder listing takes no inputs: {schema:#}"
+        );
     }
 }
