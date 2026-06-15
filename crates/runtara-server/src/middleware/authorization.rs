@@ -179,8 +179,8 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
         DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
         ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute, WorkflowRead,
-        WorkflowUpdate,
+        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute,
+        WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
     };
 
     let m = method.as_str();
@@ -209,7 +209,10 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current") => {
             WorkflowUpdate
         }
-        ("PUT", "/api/runtime/workflows/folders/rename") => WorkflowUpdate,
+        // Folder rename is a tenant-wide bulk op (rewrites the path prefix of every workflow
+        // under the folder, other members' included) → Owner/Admin only, not Member-`update`.
+        ("PUT", "/api/runtime/workflows/folders/rename") => WorkflowFolderRename,
+        // Move is single-workflow authoring → gated like update (tenant-wide Allow for Member).
         ("PUT", "/api/runtime/workflows/{id}/move") => WorkflowUpdate,
         // ── Workflows: delete ────────────────────────────────────────────
         ("POST", "/api/runtime/workflows/{id}/delete") => WorkflowDelete,
@@ -502,12 +505,13 @@ mod tests {
         // Reads allowed.
         assert!(require_permission(p, Some(Role::Viewer), Permission::WorkflowRead).is_ok());
         assert!(require_permission(p, Some(Role::Viewer), Permission::ConnectionRead).is_ok());
-        // Create / execute / update / delete all denied for a read-only role.
+        // Create / execute / update / delete / folder-rename all denied for a read-only role.
         for permission in [
             Permission::WorkflowCreate,
             Permission::WorkflowUpdate,
             Permission::WorkflowDelete,
             Permission::WorkflowExecute,
+            Permission::WorkflowFolderRename,
             Permission::ConnectionCreate,
         ] {
             let err = require_permission(p, Some(Role::Viewer), permission)
@@ -519,26 +523,91 @@ mod tests {
 
     #[test]
     fn required_member_own_scoped_permissions_pass_the_route_gate() {
-        // The map scopes workflow:update/delete to Own for Member. At the route gate that is
-        // indistinguishable from Allow — the created_by comparison is a handler-level
-        // check, not this gate.
+        // workflow:delete is Own and connection update/delete are Allow for Member. At the route
+        // gate Own is indistinguishable from Allow — the created_by comparison is a handler-level
+        // check, not this gate — so all of these clear it.
         let p = MembershipPolicy::Required;
         for permission in [
-            Permission::WorkflowUpdate,
             Permission::WorkflowDelete,
             Permission::ConnectionUpdate,
             Permission::ConnectionDelete,
         ] {
             assert!(
                 require_permission(p, Some(Role::Member), permission).is_ok(),
-                "Own-scoped {permission} must clear the route gate for Member"
+                "Member write {permission} must clear the route gate"
             );
         }
-        // ...but a Member still cannot do an Owner/Admin-only action — there are none in the
-        // P0 runtara vocabulary, so the strongest negative we can assert is Viewer-style:
-        // a Member CAN create/execute (Allow).
+        // A Member CAN create/execute, and — collaboratively — update any workflow (all Allow).
         assert!(require_permission(p, Some(Role::Member), Permission::WorkflowCreate).is_ok());
         assert!(require_permission(p, Some(Role::Member), Permission::WorkflowExecute).is_ok());
+        assert!(require_permission(p, Some(Role::Member), Permission::WorkflowUpdate).is_ok());
+        // ...but folder rename is Owner/Admin-only — a Member is denied at the gate.
+        let err = require_permission(p, Some(Role::Member), Permission::WorkflowFolderRename)
+            .expect_err("Member must be denied folder rename");
+        assert_eq!(err.permission(), Permission::WorkflowFolderRename);
+    }
+
+    #[test]
+    fn required_folder_rename_is_owner_admin_only() {
+        // The collaboration change opens workflow:update to Member, but folder rename — a
+        // tenant-wide bulk path-prefix rewrite — must stay Owner/Admin-only. Pin the whole
+        // column so a future grant-list edit can't quietly hand it to Member or Viewer.
+        let p = MembershipPolicy::Required;
+        for role in [Role::Owner, Role::Admin] {
+            assert!(
+                require_permission(p, Some(role), Permission::WorkflowFolderRename).is_ok(),
+                "{role:?} must be allowed folder rename"
+            );
+        }
+        for role in [Role::Member, Role::Viewer] {
+            let err =
+                require_permission(p, Some(role), Permission::WorkflowFolderRename).unwrap_err();
+            assert_eq!(
+                err.permission(),
+                Permission::WorkflowFolderRename,
+                "{role:?} must be denied folder rename"
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_lets_member_update_any_workflow_but_only_delete_own() {
+        // The crux of the collaboration change, at the per-resource layer: with workflow:update
+        // now Allow, a Member may update a workflow created by someone else (move rides the same
+        // permission, so it follows). Delete stays Own, so a Member may delete only their own.
+        let p = MembershipPolicy::Required;
+        let other = Some("member-a");
+
+        assert!(
+            require_ownership(
+                p,
+                Some(Role::Member),
+                Permission::WorkflowUpdate,
+                other,
+                "member-b"
+            )
+            .is_ok(),
+            "Member must be able to update a workflow they don't own"
+        );
+        assert!(
+            require_ownership(
+                p,
+                Some(Role::Member),
+                Permission::WorkflowDelete,
+                other,
+                "member-b"
+            )
+            .is_err(),
+            "Member must not be able to delete a workflow they don't own"
+        );
+        // Owner/Admin bypass ownership entirely for delete.
+        for role in [Role::Owner, Role::Admin] {
+            assert!(
+                require_ownership(p, Some(role), Permission::WorkflowDelete, other, "member-b")
+                    .is_ok(),
+                "{role:?} must bypass the delete ownership check"
+            );
+        }
     }
 
     #[test]
@@ -732,6 +801,16 @@ mod tests {
                 Method::POST,
                 "/api/runtime/workflows/{id}/delete",
                 Permission::WorkflowDelete,
+            ),
+            (
+                Method::PUT,
+                "/api/runtime/workflows/{id}/move",
+                Permission::WorkflowUpdate,
+            ),
+            (
+                Method::PUT,
+                "/api/runtime/workflows/folders/rename",
+                Permission::WorkflowFolderRename,
             ),
             (
                 Method::POST,
@@ -979,6 +1058,51 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Build an app exposing the real folder-rename route under the `authorize` layer.
+    fn folder_rename_app(role: Option<Role>) -> Router {
+        Router::new()
+            .route(
+                "/api/runtime/workflows/folders/rename",
+                axum::routing::put(|| async { "ok" }),
+            )
+            .route_layer(from_fn(authorize(MembershipPolicy::Required)))
+            .route_layer(from_fn(inject(role)))
+    }
+
+    #[tokio::test]
+    async fn authorize_denies_member_on_folder_rename_route() {
+        // The collaboration change makes workflow:update tenant-wide for Member, but folder
+        // rename is gated by the Owner/Admin-only workflow:folder_rename — a Member is rejected
+        // at the route gate, before any handler runs.
+        let app = folder_rename_app(Some(Role::Member));
+        let resp = app
+            .oneshot(
+                HttpRequest::put("/api/runtime/workflows/folders/rename")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["permission"], "workflow:folder_rename");
+    }
+
+    #[tokio::test]
+    async fn authorize_allows_admin_on_folder_rename_route() {
+        let app = folder_rename_app(Some(Role::Admin));
+        let resp = app
+            .oneshot(
+                HttpRequest::put("/api/runtime/workflows/folders/rename")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn authorize_is_dormant_under_logging() {
         let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Logging);
@@ -1023,13 +1147,14 @@ mod tests {
 
     #[test]
     fn ownership_member_denied_on_unowned_or_missing_resource() {
-        // NULL owner (legacy row) or a resource that doesn't exist → Member denied; only
-        // Owner/Admin (who get Allow) can manage these.
+        // NULL owner (legacy row) or a resource that doesn't exist → Member denied for an Own
+        // permission; only Owner/Admin (who get Allow) can manage these. Uses workflow:delete:
+        // workflow:update is now flat Allow for Member, so it would not exercise the Own path.
         assert!(
             require_ownership(
                 REQ,
                 Some(Role::Member),
-                Permission::WorkflowUpdate,
+                Permission::WorkflowDelete,
                 None,
                 "u1"
             )
@@ -1113,6 +1238,8 @@ mod tests {
                 "/api/runtime/workflows/{id}/versions/{version}/graph",
             ),
             (Method::POST, "/api/runtime/workflows/{id}/delete"),
+            (Method::PUT, "/api/runtime/workflows/{id}/move"),
+            (Method::PUT, "/api/runtime/workflows/folders/rename"),
             (Method::POST, "/api/runtime/workflows/{id}/execute"),
             (Method::POST, "/api/runtime/workflows/{id}/clone"),
             (
