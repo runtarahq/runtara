@@ -2017,6 +2017,80 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
     );
 }
 
+/// The tool-loop graph with a raised turn budget so a long conversation can run
+/// past the default 10-turn safety bound.
+fn ai_agent_tool_loop_graph_with_max(max_iterations: u32) -> String {
+    ai_agent_tool_loop_graph_json().replace(
+        r#""model":"gpt-4o"}}"#,
+        &format!(r#""model":"gpt-4o","maxIterations":{max_iterations}}}}}"#),
+    )
+}
+
+// 24 KiB echoed back into the conversation each of ~50 turns. The conversation
+// (carried in the loop's STATE survivor) grows ~linearly, and each turn's input
+// embeds that whole conversation, so the un-freed per-turn scratch (turn input,
+// model output, tool result) accumulates O(N^2) across the run — the same
+// unbounded-bump leak the Split/While reset fixed, now per turn. The per-turn
+// arena reset bounds the live set to ~the final conversation plus one turn's
+// working set.
+const AI_LEAK_TOOL_BYTES: usize = 24 * 1024;
+const AI_LEAK_TURNS: usize = 50;
+const AI_LEAK_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
+
+/// Regression for the AiAgent loop's per-turn heap reset (Stage 4): a long
+/// tool-calling conversation that echoes a large payload every turn must not grow
+/// guest memory per turn. With the reset the run completes with a bounded peak;
+/// without it the O(N^2) per-turn scratch balloons past the cap. Asserts the
+/// FIXED behavior — the loop completes all turns (no state corruption over a long
+/// conversation) AND the guest peak stays well under a cap the un-reset O(N^2)
+/// would exceed. Relies on the keep-alive-fixed mock server to sustain the
+/// hundreds of HTTP round-trips a 50-turn loop makes.
+#[test]
+fn ai_agent_loop_long_conversation_stays_bounded() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Each turn the model "requests" an echo tool call carrying a large blob; the
+    // echo tool returns it, so both the tool-call message and its result grow the
+    // conversation. The final turn answers, exiting the loop.
+    let payload = "z".repeat(AI_LEAK_TOOL_BYTES);
+    let args = serde_json::json!({ "blob": payload }).to_string();
+    let mut script: Vec<Value> = (0..AI_LEAK_TURNS - 1)
+        .map(|_| llm_tool_call("echo", &args))
+        .collect();
+    script.push(llm_ok("done"));
+
+    let captured = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-long-conversation",
+        &ai_agent_tool_loop_graph_with_max(AI_LEAK_TURNS as u32 + 5),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        script,
+        vec![(
+            "RUNTARA_INSTANCE_MEMORY_MAX_BYTES".into(),
+            AI_LEAK_MEM_CAP_BYTES.to_string(),
+        )],
+    );
+
+    assert!(
+        captured.status_success,
+        "long AiAgent conversation should complete; stderr={:?} error_json={:?}",
+        captured.stderr, captured.error_json,
+    );
+    let peak = captured
+        .memory_peak_bytes
+        .expect("embedded executor reports a memory peak");
+    assert!(
+        peak < 48 * 1024 * 1024,
+        "per-turn scratch not reclaimed: peak {peak} bytes over {} turns \
+         (expected bounded to ~the final conversation's working set)",
+        AI_LEAK_TURNS,
+    );
+}
+
 fn ai_agent_tool_only_no_next_graph_json() -> String {
     r##"{
       "entryPoint": "ai",
