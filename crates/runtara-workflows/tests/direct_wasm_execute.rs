@@ -4122,6 +4122,114 @@ fn while_accumulator_input(iterations: usize) -> Vec<u8> {
     serde_json::to_vec(&input).expect("input serializes")
 }
 
+/// A While whose iteration body reads the previous iteration's `loop.outputs`
+/// through a **template**, while the iteration output is padded past the 16 KiB
+/// intern threshold so `loop.outputs` is carried by `$wfref` handle on
+/// iteration 1+. Mirrors the production regression where a paginating loop read
+/// `{% if loop.outputs.next_page %}…` in a templated agent input.
+fn while_template_reads_loop_outputs_graph(chunk_bytes: usize) -> String {
+    let chunk = "a".repeat(chunk_bytes);
+    let graph = serde_json::json!({
+        "durable": false,
+        "steps": {
+            "loop": {
+                "stepType": "While",
+                "id": "loop",
+                "name": "Read Loop Outputs",
+                "condition": {
+                    "type": "operation",
+                    "op": "LT",
+                    "arguments": [
+                        { "valueType": "reference", "value": "loop.index" },
+                        { "valueType": "reference", "value": "data.count" }
+                    ]
+                },
+                "subgraph": {
+                    "name": "Iter",
+                    "entryPoint": "finish",
+                    "steps": {
+                        "finish": {
+                            "stepType": "Finish",
+                            "id": "finish",
+                            "inputMapping": {
+                                // The reported pattern: a template reaching into
+                                // the prior iteration's loop outputs. Renders "1"
+                                // on iteration 0 (loop.outputs is null) and the
+                                // next_page value once it is set.
+                                "page": {
+                                    "valueType": "template",
+                                    "value": "{% if loop.outputs.next_page %}{{ loop.outputs.next_page }}{% else %}1{% endif %}"
+                                },
+                                "next_page": { "valueType": "immediate", "value": 7 },
+                                // Pads the iteration output over the intern
+                                // threshold so loop.outputs becomes a handle.
+                                "chunk": { "valueType": "immediate", "value": chunk }
+                            }
+                        }
+                    },
+                    "executionPlan": []
+                },
+                "config": { "maxIterations": 1000 }
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                    "iterations": {
+                        "valueType": "reference",
+                        "value": "steps.loop.outputs.iterations"
+                    },
+                    "page": {
+                        "valueType": "reference",
+                        "value": "steps.loop.outputs.outputs.page"
+                    }
+                }
+            }
+        },
+        "entryPoint": "loop",
+        "executionPlan": [
+            { "fromStep": "loop", "toStep": "finish" }
+        ],
+        "variables": {},
+        "inputSchema": { "count": { "type": "number" } },
+        "outputSchema": {}
+    });
+    serde_json::to_string(&graph).expect("graph serializes")
+}
+
+/// Regression for the interning-handle template opacity (8.0.19): once a While's
+/// accumulated `loop.outputs` crosses the 16 KiB intern threshold it is carried
+/// as a `$wfref` handle. References saw through it, but template rendering did
+/// not — so `{% if loop.outputs.next_page %}` raised "Template render error:
+/// undefined value" on iteration 1 and crashed the loop. With the fix the
+/// template renders against a materialized source and the loop completes.
+#[test]
+fn direct_wasm_execute_while_template_reads_interned_loop_outputs() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // 20 KiB chunk — just over the 16 KiB threshold so the iteration output is
+    // interned, three iterations to read it back at least twice.
+    let graph = while_template_reads_loop_outputs_graph(20 * 1024);
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "while-template-reads-interned-loop-outputs",
+        &graph,
+        br#"{"count":3}"#,
+    );
+
+    assert_eq!(
+        output["iterations"], 3,
+        "loop must run to completion (pre-fix it crashed on iteration 1)"
+    );
+    assert_eq!(
+        output["page"], "7",
+        "template must read next_page through the interned loop.outputs handle"
+    );
+}
+
 // 64 KiB chunk (above the 16 KiB intern threshold) appended over 60 iterations.
 // Final accumulator ~3.8 MiB. The two cost terms diverge sharply, which makes the
 // guest-memory peak a clean GC signal:
