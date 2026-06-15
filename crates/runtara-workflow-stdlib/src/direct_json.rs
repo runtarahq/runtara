@@ -6642,6 +6642,52 @@ mod tests {
         );
     }
 
+    /// The AiAgent loop's durable replay hinges on `ai-turn-cache-key` producing
+    /// the *same* key across the original run and a resume. After interning, a
+    /// large scope value is stored as a `$wfref` handle whose id is run-local — so
+    /// if the key depended on the payload, an identical turn would key differently
+    /// across runs and never replay. It must not: the key is built only from
+    /// step id, iteration, and loop indices, all of which survive interning inline.
+    /// This pins that interning is transparent to the durability key.
+    #[test]
+    fn ai_turn_cache_key_is_interning_transparent() {
+        reset_value_store();
+        let big = "x".repeat(64 * 1024); // > 16 KiB intern threshold
+        let vars = br#"{"_loop_indices":[1,4]}"#;
+
+        let source_big =
+            build_source(format!(r#"{{"blob":"{big}"}}"#).as_bytes(), vars, b"{}").expect("big");
+        let source_small = build_source(br#"{"blob":"x"}"#, vars, b"{}").expect("small");
+
+        // The large value really interned (else the test proves nothing); the
+        // small one stayed inline.
+        let parsed_big: Value = serde_json::from_slice(&source_big).expect("parse big source");
+        assert!(
+            wfref_id(&parsed_big["data"]["blob"]).is_some(),
+            "a >16 KiB scope value must intern to a $wfref handle"
+        );
+        let parsed_small: Value =
+            serde_json::from_slice(&source_small).expect("parse small source");
+        assert!(
+            wfref_id(&parsed_small["data"]["blob"]).is_none(),
+            "a tiny scope value must stay inline"
+        );
+
+        // Same turn, same loop indices → identical key, independent of whether the
+        // scope payload was interned to a handle or left inline.
+        let key_big = DirectJsonManifest::ai_turn_cache_key("ai", 2, &source_big).expect("key big");
+        let key_small =
+            DirectJsonManifest::ai_turn_cache_key("ai", 2, &source_small).expect("key small");
+        assert_eq!(
+            key_big, key_small,
+            "durability key must not depend on interned payload size"
+        );
+        assert!(
+            key_big.starts_with("ai.turn.2") && key_big != "ai.turn.2",
+            "key carries step/iter and is scoped by loop indices: {key_big}"
+        );
+    }
+
     #[test]
     fn eval_condition_errors_on_query_only_operators() {
         // SIMILARITY_GTE / MATCH / COSINE_DISTANCE_LTE / L2_DISTANCE_LTE are
