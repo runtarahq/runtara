@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! End-to-end ownership-check tests: seed a real `workflows` row with a known `created_by`,
 //! read it back through the production `WorkflowRepository::owner` query, and feed the result
-//! into the production `require_ownership` decision — the same two pieces the update/delete
-//! handlers compose. This closes the "Member can / cannot update own workflow" item that the
-//! pure unit tests can only approximate (they hard-code the owner).
+//! into the production `require_ownership` decision — the same two pieces the delete handler
+//! composes. This closes the "Member can / cannot delete own workflow" item that the pure unit
+//! tests can only approximate (they hard-code the owner). Note: `workflow:update` is tenant-wide
+//! `Allow` for Member (collaborative editing), so the `Own` resource check applies to
+//! `workflow:delete`, not `update`.
 //!
 //! Needs a live Postgres. Skips cleanly when neither `TEST_RUNTARA_SERVER_DATABASE_URL` nor
 //! `RUNTARA_SERVER_DATABASE_URL` is set. Run with:
@@ -62,7 +64,7 @@ async fn cleanup(pool: &PgPool, tenant: &str) {
 }
 
 #[tokio::test]
-async fn member_may_update_own_workflow_but_not_another_users() {
+async fn member_may_update_any_workflow_but_only_delete_own() {
     skip_if_no_db!();
     let pool = get_test_pool().await.expect("test pool");
     let repo = WorkflowRepository::new(pool.clone());
@@ -77,20 +79,20 @@ async fn member_may_update_own_workflow_but_not_another_users() {
         .expect("owner query");
     assert_eq!(owner.as_deref(), Some("member-a"));
 
-    // Owner identity → allowed.
+    // A different Member may UPDATE it: workflow:update is tenant-wide Allow (collaborative).
     assert!(
         require_ownership(
             MembershipPolicy::Required,
             Some(Role::Member),
             Permission::WorkflowUpdate,
             owner.as_deref(),
-            "member-a",
+            "member-b",
         )
         .is_ok(),
-        "Member must be able to update a workflow they created"
+        "Member must be able to update a workflow they did not create"
     );
 
-    // Different Member → denied.
+    // ...but a different Member may NOT delete it: workflow:delete stays Own.
     assert!(
         require_ownership(
             MembershipPolicy::Required,
@@ -101,6 +103,19 @@ async fn member_may_update_own_workflow_but_not_another_users() {
         )
         .is_err(),
         "Member must not be able to delete another user's workflow"
+    );
+
+    // The creator may delete their own.
+    assert!(
+        require_ownership(
+            MembershipPolicy::Required,
+            Some(Role::Member),
+            Permission::WorkflowDelete,
+            owner.as_deref(),
+            "member-a",
+        )
+        .is_ok(),
+        "Member must be able to delete a workflow they created"
     );
 
     cleanup(&pool, &tenant).await;
@@ -152,24 +167,25 @@ async fn unowned_legacy_workflow_is_member_denied_but_admin_allowed() {
         .expect("owner query");
     assert_eq!(owner, None, "NULL created_by reads back as no owner");
 
-    // Member cannot manage an unowned row...
+    // Member cannot delete an unowned row (delete is Own; update is Allow so it wouldn't
+    // exercise the ownership path)...
     assert!(
         require_ownership(
             MembershipPolicy::Required,
             Some(Role::Member),
-            Permission::WorkflowUpdate,
+            Permission::WorkflowDelete,
             owner.as_deref(),
             "member-a",
         )
         .is_err(),
-        "Member must not manage an unowned (NULL) workflow"
+        "Member must not delete an unowned (NULL) workflow"
     );
     // ...but Owner/Admin still can.
     assert!(
         require_ownership(
             MembershipPolicy::Required,
             Some(Role::Admin),
-            Permission::WorkflowUpdate,
+            Permission::WorkflowDelete,
             owner.as_deref(),
             "member-a",
         )

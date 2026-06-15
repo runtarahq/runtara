@@ -75,10 +75,12 @@ pub enum Access {
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
     /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
     ///
-    /// Used by exactly six cells for Member — `workflow`/`trigger`/`report` update/delete — the
-    /// resources whose per-row owner (`created_by`) is recorded and a server-crate handler can
-    /// check it. Resources without enforceable per-row ownership (database, connection) are flat
-    /// `Allow`, never `Own`. The complete set is pinned by
+    /// Used by exactly five cells for Member — `workflow:delete` plus `trigger`/`report`
+    /// update/delete — the resources whose per-row owner (`created_by`) is recorded and a
+    /// server-crate handler can check it. `workflow:update` is intentionally *not* `Own`: it is
+    /// tenant-wide `Allow` for Member (collaborative editing — workflows are versioned, so edits
+    /// are non-destructive and recoverable). Resources without enforceable per-row ownership
+    /// (database, connection) are flat `Allow`, never `Own`. The complete set is pinned by
     /// `own_is_restricted_to_the_ownable_permissions`.
     Own,
     /// Never permitted.
@@ -95,6 +97,11 @@ pub enum Permission {
     WorkflowUpdate,
     WorkflowDelete,
     WorkflowExecute,
+    /// Rename a workflow folder — a tenant-wide bulk op that rewrites the `path` prefix of
+    /// every workflow under it (other members' included). It is deliberately *not* folded into
+    /// `WorkflowUpdate`: update is tenant-wide (Allow) for Member, but a structural bulk rename
+    /// is Owner/Admin-only. Gates `PUT /workflows/folders/rename` (see `permission_for`).
+    WorkflowFolderRename,
     InvocationHistoryRead,
     DatabaseRead,
     DatabaseCreate,
@@ -121,12 +128,13 @@ pub enum Permission {
 
 impl Permission {
     /// Every permission, in table order.
-    pub const ALL: [Permission; 24] = [
+    pub const ALL: [Permission; 25] = [
         WorkflowRead,
         WorkflowCreate,
         WorkflowUpdate,
         WorkflowDelete,
         WorkflowExecute,
+        WorkflowFolderRename,
         InvocationHistoryRead,
         DatabaseRead,
         DatabaseCreate,
@@ -157,6 +165,7 @@ impl Permission {
             Permission::WorkflowUpdate => "workflow:update",
             Permission::WorkflowDelete => "workflow:delete",
             Permission::WorkflowExecute => "workflow:execute",
+            Permission::WorkflowFolderRename => "workflow:folder_rename",
             Permission::InvocationHistoryRead => "invocation_history:read",
             Permission::DatabaseRead => "database:read",
             Permission::DatabaseCreate => "database:create",
@@ -212,8 +221,13 @@ impl<'de> Deserialize<'de> for Permission {
 // the scope of each. Kept in sync with `docs/security/user-management-contracts.md` §4 and
 // pinned by `permission_map_matches_contract`.
 //
-// Reads are allowed for everyone; create/execute for Member and above; update/delete are
-// Member-`Own` (own resources only) and Allow for Owner/Admin. Viewer is read-only.
+// Reads are allowed for everyone; create/execute for Member and above. For Member, `update`
+// and `delete` are `Own` (own resources only) for trigger and report, but `workflow:update` is
+// the exception: it is tenant-wide `Allow` (collaborative editing — workflows are versioned, so
+// edits are non-destructive and recoverable), while `workflow:delete` stays `Own` since it
+// removes the whole workflow and its history. Folder rename is a tenant-wide bulk structural
+// op, gated by the Owner/Admin-only `WorkflowFolderRename`. Owner/Admin get `Allow` throughout.
+// Viewer is read-only.
 // ---------------------------------------------------------------------------------------
 
 use Access::{Allow, Own};
@@ -222,7 +236,7 @@ use Permission::{
     DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
     ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
     TriggerRead, TriggerUpdate, UserManagementAccess, WorkflowCreate, WorkflowDelete,
-    WorkflowExecute, WorkflowRead, WorkflowUpdate,
+    WorkflowExecute, WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
 };
 
 /// Owner: every permission, unconditionally.
@@ -232,6 +246,7 @@ const OWNER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowUpdate, Allow),
     (WorkflowDelete, Allow),
     (WorkflowExecute, Allow),
+    (WorkflowFolderRename, Allow),
     (InvocationHistoryRead, Allow),
     (DatabaseRead, Allow),
     (DatabaseCreate, Allow),
@@ -261,6 +276,7 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (WorkflowUpdate, Allow),
     (WorkflowDelete, Allow),
     (WorkflowExecute, Allow),
+    (WorkflowFolderRename, Allow),
     (InvocationHistoryRead, Allow),
     (DatabaseRead, Allow),
     (DatabaseCreate, Allow),
@@ -282,13 +298,17 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (UserManagementAccess, Allow),
 ];
 
-/// Member: read + create + execute on any resource. Update/delete are `Own` (own resources
-/// only) for workflow, trigger, and report; database and connection have no enforceable
-/// per-row owner, so their update/delete are flat `Allow`.
+/// Member: read + create + execute on any resource. `workflow:update` is tenant-wide `Allow`
+/// (collaborative editing — workflows are versioned, so an edit to another member's workflow is
+/// a new, recoverable version), and so is `move` (gated by `workflow:update`). `workflow:delete`
+/// stays `Own` because it removes the whole workflow and every version. `trigger`/`report`
+/// update/delete remain `Own`; database and connection have no enforceable per-row owner, so
+/// their update/delete are flat `Allow`. Folder rename is Owner/Admin-only
+/// (`WorkflowFolderRename`), so Member does not grant it (absent ⇒ `Deny`).
 const MEMBER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowRead, Allow),
     (WorkflowCreate, Allow),
-    (WorkflowUpdate, Own),
+    (WorkflowUpdate, Allow),
     (WorkflowDelete, Own),
     (WorkflowExecute, Allow),
     (InvocationHistoryRead, Allow),
@@ -348,7 +368,7 @@ pub fn access_for(role: Role, permission: Permission) -> Access {
 ///   "version": 1,
 ///   "roles": ["owner", "admin", "member", "viewer"],
 ///   "permissions": {
-///     "workflow:update": { "owner": "allow", "admin": "allow", "member": "own", "viewer": "deny" },
+///     "workflow:update": { "owner": "allow", "admin": "allow", "member": "allow", "viewer": "deny" },
 ///     ...
 ///   }
 /// }
@@ -448,9 +468,10 @@ mod tests {
         let expected: &[(Permission, [Access; 4])] = &[
             (Permission::WorkflowRead, [Allow, Allow, Allow, Allow]),
             (Permission::WorkflowCreate, [Allow, Allow, Allow, Deny]),
-            (Permission::WorkflowUpdate, [Allow, Allow, Own, Deny]),
+            (Permission::WorkflowUpdate, [Allow, Allow, Allow, Deny]),
             (Permission::WorkflowDelete, [Allow, Allow, Own, Deny]),
             (Permission::WorkflowExecute, [Allow, Allow, Allow, Deny]),
+            (Permission::WorkflowFolderRename, [Allow, Allow, Deny, Deny]),
             (
                 Permission::InvocationHistoryRead,
                 [Allow, Allow, Allow, Allow],
@@ -494,16 +515,17 @@ mod tests {
         }
     }
 
-    /// `Own` is allowed for exactly six cells — workflow/trigger/report update/delete — the
-    /// resources whose per-row owner (`created_by`) is recorded and a server-crate path can
-    /// check it. Any other `Own` (a new resource, or connection/database regaining it before the
-    /// storage layer can enforce it) fails here. Pins the whole `Own` set, both directions.
+    /// `Own` is allowed for exactly five cells — `workflow:delete` plus trigger/report
+    /// update/delete — the resources whose per-row owner (`created_by`) is recorded and a
+    /// server-crate path can check it. `workflow:update` is deliberately excluded: it is
+    /// tenant-wide `Allow` for Member (collaborative editing). Any other `Own` (a new resource,
+    /// or connection/database regaining it before the storage layer can enforce it) fails here.
+    /// Pins the whole `Own` set, both directions.
     #[test]
     fn own_is_restricted_to_the_ownable_permissions() {
         use std::collections::BTreeSet;
 
         let allowed: BTreeSet<&str> = [
-            "workflow:update",
             "workflow:delete",
             "trigger:update",
             "trigger:delete",
@@ -563,8 +585,11 @@ mod tests {
         let perms = map["permissions"].as_object().expect("permissions object");
         assert_eq!(perms.len(), Permission::ALL.len());
 
-        // Spot-check a representative trio against the map, and confirm the wire forms match.
-        assert_eq!(perms["workflow:update"]["member"], "own");
+        // Spot-check a representative set against the map, and confirm the wire forms match.
+        assert_eq!(perms["workflow:update"]["member"], "allow");
+        assert_eq!(perms["workflow:delete"]["member"], "own");
+        assert_eq!(perms["workflow:folder_rename"]["member"], "deny");
+        assert_eq!(perms["workflow:folder_rename"]["admin"], "allow");
         assert_eq!(perms["database:delete"]["member"], "allow");
         assert_eq!(perms["workflow:delete"]["viewer"], "deny");
 

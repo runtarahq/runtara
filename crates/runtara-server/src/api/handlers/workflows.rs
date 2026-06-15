@@ -2477,7 +2477,13 @@ pub async fn get_version_schemas_handler(
 // Folder Management Handlers
 // ============================================================================
 
-/// Move a workflow to a different folder
+/// Move a workflow to a different folder.
+///
+/// Authorization: gated by `workflow:update` (see `permission_for`). For Member that is
+/// tenant-wide `Allow` (collaborative editing — workflows are versioned), so no per-resource
+/// ownership check is needed here; move is consistently permitted for anyone who may update.
+/// If `workflow:update` is ever narrowed back to `Own` for Member, this handler must extract the
+/// caller and call `require_ownership` (as `update`/`delete` do) — otherwise it fails open.
 #[utoipa::path(
     put,
     path = "/api/runtime/workflows/{id}/move",
@@ -2547,7 +2553,13 @@ pub async fn list_folders_handler(
     }
 }
 
-/// Rename a folder (updates all workflows with matching path prefix)
+/// Rename a folder (updates all workflows with matching path prefix).
+///
+/// Authorization: gated by `workflow:folder_rename` (see `permission_for`), which is Owner/Admin
+/// only. This is a tenant-wide bulk op — it rewrites the `path` of every workflow under the
+/// prefix, other members' included — so it is deliberately kept off the Member-`Allow`
+/// `workflow:update` permission. The route gate is the whole control; no per-resource ownership
+/// check applies (the op spans many resources with different owners by design).
 #[utoipa::path(
     put,
     path = "/api/runtime/workflows/folders/rename",

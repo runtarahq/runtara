@@ -199,9 +199,10 @@ tenant requires it.
 |---|---|---|---|---|
 | `workflow:read` | Allow | Allow | Allow | Allow |
 | `workflow:create` | Allow | Allow | Allow | Deny |
-| `workflow:update` | Allow | Allow | Own | Deny |
+| `workflow:update` | Allow | Allow | Allow | Deny |
 | `workflow:delete` | Allow | Allow | Own | Deny |
 | `workflow:execute` | Allow | Allow | Allow | Deny |
+| `workflow:folder_rename` | Allow | Allow | Deny | Deny |
 | `invocation_history:read` | Allow | Allow | Allow | Allow |
 | `database:read` | Allow | Allow | Allow | Allow |
 | `database:create` | Allow | Allow | Allow | Deny |
@@ -234,12 +235,23 @@ Notes:
   open to every role, Viewer included.
 - Create and `workflow:execute` require Member or above.
 - Update/delete are `Own` for Member (own resources only; Owner/Admin bypass the
-  ownership check) and denied for Viewer — for **workflow, trigger, and report**
-  only. `database:*` and `connection:*` have no enforceable per-row owner
+  ownership check) and denied for Viewer — for **trigger and report**, plus
+  `workflow:delete`. **`workflow:update` is the exception: it is tenant-wide `Allow`
+  for Member**, not `Own`. Workflows are versioned (`update` creates a new version,
+  `set_current_version` rolls back), so editing another member's workflow is
+  non-destructive and recoverable; opening it up enables collaboration without risk.
+  `workflow:delete` stays `Own` because it soft-deletes the whole workflow and every
+  version. `database:*` and `connection:*` have no enforceable per-row owner
   (object-model tracks no `created_by`; connections live in a crate that does not
   bridge the caller's identity), so their update/delete are full Allow for Member,
-  never `Own`. So the complete `Own` set is **six** cells: workflow/trigger/report
-  update/delete.
+  never `Own`. So the complete `Own` set is **five** cells: `workflow:delete` plus
+  trigger/report update/delete.
+- **`workflow:folder_rename`** is a dedicated **Owner/Admin-only** permission, not
+  part of `workflow:update`. Renaming a folder is a tenant-wide **bulk** op — it
+  rewrites the `path` prefix of *every* workflow under the folder, including other
+  members' — so it is kept off the Member-`Allow` `update` permission. (Moving a
+  single workflow, `PUT /workflows/{id}/move`, is gated by `workflow:update` and so
+  follows it: tenant-wide for Member.)
 - **API keys** (the legacy `rt_*` keys) are deliberately **absent from this role map**.
   They are personal credentials scoped to their `issuing_user_id`: any role may create,
   list, and revoke its **own** keys, and only its own. There is no role distinction, so

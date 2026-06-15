@@ -485,7 +485,7 @@ export function WorkflowsGrid({
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                    <Can permission="workflow:update">
+                    <Can permission="workflow:folder_rename">
                     <Button
                       variant="ghost"
                       size="icon"
