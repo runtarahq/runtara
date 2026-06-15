@@ -4980,7 +4980,16 @@ fn apply_mapping_value(value: &Value, source: &Value) -> Result<Value, String> {
                 .get("value")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "template mapping value must be a string".to_string())?;
-            render_template(template, source).map(Value::String)
+            // minijinja cannot resolve `$wfref` interning handles: a template
+            // reaching into a large, interned scope value (e.g.
+            // `loop.outputs.next_page` once the accumulated outputs cross the
+            // intern threshold) would otherwise see the bare handle object and
+            // raise "undefined value". References go through `lookup_source_path`,
+            // which derefs handles as it traverses; rendering a template is the
+            // same kind of boundary, so hand minijinja a fully materialized,
+            // handle-free view of the source. `materialize` is a no-op when
+            // nothing was interned.
+            render_template(template, &materialize(source.clone())).map(Value::String)
         }
         other => Err(format!("unsupported mapping valueType '{other}'")),
     }
@@ -6427,6 +6436,80 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn template_resolves_through_interned_loop_outputs() {
+        // Regression (interning stage 1, 8.0.19): a While iteration's accumulated
+        // `loop.outputs` grows past the 16 KiB intern threshold, so build_source
+        // carries `variables._loop` — and thus `source.loop` — as a `$wfref`
+        // handle. References see through handles (lookup_source_path), but a
+        // template reading *into* the handle (`loop.outputs.next_page`) saw the
+        // bare handle object instead of the value: `loop.outputs` resolved to
+        // undefined and minijinja raised "undefined value" on iteration 1+.
+        reset_value_store();
+        let big_pages = json!(vec![json!({ "sku": "S" }); 4000]); // > 16 KiB
+        let loop_ctx = json!({
+            "index": 1,
+            "outputs": { "next_page": 2, "pages": big_pages }
+        });
+        let variables = serde_json::to_vec(&json!({ "_loop": loop_ctx })).unwrap();
+        let source = build_source(b"{}", &variables, b"{}").expect("source");
+
+        // Precondition: the large loop context is carried as a handle.
+        let parsed: Value = serde_json::from_slice(&source).unwrap();
+        assert!(
+            wfref_id(&parsed["loop"]).is_some(),
+            "precondition: large loop context should be interned to a handle"
+        );
+
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "page": {
+                "valueType": "template",
+                "value": "{% if loop.outputs.next_page %}{{ loop.outputs.next_page }}{% else %}1{% endif %}"
+            }
+        })))
+        .expect("manifest");
+
+        let output = manifest
+            .apply_mapping(0, &source)
+            .expect("template must render through the interned loop context");
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["page"], json!("2"));
+    }
+
+    #[test]
+    fn template_resolves_nested_access_into_interned_scope_value() {
+        // The same handle-opacity affects any template that reaches *into* a
+        // large top-level scope entry (`data.*`, `variables.*`, `steps.*`), not
+        // just `loop.outputs`. Here `data.big` is interned to a handle.
+        reset_value_store();
+        let big = json!({
+            "marker": "found",
+            "rows": vec!["x".repeat(100); 500] // > 16 KiB
+        });
+        let data = serde_json::to_vec(&json!({ "big": big })).unwrap();
+        let source = build_source(&data, b"{}", b"{}").expect("source");
+
+        let parsed: Value = serde_json::from_slice(&source).unwrap();
+        assert!(
+            wfref_id(&parsed["data"]["big"]).is_some(),
+            "precondition: large data entry should be interned to a handle"
+        );
+
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "msg": {
+                "valueType": "template",
+                "value": "{{ data.big.marker }}"
+            }
+        })))
+        .expect("manifest");
+
+        let output = manifest
+            .apply_mapping(0, &source)
+            .expect("template must render through the interned data entry");
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["msg"], json!("found"));
     }
 
     #[test]
