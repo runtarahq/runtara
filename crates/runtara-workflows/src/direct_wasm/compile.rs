@@ -334,6 +334,17 @@ const DIRECT_CONDITION_RESULT_LOCAL: u32 = 107;
 const DIRECT_SPLIT_HEAP_BASE_LOCAL: u32 = 108;
 const DIRECT_WHILE_HEAP_BASE_LOCAL: u32 = DIRECT_SPLIT_HEAP_BASE_LOCAL;
 
+/// Heap watermark for the `AiAgent` chat-turn loop, the analog of
+/// [`DIRECT_SPLIT_HEAP_BASE_LOCAL`] for that loop. Captured once above the
+/// pre-loop persistent buffers (base turn config, conversation, initial
+/// state/pending); at the top of each turn the loop bundles its cross-turn
+/// survivors (state + pending) into one snapshot, compacts it back to this mark,
+/// and rewinds — reclaiming the turn's model-output / tool-result scratch so a
+/// long conversation does not grow guest memory per turn. A distinct local from
+/// the Split/While mark so an AiAgent loop nested in a Split/While keeps its own.
+/// i32 local.
+const DIRECT_AI_HEAP_BASE_LOCAL: u32 = 109;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

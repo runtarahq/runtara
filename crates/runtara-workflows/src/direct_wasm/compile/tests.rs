@@ -2143,6 +2143,48 @@ fn direct_core_emits_value_store_retain_for_loops() {
     );
 }
 
+/// The AiAgent chat-turn loop reclaims each turn's scratch with the same
+/// memory.copy-based arena reset as Split/While — it bundles the cross-turn
+/// survivors (loop state + pending) into one snapshot and compacts it to the heap
+/// watermark. So an AiAgent *loop* core must contain a memory.copy, while a
+/// *single-shot* AiAgent (no turn loop) must not — pinning that the per-turn reset
+/// is emitted for the loop and only the loop. (The Split/While memory.copy guard
+/// can't cover this: emitting an agent step needs the agent component imports
+/// wired into the resolve, which the bare emit path lacks.)
+#[test]
+fn direct_core_emits_arena_reset_memory_copy_for_ai_loop() {
+    fn ai_core_has_memory_copy(fixture_name: &str) -> bool {
+        let manifest = build_direct_workflow_manifest(&fixture(fixture_name)).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new()
+            .validate_all(&core)
+            .expect("AiAgent loop core module validates");
+        Parser::new(0).parse_all(&core).any(|payload| {
+            matches!(payload, Ok(Payload::CodeSectionEntry(ref body))
+                if body
+                    .get_operators_reader()
+                    .expect("operators")
+                    .into_iter()
+                    .any(|op| matches!(op, Ok(Operator::MemoryCopy { .. }))))
+        })
+    }
+
+    assert!(
+        ai_core_has_memory_copy("ai_agent_tool_loop"),
+        "AiAgent tool loop must emit the per-turn arena-reset memory.copy"
+    );
+    assert!(
+        !ai_core_has_memory_copy("ai_agent_single_shot"),
+        "a single-shot AiAgent (no turn loop) must not emit memory.copy"
+    );
+}
+
 #[test]
 fn direct_compile_supports_nested_split_graph() {
     let temp = tempfile::tempdir().expect("tempdir");

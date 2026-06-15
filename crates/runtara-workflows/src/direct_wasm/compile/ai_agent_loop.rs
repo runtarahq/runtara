@@ -28,12 +28,13 @@ use super::debug::{
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_workflow::emit_embed_workflow_tool_arm;
 use super::mapping::{emit_apply_mapping, emit_build_source};
+use super::split::emit_loop_iteration_heap_reset;
 use super::wait::emit_ai_wait_tool_arm;
 use super::{
     DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_CONV_LEN_LOCAL,
-    DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_ITER_LOCAL, DIRECT_AI_PENDING_LEN_LOCAL,
-    DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL, DIRECT_AI_STATE_PTR_LOCAL,
-    DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+    DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_HEAP_BASE_LOCAL, DIRECT_AI_ITER_LOCAL,
+    DIRECT_AI_PENDING_LEN_LOCAL, DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL,
+    DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
     DIRECT_AI_TOOL_CALL_COUNTER_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL,
     DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL, DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
     DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL,
@@ -266,6 +267,15 @@ pub(super) fn emit_ai_agent_loop_plan(
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
 
+    // Capture the heap watermark above the pre-loop persistent buffers (base turn
+    // config, conversation, initial state/pending). Each turn's scratch — the
+    // model turn input, the chat-turn output, every tool result — is bump-allocated
+    // above this and reclaimed at the top of the next turn (see the per-turn reset
+    // below). Without it a long conversation grows guest memory per turn, the same
+    // unbounded-bump-allocator leak the Split/While arena reset fixed.
+    body.instruction(&Instruction::GlobalGet(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_HEAP_BASE_LOCAL));
+
     body.instruction(&Instruction::Block(BlockType::Empty)); // $outer
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $turn
 
@@ -278,6 +288,58 @@ pub(super) fn emit_ai_agent_loop_plan(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_AI_ITER_LOCAL));
+
+    // Reclaim the previous turn's scratch before this turn allocates anything.
+    // The only heap buffers that must survive into the next turn are the loop
+    // state (the growing conversation) and pending (this turn's tool results);
+    // bundle them into one snapshot, compact it down to the watermark, rewind the
+    // bump pointer (freeing the prior turn's model input/output and tool-result
+    // buffers), then unpack the two survivors back out. This mirrors the
+    // Split/While single-survivor arena reset, using the snapshot as the single
+    // survivor. The tool-call counter rides an i32 local, so it needs no
+    // relocation; `complete` is never read back here, so pass false. Both the
+    // live path and the durable replay path (which `Br $turn`s back here) funnel
+    // through this point, so neither grows guest memory per turn.
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+    body.instruction(&Instruction::I32Const(0)); // complete = false (unused on unpack)
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot));
+    emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
+    emit_loop_iteration_heap_reset(
+        body,
+        DIRECT_AI_HEAP_BASE_LOCAL,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
+    // state = snapshot.state (part 0); allocated just above the compacted snapshot.
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_part));
+    emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+    load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+    // pending = snapshot.pending (part 1); allocated above the relocated state.
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_part));
+    emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+    load_retptr_list(
+        body,
+        DIRECT_AI_PENDING_PTR_LOCAL,
+        DIRECT_AI_PENDING_LEN_LOCAL,
+    );
 
     // Per-turn durability (GAP-04): a completed turn's snapshot under
     // `{step}.turn.{n}` replays without re-running (and re-billing) the LLM
