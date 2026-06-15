@@ -10,7 +10,10 @@
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
-use super::abi::{load_retptr_list, push_retptr_arg, push_segment_args, return_if_retptr_error};
+use super::abi::{
+    emit_retptr_error_or_start_step_fail, load_retptr_list, push_retptr_arg, push_segment_args,
+    return_if_retptr_error,
+};
 use super::debug::emit_step_breakpoint;
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -64,7 +67,24 @@ pub(super) fn emit_log_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_log_event));
-    return_if_retptr_error(body);
+    // A Log emits no step-debug events on the happy path, but an unresolvable log
+    // payload (e.g. a template error) should be attributed to the step and fail,
+    // not silently exit via `return_if_retptr_error`. Emit a start + error pair on
+    // the failure branch so the failed Log appears in the step summary.
+    emit_retptr_error_or_start_step_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        route_ptr_local,
+        route_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, workflow_log_kind);

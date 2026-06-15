@@ -12,8 +12,8 @@
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
 use super::abi::{
-    load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_segment_args,
-    return_if_retptr_error,
+    emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg, push_retptr_i64_load,
+    push_segment_args, return_if_retptr_error,
 };
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
@@ -83,7 +83,22 @@ pub(super) fn emit_delay_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_delay_duration_ms));
-    return_if_retptr_error(body);
+    // Attribute an unresolvable duration (e.g. a template error) to this step and
+    // fail, instead of the bare `return_if_retptr_error` silent exit.
+    emit_retptr_error_or_step_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        route_ptr_local,
+        route_len_local,
+        output_ptr_local,
+        output_len_local,
+    );
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_DELAY_DURATION_MS_LOCAL));
 

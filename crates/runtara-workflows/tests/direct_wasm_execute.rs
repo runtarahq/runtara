@@ -1636,6 +1636,110 @@ fn direct_wasm_execute_finish_input_mapping_failure_records_step_error() {
 }
 
 #[test]
+fn direct_wasm_execute_delay_duration_failure_records_step_error() {
+    // Delay/Log path: these used return_if_retptr_error, which returned without
+    // runtime.fail — an unresolvable config silently exited ("crashed", no
+    // reason). A Delay with an unresolvable durationMs must now fail with the
+    // error AND attribute it to the step (Delay emits a start before resolving).
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let graph = r##"{
+      "entryPoint": "wait",
+      "executionPlan": [{"fromStep":"wait","toStep":"finish"}],
+      "steps": {
+        "wait": {"id":"wait","stepType":"Delay","name":"Wait",
+          "durationMs": {"valueType":"template","value":"{{ data.missing.deep }}"}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "ok": {"valueType":"immediate","value":true}
+        }}
+      },
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"##;
+
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "direct-wasm-execute-delay-duration-failure",
+        graph,
+        br#"{}"#,
+        true,
+    );
+
+    assert!(
+        !captured.status_success,
+        "an unresolvable Delay duration must fail the instance (not silently exit).\n--- stderr ---\n{}",
+        captured.stderr
+    );
+    let end = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == "wait")
+        .expect("the failed Delay must emit an error step_debug_end");
+    assert_eq!(end.payload_json["outputs"]["_error"], true);
+    assert!(
+        captured
+            .events
+            .iter()
+            .any(|e| e.subtype == "step_debug_start" && e.payload_json["step_id"] == "wait"),
+        "the failed Delay must emit a paired step_debug_start"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_log_payload_failure_records_step_error() {
+    // A Log emits no step-debug events normally, but an unresolvable log payload
+    // (broken context template) must fail with the error and be attributed: the
+    // failure path emits a start + error pair so the failed Log is visible.
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let graph = r##"{
+      "entryPoint": "logit",
+      "executionPlan": [{"fromStep":"logit","toStep":"finish"}],
+      "steps": {
+        "logit": {"id":"logit","stepType":"Log","name":"Log It","level":"info","message":"hello",
+          "context": {"x": {"valueType":"template","value":"{{ data.missing.deep }}"}}},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "ok": {"valueType":"immediate","value":true}
+        }}
+      },
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"##;
+
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "direct-wasm-execute-log-payload-failure",
+        graph,
+        br#"{}"#,
+        true,
+    );
+
+    assert!(
+        !captured.status_success,
+        "an unresolvable Log payload must fail the instance (not silently exit).\n--- stderr ---\n{}",
+        captured.stderr
+    );
+    let start = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_start" && e.payload_json["step_id"] == "logit")
+        .expect("the failed Log must emit a step_debug_start on the failure path");
+    assert_eq!(start.payload_json["step_type"], "Log");
+    let end = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == "logit")
+        .expect("the failed Log must emit an error step_debug_end");
+    assert_eq!(end.payload_json["outputs"]["_error"], true);
+}
+
+#[test]
 fn direct_wasm_execute_conditional_finish_branches_report_completion() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;

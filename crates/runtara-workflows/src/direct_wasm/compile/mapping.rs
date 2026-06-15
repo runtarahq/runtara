@@ -11,14 +11,12 @@
 //! mapping, so factoring these out keeps the lowerers small and guarantees every
 //! step constructs its context identically.
 
-use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
+use wasm_encoder::{Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, emit_retptr_error_or_step_fail,
-    emit_retptr_error_target_or_return, load_retptr_list, load_retptr_tag, push_retptr_arg,
-    push_variables_args,
+    emit_retptr_error_or_return, emit_retptr_error_or_start_step_fail,
+    emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg, push_variables_args,
 };
-use super::debug::{emit_step_debug_error, emit_step_debug_event};
 use super::{
     DirectCoreFunctionIndices, DirectCoreStaticData, DirectFailureTarget, DirectVariables,
 };
@@ -153,48 +151,19 @@ pub(super) fn emit_apply_mapping_start_step_error(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
-
-    if let Some(failure_target) = failure_target {
-        emit_retptr_error_target_or_return(
-            body,
-            indices,
-            failure_target,
-            output_ptr_local,
-            output_len_local,
-        );
-    } else {
-        load_retptr_tag(body);
-        body.instruction(&Instruction::If(BlockType::Empty));
-        // Capture the error before the debug events clobber the shared retptr.
-        load_retptr_list(body, output_ptr_local, output_len_local);
-        emit_step_debug_event(
-            body,
-            indices,
-            static_data,
-            track_events,
-            true,
-            step_id,
-            source_ptr_local,
-            source_len_local,
-            scratch_ptr_local,
-            scratch_len_local,
-        );
-        emit_step_debug_error(
-            body,
-            indices,
-            static_data,
-            track_events,
-            step_id,
-            source_ptr_local,
-            source_len_local,
-            output_ptr_local,
-            output_len_local,
-            scratch_ptr_local,
-            scratch_len_local,
-        );
-        super::emit_runtime_fail_return(body, indices, output_ptr_local, output_len_local);
-        body.instruction(&Instruction::End);
-    }
-
+    emit_retptr_error_or_start_step_fail(
+        body,
+        indices,
+        static_data,
+        track_events,
+        failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        scratch_ptr_local,
+        scratch_len_local,
+    );
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
