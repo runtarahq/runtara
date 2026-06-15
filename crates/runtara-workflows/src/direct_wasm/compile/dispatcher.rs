@@ -15,7 +15,7 @@
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
-use super::abi::{emit_retptr_error_or_return, push_retptr_arg};
+use super::abi::{emit_retptr_error_or_step_fail, push_retptr_arg};
 use super::agent::emit_agent_plan;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::delay::emit_delay_plan;
@@ -23,7 +23,7 @@ use super::edge_route::emit_edge_route_dispatch;
 use super::embed_workflow::emit_embed_workflow_plan;
 use super::error_step::emit_error_plan;
 use super::log::emit_log_plan;
-use super::mapping::emit_apply_mapping;
+use super::mapping::emit_apply_mapping_step_error;
 use super::split::emit_split_plan;
 use super::step_context::emit_step_context_plan;
 use super::switch_route::emit_switch_route_plan;
@@ -76,14 +76,19 @@ pub(super) fn emit_run_plan_mapping(
                 route_ptr_local,
                 route_len_local,
             );
-            emit_apply_mapping(
+            emit_apply_mapping_step_error(
                 body,
                 indices,
+                static_data,
+                track_events,
                 *mapping_id,
+                step_id,
                 source_ptr_local,
                 source_len_local,
                 output_ptr_local,
                 output_len_local,
+                route_ptr_local,
+                route_len_local,
                 failure_target,
             );
             emit_step_breakpoint(
@@ -759,12 +764,19 @@ pub(super) fn emit_run_plan_mapping(
             body.instruction(&Instruction::LocalGet(source_len_local));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
-            emit_retptr_error_or_return(
+            emit_retptr_error_or_step_fail(
                 body,
                 indices,
+                static_data,
+                track_events,
                 failure_target,
+                step_id,
+                source_ptr_local,
+                source_len_local,
                 route_ptr_local,
                 route_len_local,
+                output_ptr_local,
+                output_len_local,
             );
             // Capture the evaluated condition BEFORE the debug-end event below.
             // step-debug-end / custom-event reuse the shared retptr scratch and

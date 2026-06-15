@@ -572,6 +572,15 @@ interface json {
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
+
+    // Build a step-debug-end payload carrying an input-resolution error for any
+    // step type (generic analogue of agent-debug-error, keyed by step id). Used
+    // to attribute an unhandled mapping/condition/config failure to the step.
+    step-debug-error: func(
+        step-id: string,
+        source: list<u8>,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
 }
 
 world workflow-stdlib {

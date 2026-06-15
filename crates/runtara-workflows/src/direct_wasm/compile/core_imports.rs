@@ -135,6 +135,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_debug_error: Option<u32>,
     stdlib_step_debug_start: Option<u32>,
     stdlib_step_debug_end: Option<u32>,
+    stdlib_step_debug_error: Option<u32>,
     agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -516,6 +517,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_step_debug_end,
                 "stdlib.step-debug-end",
             )?,
+            stdlib_step_debug_error: require_import(
+                self.stdlib_step_debug_error,
+                "stdlib.step-debug-error",
+            )?,
             agent_invokes: self.agent_invokes,
         })
     }
@@ -635,6 +640,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_agent_debug_error: u32,
     pub(super) stdlib_step_debug_start: u32,
     pub(super) stdlib_step_debug_end: u32,
+    pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -951,6 +957,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_step_debug_start = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-end") {
         import_indices.stdlib_step_debug_end = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "step-debug-error") {
+        import_indices.stdlib_step_debug_error = Some(function_index);
     } else if function.name == "invoke"
         && let Some(agent_id) = agent_id_for_import(resolve, interface)
     {

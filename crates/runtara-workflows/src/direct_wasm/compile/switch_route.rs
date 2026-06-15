@@ -13,7 +13,7 @@
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg, ValType};
 
-use super::abi::{emit_retptr_error_or_return, load_retptr_list, push_retptr_arg};
+use super::abi::{emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -79,12 +79,19 @@ pub(super) fn emit_switch_route_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_process_switch));
-    emit_retptr_error_or_return(
+    emit_retptr_error_or_step_fail(
         body,
         indices,
+        static_data,
+        track_events,
         failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
         route_ptr_local,
         route_len_local,
+        output_ptr_local,
+        output_len_local,
     );
     load_retptr_list(body, route_ptr_local, route_len_local);
 
@@ -93,12 +100,19 @@ pub(super) fn emit_switch_route_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_value_switch));
-    emit_retptr_error_or_return(
+    emit_retptr_error_or_step_fail(
         body,
         indices,
+        static_data,
+        track_events,
         failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
         route_ptr_local,
         route_len_local,
+        output_ptr_local,
+        output_len_local,
     );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
     emit_step_debug_event(

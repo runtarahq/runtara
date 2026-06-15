@@ -32,7 +32,7 @@ use super::agent_retry::{
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{emit_agent_debug_error, emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
-use super::mapping::{emit_apply_mapping, emit_build_source};
+use super::mapping::{emit_apply_mapping_start_step_error, emit_build_source};
 use super::{
     DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
     DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
@@ -79,14 +79,25 @@ pub(super) fn emit_agent_plan(
     // envelope). Both share the rest of the invoke/checkpoint/retry path.
     output_fn: u32,
 ) {
-    emit_apply_mapping(
+    // Resolve the input mapping. An unhandled failure (e.g. a template render
+    // error) is attributed to this step — a start + error step-debug pair — so
+    // its per-step record carries the error and a duration instead of the failure
+    // surfacing only at execution level; an onError handler routes as before.
+    // The Agent step's start event fires after its mapping, so the failure path
+    // emits its own start (see `emit_apply_mapping_start_step_error`).
+    emit_apply_mapping_start_step_error(
         body,
         indices,
+        static_data,
+        track_events,
         input_mapping_id,
+        step_id,
         source_ptr_local,
         source_len_local,
         output_ptr_local,
         output_len_local,
+        route_ptr_local,
+        route_len_local,
         failure_target,
     );
 
