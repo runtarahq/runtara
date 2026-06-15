@@ -2066,6 +2066,46 @@ fn direct_compile_supports_sequential_split_graph() {
     assert_eq!(nested.graph.mappings.len(), 2);
 }
 
+/// Deterministic guard for the per-iteration arena reset (the Split/While heap
+/// leak fix): the reset compacts each loop's survivor with `memory.copy`, which is
+/// the only `memory.copy` the emitter produces. A loop-bearing workflow's core
+/// module must contain it; a loop-free one must not. This proves the reset is
+/// emitted without depending on the flaky execute harness.
+#[test]
+fn direct_core_emits_arena_reset_memory_copy_for_loops() {
+    fn core_has_memory_copy(graph: ExecutionGraph) -> bool {
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Parser::new(0).parse_all(&core).any(|payload| {
+            matches!(payload, Ok(Payload::CodeSectionEntry(ref body))
+                if body
+                    .get_operators_reader()
+                    .expect("operators")
+                    .into_iter()
+                    .any(|op| matches!(op, Ok(Operator::MemoryCopy { .. }))))
+        })
+    }
+
+    // Agent-free loop fixtures: emitting an Agent step's core needs the agent
+    // component imports wired into the resolve, which this bare emit path lacks.
+    assert!(
+        core_has_memory_copy(fixture("split_timeout")),
+        "Split loop must emit the arena-reset memory.copy"
+    );
+    assert!(
+        core_has_memory_copy(fixture("while_timeout")),
+        "While loop must emit the arena-reset memory.copy"
+    );
+    assert!(
+        !core_has_memory_copy(fixture("simple")),
+        "a loop-free workflow must not emit memory.copy"
+    );
+}
+
 #[test]
 fn direct_compile_supports_nested_split_graph() {
     let temp = tempfile::tempdir().expect("tempdir");

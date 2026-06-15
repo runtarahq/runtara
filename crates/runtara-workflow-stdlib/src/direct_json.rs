@@ -3108,6 +3108,52 @@ fn split_items(split: &DirectJsonSplit, source: &Value) -> Result<Value, String>
     Ok(Value::Array(items))
 }
 
+/// Cap a resolved value before it goes into a step-debug payload. A Split's
+/// `value` (the whole list it fans out over) and its `variables` (large in-scope
+/// references) can each be many MB; embedding them verbatim floods the event
+/// stream and can blow the event HTTP body. Small values pass through unchanged;
+/// large ones collapse to a compact summary that preserves type and size.
+fn bounded_debug_value(value: Value) -> Value {
+    const MAX_ITEMS: usize = 50;
+    const MAX_BYTES: usize = 8 * 1024;
+    // Cheap fast paths avoid serializing a huge array/string just to measure it.
+    match &value {
+        Value::Array(items) if items.len() > MAX_ITEMS => {
+            return serde_json::json!({
+                "_truncated": true,
+                "_type": "array",
+                "_length": items.len(),
+            });
+        }
+        Value::String(text) if text.len() > MAX_BYTES => {
+            return serde_json::json!({
+                "_truncated": true,
+                "_type": "string",
+                "_length": text.len(),
+            });
+        }
+        _ => {}
+    }
+    match serde_json::to_vec(&value) {
+        Ok(bytes) if bytes.len() > MAX_BYTES => match value {
+            Value::Object(map) => serde_json::json!({
+                "_truncated": true,
+                "_type": "object",
+                "_keys": map.keys().cloned().collect::<Vec<_>>(),
+                "_bytes": bytes.len(),
+            }),
+            Value::Array(items) => serde_json::json!({
+                "_truncated": true,
+                "_type": "array",
+                "_length": items.len(),
+                "_bytes": bytes.len(),
+            }),
+            other => other,
+        },
+        _ => value,
+    }
+}
+
 fn split_debug_inputs(split: &DirectJsonSplit, source: &Value) -> Result<Value, String> {
     let value_mapping = split
         .value
@@ -3116,7 +3162,7 @@ fn split_debug_inputs(split: &DirectJsonSplit, source: &Value) -> Result<Value, 
     let mut inputs = Map::new();
     inputs.insert(
         "value".to_string(),
-        apply_mapping_value(value_mapping, source)?,
+        bounded_debug_value(apply_mapping_value(value_mapping, source)?),
     );
     inputs.insert(
         "parallelism".to_string(),
@@ -3157,7 +3203,7 @@ fn split_debug_inputs(split: &DirectJsonSplit, source: &Value) -> Result<Value, 
     if let Some(extra_variables_mapping) = split.value.get("variables") {
         inputs.insert(
             "variables".to_string(),
-            apply_input_mapping(extra_variables_mapping, source)?,
+            bounded_debug_value(apply_input_mapping(extra_variables_mapping, source)?),
         );
     }
     Ok(Value::Object(inputs))

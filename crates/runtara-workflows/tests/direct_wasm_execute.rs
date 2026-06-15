@@ -318,6 +318,9 @@ struct CapturedRun {
     llm_requests: Vec<Value>,
     status_success: bool,
     stderr: String,
+    /// Peak guest linear memory observed by the embedded executor's limiter, when
+    /// the embedded path ran it. `None` under the CLI executor (no limiter hook).
+    memory_peak_bytes: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1048,10 +1051,11 @@ fn run_direct_workflow_capture_attempt(
     ];
     env_pairs.extend(extra_env.iter().cloned());
 
-    let (status_success, stderr) = if embedded_executor_mode() {
+    let (status_success, stderr, memory_peak_bytes) = if embedded_executor_mode() {
         execute_via_embedded(&compiled.wasm_path, &env_pairs)
     } else {
-        execute_via_cli(&compiled.wasm_path, &env_pairs)
+        let (ok, err) = execute_via_cli(&compiled.wasm_path, &env_pairs);
+        (ok, err, None)
     };
     let _ = stop_tx.send(());
     let _ = server_handle.join();
@@ -1084,6 +1088,7 @@ fn run_direct_workflow_capture_attempt(
         llm_requests,
         status_success,
         stderr,
+        memory_peak_bytes,
     }
 }
 
@@ -1119,8 +1124,13 @@ fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, S
     )
 }
 
-/// Embedded path: same component, same env, executed in-process.
-fn execute_via_embedded(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
+/// Embedded path: same component, same env, executed in-process. Returns the
+/// status, the failure reason (empty on success/guest-error), and the exact guest
+/// linear-memory peak from the executor's limiter.
+fn execute_via_embedded(
+    wasm_path: &Path,
+    env_pairs: &[(String, String)],
+) -> (bool, String, Option<u64>) {
     let executor = embedded_executor();
     let mut limits = runtara_component_host::WorkflowLimits::default();
     // Honor a per-run guest memory cap exactly as the production embedded runner
@@ -1156,11 +1166,12 @@ fn execute_via_embedded(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bo
         "embedded run: exit={:?} memory_peak_bytes={}",
         result.exit, result.memory_peak_bytes
     );
+    let peak = Some(result.memory_peak_bytes);
     match result.exit {
-        runtara_component_host::WorkflowExit::Completed => (true, String::new()),
-        runtara_component_host::WorkflowExit::GuestError => (false, String::new()),
-        runtara_component_host::WorkflowExit::Failed { reason } => (false, reason),
-        other => (false, format!("embedded run interrupted: {other:?}")),
+        runtara_component_host::WorkflowExit::Completed => (true, String::new(), peak),
+        runtara_component_host::WorkflowExit::GuestError => (false, String::new(), peak),
+        runtara_component_host::WorkflowExit::Failed { reason } => (false, reason, peak),
+        other => (false, format!("embedded run interrupted: {other:?}"), peak),
     }
 }
 
@@ -3615,6 +3626,7 @@ fn run_direct_workflow_embedded(
         llm_requests,
         status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
         stderr,
+        memory_peak_bytes: Some(result.memory_peak_bytes),
     }
 }
 
@@ -3726,11 +3738,15 @@ fn embedded_execute_is_repeatable_across_runs() {
 // a tiny one completes — isolating the per-iteration scope buffers as the cause.
 // ===========================================================================
 
-/// A sequential Split that fans out over `data.items`, running a trivial inner
-/// agent per item. The Split declares an iteration variable `big` whose value is
-/// an immediate string baked into the compiled workflow's static data — so it
-/// originates inside the guest (no HTTP input fetch) and is copied into every
-/// iteration's scope. The test sizes `big` via `scope_bytes`.
+/// A sequential Split that fans out over `data.items`. Each iteration's subgraph
+/// is a single Finish (no inner agent) so the loop makes NO per-iteration HTTP
+/// call — that keeps long runs clear of the harness's per-request flake, which
+/// would otherwise truncate a 300-iteration run before the leak accrues. The
+/// per-iteration leak under test (`split_iteration_variables` + `build_source`
+/// re-materializing the scope) happens regardless of the subgraph body. The Split
+/// declares an iteration variable `big` whose value is an immediate string baked
+/// into the compiled workflow's static data, copied into every iteration's scope;
+/// the test sizes `big` via `scope_bytes`.
 fn split_scope_leak_graph(scope_bytes: usize) -> String {
     let big = "a".repeat(scope_bytes);
     let graph = serde_json::json!({
@@ -3749,29 +3765,17 @@ fn split_scope_leak_graph(scope_bytes: usize) -> String {
                 },
                 "subgraph": {
                     "name": "Item",
-                    "entryPoint": "echo",
+                    "entryPoint": "finish",
                     "steps": {
-                        "echo": {
-                            "stepType": "Agent",
-                            "id": "echo",
-                            "name": "Echo",
-                            "agentId": "utils",
-                            "capabilityId": "return-input",
-                            "inputMapping": {
-                                "value": { "valueType": "immediate", "value": "ok" }
-                            }
-                        },
                         "finish": {
                             "stepType": "Finish",
                             "id": "finish",
                             "inputMapping": {
-                                "v": { "valueType": "reference", "value": "steps.echo.outputs" }
+                                "ok": { "valueType": "immediate", "value": true }
                             }
                         }
                     },
-                    "executionPlan": [
-                        { "fromStep": "echo", "toStep": "finish" }
-                    ]
+                    "executionPlan": []
                 }
             },
             "finish": {
@@ -3806,9 +3810,15 @@ fn split_scope_leak_input(n: usize) -> Vec<u8> {
 /// guest memory cap. The cap is far above the baseline machinery's footprint, so
 /// the only thing that can exhaust it is the leak — and the only variable between
 /// the two tests is the scope size.
-const SPLIT_LEAK_SCOPE_BYTES: usize = 8 * 1024 * 1024;
-const SPLIT_LEAK_ITEMS: usize = 40;
-const SPLIT_LEAK_MEM_CAP_BYTES: usize = 256 * 1024 * 1024;
+// Scope kept at 512 KiB (not multi-MB) so the stdlib's per-call parse peak and the
+// HTTP body sizes stay small — isolating the *workflow* heap leak as the only thing
+// that can exhaust the cap, and keeping the run clear of the harness's large-body
+// flake. With 300 iterations and a 64 MiB cap, the un-reclaimed per-iteration
+// buffers (~1+ MiB each) would OOM by ~iteration 50 without the arena reset; with
+// it, heap stays flat and the loop completes.
+const SPLIT_LEAK_SCOPE_BYTES: usize = 512 * 1024;
+const SPLIT_LEAK_ITEMS: usize = 300;
+const SPLIT_LEAK_MEM_CAP_BYTES: usize = 64 * 1024 * 1024;
 
 /// Regression for the per-iteration scope leak: a large in-scope variable is
 /// copied into every Split iteration, and the workflow core module's bump
@@ -3818,10 +3828,10 @@ const SPLIT_LEAK_MEM_CAP_BYTES: usize = 256 * 1024 * 1024;
 /// crossed, or (at a higher cap) an `HttpProtocolError` once a runaway buffer
 /// breaks an outbound call. Both are the production regression.
 ///
-/// This asserts the FIXED behavior (the Split completes); it is expected to fail
-/// until per-iteration heap is reclaimed. [`split_small_scope_completes_under_same_cap`]
-/// is the same graph with a tiny scope and stays green, isolating scope size as
-/// the cause.
+/// Asserts the FIXED behavior — guest memory stays bounded across the iterations
+/// (it would OOM at the cap without the per-iteration arena reset).
+/// [`split_small_scope_completes_under_same_cap`] is the same graph with a tiny
+/// scope, isolating scope size as the cause.
 #[test]
 fn split_large_scope_does_not_exhaust_guest_heap() {
     let Some(components_dir) = direct_e2e_components_dir() else {
@@ -3849,11 +3859,25 @@ fn split_large_scope_does_not_exhaust_guest_heap() {
         )],
     );
 
+    // Assert on the guest memory peak rather than completion: the arena reset's
+    // guarantee is *bounded* heap, and that signal is immune to the harness's
+    // load-sensitive HTTP flake (which can fail a run regardless of memory).
+    // Without the reset, 300 un-reclaimed iterations (~1+ MiB each) would climb
+    // well past this bound and OOM at the 64 MiB cap; with it, the peak stays near
+    // one iteration's footprint (a few MiB).
+    let peak = captured
+        .memory_peak_bytes
+        .expect("embedded executor reports a memory peak");
     assert!(
-        captured.status_success,
-        "large-scope split should complete without exhausting guest heap; \
-         stderr={:?} error_json={:?}",
-        captured.stderr, captured.error_json,
+        peak < 32 * 1024 * 1024,
+        "per-iteration heap not reclaimed: peak {peak} bytes over {} iterations \
+         (expected bounded to ~one iteration)",
+        SPLIT_LEAK_ITEMS,
+    );
+    assert!(
+        !captured.stderr.contains("guest memory limit exceeded"),
+        "Split exhausted guest memory mid-loop: {}",
+        captured.stderr,
     );
 }
 
@@ -3887,5 +3911,43 @@ fn split_small_scope_completes_under_same_cap() {
         captured.status_success,
         "small-scope split should complete under the same cap; stderr:\n{}",
         captured.stderr
+    );
+}
+
+/// With step events ON, a Split's own `step_debug_start` payload used to embed the
+/// fully-resolved `value` (the entire list it fans out over) and `variables` (large
+/// in-scope references), so a large scope flooded the event stream and broke the
+/// event POST before any iteration ran. `bounded_debug_value` now summarizes those
+/// fields, so the same large-scope Split runs to completion with events enabled.
+#[test]
+fn split_large_scope_with_events_does_not_flood_debug() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Few iterations: this exercises the Split's once-per-step debug payload with a
+    // large in-scope value, not the per-iteration leak (covered by the test above).
+    let graph = split_scope_leak_graph(SPLIT_LEAK_SCOPE_BYTES);
+    let input = split_scope_leak_input(8);
+
+    let captured = run_direct_workflow_capture_full(
+        &components_dir,
+        "split-large-scope-events",
+        &graph,
+        &input,
+        true, // track_events on: exercises the Split's debug payload
+        Vec::new(),
+        Vec::new(),
+        vec![(
+            "RUNTARA_INSTANCE_MEMORY_MAX_BYTES".into(),
+            SPLIT_LEAK_MEM_CAP_BYTES.to_string(),
+        )],
+    );
+
+    assert!(
+        captured.status_success,
+        "large-scope split with events should complete (bounded debug payload); \
+         stderr={:?} error_json={:?}",
+        captured.stderr, captured.error_json,
     );
 }
