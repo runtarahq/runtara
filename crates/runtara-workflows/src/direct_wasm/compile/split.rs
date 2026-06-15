@@ -159,6 +159,27 @@ pub(super) fn emit_loop_iteration_heap_reset(
     body.instruction(&Instruction::GlobalSet(0));
 }
 
+/// Free interned scope values no longer reachable from the loop's live roots
+/// (the parent source plus the surviving accumulator/state), reclaiming the
+/// previous iteration's superseded interned values from the stdlib arena. The
+/// companion to the heap reset above: that reclaims the workflow guest heap,
+/// this reclaims the host-side value arena. Best-effort — the result is ignored.
+pub(super) fn emit_value_store_retain(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    parent_source_ptr_local: u32,
+    parent_source_len_local: u32,
+    survivor_ptr_local: u32,
+    survivor_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(parent_source_ptr_local));
+    body.instruction(&Instruction::LocalGet(parent_source_len_local));
+    body.instruction(&Instruction::LocalGet(survivor_ptr_local));
+    body.instruction(&Instruction::LocalGet(survivor_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_value_store_retain));
+}
+
 fn push_split_failure_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
@@ -503,6 +524,16 @@ pub(super) fn emit_split_plan(
     emit_loop_iteration_heap_reset(
         body,
         DIRECT_SPLIT_HEAP_BASE_LOCAL,
+        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+    );
+    // Reclaim superseded interned values from the host arena, keeping those still
+    // reachable from the parent source and the accumulating results.
+    emit_value_store_retain(
+        body,
+        indices,
+        DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL,
+        DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
         DIRECT_SPLIT_RESULTS_PTR_LOCAL,
         DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     );

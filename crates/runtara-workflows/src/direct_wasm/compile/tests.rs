@@ -2106,6 +2106,43 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
     );
 }
 
+/// Deterministic guard for the per-iteration value-store GC (Stage 2): at each
+/// loop reset the emitter calls the stdlib `value-store-retain`, handing it the
+/// parent source + the surviving accumulator as roots so the prior iteration's
+/// superseded interned values are mark-swept away (otherwise a growing-accumulator
+/// loop interns O(N) blobs per iteration → O(N²) host memory). The full stdlib
+/// interface is always imported, so presence proves nothing — the signal is the
+/// *call*: a loop-bearing core module must call it, a loop-free one must not. This
+/// pins the GC wiring without depending on the flaky execute harness.
+#[test]
+fn direct_core_emits_value_store_retain_for_loops() {
+    const STDLIB_MODULE: &str = "cm32p2|runtara:workflow-stdlib/json@0.1";
+
+    fn core_calls_retain(graph: ExecutionGraph) -> bool {
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
+        let index = direct_core_import(&imports, STDLIB_MODULE, "value-store-retain");
+        run_calls.contains(&index)
+    }
+
+    for fixture_name in ["split_timeout", "while_timeout"] {
+        assert!(
+            core_calls_retain(fixture(fixture_name)),
+            "{fixture_name}: loop must call value-store-retain at its reset"
+        );
+    }
+
+    assert!(
+        !core_calls_retain(fixture("simple")),
+        "a loop-free workflow must not call value-store-retain"
+    );
+}
+
 #[test]
 fn direct_compile_supports_nested_split_graph() {
     let temp = tempfile::tempdir().expect("tempdir");

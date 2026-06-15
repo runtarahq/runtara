@@ -64,12 +64,19 @@ thread_local! {
 
 #[derive(Default)]
 struct ValueStore {
-    entries: HashMap<u64, Rc<Vec<u8>>>,
+    entries: HashMap<u64, StoreEntry>,
     /// Content hash -> id. An identical value re-interned across iterations (e.g.
     /// a constant loop variable resolved fresh each pass) reuses one arena entry
-    /// instead of growing the arena per iteration — bounding memory without a GC.
+    /// instead of growing the arena per iteration.
     content_index: HashMap<u64, u64>,
     next_id: u64,
+}
+
+struct StoreEntry {
+    bytes: Rc<Vec<u8>>,
+    /// Handle ids referenced inside this value's bytes — followed during
+    /// mark-sweep so reachability is transitive (a value can carry handles).
+    nested: Vec<u64>,
 }
 
 /// Clear the interning arena. Called at run start (`init-manifest`) so a reused
@@ -81,6 +88,59 @@ pub fn reset_value_store() {
         store.content_index.clear();
         store.next_id = 0;
     });
+}
+
+/// Free every interned value not reachable from `roots`. Called at a loop
+/// iteration boundary with the loop's live roots (the parent source plus the
+/// surviving accumulator/state), so the previous iteration's superseded values
+/// (old accumulator, per-iteration scratch) are reclaimed while everything still
+/// referenced is kept. Reachability is transitive via each entry's nested ids,
+/// so a handle that carries other handles is marked correctly. This is the GC
+/// that bounds a growing-accumulator loop to ~one live copy.
+pub fn value_store_retain(roots: &[&[u8]]) {
+    // Collect the root handle ids first. If any root fails to parse we cannot
+    // determine reachability, so free nothing rather than risk dropping a live
+    // value — GC is an optimization; never let it corrupt state.
+    let mut work: Vec<u64> = Vec::new();
+    for root in roots {
+        match serde_json::from_slice::<Value>(root) {
+            Ok(value) => collect_handle_ids(&value, &mut work),
+            Err(_) => return,
+        }
+    }
+    VALUE_STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if store.entries.is_empty() {
+            return;
+        }
+        let mut marked: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        while let Some(id) = work.pop() {
+            if marked.insert(id)
+                && let Some(entry) = store.entries.get(&id)
+            {
+                work.extend(entry.nested.iter().copied());
+            }
+        }
+        store.entries.retain(|id, _| marked.contains(id));
+        store.content_index.retain(|_, id| marked.contains(id));
+    });
+}
+
+/// Collect every `{"$wfref": id}` handle id reachable in `value` (one level of
+/// JSON structure — nested handles inside *stored* values are followed via the
+/// entry's recorded nested ids during the sweep, not here).
+fn collect_handle_ids(value: &Value, out: &mut Vec<u64>) {
+    if let Some(id) = wfref_id(value) {
+        out.push(id);
+        return;
+    }
+    match value {
+        Value::Array(items) => items.iter().for_each(|item| collect_handle_ids(item, out)),
+        Value::Object(map) => map
+            .values()
+            .for_each(|value| collect_handle_ids(value, out)),
+        _ => {}
+    }
 }
 
 fn content_hash(bytes: &[u8]) -> u64 {
@@ -139,9 +199,11 @@ fn intern_if_large(value: Value) -> Value {
         // Serialization can't realistically fail for a parsed Value; keep inline.
         return value;
     };
+    let hash = content_hash(&bytes);
+    let mut nested = Vec::new();
+    collect_handle_ids(&value, &mut nested);
     let id = VALUE_STORE.with(|store| {
         let mut store = store.borrow_mut();
-        let hash = content_hash(&bytes);
         // Reuse an identical existing entry (verifying bytes to rule out the
         // astronomically-unlikely hash collision) so constant re-interned values
         // don't grow the arena.
@@ -149,13 +211,19 @@ fn intern_if_large(value: Value) -> Value {
             && store
                 .entries
                 .get(&existing)
-                .is_some_and(|stored| stored.as_slice() == bytes.as_slice())
+                .is_some_and(|stored| stored.bytes.as_slice() == bytes.as_slice())
         {
             return existing;
         }
         let id = store.next_id;
         store.next_id += 1;
-        store.entries.insert(id, Rc::new(bytes));
+        store.entries.insert(
+            id,
+            StoreEntry {
+                bytes: Rc::new(bytes),
+                nested,
+            },
+        );
         store.content_index.insert(hash, id);
         id
     });
@@ -176,7 +244,8 @@ fn intern_scope_entries(map: &mut Map<String, Value>) {
 /// bytes); borrow non-handle values unchanged.
 fn deref_handle(value: &Value) -> Cow<'_, Value> {
     if let Some(id) = wfref_id(value)
-        && let Some(bytes) = VALUE_STORE.with(|store| store.borrow().entries.get(&id).cloned())
+        && let Some(bytes) =
+            VALUE_STORE.with(|store| store.borrow().entries.get(&id).map(|e| e.bytes.clone()))
         && let Ok(inner) = serde_json::from_slice::<Value>(&bytes)
     {
         return Cow::Owned(inner);
@@ -189,8 +258,17 @@ fn deref_handle(value: &Value) -> Cow<'_, Value> {
 /// final output) where a handle must never leak; ordinary reads go through
 /// `lookup_source_path`, which resolves handles as it traverses.
 fn materialize(value: Value) -> Value {
-    if wfref_id(&value).is_some() {
-        return materialize(deref_handle(&value).into_owned());
+    if let Some(id) = wfref_id(&value) {
+        // Resolve from the arena. A missing id is a dangling handle (its value
+        // was collected) — return Null rather than recursing on the handle, which
+        // would loop forever. A correct GC never frees a still-referenced value,
+        // so this is only a fail-safe.
+        let bytes =
+            VALUE_STORE.with(|store| store.borrow().entries.get(&id).map(|e| e.bytes.clone()));
+        return match bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+            Some(inner) => materialize(inner),
+            None => Value::Null,
+        };
     }
     match value {
         Value::Array(items) => Value::Array(items.into_iter().map(materialize).collect()),
@@ -5614,6 +5692,47 @@ mod tests {
             Some(json!(1))
         );
         assert_eq!(lookup_source_path(&source, "variables.big"), Some(big));
+    }
+
+    #[test]
+    fn value_store_retain_frees_unreachable() {
+        reset_value_store();
+        let keep = json!({ "rows": vec!["k".repeat(100); 500] }); // > 16 KiB
+        let drop = json!({ "rows": vec!["d".repeat(100); 500] }); // > 16 KiB, distinct
+        let keep_handle = intern_if_large(keep.clone());
+        let drop_handle = intern_if_large(drop.clone());
+        assert!(wfref_id(&keep_handle).is_some() && wfref_id(&drop_handle).is_some());
+        // Retain with only the keep handle reachable from a root.
+        let root = serde_json::to_vec(&json!({ "survivor": keep_handle.clone() })).unwrap();
+        value_store_retain(&[root.as_slice()]);
+        assert_eq!(
+            materialize(keep_handle),
+            keep,
+            "reachable value must survive"
+        );
+        assert_eq!(
+            materialize(drop_handle),
+            Value::Null,
+            "unreachable value must be collected"
+        );
+    }
+
+    #[test]
+    fn value_store_retain_marks_transitively() {
+        reset_value_store();
+        let inner = json!(vec!["i".repeat(100); 500]); // > 16 KiB
+        let inner_handle = intern_if_large(inner.clone());
+        // The outer value carries the inner handle, so collecting `outer` must
+        // keep `inner` alive transitively.
+        let outer = json!({ "inner": inner_handle, "pad": "x".repeat(20_000) });
+        let outer_handle = intern_if_large(outer);
+        let root = serde_json::to_vec(&json!({ "s": outer_handle.clone() })).unwrap();
+        value_store_retain(&[root.as_slice()]);
+        let materialized = materialize(outer_handle);
+        assert_eq!(
+            materialized["inner"], inner,
+            "nested handle survives transitively"
+        );
     }
 
     fn manifest(mapping_value: Value) -> Vec<u8> {

@@ -81,6 +81,59 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_value_store_retain_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let len1 = arg3;
+                    let result2 = T::value_store_retain(
+                        _rt::Vec::from_raw_parts(arg0.cast(), len0, len0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
+                    );
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
+                        Ok(_) => {
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                        }
+                        Err(e) => {
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr3
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr3
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_value_store_retain<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {}
+                        _ => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_build_source_cabi<T: Guest>(
                     arg0: *mut u8,
                     arg1: usize,
@@ -6860,6 +6913,15 @@ pub mod exports {
                 }
                 pub trait Guest {
                     fn init_manifest(manifest: _rt::Vec<u8>) -> Result<(), _rt::String>;
+                    /// Free interned scope values not reachable from the given loop roots (the
+                    /// parent source and the surviving accumulator/state). Called at a loop
+                    /// iteration boundary to reclaim the previous iteration's superseded values,
+                    /// bounding a growing-accumulator loop to ~one live copy. Best-effort: a
+                    /// root that fails to parse frees nothing.
+                    fn value_store_retain(
+                        parent_source: _rt::Vec<u8>,
+                        survivor: _rt::Vec<u8>,
+                    ) -> Result<(), _rt::String>;
                     fn build_source(
                         data: _rt::Vec<u8>,
                         variables: _rt::Vec<u8>,
@@ -7370,6 +7432,16 @@ pub mod exports {
                         unsafe extern "C" fn _post_return_init_manifest(arg0 : * mut u8,)
                         { unsafe { $($path_to_types)*:: __post_return_init_manifest::<$ty
                         > (arg0) } } #[unsafe (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#value-store-retain")] unsafe
+                        extern "C" fn export_value_store_retain(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_value_store_retain_cabi::<$ty >
+                        (arg0, arg1, arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#value-store-retain")]
+                        unsafe extern "C" fn _post_return_value_store_retain(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_value_store_retain::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#build-source")] unsafe extern
                         "C" fn export_build_source(arg0 : * mut u8, arg1 : usize, arg2 :
                         * mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> * mut
@@ -8512,102 +8584,103 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5051] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb5&\x01A\x02\x01A\x02\
-\x01B\xbb\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5104] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xea&\x01A\x02\x01A\x02\
+\x01B\xbd\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
-\x0dinit-manifest\x01\x04\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05s\
-teps\0\0\x05\x04\0\x0cbuild-source\x01\x06\x01@\x02\x0amapping-idy\x06source\0\0\
-\x05\x04\0\x0dapply-mapping\x01\x07\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06\
-source\0\0\x08\x04\0\x0eeval-condition\x01\x09\x01j\x01s\x01s\x01@\x02\x09switch\
--idy\x06source\0\0\x0a\x04\0\x0eprocess-switch\x01\x0b\x01@\x02\x09switch-idy\x06\
-source\0\0\x05\x04\0\x0cvalue-switch\x01\x0c\x01@\x02\x08split-idy\x06source\0\0\
-\x05\x04\0\x0bsplit-items\x01\x0d\x01j\x01y\x01s\x01@\x02\x08split-idy\x06source\
-\0\0\x0e\x04\0\x10split-item-count\x01\x0f\x01@\x03\x08split-idy\x06source\0\x05\
-indexy\0\x05\x04\0\x0asplit-item\x01\x10\x01@\x04\x08split-idy\x06source\0\x04it\
-em\0\x05indexy\0\x05\x04\0\x19split-iteration-variables\x01\x11\x01@\x03\x08spli\
-t-idy\x04item\0\x05indexy\0\x03\x04\0\x14split-validate-input\x01\x12\x01@\x03\x08\
-split-idy\x06output\0\x05indexy\0\x03\x04\0\x15split-validate-output\x01\x13\x01\
-@\x01\x08split-idy\0\x05\x04\0\x15split-initial-results\x01\x14\x01@\x03\x08spli\
-t-idy\x07results\0\x06output\0\0\x05\x04\0\x13split-append-output\x01\x15\x01@\x04\
-\x08split-idy\x07results\0\x05errors\x05indexy\0\x05\x04\0\x12split-append-error\
-\x01\x16\x01@\x03\x08split-idy\x06source\0\x07results\0\0\x05\x04\0\x0csplit-out\
-put\x01\x17\x04\0\x0fsplit-cache-key\x01\x0d\x04\0\x0csplit-result\x01\x17\x01@\x03\
-\x08split-idy\x06source\0\x0bstep-result\0\0\x05\x04\0\x18split-output-from-resu\
-lt\x01\x18\x01@\x01\x08while-idy\0\x0e\x04\0\x14while-max-iterations\x01\x19\x01\
-@\x01\x08while-idy\0\x05\x04\0\x13while-initial-state\x01\x1a\x01@\x03\x08while-\
-idy\x06source\0\x05state\0\0\x05\x04\0\x16while-condition-source\x01\x1b\x01@\x02\
-\x08while-idy\x06source\0\0\x08\x04\0\x0fwhile-condition\x01\x1c\x01@\x03\x08whi\
-le-idy\x09variables\0\x05state\0\0\x05\x04\0\x19while-iteration-variables\x01\x1d\
-\x01@\x03\x08while-idy\x05state\0\x06output\0\0\x05\x04\0\x13while-advance-state\
-\x01\x1e\x04\0\x0cwhile-output\x01\x1b\x01@\x02\x09filter-idy\x06source\0\0\x05\x04\
-\0\x06filter\x01\x1f\x01@\x02\x06log-idy\x06source\0\0\x05\x04\0\x09log-event\x01\
-\x20\x04\0\x03log\x01\x20\x01@\x02\x08error-idy\x06source\0\0\x05\x04\0\x0berror\
--event\x01!\x04\0\x05error\x01!\x01@\x03\x07step-ids\x05error\0\x05steps\0\0\x05\
-\x04\0\x0berror-steps\x01\"\x01@\x02\x08group-idy\x06source\0\0\x05\x04\0\x08gro\
-up-by\x01#\x01j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0$\x04\0\x11delay-du\
-ration-ms\x01%\x01@\x03\x08delay-idy\x06source\0\x0bduration-msw\0\x05\x04\0\x05\
-delay\x01&\x01@\x02\x07step-ids\x06source\0\0\x0a\x04\0\x0ebreakpoint-key\x01'\x01\
-@\x02\x07step-ids\x06source\0\0\x05\x04\0\x10breakpoint-event\x01(\x01@\x03\x07s\
-tep-ids\x0binstance-ids\x06source\0\0\x0a\x04\0\x0ewait-signal-id\x01)\x01kw\x01\
-j\x01*\x01s\x01@\x02\x07step-ids\x06source\0\0+\x04\0\x0fwait-timeout-ms\x01,\x01\
-@\x03\x07step-ids\x09signal-ids\x0atimeout-msw\0\x05\x04\0\x12wait-timeout-error\
-\x01-\x04\0\x1bwait-timeout-error-envelope\x01-\x01@\x04\x07step-ids\x0binstance\
--ids\x09signal-ids\x06source\0\0\x05\x04\0\x16wait-on-wait-variables\x01.\x01@\x02\
-\x07step-ids\x05error\0\0\x05\x04\0\x12wait-on-wait-error\x01/\x01@\x01\x07step-\
-ids\0$\x04\0\x15wait-poll-interval-ms\x010\x01@\x03\x07step-ids\x09signal-ids\x06\
-source\0\0\x05\x04\0\x0await-event\x011\x01@\x04\x07step-ids\x09signal-ids\x0ati\
-meout-ms*\x06source\0\0\x05\x04\0\x10wait-debug-start\x012\x01@\x04\x07step-ids\x09\
-signal-ids\x0esignal-payload\0\x06source\0\0\x05\x04\0\x0bwait-output\x013\x01@\x05\
-\x07step-ids\x0binstance-ids\x05labels\x0ccall-countery\x06source\0\0\x0a\x04\0\x16\
-ai-wait-tool-signal-id\x014\x01@\x01\x0esignal-payload\0\0\x05\x04\0\x13ai-wait-\
-tool-result\x015\x04\0\x18embed-workflow-cache-key\x01(\x01@\x03\x07step-ids\x06\
-source\0\x0bchild-input\0\0\x05\x04\0\x18embed-workflow-variables\x016\x01@\x03\x07\
-step-ids\x06source\0\x0cchild-output\0\0\x05\x04\0\x15embed-workflow-result\x017\
-\x01@\x03\x07step-ids\x06source\0\x0bstep-result\0\0\x05\x04\0!embed-workflow-ou\
-tput-from-result\x018\x01@\x02\x07step-ids\x0bchild-error\0\0\x05\x04\0\x14embed\
--workflow-error\x019\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x05\x04\0\x0f\
-retry-sleep-key\x01:\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-dela\
-y-msw\x0cmax-delay-msw\x0eretry-after-ms*\0$\x04\0\x0eretry-delay-ms\x01;\x01@\x01\
-\x05error\0\0\x08\x04\0\x18workflow-error-retryable\x01<\x04\0\x1bworkflow-error\
--rate-limited\x01<\x01@\x01\x05error\0\0+\x04\0\x1dworkflow-error-retry-after-ms\
-\x01=\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x05\x04\0\x0cagent-output\x01\
->\x04\0\x0fai-agent-output\x01>\x01@\x03\x04base\0\x08turn-out\0\x07pending\0\0\x05\
-\x04\0\x12ai-turn-next-input\x01?\x01@\x01\x08turn-out\0\0\x08\x04\0\x13ai-turn-\
-is-complete\x01@\x01@\x01\x08turn-out\0\0\x0e\x04\0\x12ai-turn-tool-count\x01A\x01\
-@\x02\x08turn-out\0\x05indexy\0\x05\x04\0\x11ai-turn-tool-args\x01B\x01@\x02\x08\
-turn-out\0\x05indexy\0\x0e\x04\0\x12ai-turn-tool-index\x01C\x01@\x04\x07pending\0\
-\x08turn-out\0\x05indexy\x0btool-result\0\0\x05\x04\0\x12ai-turn-add-result\x01D\
-\x01@\x03\x07step-ids\x09iterationy\x06source\0\0\x0a\x04\0\x11ai-turn-cache-key\
-\x01E\x01@\x04\x05state\0\x07pending\0\x0atool-callsy\x08complete\x7f\0\x05\x04\0\
-\x10ai-turn-snapshot\x01F\x01@\x02\x08snapshot\0\x04party\0\x05\x04\0\x15ai-turn\
--snapshot-part\x01G\x01@\x01\x08snapshot\0\0\x0e\x04\0\x1bai-turn-snapshot-tool-\
-calls\x01H\x01@\x01\x08snapshot\0\0\x08\x04\0\x19ai-turn-snapshot-complete\x01I\x01\
-@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x05\x04\0\x0eai-turn-output\x01J\x01\
+\x0dinit-manifest\x01\x04\x01@\x02\x0dparent-source\0\x08survivor\0\0\x03\x04\0\x12\
+value-store-retain\x01\x05\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05\
+steps\0\0\x06\x04\0\x0cbuild-source\x01\x07\x01@\x02\x0amapping-idy\x06source\0\0\
+\x06\x04\0\x0dapply-mapping\x01\x08\x01j\x01\x7f\x01s\x01@\x02\x0ccondition-idy\x06\
+source\0\0\x09\x04\0\x0eeval-condition\x01\x0a\x01j\x01s\x01s\x01@\x02\x09switch\
+-idy\x06source\0\0\x0b\x04\0\x0eprocess-switch\x01\x0c\x01@\x02\x09switch-idy\x06\
+source\0\0\x06\x04\0\x0cvalue-switch\x01\x0d\x01@\x02\x08split-idy\x06source\0\0\
+\x06\x04\0\x0bsplit-items\x01\x0e\x01j\x01y\x01s\x01@\x02\x08split-idy\x06source\
+\0\0\x0f\x04\0\x10split-item-count\x01\x10\x01@\x03\x08split-idy\x06source\0\x05\
+indexy\0\x06\x04\0\x0asplit-item\x01\x11\x01@\x04\x08split-idy\x06source\0\x04it\
+em\0\x05indexy\0\x06\x04\0\x19split-iteration-variables\x01\x12\x01@\x03\x08spli\
+t-idy\x04item\0\x05indexy\0\x03\x04\0\x14split-validate-input\x01\x13\x01@\x03\x08\
+split-idy\x06output\0\x05indexy\0\x03\x04\0\x15split-validate-output\x01\x14\x01\
+@\x01\x08split-idy\0\x06\x04\0\x15split-initial-results\x01\x15\x01@\x03\x08spli\
+t-idy\x07results\0\x06output\0\0\x06\x04\0\x13split-append-output\x01\x16\x01@\x04\
+\x08split-idy\x07results\0\x05errors\x05indexy\0\x06\x04\0\x12split-append-error\
+\x01\x17\x01@\x03\x08split-idy\x06source\0\x07results\0\0\x06\x04\0\x0csplit-out\
+put\x01\x18\x04\0\x0fsplit-cache-key\x01\x0e\x04\0\x0csplit-result\x01\x18\x01@\x03\
+\x08split-idy\x06source\0\x0bstep-result\0\0\x06\x04\0\x18split-output-from-resu\
+lt\x01\x19\x01@\x01\x08while-idy\0\x0f\x04\0\x14while-max-iterations\x01\x1a\x01\
+@\x01\x08while-idy\0\x06\x04\0\x13while-initial-state\x01\x1b\x01@\x03\x08while-\
+idy\x06source\0\x05state\0\0\x06\x04\0\x16while-condition-source\x01\x1c\x01@\x02\
+\x08while-idy\x06source\0\0\x09\x04\0\x0fwhile-condition\x01\x1d\x01@\x03\x08whi\
+le-idy\x09variables\0\x05state\0\0\x06\x04\0\x19while-iteration-variables\x01\x1e\
+\x01@\x03\x08while-idy\x05state\0\x06output\0\0\x06\x04\0\x13while-advance-state\
+\x01\x1f\x04\0\x0cwhile-output\x01\x1c\x01@\x02\x09filter-idy\x06source\0\0\x06\x04\
+\0\x06filter\x01\x20\x01@\x02\x06log-idy\x06source\0\0\x06\x04\0\x09log-event\x01\
+!\x04\0\x03log\x01!\x01@\x02\x08error-idy\x06source\0\0\x06\x04\0\x0berror-event\
+\x01\"\x04\0\x05error\x01\"\x01@\x03\x07step-ids\x05error\0\x05steps\0\0\x06\x04\
+\0\x0berror-steps\x01#\x01@\x02\x08group-idy\x06source\0\0\x06\x04\0\x08group-by\
+\x01$\x01j\x01w\x01s\x01@\x02\x08delay-idy\x06source\0\0%\x04\0\x11delay-duratio\
+n-ms\x01&\x01@\x03\x08delay-idy\x06source\0\x0bduration-msw\0\x06\x04\0\x05delay\
+\x01'\x01@\x02\x07step-ids\x06source\0\0\x0b\x04\0\x0ebreakpoint-key\x01(\x01@\x02\
+\x07step-ids\x06source\0\0\x06\x04\0\x10breakpoint-event\x01)\x01@\x03\x07step-i\
+ds\x0binstance-ids\x06source\0\0\x0b\x04\0\x0ewait-signal-id\x01*\x01kw\x01j\x01\
++\x01s\x01@\x02\x07step-ids\x06source\0\0,\x04\0\x0fwait-timeout-ms\x01-\x01@\x03\
+\x07step-ids\x09signal-ids\x0atimeout-msw\0\x06\x04\0\x12wait-timeout-error\x01.\
+\x04\0\x1bwait-timeout-error-envelope\x01.\x01@\x04\x07step-ids\x0binstance-ids\x09\
+signal-ids\x06source\0\0\x06\x04\0\x16wait-on-wait-variables\x01/\x01@\x02\x07st\
+ep-ids\x05error\0\0\x06\x04\0\x12wait-on-wait-error\x010\x01@\x01\x07step-ids\0%\
+\x04\0\x15wait-poll-interval-ms\x011\x01@\x03\x07step-ids\x09signal-ids\x06sourc\
+e\0\0\x06\x04\0\x0await-event\x012\x01@\x04\x07step-ids\x09signal-ids\x0atimeout\
+-ms+\x06source\0\0\x06\x04\0\x10wait-debug-start\x013\x01@\x04\x07step-ids\x09si\
+gnal-ids\x0esignal-payload\0\x06source\0\0\x06\x04\0\x0bwait-output\x014\x01@\x05\
+\x07step-ids\x0binstance-ids\x05labels\x0ccall-countery\x06source\0\0\x0b\x04\0\x16\
+ai-wait-tool-signal-id\x015\x01@\x01\x0esignal-payload\0\0\x06\x04\0\x13ai-wait-\
+tool-result\x016\x04\0\x18embed-workflow-cache-key\x01)\x01@\x03\x07step-ids\x06\
+source\0\x0bchild-input\0\0\x06\x04\0\x18embed-workflow-variables\x017\x01@\x03\x07\
+step-ids\x06source\0\x0cchild-output\0\0\x06\x04\0\x15embed-workflow-result\x018\
+\x01@\x03\x07step-ids\x06source\0\x0bstep-result\0\0\x06\x04\0!embed-workflow-ou\
+tput-from-result\x019\x01@\x02\x07step-ids\x0bchild-error\0\0\x06\x04\0\x14embed\
+-workflow-error\x01:\x01@\x02\x0dcheckpoint-ids\x0eattempt-numbery\0\x06\x04\0\x0f\
+retry-sleep-key\x01;\x01@\x05\x0eattempt-numbery\x0etotal-attemptsy\x0dbase-dela\
+y-msw\x0cmax-delay-msw\x0eretry-after-ms+\0%\x04\0\x0eretry-delay-ms\x01<\x01@\x01\
+\x05error\0\0\x09\x04\0\x18workflow-error-retryable\x01=\x04\0\x1bworkflow-error\
+-rate-limited\x01=\x01@\x01\x05error\0\0,\x04\0\x1dworkflow-error-retry-after-ms\
+\x01>\x01@\x03\x08agent-idy\x06source\0\x06output\0\0\x06\x04\0\x0cagent-output\x01\
+?\x04\0\x0fai-agent-output\x01?\x01@\x03\x04base\0\x08turn-out\0\x07pending\0\0\x06\
+\x04\0\x12ai-turn-next-input\x01@\x01@\x01\x08turn-out\0\0\x09\x04\0\x13ai-turn-\
+is-complete\x01A\x01@\x01\x08turn-out\0\0\x0f\x04\0\x12ai-turn-tool-count\x01B\x01\
+@\x02\x08turn-out\0\x05indexy\0\x06\x04\0\x11ai-turn-tool-args\x01C\x01@\x02\x08\
+turn-out\0\x05indexy\0\x0f\x04\0\x12ai-turn-tool-index\x01D\x01@\x04\x07pending\0\
+\x08turn-out\0\x05indexy\x0btool-result\0\0\x06\x04\0\x12ai-turn-add-result\x01E\
+\x01@\x03\x07step-ids\x09iterationy\x06source\0\0\x0b\x04\0\x11ai-turn-cache-key\
+\x01F\x01@\x04\x05state\0\x07pending\0\x0atool-callsy\x08complete\x7f\0\x06\x04\0\
+\x10ai-turn-snapshot\x01G\x01@\x02\x08snapshot\0\x04party\0\x06\x04\0\x15ai-turn\
+-snapshot-part\x01H\x01@\x01\x08snapshot\0\0\x0f\x04\0\x1bai-turn-snapshot-tool-\
+calls\x01I\x01@\x01\x08snapshot\0\0\x09\x04\0\x19ai-turn-snapshot-complete\x01J\x01\
+@\x03\x08agent-idy\x06source\0\x08turn-out\0\0\x06\x04\0\x0eai-turn-output\x01K\x01\
 @\x06\x08agent-idy\x08turn-out\0\x05indexy\x09iterationy\x0ccall-countery\x06sou\
-rce\0\0\x05\x04\0\x13ai-tool-debug-start\x01K\x01@\x07\x08agent-idy\x08turn-out\0\
-\x05indexy\x09iterationy\x0ccall-countery\x0btool-result\0\x06source\0\0\x05\x04\
-\0\x11ai-tool-debug-end\x01L\x01@\x06\x08agent-idy\x05phasey\x0cconversation\0\x05\
-state\0\x0cmax-messagesy\x06source\0\0\x05\x04\0\x15ai-memory-debug-start\x01M\x01\
+rce\0\0\x06\x04\0\x13ai-tool-debug-start\x01L\x01@\x07\x08agent-idy\x08turn-out\0\
+\x05indexy\x09iterationy\x0ccall-countery\x0btool-result\0\x06source\0\0\x06\x04\
+\0\x11ai-tool-debug-end\x01M\x01@\x06\x08agent-idy\x05phasey\x0cconversation\0\x05\
+state\0\x0cmax-messagesy\x06source\0\0\x06\x04\0\x15ai-memory-debug-start\x01N\x01\
 @\x07\x08agent-idy\x05phasey\x0cconversation\0\x05state\0\x0bprior-state\0\x0cma\
-x-messagesy\x06source\0\0\x05\x04\0\x13ai-memory-debug-end\x01N\x01@\x01\x0bload\
--output\0\0\x05\x04\0\x17ai-memory-initial-state\x01O\x01@\x02\x0cconversation\0\
-\x0bfinal-state\0\0\x05\x04\0\x14ai-memory-save-input\x01P\x01@\x02\x05state\0\x0c\
-max-messagesy\0\x05\x04\0\x19ai-memory-compact-sliding\x01Q\x01@\x03\x04base\0\x05\
-state\0\x0cmax-messagesy\0\x05\x04\0\x12ai-summarize-input\x01R\x01@\x01\x10summ\
-arize-result\0\0\x05\x04\0\x13ai-summarize-output\x01S\x01@\x02\x08agent-idy\x05\
-input\0\0\x05\x04\0\x14agent-validate-input\x01T\x04\0\x16agent-connection-input\
-\x01T\x01@\x02\x08agent-idy\x06source\0\0\x05\x04\0\x0fagent-cache-key\x01U\x04\0\
-\x15agent-retry-sleep-key\x01:\x04\0\x14agent-retry-delay-ms\x01;\x01ks\x01@\x07\
+x-messagesy\x06source\0\0\x06\x04\0\x13ai-memory-debug-end\x01O\x01@\x01\x0bload\
+-output\0\0\x06\x04\0\x17ai-memory-initial-state\x01P\x01@\x02\x0cconversation\0\
+\x0bfinal-state\0\0\x06\x04\0\x14ai-memory-save-input\x01Q\x01@\x02\x05state\0\x0c\
+max-messagesy\0\x06\x04\0\x19ai-memory-compact-sliding\x01R\x01@\x03\x04base\0\x05\
+state\0\x0cmax-messagesy\0\x06\x04\0\x12ai-summarize-input\x01S\x01@\x01\x10summ\
+arize-result\0\0\x06\x04\0\x13ai-summarize-output\x01T\x01@\x02\x08agent-idy\x05\
+input\0\0\x06\x04\0\x14agent-validate-input\x01U\x04\0\x16agent-connection-input\
+\x01U\x01@\x02\x08agent-idy\x06source\0\0\x06\x04\0\x0fagent-cache-key\x01V\x04\0\
+\x15agent-retry-sleep-key\x01;\x04\0\x14agent-retry-delay-ms\x01<\x01ks\x01@\x07\
 \x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
-ms*\x0aattributes\xd6\0\0\x05\x04\0\x10agent-error-info\x01W\x01j\x01\x02\x01s\x01\
+ms+\x0aattributes\xd7\0\0\x06\x04\0\x10agent-error-info\x01X\x01j\x01\x02\x01s\x01\
 @\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-a\
-fter-ms*\x0aattributes\xd6\0\0\xd8\0\x04\0\x16agent-retry-error-info\x01Y\x01@\x08\
+fter-ms+\x0aattributes\xd7\0\0\xd9\0\x04\0\x16agent-retry-error-info\x01Z\x01@\x08\
 \x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
-retry-after-ms*\x0aattributes\xd6\0\0\x05\x04\0\x0bagent-error\x01Z\x01@\x02\x08\
-agent-idy\x0aerror-info\0\0\x05\x04\0\x15agent-error-from-info\x01[\x01@\x03\x08\
-agent-idy\x06source\0\x05error\0\0\x05\x04\0\x11agent-debug-error\x01\\\x04\0\x10\
-step-debug-start\x01(\x04\0\x0estep-debug-end\x01(\x04\0\"runtara:workflow-stdli\
+retry-after-ms+\x0aattributes\xd7\0\0\x06\x04\0\x0bagent-error\x01[\x01@\x02\x08\
+agent-idy\x0aerror-info\0\0\x06\x04\0\x15agent-error-from-info\x01\\\x01@\x03\x08\
+agent-idy\x06source\0\x05error\0\0\x06\x04\0\x11agent-debug-error\x01]\x04\0\x10\
+step-debug-start\x01)\x04\0\x0estep-debug-end\x01)\x04\0\"runtara:workflow-stdli\
 b/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\
 \x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
 wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";

@@ -16,6 +16,13 @@ interface json {
 
     init-manifest: func(manifest: list<u8>) -> result<_, string>;
 
+    // Free interned scope values not reachable from the given loop roots (the
+    // parent source and the surviving accumulator/state). Called at a loop
+    // iteration boundary to reclaim the previous iteration's superseded values,
+    // bounding a growing-accumulator loop to ~one live copy. Best-effort: a
+    // root that fails to parse frees nothing.
+    value-store-retain: func(parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
+
     build-source: func(
         data: list<u8>,
         variables: list<u8>,

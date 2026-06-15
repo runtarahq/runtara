@@ -145,6 +145,11 @@ mod component {
             Ok(())
         }
 
+        fn value_store_retain(parent_source: Vec<u8>, survivor: Vec<u8>) -> Result<(), String> {
+            direct_json::value_store_retain(&[parent_source.as_slice(), survivor.as_slice()]);
+            Ok(())
+        }
+
         fn build_source(
             data: Vec<u8>,
             variables: Vec<u8>,

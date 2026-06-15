@@ -21,7 +21,10 @@ use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
-use super::split::{emit_loop_iteration_heap_reset, emit_split_append_error_payload_and_continue};
+use super::split::{
+    emit_loop_iteration_heap_reset, emit_split_append_error_payload_and_continue,
+    emit_value_store_retain,
+};
 use super::step_error::{pop_step_error_frame, push_step_error_frame};
 use super::{
     DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
@@ -226,6 +229,16 @@ pub(super) fn emit_while_plan(
     emit_loop_iteration_heap_reset(
         body,
         DIRECT_WHILE_HEAP_BASE_LOCAL,
+        DIRECT_WHILE_STATE_PTR_LOCAL,
+        DIRECT_WHILE_STATE_LEN_LOCAL,
+    );
+    // Reclaim superseded interned values from the host arena, keeping those still
+    // reachable from the parent source and the surviving loop state.
+    emit_value_store_retain(
+        body,
+        indices,
+        DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL,
+        DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
         DIRECT_WHILE_STATE_PTR_LOCAL,
         DIRECT_WHILE_STATE_LEN_LOCAL,
     );

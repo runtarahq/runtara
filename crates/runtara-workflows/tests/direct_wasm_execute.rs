@@ -3951,3 +3951,157 @@ fn split_large_scope_with_events_does_not_flood_debug() {
         captured.stderr, captured.error_json,
     );
 }
+
+/// A While whose accumulator grows by one chunk per iteration: each pass wraps the
+/// previous output (`variables._previousOutputs`) and appends a fresh `chunk_bytes`
+/// string, so after `k` iterations the carried state is a `k`-deep nest of size
+/// ~`k * chunk_bytes`. The chunk is sized above the 16 KiB intern threshold, so
+/// every iteration's `_previousOutputs` is a *distinct, larger* blob interned to a
+/// `$wfref` handle (content-dedup can't help a growing value), and the per-reset
+/// `value-store-retain` GC runs between each pass. The condition runs the loop
+/// exactly `data.count` times. The final Finish emits only `iterations` so the
+/// completion path stays tiny regardless of accumulator size.
+fn while_accumulator_graph(chunk_bytes: usize) -> String {
+    let chunk = "a".repeat(chunk_bytes);
+    let graph = serde_json::json!({
+        "durable": false,
+        "steps": {
+            "loop": {
+                "stepType": "While",
+                "id": "loop",
+                "name": "Grow Accumulator",
+                "condition": {
+                    "type": "operation",
+                    "op": "LT",
+                    "arguments": [
+                        { "valueType": "reference", "value": "loop.index" },
+                        { "valueType": "reference", "value": "data.count" }
+                    ]
+                },
+                "subgraph": {
+                    "name": "Append Chunk",
+                    "entryPoint": "finish",
+                    "steps": {
+                        "finish": {
+                            "stepType": "Finish",
+                            "id": "finish",
+                            "inputMapping": {
+                                // Wrap the prior accumulator and append a fresh
+                                // large chunk: the carried state grows by one
+                                // chunk per iteration.
+                                "prev": {
+                                    "valueType": "reference",
+                                    "value": "variables._previousOutputs",
+                                    "default": null
+                                },
+                                "chunk": { "valueType": "immediate", "value": chunk }
+                            }
+                        }
+                    },
+                    "executionPlan": []
+                },
+                "config": { "maxIterations": 1000 }
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                    "iterations": {
+                        "valueType": "reference",
+                        "value": "steps.loop.outputs.iterations"
+                    }
+                }
+            }
+        },
+        "entryPoint": "loop",
+        "executionPlan": [
+            { "fromStep": "loop", "toStep": "finish" }
+        ],
+        "variables": {},
+        "inputSchema": { "count": { "type": "number" } },
+        "outputSchema": {}
+    });
+    serde_json::to_string(&graph).expect("graph serializes")
+}
+
+fn while_accumulator_input(iterations: usize) -> Vec<u8> {
+    let input = serde_json::json!({ "data": { "count": iterations }, "variables": {} });
+    serde_json::to_vec(&input).expect("input serializes")
+}
+
+// 64 KiB chunk (above the 16 KiB intern threshold) appended over 60 iterations.
+// Final accumulator ~3.8 MiB. The two cost terms diverge sharply, which makes the
+// guest-memory peak a clean GC signal:
+//   * One iteration's working set — materialize the accumulator at the Finish
+//     boundary plus serde scratch — is O(current accumulator), the same with or
+//     without GC. This sets the *GC'd* peak (empirically ~28 MiB at 50 iters,
+//     ~34 MiB at 60).
+//   * The *persistent* interned store, if never swept, accumulates the distinct
+//     blobs of size 1·chunk, 2·chunk, … N·chunk → Σ k·64KiB for k=1..60 ≈ 114 MiB,
+//     past the 96 MiB cap. So without `value-store-retain` the store alone OOMs
+//     mid-loop (the production regression); with it only the current accumulator
+//     survives each reset, so the peak stays the working-set term, under the
+//     48 MiB assertion.
+const WHILE_ACC_CHUNK_BYTES: usize = 64 * 1024;
+const WHILE_ACC_ITERATIONS: usize = 60;
+const WHILE_ACC_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
+
+/// Regression for the growing-accumulator While: the per-reset `value-store-retain`
+/// frees the previous iteration's superseded interned accumulator, so the host
+/// value store stays O(N) instead of O(N²) and the guest memory peak stays bounded
+/// to the per-iteration working set.
+///
+/// Like the Split scope-leak tests, this asserts on `memory_peak_bytes`, NOT
+/// completion: a While issues a per-iteration `heartbeat`/`check-signals`/`now-ms`
+/// HTTP round-trip to the mock runtime, and that path carries the harness's
+/// documented load-sensitive HTTP flake — so requiring the run to finish would make
+/// the test flaky (under load even the index-only While fails to complete). The
+/// peak is flake-immune in the right direction: an early HTTP death only *lowers*
+/// the peak (test still passes), while a GC regression (linear → O(N²)) drives the
+/// peak past the cap and OOMs. The deterministic proof that the GC call is wired
+/// lives in `direct_core_emits_value_store_retain_for_loops`, the intern/materialize
+/// round-trip is covered by the stdlib `value_store_retain_*` and `lookup_resolves_*`
+/// unit tests; this is the end-to-end backstop.
+#[test]
+fn while_growing_accumulator_stays_bounded() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let graph = while_accumulator_graph(WHILE_ACC_CHUNK_BYTES);
+    let input = while_accumulator_input(WHILE_ACC_ITERATIONS);
+
+    let captured = run_direct_workflow_capture_full(
+        &components_dir,
+        "while-growing-accumulator",
+        &graph,
+        &input,
+        false,
+        Vec::new(),
+        Vec::new(),
+        vec![(
+            "RUNTARA_INSTANCE_MEMORY_MAX_BYTES".into(),
+            WHILE_ACC_MEM_CAP_BYTES.to_string(),
+        )],
+    );
+
+    // Without the GC the un-reclaimed O(N²) interned blobs climb past this bound and
+    // OOM at the 96 MiB cap; with it the peak is just one iteration's working set.
+    // 48 MiB sits above the GC'd working set and far below the GC-regression peak,
+    // so a linear→quadratic regression trips it while a healthy run — or an early
+    // HTTP flake — passes.
+    let peak = captured
+        .memory_peak_bytes
+        .expect("embedded executor reports a memory peak");
+    assert!(
+        peak < 48 * 1024 * 1024,
+        "accumulator not reclaimed across iterations: peak {peak} bytes over {} \
+         iterations (expected bounded to one accumulator's working set)",
+        WHILE_ACC_ITERATIONS,
+    );
+    assert!(
+        !captured.stderr.contains("guest memory limit exceeded"),
+        "While exhausted guest memory mid-loop (accumulator not GC'd): {}",
+        captured.stderr,
+    );
+}
