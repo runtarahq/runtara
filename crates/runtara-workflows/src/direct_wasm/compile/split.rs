@@ -40,21 +40,21 @@ use super::{
     DIRECT_SPLIT_FAILURE_ITEM_PTR_LOCAL, DIRECT_SPLIT_FAILURE_PARENT_SOURCE_LEN_LOCAL,
     DIRECT_SPLIT_FAILURE_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_FAILURE_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL, DIRECT_SPLIT_FAILURE_VARIABLES_LEN_LOCAL,
-    DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
-    DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL,
-    DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL, DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
-    DIRECT_SPLIT_RATE_LIMITED_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
-    DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_RETRY_AFTER_TAG_LOCAL,
-    DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL, DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL,
-    DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL, DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL,
-    DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
-    DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL, DIRECT_SPLIT_RETRYABLE_LOCAL,
-    DIRECT_SPLIT_VARIABLES_LEN_LOCAL, DIRECT_SPLIT_VARIABLES_PTR_LOCAL,
-    DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan,
-    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
-    emit_runtime_fail_return,
+    DIRECT_SPLIT_FAILURE_VARIABLES_PTR_LOCAL, DIRECT_SPLIT_HEAP_BASE_LOCAL,
+    DIRECT_SPLIT_INDEX_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL,
+    DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL,
+    DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL, DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL,
+    DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL, DIRECT_SPLIT_RATE_LIMITED_LOCAL,
+    DIRECT_SPLIT_RESULTS_LEN_LOCAL, DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+    DIRECT_SPLIT_RETRY_AFTER_TAG_LOCAL, DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL,
+    DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL, DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL,
+    DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+    DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL,
+    DIRECT_SPLIT_RETRYABLE_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
+    DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL,
+    DIRECT_STEP_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
+    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 fn push_split_frame(body: &mut WasmFunction) {
@@ -86,9 +86,11 @@ fn push_split_frame(body: &mut WasmFunction) {
         DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
     ));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
 }
 
 fn pop_split_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(
         DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
@@ -117,6 +119,44 @@ fn pop_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+}
+
+/// Compact a loop's surviving buffer (`buf_ptr`/`buf_len`) down to the captured
+/// heap watermark `base_local` and rewind the bump allocator to just past it,
+/// reclaiming every bump allocation made above the watermark since it was taken.
+/// The core module's allocator (`export_realloc`) only ever bumps a global heap
+/// pointer (global 0) and never frees, so without this a loop that allocates
+/// per-iteration host-call return buffers grows guest memory without bound.
+///
+/// After this runs the survivor sits at `base_local` and the heap pointer is
+/// `base_local + buf_len`. The first pass is a no-op (the survivor already sits at
+/// the watermark, so the copy is to itself and the pointer is unchanged).
+/// `memory.copy` is defined for overlapping/identical ranges, and the survivor is
+/// always small relative to the reclaimed scratch. Shared by Split (results
+/// accumulator) and While (loop state).
+pub(super) fn emit_loop_iteration_heap_reset(
+    body: &mut WasmFunction,
+    base_local: u32,
+    buf_ptr_local: u32,
+    buf_len_local: u32,
+) {
+    // memory.copy(dest = base, src = buf_ptr, n = buf_len)
+    body.instruction(&Instruction::LocalGet(base_local));
+    body.instruction(&Instruction::LocalGet(buf_ptr_local));
+    body.instruction(&Instruction::LocalGet(buf_len_local));
+    body.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+    // buf_ptr = base
+    body.instruction(&Instruction::LocalGet(base_local));
+    body.instruction(&Instruction::LocalSet(buf_ptr_local));
+    // Rewind the bump allocator (global 0, the heap pointer set by export_realloc)
+    // to base + buf_len, freeing all per-iteration scratch above it.
+    body.instruction(&Instruction::LocalGet(base_local));
+    body.instruction(&Instruction::LocalGet(buf_len_local));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::GlobalSet(0));
 }
 
 fn push_split_failure_frame(body: &mut WasmFunction) {
@@ -439,6 +479,13 @@ pub(super) fn emit_split_plan(
         DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     );
 
+    // Capture the heap watermark just above the results buffer (the only heap
+    // survivor across iterations). Everything an iteration allocates lands above
+    // this; the loop rewinds the bump allocator to here each pass so per-iteration
+    // scratch is reclaimed instead of leaked. See `emit_split_iteration_heap_reset`.
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RESULTS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
+
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
@@ -447,6 +494,18 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
+
+    // Reclaim the previous iteration's scratch: compact the results buffer back
+    // down to the watermark and rewind the bump pointer. Every continue path
+    // (success, dontStopOnFailed failure, retry) branches to this loop top, so a
+    // single reset here covers them all. The parent source and any outer-scope
+    // buffers live at or below the watermark and are preserved.
+    emit_loop_iteration_heap_reset(
+        body,
+        DIRECT_SPLIT_HEAP_BASE_LOCAL,
+        DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+        DIRECT_SPLIT_RESULTS_LEN_LOCAL,
+    );
 
     // Enforce the wall-clock timeout before each item. A Split that exceeds its
     // deadline is a hard failure (not aggregated or retried): it fails the

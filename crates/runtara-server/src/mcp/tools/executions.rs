@@ -1149,17 +1149,18 @@ pub async fn why_execution_failed(
 
     let mut completed = 0;
     let mut failed_steps = Vec::new();
-    let mut running = 0;
+    let mut running_steps = Vec::new();
     for step in &steps {
         match effective_step_status(step) {
             Some("completed") => completed += 1,
             Some("failed") => {
                 failed_steps.push(step.clone());
             }
-            Some("running") => running += 1,
+            Some("running") => running_steps.push(step.clone()),
             _ => {}
         }
     }
+    let running = running_steps.len();
 
     if status != "failed" && failed_steps.is_empty() {
         return json_result(json!({
@@ -1211,6 +1212,39 @@ pub async fn why_execution_failed(
             "error": step_error(first_failed),
             "durationMs": first_failed.get("durationMs"),
             "resolvedInputs": resolved_inputs,
+        })
+    } else if status == "failed" && !running_steps.is_empty() {
+        // The execution failed but no step recorded an error, yet one or more
+        // steps were still in flight (a `step_debug_start` with no matching
+        // `step_debug_end`). The run was terminated abruptly — e.g. a guest trap
+        // such as the per-instance memory limit being exceeded — before the step
+        // could record its outcome. Attribute the instance-level failure reason
+        // to the in-flight step(s) so the failure isn't a silent
+        // running/null-error record.
+        let in_flight: Vec<serde_json::Value> = running_steps
+            .iter()
+            .map(|s| {
+                json!({
+                    "stepId": s.get("stepId"),
+                    "stepName": s.get("stepName"),
+                    "stepType": s.get("stepType"),
+                    "scopeId": s.get("scopeId"),
+                })
+            })
+            .collect();
+        let first = &running_steps[0];
+        json!({
+            "stepId": first.get("stepId"),
+            "stepName": first.get("stepName"),
+            "stepType": first.get("stepType"),
+            "scopeId": first.get("scopeId"),
+            "status": "interrupted",
+            "error": execution.pointer("/data/error"),
+            "durationMs": first.get("durationMs"),
+            "note": "Step was in flight when the execution terminated abnormally; \
+                     no step-level error was recorded. The error shown is the \
+                     instance-level failure reason.",
+            "inFlightSteps": in_flight,
         })
     } else {
         json!(null)

@@ -322,6 +322,18 @@ const DIRECT_AI_TOOL_CALL_COUNTER_LOCAL: u32 = 106;
 /// `compile/dispatcher.rs`. i32 local.
 const DIRECT_CONDITION_RESULT_LOCAL: u32 = 107;
 
+/// Heap watermark for a `Split`/`While` loop: the bump-allocator pointer captured
+/// once the loop's surviving buffer (Split results / While state) is in place,
+/// just above it. Each iteration's host-call return buffers (item, iteration
+/// variables, rebuilt source, per-step outputs) are bump-allocated above this
+/// mark and never freed by the core module's allocator, so without reclamation a
+/// large-scope loop exhausts guest memory. At the top of each iteration the loop
+/// compacts its surviving buffer down to this mark and rewinds the bump pointer,
+/// bounding heap to `parent + survivor + one iteration`. Saved/restored with the
+/// Split and While frames so nested loops keep distinct marks; i32 local.
+const DIRECT_SPLIT_HEAP_BASE_LOCAL: u32 = 108;
+const DIRECT_WHILE_HEAP_BASE_LOCAL: u32 = DIRECT_SPLIT_HEAP_BASE_LOCAL;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

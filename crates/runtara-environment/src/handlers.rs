@@ -70,6 +70,20 @@ fn ensure_absolute_path(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Keep the last `max` characters of `s`, prefixing an ellipsis when truncated.
+/// Used to bound a crash reason folded into the instance error; the host writes
+/// the failure reason at the tail of stderr, so the tail is the relevant part.
+/// Char-based (not byte-based) so it never splits a UTF-8 boundary.
+fn tail_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let mut out = String::from("…");
+    out.extend(&chars[chars.len() - max..]);
+    out
+}
+
 /// Shared state for environment handlers.
 ///
 /// Contains database connection, runner, and configuration shared across all handlers.
@@ -1184,7 +1198,8 @@ pub fn spawn_container_monitor(
                             // instance as `suspended + shutdown_requested` so restart-time
                             // heartbeat-monitor recovery treats it as a normal suspension
                             // rather than a crash.
-                            let (status, termination_reason, error_msg) = if drain.is_draining() {
+                            let draining = drain.is_draining();
+                            let (status, termination_reason, default_error) = if draining {
                                 (
                                     "suspended",
                                     "shutdown_requested",
@@ -1194,10 +1209,24 @@ pub fn spawn_container_monitor(
                                 ("failed", "crashed", "Process terminated without SDK event")
                             };
 
+                            // A crash with no terminal SDK event (e.g. a guest trap such as
+                            // the per-instance memory limit being exceeded) leaves its only
+                            // diagnostic in the per-run stderr, where the host writes
+                            // "workflow failed: <reason>". Fold that reason into the instance
+                            // `error` so the failure is visible in the API rather than the
+                            // generic "terminated without SDK event" — otherwise the step that
+                            // was in flight surfaces as running with a null error.
+                            let crash_error: String = match stderr.as_deref().map(str::trim) {
+                                Some(reason) if !draining && !reason.is_empty() => {
+                                    format!("{default_error}: {}", tail_chars(reason, 2000))
+                                }
+                                _ => default_error.to_string(),
+                            };
+
                             let mut params = CompleteInstanceParams::new(&instance_id, status)
                                 .if_running()
                                 .with_termination(termination_reason, None)
-                                .with_error(error_msg);
+                                .with_error(&crash_error);
                             if let Some(s) = stderr.as_deref() {
                                 params = params.with_stderr(s);
                             }

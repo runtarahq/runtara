@@ -21,15 +21,16 @@ use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
-use super::split::emit_split_append_error_payload_and_continue;
+use super::split::{emit_loop_iteration_heap_reset, emit_split_append_error_payload_and_continue};
 use super::step_error::{pop_step_error_frame, push_step_error_frame};
 use super::{
     DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
     DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
-    DIRECT_WHILE_DEADLINE_MS_LOCAL, DIRECT_WHILE_INDEX_LOCAL, DIRECT_WHILE_MAX_ITERATIONS_LOCAL,
-    DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL, DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL,
-    DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL, DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL,
-    DIRECT_WHILE_STATE_LEN_LOCAL, DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
+    DIRECT_WHILE_DEADLINE_MS_LOCAL, DIRECT_WHILE_HEAP_BASE_LOCAL, DIRECT_WHILE_INDEX_LOCAL,
+    DIRECT_WHILE_MAX_ITERATIONS_LOCAL, DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL, DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL,
+    DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL, DIRECT_WHILE_STATE_LEN_LOCAL,
+    DIRECT_WHILE_STATE_PTR_LOCAL, DIRECT_WHILE_VARIABLES_LEN_LOCAL,
     DIRECT_WHILE_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables, emit_runtime_fail_return,
@@ -45,9 +46,11 @@ fn push_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_HEAP_BASE_LOCAL));
 }
 
 fn pop_while_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_PTR_LOCAL));
@@ -178,6 +181,13 @@ pub(super) fn emit_while_plan(
         DIRECT_WHILE_STATE_LEN_LOCAL,
     );
 
+    // Capture the heap watermark just above the loop state (the only heap survivor
+    // across iterations). Per-iteration scratch (condition source, iteration
+    // variables, rebuilt source, step outputs) is bump-allocated above this and
+    // reclaimed at the top of each pass; see `emit_loop_iteration_heap_reset`.
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_HEAP_BASE_LOCAL));
+
     // Resolve the timeout deadline once, before the loop. `timeout_ms` is a static
     // config value; generated Rust parses but does not enforce it, so direct mode
     // is the first to honor the documented "if exceeded, step fails" contract.
@@ -207,6 +217,18 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
+
+    // Reclaim the previous iteration's scratch: compact the loop state back down
+    // to the watermark and rewind the bump pointer. The condition-false and
+    // cancellation exits leave the loop without returning here, so their final
+    // pass's scratch is not reclaimed (one iteration's worth — negligible); every
+    // continuing pass funnels through this point.
+    emit_loop_iteration_heap_reset(
+        body,
+        DIRECT_WHILE_HEAP_BASE_LOCAL,
+        DIRECT_WHILE_STATE_PTR_LOCAL,
+        DIRECT_WHILE_STATE_LEN_LOCAL,
+    );
 
     // Enforce the wall-clock timeout before each iteration. On expiry the While
     // step fails with the static WHILE_TIMEOUT payload, routed through the same
