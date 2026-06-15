@@ -207,6 +207,69 @@ pub(super) fn emit_retptr_error_or_step_fail(
     }
 }
 
+/// Like [`emit_retptr_error_or_step_fail`], but for a step that has NOT already
+/// emitted a `step_debug_start` (Log emits no debug events on the happy path).
+/// On an unhandled failure it emits both a `step_debug_start` and an error
+/// `step_debug_end` so the failed step appears in the step summary, then fails;
+/// successful runs still emit nothing. The failure-branch start relies on the
+/// step's `debug_start_data` tolerating an unresolvable config.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_retptr_error_or_start_step_fail(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    failure_target: Option<DirectFailureTarget>,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    if let Some(failure_target) = failure_target {
+        emit_retptr_error_target_or_return(
+            function,
+            indices,
+            failure_target,
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        load_retptr_tag(function);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        load_retptr_list(function, error_ptr_local, error_len_local);
+        super::debug::emit_step_debug_event(
+            function,
+            indices,
+            static_data,
+            track_events,
+            true,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            scratch_ptr_local,
+            scratch_len_local,
+        );
+        super::debug::emit_step_debug_error(
+            function,
+            indices,
+            static_data,
+            track_events,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            error_ptr_local,
+            error_len_local,
+            scratch_ptr_local,
+            scratch_len_local,
+        );
+        super::emit_runtime_fail_return(function, indices, error_ptr_local, error_len_local);
+        function.instruction(&Instruction::End);
+    }
+}
+
 pub(super) fn emit_retptr_error_target_or_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

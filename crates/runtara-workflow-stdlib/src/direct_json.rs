@@ -2647,7 +2647,10 @@ impl DirectJsonManifest {
                 let delay = self
                     .delay_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Delay config for '{}'", step.id))?;
-                let duration_ms = apply_mapping_value(&delay.duration_ms, source)?;
+                // Tolerate an unresolvable duration (see the Agent arm) so the
+                // start emits and the resolution failure is attributed to the step.
+                let duration_ms =
+                    apply_mapping_value(&delay.duration_ms, source).unwrap_or(Value::Null);
                 Ok((
                     serde_json::json!({ "duration_ms": duration_ms }),
                     Some(delay.duration_ms.clone()),
@@ -2696,8 +2699,13 @@ impl DirectJsonManifest {
                 let log = self
                     .log_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
-                let details = apply_log(&log.value, source)?;
-                Ok((details.context, None))
+                // Tolerate an unresolvable log payload (see the Agent arm): a Log
+                // emits no start normally, but the emitter fires one on the
+                // resolution-failure path to attribute the failure to the step.
+                let context = apply_log(&log.value, source)
+                    .map(|details| details.context)
+                    .unwrap_or(Value::Null);
+                Ok((context, None))
             }
             "Split" => {
                 let split = self
