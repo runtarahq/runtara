@@ -4922,14 +4922,19 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
             "breakpoint-event",
         ),
     );
-    let custom_event_position = direct_core_call_position(
-        &run_calls,
-        direct_core_import(
-            &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
-            "custom-event",
-        ),
+    // The input-mapping failure path now attributes the failure to the step (an
+    // error step_debug_start/custom-event pair emitted right after apply-mapping,
+    // before the breakpoint). Those calls only execute on the failure branch, so
+    // assert the breakpoint's own custom-event (after breakpoint-event) and the
+    // success-path step-debug-start (after breakpoint-pause), not the first
+    // static occurrence.
+    let custom_event_index = direct_core_import(
+        &imports,
+        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "custom-event",
     );
+    let custom_event_position =
+        direct_core_call_position_after(&run_calls, custom_event_index, breakpoint_event_position);
     let breakpoint_pause_position = direct_core_call_position(
         &run_calls,
         direct_core_import(
@@ -4943,7 +4948,11 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         "cm32p2|runtara:workflow-stdlib/json@0.1",
         "step-debug-start",
     );
-    let step_debug_start_position = direct_core_call_position(&run_calls, step_debug_start_index);
+    let step_debug_start_position = direct_core_call_position_after(
+        &run_calls,
+        step_debug_start_index,
+        breakpoint_pause_position,
+    );
     let agent_validate_position = direct_core_call_position(
         &run_calls,
         direct_core_import(
@@ -6591,6 +6600,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     let mut fail_index = None;
     let mut step_debug_start_index = None;
     let mut step_debug_end_index = None;
+    let mut step_debug_error_index = None;
     let mut saw_step_debug_start_kind = false;
     let mut saw_step_debug_end_kind = false;
     let mut saw_finish_step_id = false;
@@ -6630,6 +6640,9 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-end") => {
                                 step_debug_end_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-error") => {
+                                step_debug_error_index = Some(next_function_index)
                             }
                             _ => {}
                         }
@@ -6675,6 +6688,14 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
         custom_event_index.expect("custom-event import"),
         fail_index.expect("fail import"),
         apply_mapping_index.expect("apply-mapping import"),
+        // Unhandled-failure attribution: on a mapping error this Finish emits an
+        // error step-debug-end (step-debug-error builder + custom-event) and then
+        // runtime.fail. These execute only on the error branch; the success path
+        // falls through to the end event below.
+        step_debug_error_index.expect("step-debug-error import"),
+        fail_index.expect("fail import"),
+        custom_event_index.expect("custom-event import"),
+        fail_index.expect("fail import"),
         fail_index.expect("fail import"),
         step_debug_end_index.expect("step-debug-end import"),
         fail_index.expect("fail import"),
@@ -6684,7 +6705,8 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     ];
     assert_eq!(
         run_calls, expected_call_order,
-        "tracked Finish run should emit start/end debug custom events around mapping"
+        "tracked Finish run should emit start/end debug custom events around mapping, \
+         plus an error step-debug-end on the unhandled-failure branch"
     );
     assert!(
         saw_step_debug_start_kind,
