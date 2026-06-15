@@ -135,6 +135,9 @@ mod component {
 
     impl Guest for Component {
         fn init_manifest(manifest: Vec<u8>) -> Result<(), String> {
+            // Start each run with an empty interning arena so a reused component
+            // instance never resolves a previous run's handles.
+            direct_json::reset_value_store();
             let manifest = DirectJsonManifest::parse(&manifest)?;
             MANIFEST.with(|slot| {
                 *slot.borrow_mut() = Some(manifest);

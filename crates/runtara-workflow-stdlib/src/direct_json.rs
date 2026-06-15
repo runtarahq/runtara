@@ -7,8 +7,10 @@
 //! a parsed [`DirectJsonManifest`] after `init-manifest` and delegate the WIT
 //! functions here.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -20,6 +22,186 @@ use crate::agent_input_validation::{
 use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::switch_helpers::process_switch_output;
 use crate::template::render_template;
+
+// ===========================================================================
+// Value interning ("scope handles").
+//
+// The direct runtime passes the whole scope as serialized JSON across every
+// host-call boundary. A loop carrying a large value (a While/Split accumulator,
+// an AiAgent conversation) therefore re-serializes and re-parses that value on
+// every step of every iteration — O(N^2) work, and a single parse of a large
+// value into a `serde_json::Value` (~5-10x the byte size) can alone exhaust the
+// per-instance guest memory cap. The old generated-Rust path held scope as
+// native structures passed by reference and did not have this cost.
+//
+// To restore that, a large value is interned once: its raw JSON bytes are kept
+// host-side in a per-run arena and, where it sits in the scope, replaced with a
+// small handle `{"$wfref": <id>}`. Carrying the scope between steps then moves
+// only the handle; the bytes are parsed only when a path actually reads into the
+// value (`lookup_source_path` resolves handles as it traverses), and a value is
+// fully reconstituted only when it leaves the stdlib for an external consumer.
+// Storing raw bytes (not a parsed Value) keeps the arena at ~1x the data.
+//
+// Safety property the rest of the code relies on: only values whose estimated
+// size is at least `WFREF_THRESHOLD_BYTES` are interned, so anything smaller is
+// byte-identical to before — the change is invisible to small-payload workflows.
+// ===========================================================================
+
+/// Sentinel object key marking an interned-value handle: `{"$wfref": <id>}`.
+const WFREF_KEY: &str = "$wfref";
+
+/// Values whose estimated serialized size is at least this many bytes are
+/// interned and carried by handle instead of inline.
+const WFREF_THRESHOLD_BYTES: usize = 16 * 1024;
+
+thread_local! {
+    /// Per-run arena of interned values, keyed by id, holding raw JSON bytes (not
+    /// a parsed Value, so the footprint stays ~1x the data). Reset at
+    /// `init-manifest`; the stdlib component is instantiated per workflow run, so
+    /// this never outlives a single execution.
+    static VALUE_STORE: RefCell<ValueStore> = RefCell::new(ValueStore::default());
+}
+
+#[derive(Default)]
+struct ValueStore {
+    entries: HashMap<u64, Rc<Vec<u8>>>,
+    /// Content hash -> id. An identical value re-interned across iterations (e.g.
+    /// a constant loop variable resolved fresh each pass) reuses one arena entry
+    /// instead of growing the arena per iteration — bounding memory without a GC.
+    content_index: HashMap<u64, u64>,
+    next_id: u64,
+}
+
+/// Clear the interning arena. Called at run start (`init-manifest`) so a reused
+/// component instance never sees a previous run's handles.
+pub fn reset_value_store() {
+    VALUE_STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        store.entries.clear();
+        store.content_index.clear();
+        store.next_id = 0;
+    });
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn make_wfref(id: u64) -> Value {
+    let mut handle = Map::with_capacity(1);
+    handle.insert(WFREF_KEY.to_string(), Value::from(id));
+    Value::Object(handle)
+}
+
+/// The interned-value id, if `value` is a `{"$wfref": <id>}` handle.
+fn wfref_id(value: &Value) -> Option<u64> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.get(WFREF_KEY).and_then(Value::as_u64)
+}
+
+/// Cheap structural size estimate (no allocation) used only to decide whether to
+/// intern; it approximates serialized length closely enough for a threshold.
+fn estimate_json_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 8,
+        Value::String(text) => text.len() + 2,
+        Value::Array(items) => {
+            2 + items
+                .iter()
+                .map(|item| estimate_json_size(item) + 1)
+                .sum::<usize>()
+        }
+        Value::Object(map) => {
+            2 + map
+                .iter()
+                .map(|(key, value)| key.len() + 4 + estimate_json_size(value))
+                .sum::<usize>()
+        }
+    }
+}
+
+/// Intern `value` if it is large, returning a `{"$wfref": id}` handle; otherwise
+/// return it unchanged. An existing handle is returned as-is so an unchanged
+/// value keeps its id across steps and is never re-interned or copied.
+fn intern_if_large(value: Value) -> Value {
+    if wfref_id(&value).is_some() || estimate_json_size(&value) < WFREF_THRESHOLD_BYTES {
+        return value;
+    }
+    let Ok(bytes) = serde_json::to_vec(&value) else {
+        // Serialization can't realistically fail for a parsed Value; keep inline.
+        return value;
+    };
+    let id = VALUE_STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let hash = content_hash(&bytes);
+        // Reuse an identical existing entry (verifying bytes to rule out the
+        // astronomically-unlikely hash collision) so constant re-interned values
+        // don't grow the arena.
+        if let Some(&existing) = store.content_index.get(&hash)
+            && store
+                .entries
+                .get(&existing)
+                .is_some_and(|stored| stored.as_slice() == bytes.as_slice())
+        {
+            return existing;
+        }
+        let id = store.next_id;
+        store.next_id += 1;
+        store.entries.insert(id, Rc::new(bytes));
+        store.content_index.insert(hash, id);
+        id
+    });
+    make_wfref(id)
+}
+
+/// Intern each large top-level entry of a scope container in place, leaving the
+/// structural skeleton and small entries inline so common lookups never touch
+/// the arena.
+fn intern_scope_entries(map: &mut Map<String, Value>) {
+    for value in map.values_mut() {
+        let taken = std::mem::replace(value, Value::Null);
+        *value = intern_if_large(taken);
+    }
+}
+
+/// Resolve a `{"$wfref": id}` handle to its concrete value (parsing the stored
+/// bytes); borrow non-handle values unchanged.
+fn deref_handle(value: &Value) -> Cow<'_, Value> {
+    if let Some(id) = wfref_id(value)
+        && let Some(bytes) = VALUE_STORE.with(|store| store.borrow().entries.get(&id).cloned())
+        && let Ok(inner) = serde_json::from_slice::<Value>(&bytes)
+    {
+        return Cow::Owned(inner);
+    }
+    Cow::Borrowed(value)
+}
+
+/// Fully resolve every `{"$wfref": id}` handle in `value`. Used at boundaries
+/// that serialize a value for an external consumer (checkpoint blob, cache key,
+/// final output) where a handle must never leak; ordinary reads go through
+/// `lookup_source_path`, which resolves handles as it traverses.
+fn materialize(value: Value) -> Value {
+    if wfref_id(&value).is_some() {
+        return materialize(deref_handle(&value).into_owned());
+    }
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(materialize).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, materialize(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
 
 /// Parsed direct-workflow manifest data needed by JSON stdlib calls.
 #[derive(Debug, Clone)]
@@ -2675,8 +2857,25 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         data = inner;
     }
     inject_runtime_identity_variables(&mut variables);
-    let steps: Value =
+    let mut steps: Value =
         serde_json::from_slice(steps).map_err(|err| format!("failed to parse steps: {err}"))?;
+
+    // Intern large scope values: replace each big `data`/`variables`/`steps`
+    // entry with a `$wfref` handle so the serialized source — and every buffer
+    // that carries it between steps and iterations — stays small. References
+    // resolve handles transparently in `lookup_source_path`; only an actual read
+    // of a big value materializes it. Incoming handles are preserved (an
+    // unchanged value keeps its id and is never re-copied). This is the core of
+    // bounding loop memory to ~one copy of the live data.
+    if let Value::Object(map) = &mut data {
+        intern_scope_entries(map);
+    }
+    if let Value::Object(map) = &mut variables {
+        intern_scope_entries(map);
+    }
+    if let Value::Object(map) = &mut steps {
+        intern_scope_entries(map);
+    }
 
     // onError handlers inject the captured error envelope at `steps.__error`
     // (alias `steps.error`, see `error_steps`). Mirror it to the source root so
@@ -4980,7 +5179,30 @@ fn insert_nested(output: &mut Map<String, Value>, key: &str, value: Value) {
 
 fn lookup_source_path(source: &Value, path: &str) -> Option<Value> {
     let pointer = path_to_json_pointer(path);
-    source.pointer(&pointer).cloned()
+    // Walk the JSON-pointer segments, resolving any `$wfref` handle encountered
+    // (at the root, mid-path, or the final node) so interned values are
+    // transparent to references. The result is fully materialized, so callers
+    // never see a handle. Only nodes actually traversed are parsed — carrying a
+    // large value through scope without reading it never touches the arena.
+    let mut current: Cow<Value> = Cow::Borrowed(source);
+    if wfref_id(current.as_ref()).is_some() {
+        current = Cow::Owned(deref_handle(current.as_ref()).into_owned());
+    }
+    for raw_segment in pointer.split('/').skip(1) {
+        let segment = unescape_pointer_segment(raw_segment);
+        let next: Value = match current.as_ref() {
+            Value::Object(map) => map.get(&segment)?.clone(),
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?.clone(),
+            _ => return None,
+        };
+        current = Cow::Owned(deref_handle(&next).into_owned());
+    }
+    Some(materialize(current.into_owned()))
+}
+
+/// Reverse the JSON-pointer escaping applied by [`path_to_json_pointer`].
+fn unescape_pointer_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
 }
 
 fn path_to_json_pointer(path: &str) -> String {
@@ -5331,6 +5553,68 @@ struct DirectJsonRequiredAgentInput {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn interning_round_trips_large_values() {
+        reset_value_store();
+        let big = json!({ "items": vec!["x".repeat(1000); 50] }); // ~50 KiB
+        let handle = intern_if_large(big.clone());
+        assert!(
+            wfref_id(&handle).is_some(),
+            "a value over the threshold should become a handle"
+        );
+        assert_eq!(materialize(handle), big, "materialize must round-trip");
+    }
+
+    #[test]
+    fn interning_leaves_small_values_inline() {
+        reset_value_store();
+        let small = json!({ "a": 1, "b": "short" });
+        assert_eq!(
+            intern_if_large(small.clone()),
+            small,
+            "small values must be byte-identical (no handle)"
+        );
+    }
+
+    #[test]
+    fn lookup_resolves_through_handles() {
+        reset_value_store();
+        let big = json!({ "pages": vec![json!({ "sku": "S" }); 4000] }); // > 16 KiB
+        let handle = intern_if_large(big.clone());
+        assert!(wfref_id(&handle).is_some());
+        let source = json!({ "variables": { "acc": handle } });
+        // Path crossing a handle resolves the underlying value.
+        assert_eq!(
+            lookup_source_path(&source, "variables.acc.pages[0].sku"),
+            Some(json!("S"))
+        );
+        // Reading the whole handle materializes it.
+        assert_eq!(lookup_source_path(&source, "variables.acc"), Some(big));
+    }
+
+    #[test]
+    fn build_source_interns_large_variable_and_resolves_it() {
+        reset_value_store();
+        let big = json!(vec!["y".repeat(100); 500]); // ~50 KiB array
+        let data = serde_json::to_vec(&json!({})).unwrap();
+        let variables = serde_json::to_vec(&json!({ "big": big, "small": 1 })).unwrap();
+        let steps = serde_json::to_vec(&json!({})).unwrap();
+        let source_bytes = build_source(&data, &variables, &steps).unwrap();
+        // The serialized source is tiny because `big` became a handle, even though
+        // it is referenced twice (source.variables and workflow.inputs.variables).
+        assert!(
+            source_bytes.len() < 2048,
+            "interned source should be small, got {} bytes",
+            source_bytes.len()
+        );
+        let source: Value = serde_json::from_slice(&source_bytes).unwrap();
+        assert_eq!(
+            lookup_source_path(&source, "variables.small"),
+            Some(json!(1))
+        );
+        assert_eq!(lookup_source_path(&source, "variables.big"), Some(big));
+    }
 
     fn manifest(mapping_value: Value) -> Vec<u8> {
         serde_json::to_vec(&json!({
