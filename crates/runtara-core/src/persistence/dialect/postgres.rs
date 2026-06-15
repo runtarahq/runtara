@@ -188,94 +188,145 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_list_step_summaries(order_direction: &str) -> String {
-        // `inputs`/`outputs`/`error` are cast to TEXT so the shared row
-        // mapper can parse them with `serde_json::from_str`. Previously
-        // these were returned as JSONB and decoded directly into
-        // `serde_json::Value`; the TEXT form round-trips identically.
+        // Page-first: the expensive part of this query is the per-row
+        // `convert_from(payload,'UTF8')::jsonb` parse and carrying the full
+        // `inputs`/`outputs` text through an `ORDER BY` (which spills to temp
+        // disk when payloads are large). To bound both:
+        //
+        // 1. `se`/`ee` are LIGHTWEIGHT: they parse each event's payload jsonb
+        //    exactly once (the `OFFSET 0` fence stops the planner from
+        //    flattening the subselect and re-evaluating `convert_from` once per
+        //    referenced key) and project only the small join/filter/status
+        //    keys — never `inputs`/`outputs`. `MATERIALIZED` forces that small
+        //    projection to be the join/sort input so the planner cannot carry
+        //    the full payload jsonb through a merge-join sort (which would
+        //    spill hundreds of MB of temp for large payloads).
+        // 2. `paired`/`page` filter, order and `LIMIT` on those small rows, so
+        //    the sort never carries large text and never spills.
+        // 3. Only the <= `limit` surviving rows are joined back to
+        //    `instance_events` to extract the heavy `inputs`/`outputs` text.
+        //
+        // `inputs`/`outputs`/`error` are emitted as TEXT so the shared row
+        // mapper can parse them with `serde_json::from_str`; the JSONB->TEXT
+        // round-trip produces an equal `serde_json::Value`.
         format!(
-            "WITH start_events AS ( \
+            "WITH se AS MATERIALIZED ( \
                 SELECT \
                     id, \
-                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
-                    convert_from(payload, 'UTF8')::jsonb->>'step_name' as step_name, \
-                    convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
-                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
-                    convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id, \
-                    (convert_from(payload, 'UTF8')::jsonb->'inputs')::text as inputs, \
-                    created_at \
-                FROM instance_events \
-                WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+                    created_at AS started_at, \
+                    sj->>'step_id' as step_id, \
+                    sj->>'step_type' as step_type, \
+                    sj->>'scope_id' as scope_id, \
+                    sj->>'parent_scope_id' as parent_scope_id \
+                FROM ( \
+                    SELECT id, created_at, convert_from(payload, 'UTF8')::jsonb as sj \
+                    FROM instance_events \
+                    WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+                    OFFSET 0 \
+                ) s0 \
             ), \
-            end_events AS ( \
+            ee AS MATERIALIZED ( \
                 SELECT \
-                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
-                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
-                    (convert_from(payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
-                    (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
-                    convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error, \
-                    created_at \
-                FROM instance_events \
-                WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+                    id AS end_id, \
+                    created_at AS completed_at, \
+                    ej->>'step_id' as step_id, \
+                    ej->>'scope_id' as scope_id, \
+                    (ej->'error')::text as error, \
+                    ej->'outputs'->>'_error' as output_error \
+                FROM ( \
+                    SELECT id, created_at, convert_from(payload, 'UTF8')::jsonb as ej \
+                    FROM instance_events \
+                    WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+                    OFFSET 0 \
+                ) e0 \
             ), \
             paired AS ( \
                 SELECT \
-                    s.step_id, \
-                    s.step_name, \
-                    s.step_type, \
-                    s.scope_id, \
-                    s.parent_scope_id, \
-                    s.inputs, \
-                    s.created_at as started_at, \
-                    e.created_at as completed_at, \
-                    e.outputs, \
-                    e.error, \
+                    se.id, \
+                    ee.end_id, \
+                    se.step_id, \
+                    se.step_type, \
+                    se.scope_id, \
+                    se.parent_scope_id, \
+                    se.started_at, \
+                    ee.completed_at, \
+                    ee.error, \
                     CASE \
-                        WHEN e.step_id IS NULL THEN 'running' \
-                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
-                        WHEN e.output_error = 'true' THEN 'failed' \
+                        WHEN ee.end_id IS NULL THEN 'running' \
+                        WHEN ee.error IS NOT NULL AND ee.error != 'null' THEN 'failed' \
+                        WHEN ee.output_error = 'true' THEN 'failed' \
                         ELSE 'completed' \
                     END as status, \
                     CASE \
-                        WHEN e.created_at IS NOT NULL \
-                        THEN EXTRACT(MILLISECONDS FROM (e.created_at - s.created_at))::bigint \
+                        WHEN ee.completed_at IS NOT NULL \
+                        THEN EXTRACT(MILLISECONDS FROM (ee.completed_at - se.started_at))::bigint \
                         ELSE NULL \
-                    END as duration_ms, \
-                    s.id as sort_id \
-                FROM start_events s \
-                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+                    END as duration_ms \
+                FROM se LEFT JOIN ee \
+                    ON se.step_id = ee.step_id AND COALESCE(se.scope_id, '') = COALESCE(ee.scope_id, '') \
+            ), \
+            page AS ( \
+                SELECT id, end_id, step_id, step_type, scope_id, parent_scope_id, \
+                       started_at, completed_at, error, status, duration_ms \
+                FROM paired \
+                WHERE ($2::TEXT IS NULL OR status = $2) \
+                  AND ($3::TEXT IS NULL OR step_type = $3) \
+                  AND ($4::TEXT IS NULL OR scope_id = $4) \
+                  AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
+                  AND (NOT $6 OR parent_scope_id IS NULL) \
+                ORDER BY id {order_direction} \
+                LIMIT $7 OFFSET $8 \
             ) \
             SELECT \
-                step_id, step_name, step_type, scope_id, parent_scope_id, \
-                inputs, started_at, completed_at, outputs, error, status, duration_ms \
-            FROM paired \
-            WHERE ($2::TEXT IS NULL OR status = $2) \
-              AND ($3::TEXT IS NULL OR step_type = $3) \
-              AND ($4::TEXT IS NULL OR scope_id = $4) \
-              AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
-              AND (NOT $6 OR parent_scope_id IS NULL) \
-            ORDER BY sort_id {order_direction} \
-            LIMIT $7 OFFSET $8"
+                p.step_id, \
+                convert_from(s.payload, 'UTF8')::jsonb->>'step_name' as step_name, \
+                p.step_type, \
+                p.scope_id, \
+                p.parent_scope_id, \
+                (convert_from(s.payload, 'UTF8')::jsonb->'inputs')::text as inputs, \
+                p.started_at, \
+                p.completed_at, \
+                (convert_from(e.payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
+                p.error, \
+                p.status, \
+                p.duration_ms \
+            FROM page p \
+            JOIN instance_events s ON s.id = p.id \
+            LEFT JOIN instance_events e ON e.id = p.end_id \
+            ORDER BY p.id {order_direction}"
         )
     }
 
     fn sql_count_step_summaries() -> &'static str {
-        "WITH start_events AS ( \
+        // Key-only (never touches `inputs`/`outputs`). The `OFFSET 0` fence
+        // parses each event's payload jsonb exactly once instead of re-parsing
+        // it per extracted key; `MATERIALIZED` keeps the full payload jsonb
+        // from being carried through the join/sort (see the list query).
+        "WITH start_events AS MATERIALIZED ( \
             SELECT \
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
-                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
-                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id \
-            FROM instance_events \
-            WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+                sj->>'step_id' as step_id, \
+                sj->>'step_type' as step_type, \
+                sj->>'scope_id' as scope_id, \
+                sj->>'parent_scope_id' as parent_scope_id \
+            FROM ( \
+                SELECT convert_from(payload, 'UTF8')::jsonb as sj \
+                FROM instance_events \
+                WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+                OFFSET 0 \
+            ) s0 \
         ), \
-        end_events AS ( \
+        end_events AS MATERIALIZED ( \
             SELECT \
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
-                (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
-                convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error \
-            FROM instance_events \
-            WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+                ej->>'step_id' as step_id, \
+                ej->>'scope_id' as scope_id, \
+                (ej->'error')::text as error, \
+                ej->'outputs'->>'_error' as output_error \
+            FROM ( \
+                SELECT convert_from(payload, 'UTF8')::jsonb as ej \
+                FROM instance_events \
+                WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+                OFFSET 0 \
+            ) e0 \
         ), \
         paired AS ( \
             SELECT \

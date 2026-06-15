@@ -210,73 +210,93 @@ impl Dialect for SqliteDialect {
     }
 
     fn sql_list_step_summaries(order_direction: &str) -> String {
-        // `inputs`/`outputs`/`error` are TEXT on SQLite because
-        // json_extract on a JSON object returns the serialized JSON
-        // string. The shared row mapper parses it back into
-        // `serde_json::Value`.
+        // Page-first: filter, order and `LIMIT` on lightweight key-only rows
+        // (`se`/`ee` never select `inputs`/`outputs`), then join the <= `limit`
+        // surviving rows back to `instance_events` to extract the heavy
+        // `inputs`/`outputs` text. This keeps the `ORDER BY` off the large
+        // payload columns so it never spills, and limits the costly
+        // `json_extract` of `inputs`/`outputs` to the returned page.
+        //
+        // `inputs`/`outputs`/`error` are TEXT on SQLite because json_extract on
+        // a JSON object returns the serialized JSON string; the shared row
+        // mapper parses it back into `serde_json::Value`.
         format!(
-            "WITH start_events AS ( \
+            "WITH se AS ( \
                 SELECT \
                     id, \
+                    created_at as started_at, \
                     json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
-                    json_extract(CAST(payload AS TEXT), '$.step_name') as step_name, \
                     json_extract(CAST(payload AS TEXT), '$.step_type') as step_type, \
                     json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.inputs') as inputs, \
-                    created_at \
+                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id \
                 FROM instance_events \
                 WHERE instance_id = ?1 AND subtype = 'step_debug_start' \
             ), \
-            end_events AS ( \
+            ee AS ( \
                 SELECT \
+                    id as end_id, \
+                    created_at as completed_at, \
                     json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
                     json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                    json_extract(CAST(payload AS TEXT), '$.outputs') as outputs, \
                     json_extract(CAST(payload AS TEXT), '$.error') as error, \
-                    json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error, \
-                    created_at \
+                    json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error \
                 FROM instance_events \
                 WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
             ), \
             paired AS ( \
                 SELECT \
-                    s.step_id, \
-                    s.step_name, \
-                    s.step_type, \
-                    s.scope_id, \
-                    s.parent_scope_id, \
-                    s.inputs, \
-                    s.created_at as started_at, \
-                    e.created_at as completed_at, \
-                    e.outputs, \
-                    e.error, \
+                    se.id, \
+                    ee.end_id, \
+                    se.step_id, \
+                    se.step_type, \
+                    se.scope_id, \
+                    se.parent_scope_id, \
+                    se.started_at, \
+                    ee.completed_at, \
+                    ee.error, \
                     CASE \
-                        WHEN e.step_id IS NULL THEN 'running' \
-                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
-                        WHEN e.output_error = 1 OR e.output_error = 'true' THEN 'failed' \
+                        WHEN ee.end_id IS NULL THEN 'running' \
+                        WHEN ee.error IS NOT NULL AND ee.error != 'null' THEN 'failed' \
+                        WHEN ee.output_error = 1 OR ee.output_error = 'true' THEN 'failed' \
                         ELSE 'completed' \
                     END as status, \
                     CASE \
-                        WHEN e.created_at IS NOT NULL \
-                        THEN CAST((julianday(e.created_at) - julianday(s.created_at)) * 86400000 AS INTEGER) \
+                        WHEN ee.completed_at IS NOT NULL \
+                        THEN CAST((julianday(ee.completed_at) - julianday(se.started_at)) * 86400000 AS INTEGER) \
                         ELSE NULL \
-                    END as duration_ms, \
-                    s.id as sort_id \
-                FROM start_events s \
-                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+                    END as duration_ms \
+                FROM se LEFT JOIN ee \
+                    ON se.step_id = ee.step_id AND COALESCE(se.scope_id, '') = COALESCE(ee.scope_id, '') \
+            ), \
+            page AS ( \
+                SELECT id, end_id, step_id, step_type, scope_id, parent_scope_id, \
+                       started_at, completed_at, error, status, duration_ms \
+                FROM paired \
+                WHERE (?2 IS NULL OR status = ?2) \
+                  AND (?3 IS NULL OR step_type = ?3) \
+                  AND (?4 IS NULL OR scope_id = ?4) \
+                  AND (?5 IS NULL OR parent_scope_id = ?5) \
+                  AND (NOT ?6 OR parent_scope_id IS NULL) \
+                ORDER BY id {order_direction} \
+                LIMIT ?7 OFFSET ?8 \
             ) \
             SELECT \
-                step_id, step_name, step_type, scope_id, parent_scope_id, \
-                inputs, started_at, completed_at, outputs, error, status, duration_ms \
-            FROM paired \
-            WHERE (?2 IS NULL OR status = ?2) \
-              AND (?3 IS NULL OR step_type = ?3) \
-              AND (?4 IS NULL OR scope_id = ?4) \
-              AND (?5 IS NULL OR parent_scope_id = ?5) \
-              AND (NOT ?6 OR parent_scope_id IS NULL) \
-            ORDER BY sort_id {order_direction} \
-            LIMIT ?7 OFFSET ?8"
+                p.step_id, \
+                json_extract(CAST(s.payload AS TEXT), '$.step_name') as step_name, \
+                p.step_type, \
+                p.scope_id, \
+                p.parent_scope_id, \
+                json_extract(CAST(s.payload AS TEXT), '$.inputs') as inputs, \
+                p.started_at, \
+                p.completed_at, \
+                json_extract(CAST(e.payload AS TEXT), '$.outputs') as outputs, \
+                p.error, \
+                p.status, \
+                p.duration_ms \
+            FROM page p \
+            JOIN instance_events s ON s.id = p.id \
+            LEFT JOIN instance_events e ON e.id = p.end_id \
+            ORDER BY p.id {order_direction}"
         )
     }
 
