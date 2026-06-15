@@ -801,6 +801,11 @@ pub struct WorkflowInstanceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "terminationType")]
     pub termination_type: Option<TerminationType>,
+    /// Instance-level failure reason. Carries the host-side crash reason (e.g. a
+    /// guest trap such as "guest memory limit exceeded") for runs that died without
+    /// the SDK reporting a terminal status, so the failure is not silent in the API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(rename = "workflowId")]
     pub workflow_id: String,
     /// Workflow name (populated when listing all executions)

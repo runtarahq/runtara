@@ -139,6 +139,7 @@ pub fn runtara_instance_to_dto_with_info(
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
         termination_type: None, // Not available from Runtara summary
+        error: None,            // Summary carries only `has_error`, not the message
         workflow_id,
         workflow_name,
         inputs: InstanceInputs {
@@ -187,6 +188,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         updated,
         status,
         termination_type: None,
+        error: info.error.clone(),
         workflow_id,
         workflow_name: None,
         inputs: InstanceInputs { data, variables },
@@ -235,6 +237,7 @@ pub fn runtara_info_to_execution_with_metadata(
         updated,
         status,
         termination_type: None,
+        error: info.error.clone(),
         workflow_id,
         workflow_name: workflow_name.clone(),
         inputs: InstanceInputs { data, variables },
