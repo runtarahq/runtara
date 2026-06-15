@@ -56,13 +56,17 @@ ensure_tool() {
 # cargo-component compiles each agent crate's cdylib into a Component-Model
 # .wasm. Pinned to match the version this codebase was built against.
 ensure_tool cargo-component cargo-component 0.21.1
-# wit-deps resolves the wasi:* dependencies pinned by
-# crates/runtara-agent-wit/wit/deps.toml. Only needed for first-time
-# checkouts or after a deps.toml bump; the lockfile is committed.
-ensure_tool wit-deps wit-deps-cli
 
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace"
+
+# wit-deps resolves the wasi:* dependencies pinned by
+# crates/runtara-agent-wit/wit/deps.toml. The resolved deps directory and
+# lockfile are committed, so normal CI/release builds do not need the tool.
+if [ ! -f "crates/runtara-agent-wit/wit/deps.lock" ] || [ ! -d "crates/runtara-agent-wit/wit/deps" ]; then
+    ensure_tool wit-deps wit-deps-cli
+    (cd crates/runtara-agent-wit && wit-deps lock)
+fi
 
 # Discover every workspace member under crates/agents/. Component agents
 # live there as a self-contained subsystem; runtara-agent-wit, -macro,

@@ -18,6 +18,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
+  WASM_PACK_VERSION: "0.13.1"
+  WIT_DEPS_VERSION: "0.6.0"
+  WASM_TOOLS_VERSION: "1.252.0"
+  CARGO_COMPONENT_VERSION: "0.21.1"
+  WASMTIME_VERSION: "43.0.0"
 
 jobs:
   notify-start:
@@ -68,8 +73,22 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
+      - name: Cache wasm-pack binary
+        id: cache-wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.13.1 --locked
+        if: steps.cache-wasm-pack.outputs.cache-hit != 'true'
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+          fi
 
       - name: Build frontend (embedded UI)
         working-directory: crates/runtara-server/frontend
@@ -104,8 +123,22 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
+      - name: Cache wasm-pack binary
+        id: cache-wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.13.1 --locked
+        if: steps.cache-wasm-pack.outputs.cache-hit != 'true'
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+          fi
 
       - name: Build frontend (embedded UI)
         working-directory: crates/runtara-server/frontend
@@ -380,11 +413,41 @@ jobs:
         with:
           submodules: true
 
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache wit-deps binary
+        id: cache-wit-deps
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wit-deps
+          key: wit-deps-${{ runner.os }}-${{ runner.arch }}-${{ env.WIT_DEPS_VERSION }}
+
       - name: Install wit-deps
-        run: cargo install wit-deps-cli --locked
+        if: steps.cache-wit-deps.outputs.cache-hit != 'true'
+        run: |
+          if command -v wit-deps >/dev/null 2>&1; then
+            echo "wit-deps already installed"
+          else
+            cargo install wit-deps-cli --version "$WIT_DEPS_VERSION" --locked
+          fi
+
+      - name: Cache wasm-tools binary
+        id: cache-wasm-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-tools
+          key: wasm-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_TOOLS_VERSION }}
 
       - name: Install wasm-tools
-        run: cargo install wasm-tools --locked
+        if: steps.cache-wasm-tools.outputs.cache-hit != 'true'
+        run: |
+          if command -v wasm-tools >/dev/null 2>&1 \
+            && wasm-tools --version | grep -q "wasm-tools ${WASM_TOOLS_VERSION}"; then
+            echo "wasm-tools ${WASM_TOOLS_VERSION} already installed"
+          else
+            cargo install wasm-tools --version "$WASM_TOOLS_VERSION" --locked
+          fi
 
       - name: Lock and resolve WIT dependencies
         working-directory: crates/runtara-agent-wit
@@ -421,7 +484,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-component
-          key: cargo-component-${{ runner.os }}-${{ runner.arch }}-0.21.1
+          key: cargo-component-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_COMPONENT_VERSION }}
 
       # Intentionally NOT using --locked. cargo-component v0.21.1's own
       # Cargo.lock pins wit-parser v0.219.1, which has since been yanked
@@ -430,7 +493,7 @@ jobs:
       # pinned via --version.
       - name: Install cargo-component
         if: steps.cache-cargo-component.outputs.cache-hit != 'true'
-        run: cargo install cargo-component --version 0.21.1
+        run: cargo install cargo-component --version "$CARGO_COMPONENT_VERSION"
 
       # direct_wasm_execute runs the composed artifacts
       # through the same CLI used by bundled environments. Keep the version
@@ -440,7 +503,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-43.0.0
+          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ env.WASMTIME_VERSION }}
 
       - name: Install wasmtime
         if: steps.cache-wasmtime.outputs.cache-hit != 'true'
@@ -448,7 +511,7 @@ jobs:
           RUNNER_ARCH_LOCAL: ${{ runner.arch }}
         run: |
           set -euo pipefail
-          version="43.0.0"
+          version="$WASMTIME_VERSION"
           case "$RUNNER_ARCH_LOCAL" in
             X64) asset="wasmtime-v${version}-x86_64-linux" ;;
             ARM64) asset="wasmtime-v${version}-aarch64-linux" ;;
@@ -463,9 +526,6 @@ jobs:
 
       - name: Verify wasmtime
         run: wasmtime --version
-
-      - name: Install wit-deps
-        run: cargo install wit-deps-cli --locked
 
       - name: Build all 24 agent components + emit sidecar meta.json
         env:

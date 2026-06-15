@@ -20,11 +20,16 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   SQLX_OFFLINE: true
+  WASM_PACK_VERSION: "0.13.1"
+  CARGO_COMPONENT_VERSION: "0.21.1"
 
 jobs:
   bundle:
     name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +71,9 @@ jobs:
         with:
           cache-bin: false
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -73,8 +81,22 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
+      - name: Cache wasm-pack binary
+        id: cache-wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.13.1 --locked
+        if: steps.cache-wasm-pack.outputs.cache-hit != 'true'
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+          fi
 
       # build-bundle.sh installs cargo-component (~5 min cold, used to build
       # the agent/shared components) into this directory keyed by version.
@@ -84,7 +106,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/runtara-bundle-build
-          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-0.21.1-locked
+          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-${{ env.CARGO_COMPONENT_VERSION }}-locked
 
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
