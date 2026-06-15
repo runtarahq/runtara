@@ -376,3 +376,48 @@ pub(super) fn emit_agent_debug_error(
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
     emit_fail_if_retptr_error_inplace(body, indices);
 }
+
+/// Emit an error-bearing `step_debug_end` for a failed step of any type — the
+/// generic analogue of [`emit_agent_debug_error`], keyed by step id. Used to
+/// attribute an unhandled input-resolution failure (mapping/condition/config) to
+/// the step whose `step_debug_start` already fired, so the step summary pairs
+/// them into a failed record carrying the error and a duration. `error_*` hold
+/// the captured error list; `debug_*` are free scratch for the built payload.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_step_debug_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    debug_ptr_local: u32,
+    debug_len_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_step_debug_error));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, debug_ptr_local, debug_len_local);
+
+    push_segment_args(body, &static_data.step_debug_end_kind);
+    body.instruction(&Instruction::LocalGet(debug_ptr_local));
+    body.instruction(&Instruction::LocalGet(debug_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_custom_event));
+    emit_fail_if_retptr_error_inplace(body, indices);
+}

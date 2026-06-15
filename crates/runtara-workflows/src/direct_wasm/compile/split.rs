@@ -15,9 +15,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, emit_retptr_error_target_or_return, load_retptr_list,
-    load_retptr_tag, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
-    return_if_retptr_error,
+    emit_retptr_error_or_return, emit_retptr_error_or_step_fail,
+    emit_retptr_error_target_or_return, load_retptr_list, load_retptr_tag, push_retptr_arg,
+    push_retptr_i32_load, push_retptr_i64_load, return_if_retptr_error,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
@@ -474,12 +474,19 @@ pub(super) fn emit_split_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_item_count));
-    emit_retptr_error_or_return(
+    emit_retptr_error_or_step_fail(
         body,
         indices,
+        static_data,
+        track_events,
         fresh_failure_target,
+        step_id,
+        source_ptr_local,
+        source_len_local,
         route_ptr_local,
         route_len_local,
+        output_ptr_local,
+        output_len_local,
     );
     push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));

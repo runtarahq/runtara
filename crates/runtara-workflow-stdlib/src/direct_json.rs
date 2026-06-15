@@ -2393,6 +2393,51 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize Agent step-debug-end payload: {err}"))
     }
 
+    /// Build a generic `step_debug_end` payload for a failed step of any type.
+    ///
+    /// The [`agent_debug_error`](Self::agent_debug_error) analogue keyed by step
+    /// id rather than agent id, so non-Agent steps (Finish, Conditional, Filter,
+    /// While, …) can attribute an unhandled input-resolution failure to
+    /// themselves with the same `{ outputs: { _error, error } }` shape the step
+    /// summary recognizes.
+    pub fn step_debug_error(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        error: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse step-debug-error source: {err}"))?;
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let timestamp = timestamp_ms();
+        let duration_ms = self
+            .debug_start_ms
+            .borrow_mut()
+            .remove(step_id)
+            .map(|start| timestamp.saturating_sub(start).max(0))
+            .unwrap_or(0);
+        let error = String::from_utf8_lossy(error).to_string();
+
+        let mut payload = debug_event_base(step, &source, timestamp);
+        payload.insert(
+            "outputs".to_string(),
+            serde_json::json!({
+                "_error": true,
+                "error": error,
+            }),
+        );
+        payload.insert(
+            "duration_ms".to_string(),
+            Value::Number(serde_json::Number::from(duration_ms)),
+        );
+
+        serde_json::to_vec(&Value::Object(payload))
+            .map_err(|err| format!("failed to serialize step-debug-end error payload: {err}"))
+    }
+
     /// Build the payload for a manifest Log step's runtime custom event.
     pub fn log_event(&self, log_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -2568,11 +2613,14 @@ impl DirectJsonManifest {
                 let filter = self
                     .filter_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
+                // Tolerate an unresolvable input (see the Agent arm): the failing
+                // step's start must still emit so the resolution failure can be
+                // attributed to it; show null inputs, the error rides the end.
                 let input = filter
                     .value
                     .get("value")
-                    .ok_or_else(|| "Filter config missing value".to_string())
-                    .and_then(|value| apply_mapping_value(value, source))?;
+                    .and_then(|value| apply_mapping_value(value, source).ok())
+                    .unwrap_or(Value::Null);
                 Ok((input, filter.value.get("condition").cloned()))
             }
             "Switch" => {
@@ -2580,7 +2628,7 @@ impl DirectJsonManifest {
                     .switch_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
                 Ok((
-                    switch_debug_inputs(&switch.value, source)?,
+                    switch_debug_inputs(&switch.value, source).unwrap_or(Value::Null),
                     Some(switch.value.clone()),
                 ))
             }
@@ -2591,8 +2639,8 @@ impl DirectJsonManifest {
                 let input = group_by
                     .value
                     .get("value")
-                    .ok_or_else(|| "GroupBy config missing value".to_string())
-                    .and_then(|value| apply_mapping_value(value, source))?;
+                    .and_then(|value| apply_mapping_value(value, source).ok())
+                    .unwrap_or(Value::Null);
                 Ok((input, None))
             }
             "Delay" => {
@@ -2615,7 +2663,15 @@ impl DirectJsonManifest {
                         agent.input_mapping_id, step.id
                     )
                 })?;
-                let inputs = apply_input_mapping(&mapping.value, source)?;
+                // Tolerate an input-mapping that fails to resolve (e.g. a template
+                // render error). A step-debug-start is diagnostic, and the emitter
+                // fires one on the input-resolution failure path so the failing
+                // step appears in the step summary with its error; if resolution
+                // errored here too the start would abort and the step would stay
+                // invisible. Show empty inputs — the paired error step-debug-end
+                // carries the actual failure.
+                let inputs = apply_input_mapping(&mapping.value, source)
+                    .unwrap_or_else(|_| Value::Object(Map::new()));
                 Ok((
                     inputs,
                     (!mapping.value.as_object().is_some_and(Map::is_empty))
@@ -2625,8 +2681,7 @@ impl DirectJsonManifest {
             "EmbedWorkflow" => {
                 let mapping = self.embed_workflow_mapping(step.id.as_str());
                 let inputs = mapping
-                    .map(|mapping| apply_input_mapping(&mapping.value, source))
-                    .transpose()?
+                    .and_then(|mapping| apply_input_mapping(&mapping.value, source).ok())
                     .unwrap_or_else(|| Value::Object(Map::new()));
                 Ok((
                     inputs,
@@ -2648,7 +2703,7 @@ impl DirectJsonManifest {
                 let split = self
                     .split_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
-                let inputs = split_debug_inputs(split, source)?;
+                let inputs = split_debug_inputs(split, source).unwrap_or(Value::Null);
                 Ok((inputs, None))
             }
             "While" => {

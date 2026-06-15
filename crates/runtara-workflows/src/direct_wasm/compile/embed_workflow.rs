@@ -26,7 +26,7 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::embed_retry::{
     emit_embed_retry_before_attempt, emit_embed_retry_condition, emit_embed_retry_error_info,
 };
-use super::mapping::{emit_apply_mapping, emit_build_source};
+use super::mapping::{emit_apply_mapping_start_step_error, emit_build_source};
 use super::{
     DIRECT_EMBED_CHILD_DATA_LEN_LOCAL, DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
     DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL, DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL,
@@ -513,14 +513,19 @@ pub(super) fn emit_embed_workflow_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
 
-    emit_apply_mapping(
+    emit_apply_mapping_start_step_error(
         body,
         indices,
+        static_data,
+        track_events,
         input_mapping_id,
+        step_id,
         DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
         DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
         DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
         DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+        output_ptr_local,
+        output_len_local,
         failure_target,
     );
 

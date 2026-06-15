@@ -6911,6 +6911,84 @@ pub mod exports {
                         }
                     }
                 }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_step_debug_error_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let len2 = arg5;
+                    let result3 = T::step_debug_error(
+                        _rt::string_lift(bytes0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
+                        _rt::Vec::from_raw_parts(arg4.cast(), len2, len2),
+                    );
+                    let ptr4 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result3 {
+                        Ok(e) => {
+                            *ptr4.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec5 = (e).into_boxed_slice();
+                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                            let len5 = vec5.len();
+                            ::core::mem::forget(vec5);
+                            *ptr4
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len5;
+                            *ptr4
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr5.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr4.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec6 = (e.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr4
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr4
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                    };
+                    ptr4
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_step_debug_error<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
                 pub trait Guest {
                     fn init_manifest(manifest: _rt::Vec<u8>) -> Result<(), _rt::String>;
                     /// Free interned scope values not reachable from the given loop roots (the
@@ -7417,6 +7495,14 @@ pub mod exports {
                     fn step_debug_end(
                         step_id: _rt::String,
                         source: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// Build a step-debug-end payload carrying an input-resolution error for any
+                    /// step type (generic analogue of agent-debug-error, keyed by step id). Used
+                    /// to attribute an unhandled mapping/condition/config failure to the step.
+                    fn step_debug_error(
+                        step_id: _rt::String,
+                        source: _rt::Vec<u8>,
+                        error: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
                 }
                 #[doc(hidden)]
@@ -8405,7 +8491,18 @@ pub mod exports {
                         "cabi_post_runtara:workflow-stdlib/json@0.1.0#step-debug-end")]
                         unsafe extern "C" fn _post_return_step_debug_end(arg0 : * mut
                         u8,) { unsafe { $($path_to_types)*::
-                        __post_return_step_debug_end::<$ty > (arg0) } } };
+                        __post_return_step_debug_end::<$ty > (arg0) } } #[unsafe
+                        (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#step-debug-error")] unsafe
+                        extern "C" fn export_step_debug_error(arg0 : * mut u8, arg1 :
+                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_step_debug_error_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#step-debug-error")]
+                        unsafe extern "C" fn _post_return_step_debug_error(arg0 : * mut
+                        u8,) { unsafe { $($path_to_types)*::
+                        __post_return_step_debug_error::<$ty > (arg0) } } };
                     };
                 }
                 #[doc(hidden)]
@@ -8584,9 +8681,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5104] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xea&\x01A\x02\x01A\x02\
-\x01B\xbd\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5154] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9c'\x01A\x02\x01A\x02\
+\x01B\xbf\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01j\0\x01s\x01@\x01\x08manifest\0\0\x03\x04\0\
 \x0dinit-manifest\x01\x04\x01@\x02\x0dparent-source\0\x08survivor\0\0\x03\x04\0\x12\
 value-store-retain\x01\x05\x01j\x01\0\x01s\x01@\x03\x04data\0\x09variables\0\x05\
@@ -8680,8 +8777,9 @@ fter-ms+\x0aattributes\xd7\0\0\xd9\0\x04\0\x16agent-retry-error-info\x01Z\x01@\x
 retry-after-ms+\x0aattributes\xd7\0\0\x06\x04\0\x0bagent-error\x01[\x01@\x02\x08\
 agent-idy\x0aerror-info\0\0\x06\x04\0\x15agent-error-from-info\x01\\\x01@\x03\x08\
 agent-idy\x06source\0\x05error\0\0\x06\x04\0\x11agent-debug-error\x01]\x04\0\x10\
-step-debug-start\x01)\x04\0\x0estep-debug-end\x01)\x04\0\"runtara:workflow-stdli\
-b/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\
+step-debug-start\x01)\x04\0\x0estep-debug-end\x01)\x01@\x03\x07step-ids\x06sourc\
+e\0\x05error\0\0\x06\x04\0\x10step-debug-error\x01^\x04\0\"runtara:workflow-stdl\
+ib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\
 \x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
 wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]

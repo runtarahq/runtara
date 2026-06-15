@@ -1506,6 +1506,136 @@ fn direct_wasm_execute_finish_passthrough_track_events_emits_step_debug_events()
 }
 
 #[test]
+fn direct_wasm_execute_agent_input_mapping_failure_records_step_error() {
+    // Diagnostic-gap regression: an Agent whose input mapping fails to resolve
+    // (here a template "undefined value" error) with NO onError handler used to
+    // abort with only an execution-level error — its per-step record showed
+    // durationMs: null, error: null. The emitter now attributes the failure to
+    // the step: a step_debug_start plus an error-bearing step_debug_end, so the
+    // step summary pairs them into a failed record carrying the actual error.
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let graph = r##"{
+      "entryPoint": "echo",
+      "executionPlan": [{"fromStep":"echo","toStep":"finish"}],
+      "steps": {
+        "echo": {"id":"echo","stepType":"Agent","name":"Echo",
+          "agentId":"utils","capabilityId":"return-input","inputMapping":{
+            "value": {"valueType":"template","value":"{{ data.missing.deep }}"}
+          }},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "ok": {"valueType":"immediate","value":true}
+        }}
+      }
+    }"##;
+
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "direct-wasm-execute-agent-input-mapping-failure",
+        graph,
+        br#"{}"#,
+        true, // track_events
+    );
+
+    assert!(
+        !captured.status_success,
+        "an unhandled input-mapping failure must fail the instance.\n--- stderr ---\n{}",
+        captured.stderr
+    );
+
+    let start = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_start" && e.payload_json["step_id"] == "echo")
+        .expect("the failed step must emit a step_debug_start (pre-fix: none was emitted)");
+    assert_eq!(start.payload_json["step_type"], "Agent");
+
+    let end = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == "echo")
+        .expect("the failed step must emit an error step_debug_end (pre-fix: none was emitted)");
+    assert_eq!(
+        end.payload_json["outputs"]["_error"], true,
+        "the step end must carry the error flag so the summary marks it failed"
+    );
+    let err_text = end.payload_json["outputs"]["error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        err_text.contains("undefined value") || err_text.contains("Template render error"),
+        "the step record must carry the actual input-resolution error, got: {err_text:?}"
+    );
+    assert!(
+        end.payload_json["duration_ms"].as_i64().is_some(),
+        "the failed step must carry a non-null duration"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_finish_input_mapping_failure_records_step_error() {
+    // Full-coverage companion to the Agent case: a non-Agent step (Finish) whose
+    // input mapping fails to resolve with no onError handler must also attribute
+    // the error to itself. Finish fires its step_debug_start before resolving, so
+    // this exercises the generic emit_retptr_error_or_step_fail primitive (the
+    // error step_debug_end pairs with the already-fired start).
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    let graph = r##"{
+      "entryPoint": "finish",
+      "executionPlan": [],
+      "steps": {
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "out": {"valueType":"template","value":"{{ data.missing.deep }}"}
+        }}
+      },
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"##;
+
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "direct-wasm-execute-finish-input-mapping-failure",
+        graph,
+        br#"{}"#,
+        true, // track_events
+    );
+
+    assert!(
+        !captured.status_success,
+        "an unhandled Finish input-mapping failure must fail the instance.\n--- stderr ---\n{}",
+        captured.stderr
+    );
+
+    let start = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_start" && e.payload_json["step_id"] == "finish")
+        .expect("the failed Finish must emit a step_debug_start");
+    assert_eq!(start.payload_json["step_type"], "Finish");
+
+    let end = captured
+        .events
+        .iter()
+        .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == "finish")
+        .expect("the failed Finish must emit an error step_debug_end (pre-fix: none was emitted)");
+    assert_eq!(end.payload_json["outputs"]["_error"], true);
+    let err_text = end.payload_json["outputs"]["error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        err_text.contains("undefined value") || err_text.contains("Template render error"),
+        "the Finish step record must carry the input-resolution error, got: {err_text:?}"
+    );
+    assert!(end.payload_json["duration_ms"].as_i64().is_some());
+}
+
+#[test]
 fn direct_wasm_execute_conditional_finish_branches_report_completion() {
     let Some(components_dir) = direct_e2e_components_dir() else {
         return;

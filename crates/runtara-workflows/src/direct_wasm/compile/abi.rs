@@ -26,7 +26,7 @@ use super::{
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
     DIRECT_RESULT_OPTION_LIST_LEN_OFFSET, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET,
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
-    DirectFailureTarget, DirectVariables,
+    DirectCoreStaticData, DirectFailureTarget, DirectVariables,
 };
 use crate::direct_wasm::static_data::DirectDataSegment;
 
@@ -150,6 +150,58 @@ pub(super) fn emit_retptr_error_or_return(
         load_retptr_tag(function);
         function.instruction(&Instruction::If(BlockType::Empty));
         load_retptr_list(function, error_ptr_local, error_len_local);
+        super::emit_runtime_fail_return(function, indices, error_ptr_local, error_len_local);
+        function.instruction(&Instruction::End);
+    }
+}
+
+/// Like [`emit_retptr_error_or_return`], but for an unhandled failure
+/// (`failure_target` is `None`) it first emits an error-bearing `step_debug_end`
+/// attributing the failure to `step_id` — whose `step_debug_start` has already
+/// fired — so the per-step record carries the error and a duration rather than
+/// the failure surfacing only at execution level. With an onError handler in
+/// scope it routes exactly as before. `scratch_*` are free locals used to build
+/// the debug payload; both branches consume the retptr error in place.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_retptr_error_or_step_fail(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    failure_target: Option<DirectFailureTarget>,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    if let Some(failure_target) = failure_target {
+        emit_retptr_error_target_or_return(
+            function,
+            indices,
+            failure_target,
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        load_retptr_tag(function);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        load_retptr_list(function, error_ptr_local, error_len_local);
+        super::debug::emit_step_debug_error(
+            function,
+            indices,
+            static_data,
+            track_events,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            error_ptr_local,
+            error_len_local,
+            scratch_ptr_local,
+            scratch_len_local,
+        );
         super::emit_runtime_fail_return(function, indices, error_ptr_local, error_len_local);
         function.instruction(&Instruction::End);
     }
