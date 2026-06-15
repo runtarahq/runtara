@@ -436,16 +436,22 @@ fn wasmtime_installed() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+// Serve one HTTP request from a *persistent* connection reader. The reader is
+// owned by the connection loop and reused across requests, NOT recreated here:
+// a `BufReader` reads ahead in blocks, so it routinely pulls the first bytes of
+// the *next* request past the current request's body. A per-request reader
+// (the previous design) discarded that read-ahead when it was dropped, so the
+// next request on a reused keep-alive connection began mid-stream — a desync the
+// client surfaced as `HttpProtocolError`. It only bit under load, when the SDK's
+// next request had already arrived by the time we read this one's body — i.e. on
+// long, many-request runs (AiAgent loops). Returns `Ok(true)` to keep the
+// connection, `Ok(false)`/`Err` to close it.
 fn handle_request(
-    stream: &mut std::net::TcpStream,
+    reader: &mut BufReader<std::net::TcpStream>,
     sink: &mpsc::Sender<CapturedMessage>,
     server_state: &ServerState,
     workflow_input: &[u8],
 ) -> std::io::Result<bool> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-
-    let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line)? == 0 {
         return Ok(false);
@@ -484,7 +490,7 @@ fn handle_request(
     }
 
     let body = if chunked {
-        read_chunked_body(&mut reader)?
+        read_chunked_body(reader)?
     } else {
         let mut buf = vec![0u8; content_length];
         if content_length > 0 {
@@ -500,6 +506,9 @@ fn handle_request(
         len = response_bytes.len(),
         body = response_bytes,
     );
+    // Write through the underlying stream. The BufReader only buffers reads, so
+    // its retained read-ahead survives across requests (full-duplex socket).
+    let stream = reader.get_mut();
     stream.write_all(response.as_bytes())?;
     stream.flush()?;
 
@@ -745,13 +754,23 @@ fn serve(
             return;
         }
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
                 let sink = sink.clone();
                 let server_state = server_state.clone();
                 let workflow_input = workflow_input.clone();
                 thread::spawn(move || {
+                    // Accepted sockets can inherit the listener's non-blocking flag
+                    // (macOS); force blocking + a timeout so request parsing blocks
+                    // for the next keep-alive request rather than erroring, and a
+                    // dead peer eventually frees the thread.
+                    stream.set_nonblocking(false).ok();
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                    // ONE reader for the whole connection: its read-ahead buffer
+                    // must persist across requests (see `handle_request`).
+                    let mut reader = BufReader::new(stream);
                     while let Ok(true) =
-                        handle_request(&mut stream, &sink, &server_state, workflow_input.as_slice())
+                        handle_request(&mut reader, &sink, &server_state, workflow_input.as_slice())
                     {
                         // Keep serving the same connection while the SDK reuses it.
                     }
