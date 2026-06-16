@@ -28,6 +28,11 @@ the `CompiledExpr` design via **runtime compilation cached per run**, entirely i
   `eval_condition` (Conditional + edge), `while_condition`, `filter` (per
   element), and Switch case conditions. Conditions are cached on the manifest
   (`c{id}`/`w{id}`/`f{id}`); Switch (cold) compiles per call.
+- **Input mappings** for `apply_mapping` (agent / finish / embedWorkflow) compile
+  to a cached `CompiledInputMapping` (keyed by mapping id) — agent input mappings
+  inside a Split body run per iteration, so this is a per-iteration win too. The
+  finish/agent post-passes are unchanged. Differential oracle
+  `compiled_input_mapping_matches_interpreter`.
 - W3: `lookup_segments` borrows through inline nodes (Cow) and clones only at a
   handle deref / the leaf; `apply_filter_compiled` consumes the input array and
   **moves** each element in/out of the scope instead of cloning it.
@@ -38,14 +43,15 @@ the `CompiledExpr` design via **runtime compilation cached per run**, entirely i
   tests (filter/while/conditional/switch incl. interned-handle template +
   bounded large-scope accumulator), correctness unchanged.
 
-**Deferred (no perf delta; documented for follow-up):**
-- **Cold per-step mapping sites** (`apply_mapping` agent/finish/embed, `apply_log`,
-  `apply_error`, `delay_duration_ms`, `wait_timeout_ms`, Split value/iteration
-  variables) still use the interpreter `apply_mapping_value`. They run once per
-  step (not per element), so compiling them yields ~0 perf and risks the
-  byte-exact debug-shape tests + the `resolve_nested_references` agent-input
-  rewrite. The `CompiledMapping` IR already covers them, so migration is
-  mechanical when wanted.
+**Deferred (mechanical; small/no perf delta):**
+- **Remaining mapping sites** — Split iteration variables, `apply_log` /
+  `apply_error` context, `delay_duration_ms`, `wait_timeout_ms` /
+  `wait_action_mapping` — still use the interpreter `apply_input_mapping` /
+  `apply_mapping_value`. These are small mappings; per-iteration only when the
+  step sits in a Split/While body. They are mechanical extensions of the shipped
+  `CompiledInputMapping` machinery (same compile + cache pattern as
+  `apply_mapping`), left to keep the cutover low-risk against the byte-exact
+  debug-shape tests.
 - **Interpreter retained** (not the M5 full deletion): it is still the cold-path
   mapping evaluator and the differential-test oracle. A literal "delete the
   interpreter" cutover requires migrating all mapping sites first.
