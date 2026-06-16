@@ -298,6 +298,12 @@ pub struct DirectJsonManifest {
     errors: BTreeMap<u32, DirectJsonError>,
     agents: BTreeMap<u32, DirectJsonAgent>,
     debug_start_ms: RefCell<BTreeMap<String, i64>>,
+    /// Lazily-populated cache of compiled conditions, keyed by a stable string
+    /// (`c{id}` Conditional/edge, `w{id}` While, `f{id}` Filter). A condition is
+    /// compiled once on first evaluation and reused across every element /
+    /// iteration within the run — the manifest (and this cache) is discarded
+    /// with the per-run component instance, so there is no cross-run staleness.
+    compiled_conditions: RefCell<BTreeMap<String, Rc<CompiledCondition>>>,
 }
 
 /// Raw Agent retry payload plus generated-Rust-compatible retry classification.
@@ -358,7 +364,21 @@ impl DirectJsonManifest {
             errors: collections.errors,
             agents: collections.agents,
             debug_start_ms: RefCell::new(BTreeMap::new()),
+            compiled_conditions: RefCell::new(BTreeMap::new()),
         })
+    }
+
+    /// Get-or-compile a condition, caching it by a stable key so each condition
+    /// is compiled once per run and reused across all evaluations.
+    fn compiled_condition(&self, key: &str, raw: &Value) -> Rc<CompiledCondition> {
+        if let Some(compiled) = self.compiled_conditions.borrow().get(key) {
+            return Rc::clone(compiled);
+        }
+        let compiled = Rc::new(compile_condition(raw));
+        self.compiled_conditions
+            .borrow_mut()
+            .insert(key.to_string(), Rc::clone(&compiled));
+        compiled
     }
 
     /// Apply a manifest mapping to a source JSON envelope.
@@ -389,7 +409,8 @@ impl DirectJsonManifest {
             .conditions
             .get(&condition_id)
             .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
-        eval_condition_expression(&condition.value, &source)
+        self.compiled_condition(&format!("c{condition_id}"), &condition.value)
+            .eval(&source)
     }
 
     /// Execute a manifest routing Switch config and return the selected route.
@@ -750,7 +771,8 @@ impl DirectJsonManifest {
             .whiles
             .get(&while_id)
             .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
-        eval_condition_expression(&while_step.condition, &source)
+        self.compiled_condition(&format!("w{while_id}"), &while_step.condition)
+            .eval(&source)
     }
 
     /// Build generated-code-compatible variables for one While iteration.
@@ -835,7 +857,17 @@ impl DirectJsonManifest {
             .filters
             .get(&filter_id)
             .ok_or_else(|| format!("unknown direct Filter id {filter_id}"))?;
-        let output = apply_filter(&filter.value, &source)?;
+        let input = filter
+            .value
+            .get("value")
+            .ok_or_else(|| "Filter config missing value".to_string())
+            .and_then(|value| apply_mapping_value(value, &source))?;
+        let condition_raw = filter
+            .value
+            .get("condition")
+            .ok_or_else(|| "Filter config missing condition".to_string())?;
+        let condition = self.compiled_condition(&format!("f{filter_id}"), condition_raw);
+        let output = apply_filter_compiled(input, &condition, &source)?;
         let steps = insert_step_output(
             &source,
             &filter.step_id,
@@ -3952,10 +3984,21 @@ fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
         .get("value")
         .ok_or_else(|| "Filter config missing value".to_string())
         .and_then(|value| apply_mapping_value(value, source))?;
-    let items = input.as_array().cloned().unwrap_or_default();
     let condition = config
         .get("condition")
         .ok_or_else(|| "Filter config missing condition".to_string())?;
+    apply_filter_compiled(input, &compile_condition(condition), source)
+}
+
+/// Filter a pre-resolved `input` array with a pre-compiled condition. The hot
+/// path: `manifest.filter` passes the run-cached compiled condition so the
+/// condition is compiled once per run, not re-walked/re-parsed per element.
+fn apply_filter_compiled(
+    input: Value,
+    condition: &CompiledCondition,
+    source: &Value,
+) -> Result<Value, String> {
+    let items = input.as_array().cloned().unwrap_or_default();
     let mut source = source.clone();
     if !source.is_object() {
         return Err("filter source must be a JSON object".to_string());
@@ -3967,7 +4010,7 @@ fn apply_filter(config: &Value, source: &Value) -> Result<Value, String> {
             .as_object_mut()
             .expect("filter source was checked as object")
             .insert("item".to_string(), item.clone());
-        if eval_condition_expression(condition, &source)? {
+        if condition.eval(&source)? {
             filtered.push(item);
         }
     }
@@ -5386,20 +5429,37 @@ fn insert_nested(output: &mut Map<String, Value>, key: &str, value: Value) {
 }
 
 fn lookup_source_path(source: &Value, path: &str) -> Option<Value> {
-    let pointer = path_to_json_pointer(path);
-    // Walk the JSON-pointer segments, resolving any `$wfref` handle encountered
-    // (at the root, mid-path, or the final node) so interned values are
-    // transparent to references. The result is fully materialized, so callers
-    // never see a handle. Only nodes actually traversed are parsed — carrying a
-    // large value through scope without reading it never touches the arena.
+    lookup_segments(source, &path_to_segments(path))
+}
+
+/// Pre-split a reference path into already-unescaped JSON-pointer segments.
+///
+/// This is the expensive half of [`lookup_source_path`] (the `['..']`/`["..]`
+/// bracket normalization, the `[N]` numeric-index scan, and the `~0`/`~1`
+/// escape round-trip). Hoisting it into a compiled reference means a per-element
+/// Filter/While/GroupBy reference parses its path **once** instead of on every
+/// evaluation. `lookup_segments` is the cheap walk over the result.
+fn path_to_segments(path: &str) -> Vec<String> {
+    path_to_json_pointer(path)
+        .split('/')
+        .skip(1)
+        .map(unescape_pointer_segment)
+        .collect()
+}
+
+/// Walk pre-split JSON-pointer segments, resolving any `$wfref` handle
+/// encountered (at the root, mid-path, or the final node) so interned values are
+/// transparent to references. The result is fully materialized, so callers never
+/// see a handle. Only nodes actually traversed are parsed — carrying a large
+/// value through scope without reading it never touches the arena.
+fn lookup_segments(source: &Value, segments: &[String]) -> Option<Value> {
     let mut current: Cow<Value> = Cow::Borrowed(source);
     if wfref_id(current.as_ref()).is_some() {
         current = Cow::Owned(deref_handle(current.as_ref()).into_owned());
     }
-    for raw_segment in pointer.split('/').skip(1) {
-        let segment = unescape_pointer_segment(raw_segment);
+    for segment in segments {
         let next: Value = match current.as_ref() {
-            Value::Object(map) => map.get(&segment)?.clone(),
+            Value::Object(map) => map.get(segment)?.clone(),
             Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?.clone(),
             _ => return None,
         };
@@ -5457,6 +5517,457 @@ fn path_to_json_pointer(path: &str) -> String {
         }
     }
     out
+}
+
+// ===========================================================================
+// Compiled expressions
+//
+// A condition/mapping/reference is parsed ONCE into a reusable evaluable form
+// and evaluated per element/iteration with no JSON re-walk and no path
+// re-parse. This is a structural mirror of the interpreter
+// (`eval_condition_expression` / `apply_mapping_value` / `apply_reference` /
+// `lookup_source_path`); leaf comparison/coercion delegate to the SAME helpers
+// (`values_equal` / `is_truthy` / `to_number` / `apply_type_hint` /
+// `render_template`), so results are bit-identical. Compilation is infallible:
+// any error the interpreter would raise at eval time is carried as an
+// `Error(String)` node holding the exact message and re-raised on eval, so
+// error parity (incl. message text) is preserved.
+// ===========================================================================
+
+#[derive(Debug, Clone, Copy)]
+enum CmpOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArrKind {
+    Contains,
+    In,
+    NotIn,
+}
+
+/// Compiled condition — mirrors `eval_condition_expression` (`-> bool`).
+#[derive(Debug, Clone)]
+enum CompiledCondition {
+    Op(Box<CompiledOp>),
+    /// Non-operation node: `is_truthy(eval_condition_value(..))`.
+    Truthy(CompiledMapping),
+}
+
+/// Compiled operation — mirrors `eval_condition_operation`.
+#[derive(Debug, Clone)]
+enum CompiledOp {
+    And(Vec<CompiledCondition>),
+    Or(Vec<CompiledCondition>),
+    Not(Option<Box<CompiledCondition>>),
+    Compare {
+        op: CmpOp,
+        args: Vec<CompiledArgValue>,
+    },
+    Equality {
+        ne: bool,
+        args: Vec<CompiledArgValue>,
+    },
+    StringMatch {
+        ends: bool,
+        args: Vec<CompiledArgValue>,
+    },
+    ArrayMatch {
+        kind: ArrKind,
+        args: Vec<CompiledArgValue>,
+    },
+    LengthBool(Vec<CompiledArgValue>),
+    IsDefined(Option<CompiledArgValue>),
+    IsEmpty(Option<CompiledArgValue>),
+    IsNotEmpty(Option<CompiledArgValue>),
+    /// Deferred error (missing op/args, query-only operator, unknown op).
+    Error(String),
+}
+
+/// Compiled condition argument evaluated as a value — mirrors
+/// `eval_condition_argument_as_value`.
+#[derive(Debug, Clone)]
+enum CompiledArgValue {
+    /// `LENGTH` operation used as a value (`eval_length_as_value`).
+    /// `None` = the LENGTH op had no `arguments` array.
+    LengthValue(Option<Vec<CompiledArgValue>>),
+    /// A non-LENGTH operation used as a value: `Value::Bool(eval_condition(..))`.
+    Condition(Box<CompiledCondition>),
+    /// A plain value/mapping (`eval_condition_value`).
+    Value(CompiledMapping),
+}
+
+/// Compiled mapping value — mirrors `apply_mapping_value`.
+#[derive(Debug, Clone)]
+enum CompiledMapping {
+    Reference(CompiledReference),
+    Immediate(Value),
+    Composite(Box<CompiledComposite>),
+    Template(String),
+    /// Deferred error (not an object / missing valueType / bad reference path /
+    /// non-string template / unsupported valueType / bad composite).
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+enum CompiledComposite {
+    Object(Vec<(String, CompiledMapping)>),
+    Array(Vec<CompiledMapping>),
+}
+
+/// Compiled reference — `lookup` path pre-split once. Mirrors `apply_reference`.
+#[derive(Debug, Clone)]
+struct CompiledReference {
+    segments: Vec<String>,
+    default: Option<Value>,
+    type_hint: Option<String>,
+}
+
+// ---- Compilation (infallible; defers errors to Error nodes) ----
+
+fn compile_condition(expr: &Value) -> CompiledCondition {
+    if is_condition_operation(expr) {
+        CompiledCondition::Op(Box::new(compile_op(expr)))
+    } else {
+        CompiledCondition::Truthy(compile_value(expr))
+    }
+}
+
+fn compile_op(expr: &Value) -> CompiledOp {
+    let Some(op) = expr.get("op").and_then(Value::as_str) else {
+        return CompiledOp::Error("condition operation missing op".to_string());
+    };
+    let Some(args) = expr.get("arguments").and_then(Value::as_array) else {
+        return CompiledOp::Error("condition operation missing arguments".to_string());
+    };
+    let vals = || args.iter().map(compile_arg_value).collect::<Vec<_>>();
+    match op {
+        "AND" => CompiledOp::And(args.iter().map(compile_condition).collect()),
+        "OR" => CompiledOp::Or(args.iter().map(compile_condition).collect()),
+        "NOT" => CompiledOp::Not(args.first().map(|a| Box::new(compile_condition(a)))),
+        "GT" => CompiledOp::Compare {
+            op: CmpOp::Gt,
+            args: vals(),
+        },
+        "GTE" => CompiledOp::Compare {
+            op: CmpOp::Gte,
+            args: vals(),
+        },
+        "LT" => CompiledOp::Compare {
+            op: CmpOp::Lt,
+            args: vals(),
+        },
+        "LTE" => CompiledOp::Compare {
+            op: CmpOp::Lte,
+            args: vals(),
+        },
+        "EQ" => CompiledOp::Equality {
+            ne: false,
+            args: vals(),
+        },
+        "NE" => CompiledOp::Equality {
+            ne: true,
+            args: vals(),
+        },
+        "STARTS_WITH" => CompiledOp::StringMatch {
+            ends: false,
+            args: vals(),
+        },
+        "ENDS_WITH" => CompiledOp::StringMatch {
+            ends: true,
+            args: vals(),
+        },
+        "CONTAINS" => CompiledOp::ArrayMatch {
+            kind: ArrKind::Contains,
+            args: vals(),
+        },
+        "IN" => CompiledOp::ArrayMatch {
+            kind: ArrKind::In,
+            args: vals(),
+        },
+        "NOT_IN" => CompiledOp::ArrayMatch {
+            kind: ArrKind::NotIn,
+            args: vals(),
+        },
+        "LENGTH" => CompiledOp::LengthBool(vals()),
+        "IS_DEFINED" => CompiledOp::IsDefined(args.first().map(compile_arg_value)),
+        "IS_EMPTY" => CompiledOp::IsEmpty(args.first().map(compile_arg_value)),
+        "IS_NOT_EMPTY" => CompiledOp::IsNotEmpty(args.first().map(compile_arg_value)),
+        "SIMILARITY_GTE" | "MATCH" | "COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE" => {
+            CompiledOp::Error(format!(
+                "condition operator '{op}' is only valid inside object-model query conditions; \
+                 the workflow runtime cannot evaluate it"
+            ))
+        }
+        other => CompiledOp::Error(format!("unsupported condition operator '{other}'")),
+    }
+}
+
+fn compile_arg_value(arg: &Value) -> CompiledArgValue {
+    if is_condition_operation(arg) {
+        if arg.get("op").and_then(Value::as_str) == Some("LENGTH") {
+            let compiled = arg
+                .get("arguments")
+                .and_then(Value::as_array)
+                .map(|args| args.iter().map(compile_arg_value).collect());
+            CompiledArgValue::LengthValue(compiled)
+        } else {
+            CompiledArgValue::Condition(Box::new(compile_condition(arg)))
+        }
+    } else {
+        CompiledArgValue::Value(compile_value(arg))
+    }
+}
+
+/// Mirror `eval_condition_value`'s `{type:"value"}` unwrap, then compile the
+/// resolved mapping object.
+fn compile_value(value: &Value) -> CompiledMapping {
+    if value.get("type").and_then(Value::as_str) == Some("value") {
+        if value.get("valueType").is_some() {
+            return compile_mapping(value);
+        }
+        if let Some(inner) = value.get("value") {
+            return compile_mapping(inner);
+        }
+    }
+    compile_mapping(value)
+}
+
+fn compile_mapping(value: &Value) -> CompiledMapping {
+    let Value::Object(map) = value else {
+        return CompiledMapping::Error("mapping value must be an object".to_string());
+    };
+    let Some(value_type) = map.get("valueType").and_then(Value::as_str) else {
+        return CompiledMapping::Error("mapping value missing valueType".to_string());
+    };
+    match value_type {
+        "reference" => match map.get("value").and_then(Value::as_str) {
+            Some(path) => CompiledMapping::Reference(CompiledReference {
+                segments: path_to_segments(path),
+                default: map.get("default").cloned(),
+                type_hint: map.get("type").and_then(Value::as_str).map(str::to_string),
+            }),
+            None => {
+                CompiledMapping::Error("reference mapping value must be a string path".to_string())
+            }
+        },
+        "immediate" => CompiledMapping::Immediate(map.get("value").cloned().unwrap_or(Value::Null)),
+        "composite" => compile_composite(map.get("value").unwrap_or(&Value::Null)),
+        "template" => match map.get("value").and_then(Value::as_str) {
+            Some(template) => CompiledMapping::Template(template.to_string()),
+            None => CompiledMapping::Error("template mapping value must be a string".to_string()),
+        },
+        other => CompiledMapping::Error(format!("unsupported mapping valueType '{other}'")),
+    }
+}
+
+fn compile_composite(value: &Value) -> CompiledMapping {
+    match value {
+        Value::Object(map) => CompiledMapping::Composite(Box::new(CompiledComposite::Object(
+            map.iter()
+                .map(|(k, child)| (k.clone(), compile_mapping(child)))
+                .collect(),
+        ))),
+        Value::Array(items) => CompiledMapping::Composite(Box::new(CompiledComposite::Array(
+            items.iter().map(compile_mapping).collect(),
+        ))),
+        _ => {
+            CompiledMapping::Error("composite mapping value must be an object or array".to_string())
+        }
+    }
+}
+
+// ---- Evaluation (delegates leaf ops to the shared helpers) ----
+
+impl CompiledCondition {
+    fn eval(&self, source: &Value) -> Result<bool, String> {
+        match self {
+            CompiledCondition::Op(op) => op.eval(source),
+            CompiledCondition::Truthy(value) => value.eval(source).map(|v| is_truthy(&v)),
+        }
+    }
+}
+
+impl CompiledOp {
+    fn eval(&self, source: &Value) -> Result<bool, String> {
+        match self {
+            CompiledOp::And(args) => args
+                .iter()
+                .try_fold(true, |acc, a| if !acc { Ok(false) } else { a.eval(source) }),
+            CompiledOp::Or(args) => args
+                .iter()
+                .try_fold(false, |acc, a| if acc { Ok(true) } else { a.eval(source) }),
+            CompiledOp::Not(arg) => match arg {
+                Some(c) => c.eval(source).map(|v| !v),
+                None => Ok(true),
+            },
+            CompiledOp::Compare { op, args } => {
+                if args.len() < 2 {
+                    return Ok(false);
+                }
+                let (Some(left), Some(right)) = (
+                    to_number(&args[0].eval(source)?),
+                    to_number(&args[1].eval(source)?),
+                ) else {
+                    return Ok(false);
+                };
+                Ok(match op {
+                    CmpOp::Gt => left > right,
+                    CmpOp::Gte => left >= right,
+                    CmpOp::Lt => left < right,
+                    CmpOp::Lte => left <= right,
+                })
+            }
+            CompiledOp::Equality { ne, args } => {
+                if args.len() < 2 {
+                    return Ok(false);
+                }
+                let equal = values_equal(&args[0].eval(source)?, &args[1].eval(source)?);
+                Ok(if *ne { !equal } else { equal })
+            }
+            CompiledOp::StringMatch { ends, args } => {
+                if args.len() < 2 {
+                    return Ok(false);
+                }
+                let left = args[0].eval(source)?;
+                let right = args[1].eval(source)?;
+                let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
+                    return Ok(false);
+                };
+                Ok(if *ends {
+                    left.ends_with(right)
+                } else {
+                    left.starts_with(right)
+                })
+            }
+            CompiledOp::ArrayMatch { kind, args } => {
+                if args.len() < 2 {
+                    return Ok(false);
+                }
+                let left = args[0].eval(source)?;
+                let right = args[1].eval(source)?;
+                let matched = match kind {
+                    ArrKind::Contains => left
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|i| values_equal(i, &right))),
+                    ArrKind::In | ArrKind::NotIn => right
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|i| values_equal(&left, i))),
+                };
+                Ok(if matches!(kind, ArrKind::NotIn) {
+                    !matched
+                } else {
+                    matched
+                })
+            }
+            CompiledOp::LengthBool(args) => {
+                let value = compiled_length_value(args, source)?;
+                Ok(value
+                    .as_i64()
+                    .or_else(|| value.as_u64().map(|v| v as i64))
+                    .unwrap_or(0)
+                    > 0)
+            }
+            CompiledOp::IsDefined(arg) => match arg {
+                Some(a) => a.eval(source).map(|v| !v.is_null()),
+                None => Ok(false),
+            },
+            CompiledOp::IsEmpty(arg) => match arg {
+                Some(a) => a.eval(source).map(|v| match v {
+                    Value::Array(v) => v.is_empty(),
+                    Value::String(v) => v.is_empty(),
+                    Value::Object(v) => v.is_empty(),
+                    Value::Null => true,
+                    _ => false,
+                }),
+                None => Ok(true),
+            },
+            CompiledOp::IsNotEmpty(arg) => match arg {
+                Some(a) => a.eval(source).map(|v| match v {
+                    Value::Array(v) => !v.is_empty(),
+                    Value::String(v) => !v.is_empty(),
+                    Value::Object(v) => !v.is_empty(),
+                    Value::Null => false,
+                    _ => true,
+                }),
+                None => Ok(false),
+            },
+            CompiledOp::Error(message) => Err(message.clone()),
+        }
+    }
+}
+
+impl CompiledArgValue {
+    fn eval(&self, source: &Value) -> Result<Value, String> {
+        match self {
+            CompiledArgValue::LengthValue(Some(args)) => compiled_length_value(args, source),
+            CompiledArgValue::LengthValue(None) => {
+                Err("LENGTH condition missing arguments".to_string())
+            }
+            CompiledArgValue::Condition(cond) => cond.eval(source).map(Value::Bool),
+            CompiledArgValue::Value(mapping) => mapping.eval(source),
+        }
+    }
+}
+
+fn compiled_length_value(args: &[CompiledArgValue], source: &Value) -> Result<Value, String> {
+    let Some(arg) = args.first() else {
+        return Ok(Value::Number(0.into()));
+    };
+    let len = match &arg.eval(source)? {
+        Value::String(v) => v.len() as i64,
+        Value::Array(v) => v.len() as i64,
+        Value::Object(v) => v.len() as i64,
+        Value::Null => 0,
+        _ => 1,
+    };
+    Ok(Value::Number(len.into()))
+}
+
+impl CompiledMapping {
+    fn eval(&self, source: &Value) -> Result<Value, String> {
+        match self {
+            CompiledMapping::Reference(reference) => Ok(reference.resolve(source)),
+            CompiledMapping::Immediate(value) => Ok(value.clone()),
+            CompiledMapping::Composite(composite) => composite.eval(source),
+            CompiledMapping::Template(template) => {
+                render_template(template, &materialize(source.clone())).map(Value::String)
+            }
+            CompiledMapping::Error(message) => Err(message.clone()),
+        }
+    }
+}
+
+impl CompiledComposite {
+    fn eval(&self, source: &Value) -> Result<Value, String> {
+        match self {
+            CompiledComposite::Object(entries) => {
+                let mut output = Map::new();
+                for (key, child) in entries {
+                    output.insert(key.clone(), child.eval(source)?);
+                }
+                Ok(Value::Object(output))
+            }
+            CompiledComposite::Array(items) => items
+                .iter()
+                .map(|item| item.eval(source))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array),
+        }
+    }
+}
+
+impl CompiledReference {
+    fn resolve(&self, source: &Value) -> Value {
+        let value = match lookup_segments(source, &self.segments) {
+            Some(Value::Null) | None => self.default.clone().unwrap_or(Value::Null),
+            Some(value) => value,
+        };
+        apply_type_hint(value, self.type_hint.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -9634,6 +10145,143 @@ mod tests {
         // A small error envelope is left intact so `_error` survives for status.
         let err = json!({ "_error": true, "message": "boom" });
         assert_eq!(bound_debug_output(err.clone()), err);
+    }
+
+    #[test]
+    fn compiled_condition_matches_interpreter() {
+        // Differential oracle: the compiled condition must produce the SAME
+        // Result (incl. Err message) as the JSON interpreter across every
+        // operator + edge case. This guards the full-replacement cutover.
+        fn parity(expr: Value, source: Value) {
+            let interp = eval_condition_expression(&expr, &source);
+            let compiled = compile_condition(&expr).eval(&source);
+            assert_eq!(
+                interp, compiled,
+                "compiled/interpreted mismatch\n  expr={expr}\n  source={source}"
+            );
+        }
+        let src = json!({
+            "data": { "sku": "S5", "n": 5, "tags": ["a", "b"], "name": "widget", "flag": true },
+            "item": { "sku": "S5", "n": 7, "s": "" },
+            "variables": {},
+            "steps": {}
+        });
+        let r = |p: &str| json!({ "valueType": "reference", "value": p });
+        let i = |v: Value| json!({ "valueType": "immediate", "value": v });
+        let op = |o: &str, a: Value| json!({ "type": "operation", "op": o, "arguments": a });
+
+        // equality / inequality, with string<->number coercion + refs
+        parity(op("EQ", json!([r("item.sku"), r("data.sku")])), src.clone());
+        parity(
+            op("EQ", json!([r("item.sku"), i(json!("S6"))])),
+            src.clone(),
+        );
+        parity(op("NE", json!([r("item.n"), r("data.n")])), src.clone());
+        parity(op("EQ", json!([r("item.n"), i(json!("7"))])), src.clone()); // coercion
+        // comparisons (numeric + arity underflow)
+        for o in ["GT", "GTE", "LT", "LTE"] {
+            parity(op(o, json!([r("item.n"), r("data.n")])), src.clone());
+            parity(op(o, json!([r("item.n")])), src.clone()); // <2 args -> false
+        }
+        // boolean combinators + short-circuit + nesting + missing NOT arg
+        parity(
+            op(
+                "AND",
+                json!([
+                    op("EQ", json!([r("item.sku"), r("data.sku")])),
+                    op("GT", json!([r("item.n"), i(json!(3))]))
+                ]),
+            ),
+            src.clone(),
+        );
+        parity(
+            op(
+                "OR",
+                json!([
+                    op("EQ", json!([r("item.sku"), i(json!("x"))])),
+                    i(json!(true))
+                ]),
+            ),
+            src.clone(),
+        );
+        parity(
+            op(
+                "NOT",
+                json!([op("EQ", json!([r("item.sku"), r("data.sku")]))]),
+            ),
+            src.clone(),
+        );
+        parity(op("NOT", json!([])), src.clone()); // missing arg -> true
+        // string match
+        parity(
+            op("STARTS_WITH", json!([r("data.name"), i(json!("wid"))])),
+            src.clone(),
+        );
+        parity(
+            op("ENDS_WITH", json!([r("data.name"), i(json!("get"))])),
+            src.clone(),
+        );
+        parity(
+            op("STARTS_WITH", json!([r("data.n"), i(json!("5"))])),
+            src.clone(),
+        ); // non-string -> false
+        // array match
+        parity(
+            op("CONTAINS", json!([r("data.tags"), i(json!("a"))])),
+            src.clone(),
+        );
+        parity(
+            op("IN", json!([i(json!("b")), r("data.tags")])),
+            src.clone(),
+        );
+        parity(
+            op("NOT_IN", json!([i(json!("z")), r("data.tags")])),
+            src.clone(),
+        );
+        // length (as condition + nested as value)
+        parity(
+            op(
+                "GT",
+                json!([op("LENGTH", json!([r("data.tags")])), i(json!(1))]),
+            ),
+            src.clone(),
+        );
+        parity(op("LENGTH", json!([r("data.tags")])), src.clone());
+        parity(op("LENGTH", json!([])), src.clone());
+        // existence / emptiness (present + missing arg defaults)
+        parity(op("IS_DEFINED", json!([r("data.sku")])), src.clone());
+        parity(op("IS_DEFINED", json!([r("data.missing")])), src.clone());
+        parity(op("IS_DEFINED", json!([])), src.clone());
+        parity(op("IS_EMPTY", json!([r("item.s")])), src.clone());
+        parity(op("IS_EMPTY", json!([r("data.tags")])), src.clone());
+        parity(op("IS_EMPTY", json!([])), src.clone());
+        parity(op("IS_NOT_EMPTY", json!([r("data.tags")])), src.clone());
+        parity(op("IS_NOT_EMPTY", json!([])), src.clone());
+        // truthiness of a non-operation value node
+        parity(r("data.flag"), src.clone());
+        parity(i(json!(0)), src.clone());
+        parity(
+            json!({ "type": "value", "valueType": "reference", "value": "data.name" }),
+            src.clone(),
+        );
+        // error parity: query-only, unknown op, malformed
+        parity(
+            op("SIMILARITY_GTE", json!([r("item.sku"), i(json!(0.5))])),
+            src.clone(),
+        );
+        parity(op("MATCH", json!([])), src.clone());
+        parity(op("BOGUS_OP", json!([])), src.clone());
+        parity(json!({ "type": "operation" }), src.clone()); // missing op
+        parity(json!({ "op": "EQ" }), src.clone()); // missing arguments
+        // reference defaults + type hints
+        parity(
+            json!({ "valueType": "reference", "value": "data.missing", "default": true }),
+            src.clone(),
+        );
+        parity(
+            json!({ "valueType": "reference", "value": "data.n", "type": "string" }),
+            src.clone(),
+        );
     }
 
     #[test]
