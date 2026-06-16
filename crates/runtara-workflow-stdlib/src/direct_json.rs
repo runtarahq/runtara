@@ -2550,7 +2550,12 @@ impl DirectJsonManifest {
 
         let mut payload = debug_event_base(step, &source, timestamp);
         let (inputs, input_mapping) = self.debug_start_data(step, &source)?;
-        payload.insert("inputs".to_string(), inputs);
+        // Bound the resolved inputs: steps that operate over collections
+        // (Filter/GroupBy/Agent/EmbedWorkflow/...) would otherwise persist the
+        // entire input value verbatim on every iteration — multi-MB per event,
+        // GB-scale per instance for a loop body. `bounded_debug_value` was only
+        // wired into Split/While; apply it here so every step type is bounded.
+        payload.insert("inputs".to_string(), bounded_debug_value(inputs));
         if let Some(input_mapping) = input_mapping {
             payload.insert("input_mapping".to_string(), input_mapping);
         }
@@ -2576,7 +2581,10 @@ impl DirectJsonManifest {
             .unwrap_or(0);
 
         let mut payload = debug_event_base(step, &source, timestamp);
-        payload.insert("outputs".to_string(), self.debug_end_output(step, &source)?);
+        payload.insert(
+            "outputs".to_string(),
+            bound_debug_output(self.debug_end_output(step, &source)?),
+        );
         payload.insert(
             "duration_ms".to_string(),
             Value::Number(serde_json::Number::from(duration_ms)),
@@ -3491,6 +3499,24 @@ fn bounded_debug_value(value: Value) -> Value {
             other => other,
         },
         _ => value,
+    }
+}
+
+/// Bound a step-debug-end `outputs` value. The step-output envelope keeps the
+/// real payload under an `"outputs"` key alongside `stepId`/`stepName`/
+/// `stepType`/`route` and the `_error` flag the step-summary status query reads;
+/// bound only the heavy nested payload so the envelope and `_error` survive.
+/// Non-envelope values (e.g. the Error step's bare `{_error,..}`) are bounded
+/// whole — they are small, so `bounded_debug_value` leaves them unchanged.
+fn bound_debug_output(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) if map.contains_key("outputs") => {
+            if let Some(inner) = map.remove("outputs") {
+                map.insert("outputs".to_string(), bounded_debug_value(inner));
+            }
+            Value::Object(map)
+        }
+        other => bounded_debug_value(other),
     }
 }
 
@@ -9509,6 +9535,73 @@ mod tests {
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("Split"));
         assert_eq!(end["outputs"]["outputs"], json!([{ "ok": true }]));
+    }
+
+    #[test]
+    fn filter_debug_payloads_are_bounded() {
+        // Regression: a Filter over a large collection used to store the entire
+        // resolved array in the step-debug-start `inputs` (and the filtered
+        // result in the end `outputs`) verbatim — multi-MB per event, GB-scale
+        // across a loop body, which timed out the step-summaries query. Filter
+        // (and the other non-Split arms) must be bounded like Split's inputs.
+        let big: Vec<i64> = (0..1000).collect();
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Filter",
+            "filter",
+            None,
+            json!({
+                "filters": [{
+                    "id": 0,
+                    "stepId": "filter",
+                    "name": "Filter Items",
+                    "stepType": "Filter",
+                    "purpose": "filter.config",
+                    "value": {
+                        "value": { "valueType": "immediate", "value": big },
+                        "condition": {
+                            "type": "operation",
+                            "op": "GT",
+                            "arguments": [
+                                { "valueType": "reference", "value": "item" },
+                                { "valueType": "immediate", "value": 0 }
+                            ]
+                        }
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("filter", &source)
+            .expect("Filter debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+        // The 1000-item input array is replaced by a truncation stub, not stored.
+        assert_eq!(start["inputs"]["_truncated"], json!(true));
+        assert_eq!(start["inputs"]["_type"], json!("array"));
+        assert_eq!(start["inputs"]["_length"], json!(1000));
+        assert!(
+            start["inputs"].to_string().len() < 1024,
+            "bounded Filter inputs must be small, got {} bytes",
+            start["inputs"].to_string().len()
+        );
+
+        // Output side: bound the heavy nested `outputs` while preserving the
+        // envelope keys and the `_error` flag the status query reads.
+        let big_output = json!({
+            "stepId": "filter",
+            "stepName": "Filter Items",
+            "stepType": "Filter",
+            "outputs": (0..1000).collect::<Vec<i64>>(),
+        });
+        let bounded = bound_debug_output(big_output);
+        assert_eq!(bounded["stepType"], json!("Filter"));
+        assert_eq!(bounded["outputs"]["_truncated"], json!(true));
+        assert_eq!(bounded["outputs"]["_length"], json!(1000));
+        // A small error envelope is left intact so `_error` survives for status.
+        let err = json!({ "_error": true, "message": "boom" });
+        assert_eq!(bound_debug_output(err.clone()), err);
     }
 
     #[test]
