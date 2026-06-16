@@ -83,7 +83,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
 
       - name: Install wasm-pack
         run: |
@@ -91,7 +91,7 @@ jobs:
             && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
             echo "wasm-pack ${WASM_PACK_VERSION} already installed"
           else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
           fi
 
       - name: Build frontend (embedded UI)
@@ -135,7 +135,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
 
       - name: Install wasm-pack
         run: |
@@ -143,7 +143,7 @@ jobs:
             && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
             echo "wasm-pack ${WASM_PACK_VERSION} already installed"
           else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
           fi
 
       - name: Build frontend (embedded UI)
