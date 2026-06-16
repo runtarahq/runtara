@@ -3998,20 +3998,33 @@ fn apply_filter_compiled(
     condition: &CompiledCondition,
     source: &Value,
 ) -> Result<Value, String> {
-    let items = input.as_array().cloned().unwrap_or_default();
-    let mut source = source.clone();
-    if !source.is_object() {
+    // Consume the resolved input array (no clone) and reuse one scope object
+    // across elements, MOVING each item into `scope["item"]` rather than cloning
+    // it — the condition only borrows `item.*`, so a per-element clone of the
+    // whole element (potentially a large record) is pure waste. Matched items
+    // are moved back out via `Value::take`.
+    let items = match input {
+        Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    let mut scope = source.clone();
+    if !scope.is_object() {
         return Err("filter source must be a JSON object".to_string());
     }
 
     let mut filtered = Vec::new();
     for item in items {
-        source
+        scope
             .as_object_mut()
             .expect("filter source was checked as object")
-            .insert("item".to_string(), item.clone());
-        if condition.eval(&source)? {
-            filtered.push(item);
+            .insert("item".to_string(), item);
+        if condition.eval(&scope)? {
+            let matched = scope
+                .as_object_mut()
+                .and_then(|obj| obj.get_mut("item"))
+                .map(Value::take)
+                .unwrap_or(Value::Null);
+            filtered.push(matched);
         }
     }
 
@@ -5454,18 +5467,43 @@ fn path_to_segments(path: &str) -> Vec<String> {
 /// value through scope without reading it never touches the arena.
 fn lookup_segments(source: &Value, segments: &[String]) -> Option<Value> {
     let mut current: Cow<Value> = Cow::Borrowed(source);
-    if wfref_id(current.as_ref()).is_some() {
-        current = Cow::Owned(deref_handle(current.as_ref()).into_owned());
+    if wfref_id(source).is_some() {
+        current = Cow::Owned(deref_handle(source).into_owned());
     }
     for segment in segments {
-        let next: Value = match current.as_ref() {
-            Value::Object(map) => map.get(segment)?.clone(),
-            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?.clone(),
-            _ => return None,
+        // Borrow the child through inline (non-handle) nodes; clone only when we
+        // must deref a `$wfref` handle or when the parent is already owned (its
+        // borrow can't outlive this step). The common case — an inline path like
+        // `item.sku` — walks entirely by reference and clones once at the leaf.
+        current = match current {
+            Cow::Borrowed(parent) => {
+                let child = index_child(parent, segment)?;
+                if wfref_id(child).is_some() {
+                    Cow::Owned(deref_handle(child).into_owned())
+                } else {
+                    Cow::Borrowed(child)
+                }
+            }
+            Cow::Owned(parent) => {
+                let child = index_child(&parent, segment)?;
+                if wfref_id(child).is_some() {
+                    Cow::Owned(deref_handle(child).into_owned())
+                } else {
+                    Cow::Owned(child.clone())
+                }
+            }
         };
-        current = Cow::Owned(deref_handle(&next).into_owned());
     }
     Some(materialize(current.into_owned()))
+}
+
+/// Index one JSON-pointer segment into a value: object key or array index.
+fn index_child<'a>(value: &'a Value, segment: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => map.get(segment),
+        Value::Array(items) => items.get(segment.parse::<usize>().ok()?),
+        _ => None,
+    }
 }
 
 /// Reverse the JSON-pointer escaping applied by [`path_to_json_pointer`].
