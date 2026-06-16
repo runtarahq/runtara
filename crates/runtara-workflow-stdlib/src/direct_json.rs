@@ -4054,8 +4054,12 @@ fn apply_switch(config: &Value, source: &Value) -> Result<DirectSwitchResult, St
 
     if let Some(cases) = config.get("cases").and_then(Value::as_array) {
         for case in cases {
+            // Desugar (BETWEEN/RANGE/array-EQ) then evaluate via the compiled
+            // path. Switch is a per-step (cold) site, so the condition is
+            // compiled per call rather than cached — cheap, and keeps all
+            // condition evaluation on one evaluator.
             let condition = switch_case_condition(switch_value, case)?;
-            if eval_condition_expression(&condition, source)? {
+            if compile_condition(&condition).eval(source)? {
                 let output = case
                     .get("output")
                     .ok_or_else(|| "Switch case missing output".to_string())?;
