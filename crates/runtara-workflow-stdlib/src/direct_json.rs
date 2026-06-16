@@ -304,6 +304,10 @@ pub struct DirectJsonManifest {
     /// iteration within the run — the manifest (and this cache) is discarded
     /// with the per-run component instance, so there is no cross-run staleness.
     compiled_conditions: RefCell<BTreeMap<String, Rc<CompiledCondition>>>,
+    /// Lazily-populated cache of compiled input mappings, keyed by mapping id.
+    /// Agent input mappings inside a Split body are evaluated per iteration, so
+    /// compiling once per run rather than per iteration is a real win there.
+    compiled_mappings: RefCell<BTreeMap<u32, Rc<CompiledInputMapping>>>,
 }
 
 /// Raw Agent retry payload plus generated-Rust-compatible retry classification.
@@ -365,6 +369,7 @@ impl DirectJsonManifest {
             agents: collections.agents,
             debug_start_ms: RefCell::new(BTreeMap::new()),
             compiled_conditions: RefCell::new(BTreeMap::new()),
+            compiled_mappings: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -381,6 +386,18 @@ impl DirectJsonManifest {
         compiled
     }
 
+    /// Get-or-compile an input mapping, caching it by mapping id.
+    fn compiled_mapping(&self, mapping_id: u32, raw: &Value) -> Rc<CompiledInputMapping> {
+        if let Some(compiled) = self.compiled_mappings.borrow().get(&mapping_id) {
+            return Rc::clone(compiled);
+        }
+        let compiled = Rc::new(compile_input_mapping(raw));
+        self.compiled_mappings
+            .borrow_mut()
+            .insert(mapping_id, Rc::clone(&compiled));
+        compiled
+    }
+
     /// Apply a manifest mapping to a source JSON envelope.
     pub fn apply_mapping(&self, mapping_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -389,7 +406,9 @@ impl DirectJsonManifest {
             .mappings
             .get(&mapping_id)
             .ok_or_else(|| format!("unknown direct mapping id {mapping_id}"))?;
-        let mut output = apply_input_mapping(&mapping.value, &source)?;
+        let mut output = self
+            .compiled_mapping(mapping_id, &mapping.value)
+            .eval(&source)?;
         if mapping.purpose == "finish.inputMapping" {
             output = unwrap_finish_outputs(output);
         }
@@ -6012,6 +6031,42 @@ impl CompiledReference {
     }
 }
 
+/// Compiled top-level input mapping — mirrors `apply_input_mapping`. Each entry
+/// value is compiled once; per evaluation the dotted key is expanded with the
+/// same `insert_nested` as the interpreter.
+#[derive(Debug, Clone)]
+enum CompiledInputMapping {
+    Entries(Vec<(String, CompiledMapping)>),
+    Error(String),
+}
+
+fn compile_input_mapping(mapping: &Value) -> CompiledInputMapping {
+    match mapping {
+        Value::Object(entries) => CompiledInputMapping::Entries(
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), compile_mapping(value)))
+                .collect(),
+        ),
+        _ => CompiledInputMapping::Error("input mapping must be a JSON object".to_string()),
+    }
+}
+
+impl CompiledInputMapping {
+    fn eval(&self, source: &Value) -> Result<Value, String> {
+        match self {
+            CompiledInputMapping::Entries(entries) => {
+                let mut output = Map::new();
+                for (key, value) in entries {
+                    insert_nested(&mut output, key, value.eval(source)?);
+                }
+                Ok(Value::Object(output))
+            }
+            CompiledInputMapping::Error(message) => Err(message.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestWire {
@@ -10324,6 +10379,50 @@ mod tests {
             json!({ "valueType": "reference", "value": "data.n", "type": "string" }),
             src.clone(),
         );
+    }
+
+    #[test]
+    fn compiled_input_mapping_matches_interpreter() {
+        // Differential oracle for mappings: compile_input_mapping().eval() must
+        // equal apply_input_mapping() (incl. Err), across reference/immediate/
+        // composite/template values, dotted keys, defaults, type hints, and the
+        // not-an-object error.
+        fn parity(mapping: Value, source: Value) {
+            let interp = apply_input_mapping(&mapping, &source);
+            let compiled = compile_input_mapping(&mapping).eval(&source);
+            assert_eq!(
+                interp, compiled,
+                "compiled/interpreted mapping mismatch\n  mapping={mapping}\n  source={source}"
+            );
+        }
+        let src = json!({
+            "data": { "sku": "S5", "n": 5, "nested": { "x": 1 }, "list": [10, 20] },
+            "variables": { "mode": "live" },
+            "steps": { "prev": { "outputs": { "ok": true } } }
+        });
+        parity(
+            json!({
+                "sku": { "valueType": "reference", "value": "data.sku" },
+                "count": { "valueType": "reference", "value": "data.n", "type": "string" },
+                "missing": { "valueType": "reference", "value": "data.none", "default": "fallback" },
+                "lit": { "valueType": "immediate", "value": 42 },
+                "obj": { "valueType": "composite", "value": {
+                    "a": { "valueType": "reference", "value": "data.nested.x" },
+                    "b": { "valueType": "immediate", "value": [1, 2] }
+                }},
+                "arr": { "valueType": "composite", "value": [
+                    { "valueType": "reference", "value": "data.list[0]" },
+                    { "valueType": "immediate", "value": "x" }
+                ]},
+                "tmpl": { "valueType": "template", "value": "mode={{ variables.mode }}" },
+                "nested.key": { "valueType": "reference", "value": "steps.prev.outputs.ok" }
+            }),
+            src.clone(),
+        );
+        // not-an-object error parity
+        parity(json!("not an object"), src.clone());
+        // empty mapping
+        parity(json!({}), src);
     }
 
     #[test]
