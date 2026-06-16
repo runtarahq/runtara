@@ -75,6 +75,9 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Cache wasm-pack binary
         id: cache-wasm-pack
         uses: actions/cache@v4
@@ -83,7 +86,6 @@ jobs:
           key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
 
       - name: Install wasm-pack
-        if: steps.cache-wasm-pack.outputs.cache-hit != 'true'
         run: |
           if command -v wasm-pack >/dev/null 2>&1 \
             && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
@@ -125,6 +127,9 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Cache wasm-pack binary
         id: cache-wasm-pack
         uses: actions/cache@v4
@@ -133,7 +138,6 @@ jobs:
           key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
 
       - name: Install wasm-pack
-        if: steps.cache-wasm-pack.outputs.cache-hit != 'true'
         run: |
           if command -v wasm-pack >/dev/null 2>&1 \
             && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
