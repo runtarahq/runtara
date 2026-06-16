@@ -93,19 +93,12 @@ pub(super) fn emit_step_context_plan(
         output_len_local,
     );
     load_retptr_list(body, steps_ptr_local, steps_len_local);
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        false,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
-
+    // Fold the step's stored output (now in steps_ptr) back into source BEFORE
+    // emitting the debug-end event, so `step_debug_end` can read the persisted
+    // `steps.<id>` output instead of recomputing the step. Filter/Switch/GroupBy
+    // would otherwise execute a second time under track-events (the debug-end
+    // builder recomputed the output because its source predated the result).
+    // Downstream `steps.X` references consume the same rebuilt source.
     emit_build_source(
         body,
         indices,
@@ -117,6 +110,19 @@ pub(super) fn emit_step_context_plan(
         source_ptr_local,
         source_len_local,
         failure_target,
+    );
+
+    emit_step_debug_event(
+        body,
+        indices,
+        static_data,
+        track_events,
+        false,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
     );
 
     emit_run_plan_mapping(

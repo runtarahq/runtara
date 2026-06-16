@@ -2757,14 +2757,37 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
+            // Filter/Switch/GroupBy persist their output to `steps.<id>` during
+            // execution (via `insert_step_output`), and the emitter now rebuilds
+            // source before the debug-end event — so read that stored envelope
+            // instead of recomputing the step. Recomputing made these steps run a
+            // second time under track-events (~doubling cost for collection-heavy
+            // steps like a Filter over a large array). The recompute stays as a
+            // fallback for paths where the stored output isn't in scope (e.g. a
+            // pre-execution breakpoint).
             "Filter" => {
+                if let Some(stored) = source
+                    .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                    .cloned()
+                {
+                    return Ok(stored);
+                }
                 let filter = self
                     .filter_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
-                let output = apply_filter(&filter.value, source)?;
-                Ok(step_output_envelope(step, output, None))
+                Ok(step_output_envelope(
+                    step,
+                    apply_filter(&filter.value, source)?,
+                    None,
+                ))
             }
             "Switch" => {
+                if let Some(stored) = source
+                    .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                    .cloned()
+                {
+                    return Ok(stored);
+                }
                 let switch = self
                     .switch_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
@@ -2773,11 +2796,20 @@ impl DirectJsonManifest {
                 Ok(step_output_envelope(step, result.output, route))
             }
             "GroupBy" => {
+                if let Some(stored) = source
+                    .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                    .cloned()
+                {
+                    return Ok(stored);
+                }
                 let group_by = self
                     .group_by_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
-                let output = apply_group_by(&group_by.value, source)?;
-                Ok(step_output_envelope(step, output, None))
+                Ok(step_output_envelope(
+                    step,
+                    apply_group_by(&group_by.value, source)?,
+                    None,
+                ))
             }
             "Delay" => source
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
@@ -9602,6 +9634,108 @@ mod tests {
         // A small error envelope is left intact so `_error` survives for status.
         let err = json!({ "_error": true, "message": "boom" });
         assert_eq!(bound_debug_output(err.clone()), err);
+    }
+
+    #[test]
+    fn filter_debug_end_reads_stored_output_without_recomputing() {
+        // After execution the Filter output is persisted at steps.find and the
+        // emitter rebuilds source before debug-end, so debug-end must return that
+        // stored envelope rather than re-running apply_filter (the recompute that
+        // doubled collection-heavy steps under track-events). Pre-populate
+        // steps.find with a SENTINEL output apply_filter could never produce.
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Filter",
+            "find",
+            None,
+            json!({
+                "filters": [{
+                    "id": 0, "stepId": "find", "name": "find", "stepType": "Filter",
+                    "purpose": "filter.config",
+                    "value": {
+                        "value": { "valueType": "immediate", "value": [{"sku":"A"},{"sku":"B"}] },
+                        "condition": { "type": "operation", "op": "EQ", "arguments": [
+                            { "valueType": "reference", "value": "item.sku" },
+                            { "valueType": "immediate", "value": "A" }
+                        ]}
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        let steps = serde_json::to_vec(&json!({
+            "find": { "stepId": "find", "stepName": "find", "stepType": "Filter",
+                      "outputs": { "items": [{"sentinel": true}], "count": 99 } }
+        }))
+        .unwrap();
+        let src_bytes = build_source(b"{}", b"{}", &steps).unwrap();
+        let end = manifest
+            .step_debug_end("find", &src_bytes)
+            .expect("debug end");
+        let end: Value = serde_json::from_slice(&end).expect("end json");
+        assert_eq!(
+            end["outputs"]["outputs"]["count"],
+            json!(99),
+            "debug-end must read the stored output, not recompute the filter"
+        );
+        assert_eq!(
+            end["outputs"]["outputs"]["items"][0]["sentinel"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    #[ignore = "perf micro-benchmark; run with --ignored --nocapture"]
+    fn filter_perf_breakdown() {
+        use std::time::Instant;
+        let cfg = json!({
+            "value": { "valueType": "reference", "value": "data.items" },
+            "condition": { "type": "operation", "op": "EQ", "arguments": [
+                { "valueType": "reference", "value": "item.sku" },
+                { "valueType": "reference", "value": "data.sku" }
+            ]}
+        });
+        eprintln!(
+            "\n{:>6} {:>10} {:>10} {:>10} {:>12} {:>10}",
+            "M", "dbg_start", "filter", "dbg_end", "total/call", "per_item"
+        );
+        for m in [500usize, 1000, 2000, 4000, 8000] {
+            let items: Vec<Value> = (0..m)
+                .map(|i| json!({"sku": format!("S{i}"), "q": i}))
+                .collect();
+            let data = serde_json::to_vec(&json!({"items": items, "sku": "Sx"})).unwrap();
+            let manifest = DirectJsonManifest::parse(&debug_manifest(
+                "Filter",
+                "find",
+                None,
+                json!({
+                    "filters": [{ "id": 0, "stepId": "find", "name": "find", "stepType": "Filter",
+                        "purpose": "filter.config", "value": cfg }]
+                }),
+            ))
+            .unwrap();
+            let src_bytes = build_source(&data, b"{}", b"{}").unwrap();
+            let src: Value = serde_json::from_slice(&src_bytes).unwrap();
+            let _ = apply_filter(&cfg, &src); // warm intern arena
+            let t = Instant::now();
+            manifest.step_debug_start("find", &src_bytes).unwrap();
+            let ds = t.elapsed();
+            let t = Instant::now();
+            apply_filter(&cfg, &src).unwrap();
+            let df = t.elapsed();
+            let t = Instant::now();
+            manifest.step_debug_end("find", &src_bytes).unwrap();
+            let de = t.elapsed();
+            let tot = ds + df + de;
+            eprintln!(
+                "{:>6} {:>10.2?} {:>10.2?} {:>10.2?} {:>12.2?} {:>8.1}us",
+                m,
+                ds,
+                df,
+                de,
+                tot,
+                tot.as_micros() as f64 / m as f64
+            );
+        }
     }
 
     #[test]
