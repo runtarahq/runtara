@@ -58,6 +58,39 @@ impl EmbeddedBackend {
             rt,
         }
     }
+
+    /// Fetch the instance-wide pending lifecycle signal (cancel/pause/shutdown)
+    /// from core persistence and acknowledge it.
+    ///
+    /// This is what lets an embedded guest suspend *cleanly* at a checkpoint
+    /// boundary on a drain/pause/cancel, instead of being force-stopped at the
+    /// shutdown grace deadline. The signal is acknowledged on read so it is not
+    /// redelivered after the instance relaunches (otherwise a recovered
+    /// instance would immediately re-suspend on the same stale signal).
+    fn take_pending_lifecycle_signal(&self) -> Option<Signal> {
+        let record = self
+            .rt
+            .block_on(self.persistence.get_pending_signal(&self.instance_id))
+            .ok()
+            .flatten()?;
+        let signal_type = match record.signal_type.as_str() {
+            "cancel" => SignalType::Cancel,
+            "pause" => SignalType::Pause,
+            "resume" => SignalType::Resume,
+            "shutdown" => SignalType::Shutdown,
+            _ => return None,
+        };
+        // Acknowledge (idempotent: only clears an unacknowledged signal) so the
+        // signal is consumed once.
+        let _ = self
+            .rt
+            .block_on(self.persistence.acknowledge_signal(&self.instance_id));
+        Some(Signal {
+            signal_type,
+            payload: record.payload.unwrap_or_default(),
+            checkpoint_id: None,
+        })
+    }
 }
 
 impl SdkBackend for EmbeddedBackend {
@@ -118,7 +151,7 @@ impl SdkBackend for EmbeddedBackend {
             return Ok(CheckpointResult {
                 found: true,
                 state: checkpoint.state,
-                pending_signal: None, // No signal support in embedded mode
+                pending_signal: self.take_pending_lifecycle_signal(),
                 custom_signal: None,
             });
         }
@@ -144,7 +177,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(CheckpointResult {
             found: false,
             state: Vec::new(),
-            pending_signal: None,
+            pending_signal: self.take_pending_lifecycle_signal(),
             custom_signal: None,
         })
     }
@@ -627,6 +660,8 @@ mod tests {
                     sleep_until: inst.sleep_until,
                     termination_reason: None,
                     exit_code: None,
+                    recovery_attempts: 0,
+                    recovery_marker: None,
                 }))
         }
 

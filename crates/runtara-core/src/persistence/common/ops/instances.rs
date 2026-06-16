@@ -70,7 +70,8 @@ macro_rules! impl_instance_ops {
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, checkpoint_id, attempt, max_attempts, \
-                            created_at, started_at, finished_at, input, output, error, sleep_until \
+                            created_at, started_at, finished_at, input, output, error, sleep_until, \
+                            recovery_attempts, recovery_marker \
                      FROM instances \
                      WHERE instance_id = {p1}"
                 );
@@ -238,6 +239,47 @@ macro_rules! impl_instance_ops {
                         Ok(true)
                     }
                 }
+            }
+
+            /// Mark an instance for automatic recovery after an Environment
+            /// restart: suspend it, stamp `termination_reason =
+            /// 'environment_restart'`, set `sleep_until = NOW()` so the wake
+            /// scheduler relaunches it, and record the crash-loop counters.
+            /// Mirrors the graceful-drain suspend in
+            /// `instance_handlers::signal` plus the recovery bookkeeping.
+            pub(crate) async fn op_mark_for_recovery(
+                pool: &$Pool,
+                instance_id: &str,
+                attempt: i32,
+                marker: ::core::option::Option<&str>,
+            ) -> ::core::result::Result<(), $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let p3 = <$Dialect>::placeholder(3);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let term_cast = <$Dialect>::enum_cast(EnumKind::TerminationReason);
+                let now = <$Dialect>::NOW;
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = 'suspended'{status_cast}, \
+                         termination_reason = 'environment_restart'{term_cast}, \
+                         sleep_until = {now}, \
+                         recovery_attempts = {p2}, \
+                         recovery_marker = {p3} \
+                     WHERE instance_id = {p1}"
+                );
+                ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(attempt)
+                    .bind(marker)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "mark_for_recovery".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(())
             }
 
             /// UPDATE `input` BLOB. Does NOT require the instance to exist —

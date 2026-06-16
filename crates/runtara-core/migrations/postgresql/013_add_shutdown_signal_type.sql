@@ -1,0 +1,12 @@
+-- Migration: Add 'shutdown' to the signal_type enum.
+--
+-- The graceful drain writes an instance-wide "shutdown" signal
+-- (EnvironmentRuntime::drain -> insert_signal) so a running guest can observe it
+-- at its next checkpoint and suspend CLEANLY (status=suspended), instead of
+-- being force-stopped at the grace deadline. The signal_type enum only had
+-- cancel/pause/resume, so every "shutdown" insert failed with
+-- "invalid input value for enum signal_type", silently defeating the clean
+-- drain and forcing every graceful shutdown down the force-stop path.
+--
+-- SQLite needs no change: its pending_signals.signal_type is plain TEXT.
+ALTER TYPE signal_type ADD VALUE 'shutdown';

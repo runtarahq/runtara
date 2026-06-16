@@ -199,6 +199,9 @@ pub mod image_cleanup_worker;
 /// Background worker for detecting and failing stale instances.
 pub mod heartbeat_monitor;
 
+/// Automatic recovery of instances killed by an Environment restart.
+pub mod recovery;
+
 /// Embeddable runtime for runtara-environment.
 pub mod runtime;
 

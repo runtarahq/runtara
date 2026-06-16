@@ -857,6 +857,10 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
         "Checking registered containers for recovery"
     );
 
+    // Summary counters for an operator-facing startup line.
+    let mut recovered = 0usize;
+    let mut failed = 0usize;
+
     for container in containers {
         let instance_id = &container.instance_id;
 
@@ -891,33 +895,40 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     );
                     let _ = registry.cleanup(instance_id).await;
                 } else {
-                    // Still shows "running" but process is gone - crashed
+                    // Process is gone but Core still shows the instance
+                    // running: it was killed by this Environment restart. Route
+                    // it into the suspend → wake → relaunch recovery path
+                    // (replay-from-start with the checkpoint cache) instead of
+                    // dead-ending at `failed`. A crash-loop cap bounds instances
+                    // that never make progress. Per-workflow opt-out is wired in
+                    // a later phase; default is to recover.
                     warn!(
                         instance_id = %instance_id,
                         status = %status,
                         pid = ?container.pid,
-                        "Found orphaned container (process gone, Core shows running) - marking as crashed"
+                        "Found orphaned container (process gone, Core shows running) - recovering after Environment restart"
                     );
 
-                    // Mark as crashed in Core
-                    if let Err(e) = persistence
-                        .complete_instance(
-                            CompleteInstanceParams::new(instance_id, "failed")
-                                .if_running()
-                                .with_termination("crashed", None)
-                                .with_error("Process terminated during Environment restart"),
-                        )
-                        .await
-                    {
-                        error!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to mark orphaned instance as crashed"
-                        );
+                    let outcome = crate::recovery::recover_or_fail(
+                        persistence,
+                        instance_id,
+                        crate::recovery::auto_recover_enabled(),
+                    )
+                    .await;
+                    match outcome {
+                        crate::recovery::RecoveryOutcome::Recovered => recovered += 1,
+                        crate::recovery::RecoveryOutcome::Failed => failed += 1,
                     }
 
-                    // Clean up registry
+                    // Drop the stale registry entry either way; the wake
+                    // scheduler registers a fresh one on relaunch.
                     let _ = registry.cleanup(instance_id).await;
+
+                    info!(
+                        instance_id = %instance_id,
+                        outcome = ?outcome,
+                        "Orphaned instance recovery decision"
+                    );
                 }
             }
             Ok(None) => {
@@ -936,6 +947,15 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                 );
             }
         }
+    }
+
+    if recovered > 0 || failed > 0 {
+        info!(
+            recovered,
+            failed,
+            "Environment-restart recovery: relaunching instances killed by the previous restart \
+             (failed = exceeded RUNTARA_MAX_AUTO_RESTARTS or auto-recovery disabled)"
+        );
     }
 
     Ok(())

@@ -722,6 +722,15 @@ impl Persistence for PostgresPersistence {
         Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }
 
+    async fn mark_for_recovery(
+        &self,
+        instance_id: &str,
+        attempt: i32,
+        marker: Option<&str>,
+    ) -> Result<(), CoreError> {
+        Self::op_mark_for_recovery(&self.pool, instance_id, attempt, marker).await
+    }
+
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,

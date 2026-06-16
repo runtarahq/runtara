@@ -208,15 +208,11 @@ impl HeartbeatMonitor {
             }
         }
 
-        // Process orphaned instances (running in Core but not tracked locally)
+        // Process orphaned instances (running in Core but not tracked locally).
+        // These were orphaned by an Environment that went away; route them into
+        // the restart-recovery path rather than failing them outright.
         for instance in orphaned_instances {
-            if let Err(e) = self.fail_orphaned_instance(&instance).await {
-                error!(
-                    instance_id = %instance.instance_id,
-                    error = %e,
-                    "Failed to mark orphaned instance as failed"
-                );
-            }
+            self.recover_orphaned_instance(&instance).await;
         }
 
         Ok(())
@@ -435,53 +431,32 @@ impl HeartbeatMonitor {
         Ok(orphaned)
     }
 
-    /// Mark an orphaned instance as failed.
-    ///
-    /// Orphaned instances have no container_registry entry, so no PID is available.
-    /// We can only mark them as failed in Core persistence.
-    async fn fail_orphaned_instance(
-        &self,
-        instance: &OrphanedInstance,
-    ) -> crate::error::Result<()> {
-        let started_desc = match instance.started_at {
-            Some(started) => format!("started at {}", started.format("%Y-%m-%d %H:%M:%S UTC")),
-            None => format!(
-                "created at {}",
-                instance.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-            ),
-        };
-
-        let error_message = format!(
-            "Instance orphaned: {} but not tracked by Environment (timeout: {}s) [no_pid_available]",
-            started_desc,
-            self.config.heartbeat_timeout.as_secs()
-        );
-
+    /// Recover an orphaned instance (Core shows it running, but no Environment
+    /// tracks it — the tracking Environment went away). Route it into the
+    /// suspend → wake → relaunch recovery path, gated by the crash-loop cap,
+    /// instead of failing it outright. Per-workflow opt-out is wired in a later
+    /// phase; default is to recover.
+    async fn recover_orphaned_instance(&self, instance: &OrphanedInstance) {
         warn!(
             instance_id = %instance.instance_id,
             tenant_id = %instance.tenant_id,
             started_at = ?instance.started_at,
             created_at = %instance.created_at,
-            "Marking orphaned instance as failed (no PID to kill)"
+            "Found orphaned instance (Core running, untracked) - recovering after Environment restart"
         );
 
-        // Mark instance as failed in Core persistence with termination tracking
-        self.core_persistence
-            .complete_instance(
-                CompleteInstanceParams::new(&instance.instance_id, "failed")
-                    .if_running()
-                    .with_termination("orphaned", None)
-                    .with_error(&error_message),
-            )
-            .await
-            .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
+        let outcome = crate::recovery::recover_or_fail(
+            self.core_persistence.as_ref(),
+            &instance.instance_id,
+            crate::recovery::auto_recover_enabled(),
+        )
+        .await;
 
         info!(
             instance_id = %instance.instance_id,
-            "Orphaned instance marked as failed"
+            outcome = ?outcome,
+            "Orphaned instance recovery decision"
         );
-
-        Ok(())
     }
 
     // =========================================================================

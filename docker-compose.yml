@@ -83,6 +83,15 @@ services:
       OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
       VALKEY_HOST: valkey
       VALKEY_PORT: "6379"
+      # On stop, give running workflows time to reach a checkpoint and suspend
+      # (clean recovery) instead of being killed mid-step. `stop_grace_period`
+      # below must stay >= this, or `docker compose down/stop` SIGKILLs the
+      # server before the drain finishes (it then falls back to abrupt-restart
+      # recovery on the next `up`).
+      RUNTARA_SHUTDOWN_GRACE_MS: "30000"
+    # Wait for the in-process drain (RUNTARA_SHUTDOWN_GRACE_MS above) before
+    # SIGKILL. Keep this slightly larger than the drain window.
+    stop_grace_period: 35s
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.
     ports:

@@ -2337,14 +2337,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Run both axum servers with graceful shutdown hooks. Each waits on its
-    // own clone of the shutdown signal so neither exits prematurely.
+    // The public API server stops accepting as soon as SIGTERM flips
+    // `shutdown_signal` (no new external intake). The internal API server
+    // (object-model / agents / proxy — called by running guest instances) is
+    // held on its OWN signal and kept alive until AFTER the environment drain,
+    // so a still-running guest's in-flight agent calls keep succeeding while it
+    // reaches a checkpoint and suspends. Tearing the internal API down early
+    // (the previous behaviour) made running guests fail with ConnectionRefused
+    // and be marked `failed` instead of `suspended` — which meant they were
+    // never recovered after the restart.
     let public_shutdown = shutdown_signal.clone();
-    let internal_shutdown = shutdown_signal.clone();
+    let internal_shutdown = crate::shutdown::ShutdownSignal::new();
+    let internal_shutdown_for_server = internal_shutdown.clone();
     let public_server = axum::serve(public_listener, public_app)
         .with_graceful_shutdown(async move { public_shutdown.wait().await });
     let internal_server = axum::serve(internal_listener, internal_app)
-        .with_graceful_shutdown(async move { internal_shutdown.wait().await });
+        .with_graceful_shutdown(async move { internal_shutdown_for_server.wait().await });
 
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the servers — exiting is driven by the flag, not by
@@ -2358,38 +2366,53 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         signal_coordinator.request_shutdown();
     });
 
-    let (public_result, internal_result) = tokio::join!(public_server, internal_server);
-    if let Err(e) = public_result {
-        tracing::error!(error = %e, "Public API server error");
-    }
-    if let Err(e) = internal_result {
-        tracing::error!(error = %e, "Internal API server error");
-    }
+    // The axum graceful-shutdown future isn't `Send`, so we can't spawn the
+    // internal server on a separate task. Instead drive it concurrently with an
+    // orchestration future on THIS task via `join!`: the orchestration awaits
+    // the public server (returns on SIGTERM), runs the drain while the internal
+    // server is still being polled (and thus still serving guest agent calls),
+    // then triggers the internal server's own shutdown.
+    let orchestrate = async {
+        if let Err(e) = public_server.await {
+            tracing::error!(error = %e, "Public API server error");
+        }
 
-    // Make sure the flag is set even if the servers stopped for another reason.
-    shutdown_coordinator.request_shutdown();
-    signal_task.abort();
+        // Make sure the flag is set even if the public server stopped for
+        // another reason (e.g. a bind error).
+        shutdown_coordinator.request_shutdown();
+        signal_task.abort();
 
-    // Drain running executions and embedded instances unless we're in dev
-    // mode — local `cargo run` users want Ctrl+C to exit promptly instead of
-    // waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight workflow to
-    // checkpoint. Release builds and explicit RUNTARA_DEV_MODE=false keep the
-    // full graceful drain.
-    if config::dev_mode() {
-        tracing::warn!(
-            "Dev mode: skipping graceful drain of executions and instances. \
-             Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
-             In-flight workers will finish their current task before exiting."
-        );
-    } else {
-        tracing::info!("Draining running executions before stopping embedded services");
-        shutdown_coordinator.drain_executions().await;
-        if let Some(runtara) = embedded_runtara.as_ref() {
-            println!("Draining embedded Runtara environment...");
-            if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
-                eprintln!("Error draining embedded Runtara: {}", e);
+        // Drain running executions and embedded instances unless we're in dev
+        // mode — local `cargo run` users want Ctrl+C to exit promptly instead
+        // of waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight
+        // workflow to checkpoint. Release builds and explicit
+        // RUNTARA_DEV_MODE=false keep the full graceful drain. The internal API
+        // and embedded core are still serving throughout this drain, so guests
+        // can finish in-flight agent calls and write their suspend checkpoint.
+        if config::dev_mode() {
+            tracing::warn!(
+                "Dev mode: skipping graceful drain of executions and instances. \
+                 Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
+                 In-flight workers will finish their current task before exiting."
+            );
+        } else {
+            tracing::info!("Draining running executions before stopping embedded services");
+            shutdown_coordinator.drain_executions().await;
+            if let Some(runtara) = embedded_runtara.as_ref() {
+                println!("Draining embedded Runtara environment...");
+                if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
+                    eprintln!("Error draining embedded Runtara: {}", e);
+                }
             }
         }
+
+        // Drain complete (or skipped): now let the internal API server stop.
+        internal_shutdown.trigger();
+    };
+
+    let (internal_result, ()) = tokio::join!(internal_server, orchestrate);
+    if let Err(e) = internal_result {
+        tracing::error!(error = %e, "Internal API server error");
     }
 
     // Always tear down the embedded server so ports/pools close cleanly.

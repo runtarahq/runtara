@@ -68,4 +68,12 @@ EXPOSE 7001
 HEALTHCHECK --interval=10s --timeout=5s --start-period=40s --retries=5 \
     CMD curl -fsS "http://127.0.0.1:${SERVER_PORT}/health" || exit 1
 
+# Graceful drain contract: on stop, the server must receive SIGTERM (Docker's
+# default, made explicit here) and be given at least RUNTARA_SHUTDOWN_GRACE_MS
+# to let in-flight workflows reach a checkpoint and suspend. Orchestrators must
+# set their stop timeout accordingly (compose `stop_grace_period`, k8s
+# `terminationGracePeriodSeconds`); a too-short timeout SIGKILLs mid-drain and
+# falls back to abrupt-restart recovery instead of a clean suspend.
+STOPSIGNAL SIGTERM
+
 CMD ["runtara-server"]

@@ -67,6 +67,18 @@ impl ShutdownSignal {
         }
         self.notify.notified().await;
     }
+
+    /// Flip this signal directly (waking any `wait()`-ers). Idempotent.
+    ///
+    /// Used for the internal API server's *own* signal, which is held back
+    /// until the environment drain completes so in-flight guest agent calls
+    /// (object-model / agents / proxy) keep succeeding while running instances
+    /// reach a checkpoint and suspend.
+    pub fn trigger(&self) {
+        if !self.flag.swap(true, Ordering::SeqCst) {
+            self.notify.notify_waiters();
+        }
+    }
 }
 
 impl Default for ShutdownSignal {

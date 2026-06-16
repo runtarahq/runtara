@@ -50,6 +50,15 @@ pub struct InstanceRecord {
     /// Process exit code if available.
     #[sqlx(default)]
     pub exit_code: Option<i32>,
+    /// Consecutive no-progress auto-restarts after an Environment restart.
+    /// Reset to 0 when the instance's checkpoint count advances between
+    /// recoveries. See [`Persistence::mark_for_recovery`].
+    #[sqlx(default)]
+    pub recovery_attempts: i32,
+    /// Checkpoint count observed at the last auto-recovery, as text. Compared
+    /// against the current count to distinguish "made progress" from "stuck".
+    #[sqlx(default)]
+    pub recovery_marker: Option<String>,
 }
 
 /// Checkpoint record from the persistence layer.
@@ -581,6 +590,34 @@ pub trait Persistence: Send + Sync {
 
     /// Clear the sleep_until timestamp for an instance.
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
+
+    /// Mark an instance for automatic recovery after an Environment restart.
+    ///
+    /// Sets `status='suspended'`, `termination_reason='environment_restart'`,
+    /// `sleep_until=NOW()` (so the wake scheduler relaunches it), and stores the
+    /// crash-loop counters `recovery_attempts` / `recovery_marker`. The instance
+    /// is then replayed-from-start with the checkpoint cache, so completed
+    /// durable steps are served from cache. `marker` is the checkpoint count at
+    /// recovery time, used to detect forward progress between recoveries.
+    ///
+    /// The default implementation suspends the instance and schedules an
+    /// immediate wake using the existing building blocks; the SQL backends
+    /// override it to also persist the `recovery_attempts`/`recovery_marker`
+    /// crash-loop counters in a single atomic UPDATE.
+    async fn mark_for_recovery(
+        &self,
+        instance_id: &str,
+        _attempt: i32,
+        _marker: Option<&str>,
+    ) -> Result<(), CoreError> {
+        self.complete_instance(
+            CompleteInstanceParams::new(instance_id, "suspended")
+                .with_termination("environment_restart", None),
+        )
+        .await?;
+        self.set_instance_sleep(instance_id, chrono::Utc::now())
+            .await
+    }
 
     /// Get instances that are due to wake (sleep_until <= now).
     async fn get_sleeping_instances_due(

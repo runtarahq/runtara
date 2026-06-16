@@ -119,6 +119,8 @@ pub(crate) fn make_instance(instance_id: &str, tenant_id: &str, status: &str) ->
         sleep_until: None,
         termination_reason: None,
         exit_code: None,
+        recovery_attempts: 0,
+        recovery_marker: None,
     }
 }
 
