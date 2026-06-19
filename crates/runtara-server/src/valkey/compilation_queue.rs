@@ -17,13 +17,23 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// A compilation request in the queue
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+//
+// Note: no `Eq`/`Hash`/`PartialEq` — `product_event` can carry a `ProductEvent` whose
+// `serde_json::Value` properties are neither. Dedup uses `unique_key()` (a string), not the
+// struct's identity, so these derives weren't needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompilationRequest {
     pub tenant_id: String,
     pub workflow_id: String,
     pub version: i32,
     #[serde(default)]
     pub force_recompile: bool,
+    /// Optional pre-built, attributed `workflow.compiled` event supplied by the enqueuer (which
+    /// has the caller/surface context). The worker fills in the outcome (`success`,
+    /// `occurred_at`) and emits it. `None` → the worker emits its own no-user, `Worker`-source
+    /// default. Either way the worker is the single emit point, so the event lands exactly once.
+    #[serde(default)]
+    pub product_event: Option<crate::product_events::ProductEvent>,
 }
 
 impl CompilationRequest {
@@ -33,6 +43,7 @@ impl CompilationRequest {
             workflow_id,
             version,
             force_recompile: false,
+            product_event: None,
         }
     }
 
@@ -47,7 +58,18 @@ impl CompilationRequest {
             workflow_id,
             version,
             force_recompile,
+            product_event: None,
         }
+    }
+
+    /// Attach a pre-built, attributed `workflow.compiled` event for the worker to emit on
+    /// completion. Builder-style.
+    pub fn with_product_event(
+        mut self,
+        product_event: Option<crate::product_events::ProductEvent>,
+    ) -> Self {
+        self.product_event = product_event;
+        self
     }
 
     /// Create a unique key for this request (used for deduplication)
@@ -69,6 +91,7 @@ impl CompilationRequest {
                 workflow_id: parts[1].to_string(),
                 version: parts[2].parse().ok()?,
                 force_recompile: false,
+                product_event: None,
             })
         } else {
             None
@@ -531,13 +554,14 @@ mod tests {
     }
 
     #[test]
-    fn test_compilation_request_equality() {
+    fn test_compilation_request_dedup_key() {
+        // Dedup keys off `unique_key()` (tenant:workflow:version), not struct identity.
         let req1 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 1);
         let req2 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 1);
         let req3 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 2);
 
-        assert_eq!(req1, req2);
-        assert_ne!(req1, req3);
+        assert_eq!(req1.unique_key(), req2.unique_key());
+        assert_ne!(req1.unique_key(), req3.unique_key());
     }
 
     #[test]

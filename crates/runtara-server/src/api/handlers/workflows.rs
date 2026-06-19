@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -37,6 +37,9 @@ use crate::api::dto::workflows::{
 use crate::api::handlers::common::{execution_error_response, execution_error_response_with};
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::workflows::{ServiceError, WorkflowService};
+use crate::auth::AuthContext;
+use crate::middleware::tenant_auth::Source;
+use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
     ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
@@ -134,14 +137,17 @@ pub struct CompileWorkflowQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_name = %request.name))]
+#[instrument(skip(pool, connections, request, agent_catalog, events, ctx, source), fields(workflow_name = %request.name))]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<CreateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
@@ -161,6 +167,11 @@ pub async fn create_workflow_handler(
         .await
     {
         Ok(workflow_dto) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCreated, &ctx)
+                    .resource(workflow_dto.id.as_str(), "workflow")
+                    .source(source),
+            );
             let response =
                 ApiResponse::success_with_message("Workflow created successfully", workflow_dto);
             (
@@ -197,6 +208,9 @@ pub async fn update_workflow_handler(
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
@@ -236,7 +250,14 @@ pub async fn update_workflow_handler(
         )
         .await
     {
-        Ok(result) => result,
+        Ok(result) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowUpdated, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source),
+            );
+            result
+        }
         Err(e) => return map_service_error_to_response(e),
     };
 
@@ -244,12 +265,19 @@ pub async fn update_workflow_handler(
     // The compilation worker will process this in the background
     let compilation_status = if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
         let redis_url = valkey_config.connection_url();
-        match crate::workers::compilation_worker::enqueue_compilation(
+        // This compile is a side effect of the update — hand the worker a pre-built event
+        // attributed to the updating caller/surface, so the resulting `workflow.compiled` is
+        // not an anonymous worker event.
+        let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source);
+        match crate::workers::compilation_worker::enqueue_compilation_with_event(
             &redis_url,
             &tenant_id,
             &workflow_id,
             version_num,
             false,
+            compiled_event,
         )
         .await
         {
@@ -626,7 +654,9 @@ pub async fn delete_workflow_handler(
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
@@ -653,6 +683,11 @@ pub async fn delete_workflow_handler(
     // Delegate to service
     match service.delete_workflow(&tenant_id, &workflow_id).await {
         Ok(rows_affected) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowDeleted, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source),
+            );
             let response = json!({
                 "success": true,
                 "message": format!("Workflow '{}' marked as deleted ({} definitions deleted)", workflow_id, rows_affected),
@@ -737,13 +772,16 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client, _connections), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, runtime_client, _connections, ctx, source), fields(workflow_id = %workflow_id, version = %version))]
+#[allow(clippy::too_many_arguments)]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
     Path((workflow_id, version)): Path<(String, String)>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Query(query): Query<CompileWorkflowQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Validate version is a positive integer
@@ -847,13 +885,19 @@ pub async fn compile_workflow_handler(
             "Deferring cache decision to compilation service"
         );
 
-        // Enqueue the compilation request
-        match crate::workers::compilation_worker::enqueue_compilation(
+        // Enqueue with a pre-built event attributed to this caller and surface. The compilation
+        // worker emits it on completion, so `workflow.compiled` lands exactly once — even if the
+        // wait below times out.
+        let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source);
+        match crate::workers::compilation_worker::enqueue_compilation_with_event(
             &redis_url,
             &tenant_id,
             &workflow_id,
             version_num,
             force_recompile,
+            compiled_event,
         )
         .await
         {
@@ -906,6 +950,8 @@ pub async fn compile_workflow_handler(
         // Query DB for the compilation result
         return match query_compilation_result(&pool, &tenant_id, &workflow_id, version_num).await {
             Ok(result) => {
+                // `workflow.compiled` is emitted by the compilation worker (see enqueue above),
+                // so this handler does not emit it.
                 if result.success {
                     let mut response = json!({
                         "success": true,

@@ -5,8 +5,9 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, AuthMethod};
 use crate::authz::Role;
+use crate::product_events::EventSource;
 
 /// Middleware that bridges server auth context to `runtara_connections::TenantId`.
 ///
@@ -80,6 +81,38 @@ impl<S: Send + Sync> FromRequestParts<S> for CallerId {
                     })),
                 )
             })
+    }
+}
+
+/// Axum extractor resolving the **surface** an authenticated request entered through, for
+/// product-analytics `source`. Prefers an explicit [`EventSource`] stamped in request
+/// extensions — the MCP in-process bridge (`mcp::tools::internal_api::build_request`) sets
+/// `EventSource::Mcp` there. Absent that (a real external HTTP request), it falls back to
+/// the caller's auth method as a proxy: an API key implies the programmatic API surface, a
+/// JWT (or non-OIDC mode) implies the web UI.
+///
+/// Infallible: a surface label must never fail a request, so it always resolves to *some*
+/// value (defaulting to the UI when no auth context is present at all).
+pub struct Source(pub EventSource);
+
+impl<S: Send + Sync> FromRequestParts<S> for Source {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // An explicit surface marker (e.g. MCP) always wins.
+        if let Some(source) = parts.extensions.get::<EventSource>().copied() {
+            return Ok(Source(source));
+        }
+        // Otherwise infer the surface from how the caller authenticated.
+        let source = match parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|ctx| ctx.auth_method)
+        {
+            Some(AuthMethod::ApiKey) => EventSource::Api,
+            _ => EventSource::Ui,
+        };
+        Ok(Source(source))
     }
 }
 

@@ -23,6 +23,7 @@ use crate::mcp;
 use crate::metrics;
 use crate::middleware;
 use crate::observability;
+use crate::product_events;
 use crate::runtime_client;
 use crate::types;
 use crate::valkey;
@@ -517,6 +518,9 @@ struct AppState {
     /// consume this instead of `runtara_agents::registry` so the
     /// server-side view matches what the dispatcher actually loaded.
     agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    /// Non-blocking sink for product-analytics events. Handlers `emit` onto it; a
+    /// background drain batches the events into `product_events`.
+    events: product_events::ProductEventSink,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -544,6 +548,13 @@ impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
 impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
     fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         state.agent_catalog.clone()
+    }
+}
+
+// Implement FromRef to allow extracting the product-event sink from AppState.
+impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
+    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+        state.events.clone()
     }
 }
 
@@ -1184,6 +1195,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Product-analytics pipeline. Build the bounded channel, spawn the single drain
+    // (the consumer), and keep the sink for AppState. Handlers `emit` onto the sink
+    // off the request path; the drain batches into `product_events`.
+    let product_event_sink = {
+        let events_config = product_events::ProductEventConfig::from_env();
+        let (tx, rx) = tokio::sync::mpsc::channel(events_config.channel_capacity());
+        let drain = product_events::ProductEventDrain::new(
+            pool.clone(),
+            rx,
+            events_config,
+            shutdown_signal.clone(),
+        );
+        tokio::spawn(drain.run());
+        product_events::ProductEventSink::new(tx)
+    };
+
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
 
@@ -1241,6 +1268,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let compilation_runtime_client = runtime_client.clone();
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = component_dispatcher.as_ref().map(|d| d.catalog());
+        let compilation_events = product_event_sink.clone();
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
@@ -1252,6 +1280,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 compilation_agent_catalog,
                 worker_config,
                 compilation_shutdown,
+                compilation_events,
             )
             .await;
         });
@@ -1749,6 +1778,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
         })
         // Reject API-key-authenticated requests when the `api` feature is
         // off. Sits *between* auth (outermost) and the per-feature gates
@@ -2059,6 +2089,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this

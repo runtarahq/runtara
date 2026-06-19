@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use crate::auth::{AuthContext, AuthMethod};
 use crate::mcp::server::SmoMcpServer;
+use crate::product_events::EventSource;
 
 tokio::task_local! {
     /// The authenticated MCP caller's identity for the current tool invocation.
@@ -221,6 +222,7 @@ fn build_request(
             )
         });
     request.extensions_mut().insert(auth_context);
+    request.extensions_mut().insert(EventSource::Mcp);
 
     request
 }
