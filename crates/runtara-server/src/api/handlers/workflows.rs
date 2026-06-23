@@ -354,12 +354,16 @@ pub async fn update_workflow_handler(
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path((workflow_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -390,6 +394,13 @@ pub async fn patch_version_graph_handler(
         Ok(warnings) => warnings,
         Err(e) => return map_service_error_to_response(e),
     };
+
+    events.emit(
+        ProductEvent::from_auth(EventType::WorkflowUpdated, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source)
+            .properties(json!({ "version": version })),
+    );
 
     let response = json!({
         "success": true,
@@ -717,13 +728,16 @@ pub async fn delete_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn clone_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(workflow_id): Path<String>,
     Json(request): Json<CloneWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -737,6 +751,13 @@ pub async fn clone_workflow_handler(
         .await
     {
         Ok((new_workflow_id, versions_cloned)) => {
+            // A clone produces a brand-new workflow — record it as a creation, keyed on the
+            // *new* workflow id.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCreated, &ctx)
+                    .resource(&new_workflow_id, "workflow")
+                    .source(source),
+            );
             let response = json!({
                 "success": true,
                 "message": format!("Workflow '{}' cloned successfully", workflow_id),
@@ -772,13 +793,14 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client, _connections, ctx, source), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, runtime_client, _connections, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
 #[allow(clippy::too_many_arguments)]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
+    State(events): State<ProductEventSink>,
     Path((workflow_id, version)): Path<(String, String)>,
     Extension(ctx): Extension<AuthContext>,
     Source(source): Source,
@@ -1011,6 +1033,14 @@ pub async fn compile_workflow_handler(
         .await
     {
         Ok(result) => {
+            // Synchronous (no-queue) compile: the worker isn't involved, so this handler is the
+            // emit point for `workflow.compiled` on this path.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source)
+                    .properties(json!({ "success": true })),
+            );
             let mut response = json!({
                 "success": true,
                 "message": "Workflow compiled successfully",
@@ -1039,6 +1069,14 @@ pub async fn compile_workflow_handler(
             (StatusCode::NOT_FOUND, Json(error_response))
         }
         Err(crate::api::services::compilation::ServiceError::CompilationError(msg)) => {
+            // The compile actually ran and failed (vs. NotFound/DatabaseError, which are
+            // pre-compile failures) — record it as a failed compile on the synchronous path.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source)
+                    .properties(json!({ "success": false })),
+            );
             let error_response = json!({
                 "success": false,
                 "error": "Compilation failed",
