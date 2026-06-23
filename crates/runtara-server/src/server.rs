@@ -1195,6 +1195,23 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Product-events retention sweeper (45-day default). Server DB, no Valkey needed.
+    {
+        let cleanup_pool = pool.clone();
+        let cleanup_shutdown = shutdown_signal.clone();
+        tokio::spawn(async move {
+            let cfg =
+                workers::product_events_cleanup_worker::ProductEventsCleanupWorkerConfig::from_env(
+                );
+            let worker = workers::product_events_cleanup_worker::ProductEventsCleanupWorker::new(
+                cleanup_pool,
+                cfg,
+                cleanup_shutdown,
+            );
+            worker.run().await;
+        });
+    }
+
     // Product-analytics pipeline. Build the bounded channel, spawn the single drain
     // (the consumer), and keep the sink for AppState. Handlers `emit` onto the sink
     // off the request path; the drain batches into `product_events`.
