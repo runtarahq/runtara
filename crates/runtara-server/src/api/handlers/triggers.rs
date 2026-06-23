@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
+    Extension,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
@@ -15,6 +16,9 @@ use crate::api::dto::triggers::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::triggers::{ServiceError, TriggerService};
 use crate::api::services::webhook_manager::{WebhookManager, extract_connection_id};
+use crate::auth::AuthContext;
+use crate::middleware::tenant_auth::Source;
+use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
 /// Best-effort webhook registration after a Channel trigger is created/activated.
 /// Stores the webhook secret in the trigger's configuration for request validation.
@@ -88,11 +92,15 @@ async fn maybe_unregister_webhook(
     ),
     tag = "Invocation Triggers"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<CreateInvocationTriggerRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
@@ -103,6 +111,12 @@ pub async fn create_invocation_trigger(
         .await
     {
         Ok(trigger) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::TriggerCreated, &ctx)
+                    .resource(trigger.id.as_str(), "trigger")
+                    .properties(json!({"trigger_type": &trigger.trigger_type}))
+                    .source(source),
+            );
             maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
 
             // Re-read the trigger to get updated config (webhook_secret, platform).

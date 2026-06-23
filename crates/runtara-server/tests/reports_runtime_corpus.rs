@@ -497,6 +497,7 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
         pool: PgPool,
         connections: Arc<ConnectionsFacade>,
         agent_catalog: Arc<AgentCatalog>,
+        events: runtara_server::product_events::ProductEventSink,
     }
     impl FromRef<WfState> for PgPool {
         fn from_ref(s: &WfState) -> PgPool {
@@ -513,11 +514,20 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
             s.agent_catalog.clone()
         }
     }
+    impl FromRef<WfState> for runtara_server::product_events::ProductEventSink {
+        fn from_ref(s: &WfState) -> runtara_server::product_events::ProductEventSink {
+            s.events.clone()
+        }
+    }
 
+    // Product-event sink for the mounted handlers. The receiver is kept alive (channel open)
+    // so emits buffer harmlessly; the test asserts on workflow behavior, not on events.
+    let (events_tx, _events_rx) = tokio::sync::mpsc::channel(64);
     let wf_state = WfState {
         pool: fixture.server_pool.clone(),
         connections: connections.clone(),
         agent_catalog: agent_catalog.clone(),
+        events: runtara_server::product_events::ProductEventSink::new(events_tx),
     };
 
     // Mount only the workflow routes the tools talk to. A middleware layer

@@ -354,7 +354,6 @@ pub async fn update_workflow_handler(
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
@@ -659,6 +658,7 @@ pub async fn list_workflow_versions_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,

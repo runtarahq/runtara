@@ -70,6 +70,9 @@ pub enum EventType {
     ExecutionStarted,
     ExecutionCompleted,
     ExecutionFailed,
+    // Triggers
+    TriggerCreated,
+    TriggerFired,
 }
 
 impl EventType {
@@ -86,6 +89,8 @@ impl EventType {
             EventType::ExecutionStarted => "execution.started",
             EventType::ExecutionCompleted => "execution.completed",
             EventType::ExecutionFailed => "execution.failed",
+            EventType::TriggerCreated => "trigger.created",
+            EventType::TriggerFired => "trigger.fired",
         }
     }
 }

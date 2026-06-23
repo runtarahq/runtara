@@ -1258,6 +1258,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Compilation is handled by the compilation worker.
         let trigger_worker_tenant_id = tenant_id.clone();
         let trigger_shutdown = shutdown_signal.clone();
+        let trigger_events = product_event_sink.clone();
         tokio::spawn(async move {
             let worker_config = workers::trigger_worker::TriggerWorkerConfig {
                 tenant_id: trigger_worker_tenant_id,
@@ -1273,6 +1274,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 trigger_worker_config,
                 worker_config,
                 trigger_shutdown,
+                trigger_events,
             )
             .await;
         });
