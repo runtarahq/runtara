@@ -28,11 +28,14 @@ env:
 
 jobs:
   notify-start:
-    # Only fire on push-to-main or PRs from this repo (not forks).
-    # Forks can't read SLACK_WEBHOOK_URL anyway; this gate is belt-and-braces.
+    # Only fire on push-to-main or PRs from this repo (not forks, not Dependabot).
+    # Forks and Dependabot runs can't read SLACK_WEBHOOK_URL (GitHub withholds repo
+    # secrets from them), so curl would hit an empty URL and fail the job.
     if: |
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      github.actor != 'dependabot[bot]' && (
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack — build started
@@ -583,7 +586,7 @@ jobs:
       - wit-package
       - components-build
     if: |
-      !cancelled() && (
+      !cancelled() && github.actor != 'dependabot[bot]' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         || (github.event_name == 'push' && github.ref == 'refs/heads/main')
       )
