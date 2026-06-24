@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::mcp::entitlement::require_agent;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, validate_path_param};
+use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -52,6 +52,7 @@ pub struct TestCapabilityParams {
     )]
     pub capability_id: String,
     #[schemars(description = "Test input data as JSON")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub inputs: serde_json::Value,
     #[schemars(
         description = "Connection ID (required for agents that need credentials, e.g. shopify, openai). Use list_connections to find available connections."
@@ -153,8 +154,9 @@ pub async fn test_capability(
     validate_path_param("agent_id", &params.agent_id)?;
     validate_path_param("capability_id", &params.capability_id)?;
     require_agent(server, &params.agent_id)?;
+    let inputs = normalize_json_arg(params.inputs, "inputs")?;
     let mut body = serde_json::json!({
-        "input": params.inputs,
+        "input": inputs,
     });
     if let Some(conn_id) = &params.connection_id {
         body["connectionId"] = serde_json::json!(conn_id);
@@ -169,4 +171,27 @@ pub async fn test_capability(
     )
     .await?;
     json_result(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(|p| p.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
+
+    /// Regression for SYN-447: a bare `serde_json::Value` param without a
+    /// `schema_with` emits a description-only schema (no `type`), which makes
+    /// MCP clients forward the value as a JSON-encoded string.
+    #[test]
+    fn test_capability_inputs_schema_declares_object() {
+        let inputs = generated_property_schema::<TestCapabilityParams>("inputs");
+        assert_eq!(inputs["type"], "object", "{inputs:#}");
+    }
 }

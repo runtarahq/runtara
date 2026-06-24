@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, validate_path_param};
+use super::internal_api::{api_get, api_post, normalize_json_arg, validate_path_param};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -17,6 +17,7 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 #[serde(deny_unknown_fields)]
 pub struct ValidateGraphParams {
     #[schemars(description = "Execution graph JSON to validate")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
 }
 
@@ -113,10 +114,11 @@ pub async fn validate_graph(
     server: &SmoMcpServer,
     params: ValidateGraphParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
     let result = api_post(
         server,
         "/api/runtime/workflows/graph/validate",
-        Some(params.execution_graph),
+        Some(execution_graph),
     )
     .await?;
     json_result(result)
@@ -137,4 +139,26 @@ pub async fn validate_mappings(
     )
     .await?;
     json_result(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        schema
+            .get("properties")
+            .and_then(|p| p.get(property))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
+
+    /// Regression for SYN-447: `validate_graph` must advertise an object type so
+    /// MCP clients don't stringify the graph and trip a 400 "must be a JSON object".
+    #[test]
+    fn validate_graph_execution_graph_schema_declares_object() {
+        let graph = generated_property_schema::<ValidateGraphParams>("execution_graph");
+        assert_eq!(graph["type"], "object", "{graph:#}");
+    }
 }

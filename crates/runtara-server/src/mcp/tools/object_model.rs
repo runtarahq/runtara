@@ -9,7 +9,7 @@ use crate::mcp::entitlement::require_feature;
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
     api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, encode_path_param,
-    validate_identifier_param, validate_path_param,
+    normalize_json_arg, validate_identifier_param, validate_path_param,
 };
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -542,6 +542,7 @@ pub struct QueryAggregateParams {
                        ({valueType:'reference', ...}) are rejected inside EXPR. Max \
                        tree depth is 8."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub aggregates: serde_json::Value,
     #[schemars(
         description = "Optional top-level sort: [{column, direction}] where column \
@@ -627,6 +628,7 @@ pub struct CreateObjectInstanceParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
     #[schemars(description = "Instance properties as JSON object")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub properties: serde_json::Value,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
@@ -644,6 +646,7 @@ pub struct UpdateObjectInstanceParams {
     #[schemars(description = "Instance ID")]
     pub instance_id: String,
     #[schemars(description = "Updated properties as JSON object")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub properties: serde_json::Value,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
@@ -1001,7 +1004,8 @@ pub async fn query_aggregate(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_name", &params.schema_name)?;
-    let mut body = serde_json::json!({ "aggregates": params.aggregates });
+    let aggregates = normalize_json_arg(params.aggregates, "aggregates")?;
+    let mut body = serde_json::json!({ "aggregates": aggregates });
     if let Some(condition) = params.condition {
         body["condition"] = normalize_condition(condition)?;
     }
@@ -1148,9 +1152,10 @@ pub async fn create_object_instance(
     params: CreateObjectInstanceParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     require_feature(server, FeatureKey::Database)?;
+    let properties = normalize_json_arg(params.properties, "properties")?;
     let body = serde_json::json!({
         "schemaName": params.schema_name,
-        "properties": params.properties,
+        "properties": properties,
     });
     ensure_request_payload_reasonable("create_object_instance", &body)?;
     let path = with_connection_id_query(
@@ -1171,8 +1176,9 @@ pub async fn update_object_instance(
     require_feature(server, FeatureKey::Database)?;
     validate_path_param("schema_id", &params.schema_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
+    let properties = normalize_json_arg(params.properties, "properties")?;
     let body = serde_json::json!({
-        "properties": params.properties,
+        "properties": properties,
     });
     ensure_request_payload_reasonable("update_object_instance", &body)?;
     let path = with_connection_id_query(
@@ -1403,6 +1409,27 @@ mod tests {
         assert!(
             schema_allows_array(&result_schema),
             "query_sql resultSchema schema should allow arrays: {result_schema:#}"
+        );
+    }
+
+    /// Regression for SYN-447: object-write `properties` and `query_aggregate`
+    /// `aggregates` were bare `serde_json::Value` with description-only schemas
+    /// (no `type`), so MCP clients stringified them and the server rejected the
+    /// JSON-encoded string.
+    #[test]
+    fn object_instance_properties_schemas_declare_object() {
+        let create = generated_property_schema::<CreateObjectInstanceParams>("properties");
+        let update = generated_property_schema::<UpdateObjectInstanceParams>("properties");
+        assert_eq!(create["type"], "object", "{create:#}");
+        assert_eq!(update["type"], "object", "{update:#}");
+    }
+
+    #[test]
+    fn query_aggregate_aggregates_schema_declares_array() {
+        let aggregates = generated_property_schema::<QueryAggregateParams>("aggregates");
+        assert!(
+            schema_allows_array(&aggregates),
+            "aggregates schema should declare an array type: {aggregates:#}"
         );
     }
 
