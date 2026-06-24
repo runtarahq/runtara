@@ -4,7 +4,7 @@
 //!
 //! Uses minijinja to render template strings with the full execution context.
 
-use minijinja::Environment;
+use minijinja::{Environment, ErrorKind};
 
 /// Render a minijinja template string with the given JSON context.
 ///
@@ -30,7 +30,25 @@ pub fn render_template(template_str: &str, context: &serde_json::Value) -> Resul
         .get_template("__inline")
         .map_err(|e| format!("Template retrieval error: {e}"))?;
     tmpl.render(context)
-        .map_err(|e| format!("Template render error: {e}"))
+        .map_err(|e| format!("Template render error: {e}{}", unknown_helper_hint(&e)))
+}
+
+/// When a render fails because the template referenced a filter/function/test/
+/// method the Runtara template sandbox does not provide, append a pointer to the
+/// supported-helper list so authors don't discover the gap one deploy-execute
+/// cycle at a time. See `docs/templating.md` (SYN-449).
+fn unknown_helper_hint(error: &minijinja::Error) -> &'static str {
+    match error.kind() {
+        ErrorKind::UnknownFilter
+        | ErrorKind::UnknownFunction
+        | ErrorKind::UnknownTest
+        | ErrorKind::UnknownMethod => {
+            " — this helper is not available in Runtara templates; see docs/templating.md \
+             for the supported filters and functions. Note `now()` and `joiner()` are not \
+             provided (use the datetime agent for timestamps)."
+        }
+        _ => "",
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +127,23 @@ mod tests {
         let ctx = json!({"data": {}});
         let result = render_template("Hello {{ data.nonexistent }}", &ctx).unwrap();
         assert_eq!(result, "Hello ");
+    }
+
+    /// SYN-449: the `tojson` filter is available (minijinja `json` feature).
+    #[test]
+    fn test_tojson_filter_available() {
+        let ctx = json!({"data": {"obj": {"a": 1, "b": [2, 3]}}});
+        let result = render_template("{{ data.obj | tojson }}", &ctx).unwrap();
+        assert_eq!(result, r#"{"a":1,"b":[2,3]}"#);
+    }
+
+    /// SYN-449: an unknown helper (e.g. `now()`) fails with a hint pointing at the
+    /// supported-helper docs instead of a bare minijinja message.
+    #[test]
+    fn test_unknown_function_error_mentions_docs() {
+        let ctx = json!({});
+        let err = render_template("{{ now() }}", &ctx).unwrap_err();
+        assert!(err.contains("unknown function"), "{err}");
+        assert!(err.contains("docs/templating.md"), "{err}");
     }
 }

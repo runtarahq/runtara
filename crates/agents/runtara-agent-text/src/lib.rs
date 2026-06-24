@@ -20,7 +20,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use minijinja::Environment;
+use minijinja::{Environment, ErrorKind};
 use regex::RegexBuilder;
 use runtara_agent_encoding::Encoding;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -1014,12 +1014,29 @@ pub fn render_template(input: TemplateInput) -> Result<String, AgentError> {
     let result = tmpl.render(input.context).map_err(|e| {
         AgentError::permanent(
             "TEXT_TEMPLATE_RENDER_ERROR",
-            format!("Template render error: {}", e),
+            format!("Template render error: {}{}", e, unknown_helper_hint(&e)),
         )
         .with_attr("render_error", e.to_string())
     })?;
 
     Ok(result)
+}
+
+/// When a render fails because the template referenced a filter/function/test/
+/// method this engine does not provide, append a pointer to the supported-helper
+/// docs so authors don't discover the gap one run at a time. See SYN-449.
+fn unknown_helper_hint(error: &minijinja::Error) -> &'static str {
+    match error.kind() {
+        ErrorKind::UnknownFilter
+        | ErrorKind::UnknownFunction
+        | ErrorKind::UnknownTest
+        | ErrorKind::UnknownMethod => {
+            " — this helper is not available in Runtara templates; see docs/templating.md \
+             for the supported filters and functions. Note `now()` and `joiner()` are not \
+             provided (use the datetime agent for timestamps)."
+        }
+        _ => "",
+    }
 }
 
 /// Removes leading/trailing whitespace, collapses multiple spaces/newlines into a single space
@@ -2283,6 +2300,33 @@ mod tests {
         };
         let result = render_template(input).unwrap();
         assert_eq!(result, "");
+    }
+
+    /// SYN-449: the `tojson` filter is available (minijinja `json` feature).
+    #[test]
+    fn test_render_template_tojson_filter() {
+        let input = TemplateInput {
+            text: Some("{{ obj | tojson }}".to_string()),
+            context: json!({"obj": {"a": 1, "b": [2, 3]}}),
+        };
+        let result = render_template(input).unwrap();
+        assert_eq!(result, r#"{"a":1,"b":[2,3]}"#);
+    }
+
+    /// SYN-449: an unknown helper fails with a hint pointing at the supported-
+    /// helper docs instead of a bare minijinja message.
+    #[test]
+    fn test_render_template_unknown_function_hint() {
+        let input = TemplateInput {
+            text: Some("{{ now() }}".to_string()),
+            context: json!({}),
+        };
+        let err = render_template(input).unwrap_err();
+        assert!(
+            err.message.contains("docs/templating.md"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

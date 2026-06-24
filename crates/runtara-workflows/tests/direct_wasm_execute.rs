@@ -126,6 +126,26 @@ const NEGATIVE_INDEX_REFERENCE: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// SYN-449: a `template` mapping using the `tojson` filter, which is only
+/// available when minijinja's `json` feature is enabled. Proves the filter works
+/// in the compiled + executed WASM mapping engine, not just host-side unit tests.
+const TEMPLATE_TOJSON_FILTER: &str = r#"{
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "json_str": { "valueType": "template", "value": "{{ data.obj | tojson }}" }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 /// A single Agent step with no Finish and no edges — the agent is both entry
 /// point and terminal. Compiles via an implicit finish; the workflow output is
 /// `null` (matching the generated compiler).
@@ -3285,6 +3305,25 @@ fn direct_wasm_execute_resolves_negative_array_index() {
             "first_pos": "a",
             "oob": "fallback"
         })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_template_tojson_filter() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    // SYN-449: the `tojson` filter (minijinja `json` feature) must be available in
+    // the compiled WASM mapping engine. Output is compact JSON.
+    let result = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-template-tojson",
+        TEMPLATE_TOJSON_FILTER,
+        br#"{"data":{"obj":{"a":1,"b":[2,3]}}}"#,
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({ "json_str": "{\"a\":1,\"b\":[2,3]}" })
     );
 }
 

@@ -59,8 +59,9 @@ serde_json = { workspace = true }
 # default-features = false keeps the consumer in charge of the backend.
 runtara-http = { workspace = true, default-features = false, optional = true }
 
-# Template rendering for MappingValue::Template
-minijinja = "2.5"
+# Template rendering for MappingValue::Template.
+# `json` enables the `tojson` filter (default features stay on).
+minijinja = { version = "2.5", features = ["json"] }
 
 [package.metadata.component]
 package = "runtara:workflow-stdlib"

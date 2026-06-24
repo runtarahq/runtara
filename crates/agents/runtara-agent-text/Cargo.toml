@@ -18,7 +18,8 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 regex = "1"
-minijinja = "2.5"
+# `json` enables the `tojson` filter (default features stay on).
+minijinja = { version = "2.5", features = ["json"] }
 # Capability metadata stays beside the code: `#[capability_input]`,
 # `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
 # `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
