@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::Json,
 };
@@ -11,7 +11,9 @@ use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::middleware::tenant_auth::{CallerId, OrgId};
+use crate::auth::AuthContext;
+use crate::middleware::tenant_auth::{CallerId, OrgId, Source};
+use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
 /// API key record (key_hash is never exposed via serde skip)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -77,10 +79,14 @@ fn sha256_hex(input: &str) -> String {
     tag = "api-keys-controller",
     security(("bearer_auth" = []))
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_api_key(
     OrgId(tenant_id): OrgId,
     CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
     let snapshot = crate::config::entitlements();
@@ -151,6 +157,11 @@ pub async fn create_api_key(
                     .resource("api_key", api_key.id.to_string()),
             )
             .await;
+            events.emit(
+                ProductEvent::from_auth(EventType::ApiKeyCreated, &ctx)
+                    .resource(api_key.id.to_string(), "api_key")
+                    .source(source),
+            );
             let response = CreateApiKeyResponse {
                 api_key,
                 key: plaintext_key,
@@ -221,11 +232,15 @@ pub async fn list_api_keys(
     tag = "api-keys-controller",
     security(("bearer_auth" = []))
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn revoke_api_key(
     OrgId(tenant_id): OrgId,
     CallerId(user_id): CallerId,
     State(pool): State<PgPool>,
     State(valkey): State<Option<redis::aio::ConnectionManager>>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
     // A caller may revoke only a key they issued. Scoping the mutation by `issuing_user_id`
@@ -267,6 +282,11 @@ pub async fn revoke_api_key(
                 crate::audit::AuditEvent::new("token.revoke").resource("api_key", id.to_string()),
             )
             .await;
+            events.emit(
+                ProductEvent::from_auth(EventType::ApiKeyRevoked, &ctx)
+                    .resource(id.to_string(), "api_key")
+                    .source(source),
+            );
             (StatusCode::NO_CONTENT, Json(json!(null)))
         }
         Err(e) => (
