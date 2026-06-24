@@ -480,6 +480,28 @@ mod tests {
     }
 
     #[test]
+    fn product_event_serde_round_trips() {
+        // The "hand the worker a pre-built event via the compilation queue" design depends on
+        // ProductEvent surviving a JSON round-trip with every field (enums, options, properties).
+        let mut e = sample_event();
+        e.event_type = EventType::ExecutionFailed;
+        e.event_version = 2;
+        e.user_id = Some("user-1".to_string());
+        e.actor_id = Some("jti-9".to_string());
+        e.actor_type = Some(ActorType::ApiKey);
+        e.resource_id = Some("wf-1".to_string());
+        e.resource_type = Some("workflow".to_string());
+        e.properties = serde_json::json!({ "duration_ms": 42, "success": false });
+        e.session_id = Some("sess".to_string());
+        e.source = Some(EventSource::Mcp);
+
+        let json = serde_json::to_value(&e).expect("serialize");
+        let back: ProductEvent = serde_json::from_value(json.clone()).expect("deserialize");
+        // ProductEvent has no PartialEq; compare via re-serialization.
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    #[test]
     fn trace_sets_session_and_request() {
         let e = sample_event().trace("sess-1", "req-1");
         assert_eq!(e.session_id.as_deref(), Some("sess-1"));

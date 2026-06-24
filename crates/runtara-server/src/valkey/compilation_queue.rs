@@ -584,4 +584,52 @@ mod tests {
         assert!(debug_str.contains("workflow_id"));
         assert!(debug_str.contains("version"));
     }
+
+    #[test]
+    fn legacy_payload_without_product_event_deserializes_to_none() {
+        // Old queue payloads (pre-SYN-436) lack `product_event`; `#[serde(default)]` must make
+        // them deserialize cleanly so in-flight messages survive a deploy.
+        let legacy = r#"{"tenant_id":"t","workflow_id":"w","version":3}"#;
+        let req = CompilationRequest::from_payload(legacy).expect("legacy payload parses");
+        assert_eq!(req.tenant_id, "t");
+        assert_eq!(req.workflow_id, "w");
+        assert_eq!(req.version, 3);
+        assert!(req.product_event.is_none());
+        assert!(!req.force_recompile);
+    }
+
+    #[test]
+    fn request_with_product_event_round_trips_through_payload() {
+        // A pre-built attributed event must survive the queue's JSON payload round-trip.
+        let req = CompilationRequest::new("t".to_string(), "w".to_string(), 1)
+            .with_product_event(Some(sample_product_event()));
+        let payload = req.payload().expect("serialize payload");
+        let back = CompilationRequest::from_payload(&payload).expect("parse payload");
+        let event = back.product_event.expect("product_event survived");
+        assert_eq!(
+            event.event_type,
+            crate::product_events::EventType::WorkflowCompiled
+        );
+        assert_eq!(event.resource_id.as_deref(), Some("w"));
+    }
+
+    /// A `ProductEvent` built without the global config (struct literal, not `::new`).
+    fn sample_product_event() -> crate::product_events::ProductEvent {
+        use crate::product_events::{EventSource, EventType, ProductEvent};
+        ProductEvent {
+            occurred_at: chrono::Utc::now(),
+            event_type: EventType::WorkflowCompiled,
+            event_version: 1,
+            tenant_id: "t".to_string(),
+            user_id: None,
+            actor_id: None,
+            actor_type: None,
+            resource_id: Some("w".to_string()),
+            resource_type: Some("workflow".to_string()),
+            properties: serde_json::json!({}),
+            session_id: None,
+            request_id: None,
+            source: Some(EventSource::Ui),
+        }
+    }
 }

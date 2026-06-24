@@ -148,3 +148,65 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    /// Build request `Parts` with the given extensions populated.
+    fn parts_with(f: impl FnOnce(&mut axum::http::Extensions)) -> Parts {
+        let mut req = Request::builder().body(()).unwrap();
+        f(req.extensions_mut());
+        req.into_parts().0
+    }
+
+    fn ctx(method: AuthMethod) -> AuthContext {
+        AuthContext::new("org".to_string(), "user".to_string(), method)
+    }
+
+    #[tokio::test]
+    async fn source_prefers_explicit_marker() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(EventSource::Mcp);
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Mcp);
+    }
+
+    #[tokio::test]
+    async fn source_marker_wins_over_auth_method() {
+        // An explicit surface marker beats the auth-method fallback.
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::ApiKey));
+            ext.insert(EventSource::Mcp);
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Mcp);
+    }
+
+    #[tokio::test]
+    async fn source_api_key_falls_back_to_api() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::ApiKey));
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Api);
+    }
+
+    #[tokio::test]
+    async fn source_jwt_falls_back_to_ui() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::Jwt));
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Ui);
+    }
+
+    #[tokio::test]
+    async fn source_defaults_to_ui_without_any_context() {
+        let mut parts = parts_with(|_| {});
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Ui);
+    }
+}
