@@ -404,7 +404,15 @@ pub async fn get_workflow_authoring_schema(
         .capability_id
         .unwrap_or_else(|| "bulk-update-instances".to_string());
 
-    json_result(serde_json::json!({
+    json_result(workflow_authoring_schema(&agent_id, &capability_id))
+}
+
+/// Build the canonical workflow-authoring schema returned by
+/// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
+/// condition-operator enum can be drift-tested against `ConditionOperator`
+/// (SYN-451).
+pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> serde_json::Value {
+    serde_json::json!({
         "schema": "workflow-authoring",
         "version": 1,
         "purpose": "Canonical workflow JSON shapes for MCP clients and LLM authors.",
@@ -451,7 +459,8 @@ pub async fn get_workflow_authoring_schema(
         "conditions": {
             "conditionExpressionShape": {
                 "type": "operation",
-                "op": "EQ | NE | LT | LTE | GT | GTE | AND | OR | CONTAINS | IN",
+                "op": "AND | OR | NOT | EQ | NE | GT | GTE | LT | LTE | STARTS_WITH | ENDS_WITH | CONTAINS | IN | NOT_IN | LENGTH | IS_DEFINED | IS_EMPTY | IS_NOT_EMPTY",
+                "queryOnlyOps": "SIMILARITY_GTE | MATCH | COSINE_DISTANCE_LTE | L2_DISTANCE_LTE — valid only inside object-model query conditions; rejected in plain workflow/Conditional conditions.",
                 "arguments": [
                     {"valueType": "reference", "value": "data.status"},
                     {"valueType": "immediate", "value": "active"}
@@ -583,7 +592,7 @@ pub async fn get_workflow_authoring_schema(
             "Call deploy_latest after mutation tools to compile and set the current version.",
             "Use inspect_step after an execution to inspect resolved inputs, outputs, and errors."
         ]
-    }))
+    })
 }
 
 pub async fn list_workflows(
@@ -1521,6 +1530,81 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use schemars::JsonSchema;
+
+    /// SYN-451: the authoring schema's advertised condition `op` enum must list
+    /// every workflow-valid `ConditionOperator`, must not advertise the query-only
+    /// operators in the main list, and every advertised name must deserialize to a
+    /// real `ConditionOperator` (catches drift if a variant is added/renamed).
+    #[test]
+    fn authoring_schema_condition_ops_match_validator_enum() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let shape = &schema["conditions"]["conditionExpressionShape"];
+
+        let advertised: Vec<String> = shape["op"]
+            .as_str()
+            .expect("op enum string")
+            .split('|')
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        // Every workflow-valid operator is advertised.
+        let expected_workflow_ops = [
+            "AND",
+            "OR",
+            "NOT",
+            "EQ",
+            "NE",
+            "GT",
+            "GTE",
+            "LT",
+            "LTE",
+            "STARTS_WITH",
+            "ENDS_WITH",
+            "CONTAINS",
+            "IN",
+            "NOT_IN",
+            "LENGTH",
+            "IS_DEFINED",
+            "IS_EMPTY",
+            "IS_NOT_EMPTY",
+        ];
+        for op in expected_workflow_ops {
+            assert!(
+                advertised.iter().any(|a| a == op),
+                "authoring schema op enum is missing workflow-valid operator {op}: {advertised:?}"
+            );
+        }
+        assert_eq!(
+            advertised.len(),
+            expected_workflow_ops.len(),
+            "op enum advertises an unexpected set: {advertised:?}"
+        );
+
+        // Every advertised op is a real ConditionOperator wire name.
+        for op in &advertised {
+            serde_json::from_value::<runtara_dsl::ConditionOperator>(serde_json::json!(op))
+                .unwrap_or_else(|e| panic!("advertised op {op} is not a ConditionOperator: {e}"));
+        }
+
+        // Query-only operators are NOT in the main list and ARE documented separately.
+        let query_only = [
+            "SIMILARITY_GTE",
+            "MATCH",
+            "COSINE_DISTANCE_LTE",
+            "L2_DISTANCE_LTE",
+        ];
+        let query_only_note = shape["queryOnlyOps"].as_str().expect("queryOnlyOps note");
+        for op in query_only {
+            assert!(
+                !advertised.iter().any(|a| a == op),
+                "query-only operator {op} must not be advertised in the main op enum"
+            );
+            assert!(
+                query_only_note.contains(op),
+                "queryOnlyOps note should mention {op}: {query_only_note}"
+            );
+        }
+    }
 
     fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
         let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
