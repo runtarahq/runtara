@@ -486,16 +486,34 @@ async fn fetch_full_step_summaries(
 }
 
 /// Helper: resolve a JSON path like "field.nested.0.name" against a Value.
+///
+/// Array segments support Python-style negative suffix indexing (`-1` is the last
+/// element), matching the workflow reference resolver so diagnostics agree with
+/// runtime resolution.
 fn resolve_json_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
-        if let Ok(idx) = segment.parse::<usize>() {
+        if let serde_json::Value::Array(items) = current {
+            current = items.get(signed_array_index(segment, items.len())?)?;
+        } else if let Ok(idx) = segment.parse::<usize>() {
             current = current.get(idx)?;
         } else {
             current = current.get(segment)?;
         }
     }
     Some(current.clone())
+}
+
+/// Resolve a path segment to a concrete array index, supporting Python-style
+/// negative suffix indexing (`-1` is the last element). Non-numeric segments and
+/// out-of-range negatives return `None`.
+fn signed_array_index(segment: &str, len: usize) -> Option<usize> {
+    let raw: i64 = segment.parse().ok()?;
+    if raw >= 0 {
+        usize::try_from(raw).ok()
+    } else {
+        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
+    }
 }
 
 /// Helper: recursively replace large strings with an explicit truncation envelope.
@@ -1280,6 +1298,20 @@ mod tests {
             .and_then(|properties| properties.get(property))
             .cloned()
             .unwrap_or_else(|| panic!("missing property schema for {property}: {schema:#}"))
+    }
+
+    /// SYN-448: the diagnostic path resolver must honor Python-style negative
+    /// array indices so `inspect_step`/`trace_reference` agree with runtime
+    /// reference resolution instead of reporting `-1` as null.
+    #[test]
+    fn resolve_json_path_supports_negative_indices() {
+        let value = json!({ "items": ["a", "b", "c"] });
+
+        assert_eq!(resolve_json_path(&value, "items.-1"), Some(json!("c")));
+        assert_eq!(resolve_json_path(&value, "items.-3"), Some(json!("a")));
+        assert_eq!(resolve_json_path(&value, "items.0"), Some(json!("a")));
+        assert_eq!(resolve_json_path(&value, "items.-4"), None);
+        assert_eq!(resolve_json_path(&value, "items.5"), None);
     }
 
     fn summaries() -> serde_json::Value {

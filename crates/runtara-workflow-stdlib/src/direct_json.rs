@@ -5524,9 +5524,31 @@ fn lookup_segments(source: &Value, segments: &[String]) -> Option<Value> {
 fn index_child<'a>(value: &'a Value, segment: &str) -> Option<&'a Value> {
     match value {
         Value::Object(map) => map.get(segment),
-        Value::Array(items) => items.get(segment.parse::<usize>().ok()?),
+        Value::Array(items) => items.get(array_index(segment, items.len())?),
         _ => None,
     }
+}
+
+/// Resolve a path segment to a concrete array index, supporting Python-style
+/// negative suffix indexing: `-1` is the last element, `-2` the second-to-last.
+/// Non-numeric segments and out-of-range negatives return `None`, so an unmatched
+/// index falls through to the resolver's null/default path exactly like an
+/// out-of-range positive index does.
+fn array_index(segment: &str, len: usize) -> Option<usize> {
+    let raw: i64 = segment.parse().ok()?;
+    if raw >= 0 {
+        usize::try_from(raw).ok()
+    } else {
+        // `unsigned_abs` avoids overflow at `i64::MIN`.
+        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
+    }
+}
+
+/// True when a `[..]` bracket body is an array index — an optional leading `-`
+/// followed by one or more ASCII digits (e.g. `0`, `12`, `-1`).
+fn is_array_index_token(token: &str) -> bool {
+    let digits = token.strip_prefix('-').unwrap_or(token);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Reverse the JSON-pointer escaping applied by [`path_to_json_pointer`].
@@ -5553,7 +5575,7 @@ fn path_to_json_pointer(path: &str) -> String {
                 }
                 index.push(chars.next().expect("peeked character exists"));
             }
-            if index.chars().all(|c| c.is_ascii_digit()) {
+            if is_array_index_token(&index) {
                 dotted.push('.');
                 dotted.push_str(&index);
             } else {
@@ -6390,6 +6412,77 @@ mod tests {
             intern_if_large(small.clone()),
             small,
             "small values must be byte-identical (no handle)"
+        );
+    }
+
+    /// SYN-448: negative array indices resolve Python-style (`-1` = last) instead
+    /// of silently returning null. Covers the shared core walked by both the
+    /// interpreter and the compiled resolver.
+    #[test]
+    fn lookup_resolves_negative_array_indices() {
+        reset_value_store();
+        let source = json!({ "items": ["a", "b", "c"] });
+
+        // Dot form: -1 is the last element, -3 the first.
+        assert_eq!(lookup_source_path(&source, "items.-1"), Some(json!("c")));
+        assert_eq!(lookup_source_path(&source, "items.-2"), Some(json!("b")));
+        assert_eq!(lookup_source_path(&source, "items.-3"), Some(json!("a")));
+        // Positive indexing is unchanged.
+        assert_eq!(lookup_source_path(&source, "items.0"), Some(json!("a")));
+        // Bracket form normalizes the same way.
+        assert_eq!(lookup_source_path(&source, "items[-1]"), Some(json!("c")));
+        // Out-of-range negative misses (None), like an out-of-range positive index.
+        assert_eq!(lookup_source_path(&source, "items.-4"), None);
+        assert_eq!(lookup_source_path(&source, "items.3"), None);
+    }
+
+    /// SYN-448: the negative index must reach the leaf through both reference
+    /// resolvers — the interpreter (`apply_mapping_value`) and the compiled form
+    /// (`compile_mapping(..).eval`) — not just the raw path walk.
+    #[test]
+    fn reference_resolvers_honor_negative_index() {
+        reset_value_store();
+        let source =
+            json!({ "steps": { "make_array": { "outputs": { "items": ["a", "b", "c"] } } } });
+        let reference = json!({
+            "valueType": "reference",
+            "value": "steps.make_array.outputs.items.-1",
+        });
+
+        // Interpreter path.
+        assert_eq!(
+            apply_mapping_value(&reference, &source).unwrap(),
+            json!("c"),
+            "interpreter reference must resolve -1 to the last element"
+        );
+        // Compiled path (Filter/While/GroupBy hot loops).
+        assert_eq!(
+            compile_mapping(&reference).eval(&source).unwrap(),
+            json!("c"),
+            "compiled reference must resolve -1 to the last element"
+        );
+    }
+
+    /// SYN-448: a real array element (`null` last) must not be confused with an
+    /// out-of-range miss, and an out-of-range negative must fall back to the
+    /// reference `default` rather than the wrong element.
+    #[test]
+    fn negative_index_distinguishes_null_element_from_miss() {
+        reset_value_store();
+        let source = json!({ "items": ["a", null] });
+
+        // -1 points at a genuine null element.
+        assert_eq!(lookup_source_path(&source, "items.-1"), Some(json!(null)));
+
+        // Out-of-range negative falls through to the mapping's default.
+        let with_default = json!({
+            "valueType": "reference",
+            "value": "items.-9",
+            "default": "fallback",
+        });
+        assert_eq!(
+            apply_mapping_value(&with_default, &source).unwrap(),
+            json!("fallback")
         );
     }
 

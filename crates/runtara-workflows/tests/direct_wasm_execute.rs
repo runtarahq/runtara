@@ -100,6 +100,32 @@ const ENVELOPE_DATA_AND_VARS: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// SYN-448: a single Finish whose mappings index an array with Python-style
+/// negative indices. `-1` is the last element, `-3` the first; positive indices
+/// are unchanged; an out-of-range negative falls through to the mapping default.
+/// Proves the reference resolver honors negative indexing in the compiled +
+/// executed WASM runtime, not just in host-side unit tests.
+const NEGATIVE_INDEX_REFERENCE: &str = r#"{
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "last":      { "valueType": "reference", "value": "data.items.-1" },
+        "second":    { "valueType": "reference", "value": "data.items.-2" },
+        "first_neg": { "valueType": "reference", "value": "data.items.-3" },
+        "first_pos": { "valueType": "reference", "value": "data.items.0" },
+        "oob":       { "valueType": "reference", "value": "data.items.-9", "default": "fallback" }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
 /// A single Agent step with no Finish and no edges — the agent is both entry
 /// point and terminal. Compiles via an implicit finish; the workflow output is
 /// `null` (matching the generated compiler).
@@ -3232,6 +3258,32 @@ fn direct_wasm_execute_resolves_variables_from_envelope_and_defaults() {
             "d": "DATAVAL",
             "v_override": "OVERRIDDEN",
             "v_default": "happy"
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_resolves_negative_array_index() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+    // SYN-448 regression: negative array indices must resolve Python-style at
+    // runtime (`-1` = last element) instead of silently returning null. The
+    // out-of-range negative (`-9`) falls through to the mapping default.
+    let result = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-negative-index",
+        NEGATIVE_INDEX_REFERENCE,
+        br#"{"data":{"items":["a","b","c"]}}"#,
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "last": "c",
+            "second": "b",
+            "first_neg": "a",
+            "first_pos": "a",
+            "oob": "fallback"
         })
     );
 }
