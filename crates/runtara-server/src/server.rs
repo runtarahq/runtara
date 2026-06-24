@@ -1395,6 +1395,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtime_client.clone(),
         trigger_stream.clone(),
         Some(running_executions.clone()),
+        product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
 

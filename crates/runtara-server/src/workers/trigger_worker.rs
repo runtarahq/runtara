@@ -150,6 +150,7 @@ pub async fn run(
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
+        event_sink.clone(),
     ));
 
     // Track the start ID for XAUTOCLAIM pagination
