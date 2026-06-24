@@ -753,6 +753,95 @@ fn resolve_nested_reference_envelopes(
     }
 }
 
+/// Mirror the runtime's `apply_composite`: a composite payload is an object or
+/// array whose leaves are themselves MappingValue envelopes. Resolve each child
+/// to its materialized value so inspect_step can surface the final JSON a
+/// composite mapping sends to the agent (SYN-450).
+fn resolve_composite_payload(
+    payload: &serde_json::Value,
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+    unresolved_refs: &mut Vec<String>,
+) -> serde_json::Value {
+    match payload {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, child)| {
+                    (
+                        key.clone(),
+                        resolve_mapping_envelope(child, summaries, execution, unresolved_refs),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| resolve_mapping_envelope(item, summaries, execution, unresolved_refs))
+                .collect(),
+        ),
+        // A composite payload should be an object/array, but degrade gracefully:
+        // resolve any embedded reference envelopes rather than erroring.
+        other => resolve_nested_reference_envelopes(other, summaries, execution, unresolved_refs),
+    }
+}
+
+/// Resolve a single MappingValue envelope (`{valueType, value, ...}`) to its
+/// materialized value, mirroring the runtime's `apply_mapping_value`. Used for
+/// composite children. `template` and unknown valueTypes degrade gracefully
+/// (inspect_step is a best-effort reconstruction, not the runtime).
+fn resolve_mapping_envelope(
+    envelope: &serde_json::Value,
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+    unresolved_refs: &mut Vec<String>,
+) -> serde_json::Value {
+    match envelope.get("valueType").and_then(|v| v.as_str()) {
+        Some("reference") => {
+            let path = envelope
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            match resolve_reference_value(path, summaries, execution)
+                .or_else(|| envelope.get("default").cloned())
+            {
+                Some(resolved) => resolve_nested_reference_envelopes(
+                    &resolved,
+                    summaries,
+                    execution,
+                    unresolved_refs,
+                ),
+                None => {
+                    if !path.is_empty() {
+                        unresolved_refs.push(path.to_string());
+                    }
+                    serde_json::Value::Null
+                }
+            }
+        }
+        Some("immediate") => {
+            let inner = envelope
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            resolve_nested_reference_envelopes(&inner, summaries, execution, unresolved_refs)
+        }
+        Some("composite") => {
+            let inner = envelope
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            resolve_composite_payload(&inner, summaries, execution, unresolved_refs)
+        }
+        Some("template") => json!({
+            "__runtimeTemplate": envelope.get("value").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+        // Condition-like (`op`+`arguments`) or unknown shapes: best-effort
+        // resolve any embedded references in place.
+        _ => resolve_nested_reference_envelopes(envelope, summaries, execution, unresolved_refs),
+    }
+}
+
 fn is_reference_envelope(value: &serde_json::Value) -> bool {
     matches!(
         value.get("valueType"),
@@ -916,6 +1005,20 @@ fn resolve_input_mappings(
                     execution,
                     &mut unresolved_refs,
                 );
+                entry["resolvedValue"] = resolved_value;
+                if !unresolved_refs.is_empty() {
+                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
+                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
+                }
+            }
+            "composite" => {
+                // Mirror the runtime's `apply_composite`: a composite payload is an
+                // object/array whose leaves are themselves MappingValue envelopes.
+                // Materialize each so the author sees the final JSON the composite
+                // sends to the agent (SYN-450).
+                let mut unresolved_refs = Vec::new();
+                let resolved_value =
+                    resolve_composite_payload(&value, summaries, execution, &mut unresolved_refs);
                 entry["resolvedValue"] = resolved_value;
                 if !unresolved_refs.is_empty() {
                     entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
@@ -1456,6 +1559,73 @@ mod tests {
             })
         );
         assert!(resolved["condition"].get("resolutionNote").is_none());
+    }
+
+    /// SYN-450: composite mappings now expose a fully materialized `resolvedValue`
+    /// (nested immediate/reference/composite envelopes resolved), not just the raw
+    /// `mapping` tree.
+    #[test]
+    fn composite_mapping_resolves_nested_envelopes_to_final_value() {
+        let input_mapping = json!({
+            "value": {
+                "valueType": "composite",
+                "value": {
+                    "lit": {"valueType": "immediate", "value": "literal"},
+                    "from_input": {"valueType": "reference", "value": "data.customer.name"},
+                    "from_step": {"valueType": "reference", "value": "steps.build.outputs.status"},
+                    "nested": {
+                        "valueType": "composite",
+                        "value": [
+                            {"valueType": "immediate", "value": 1},
+                            {"valueType": "reference", "value": "variables.limit"}
+                        ]
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let entry = &resolved["value"];
+
+        assert_eq!(
+            entry["resolvedValue"],
+            json!({
+                "lit": "literal",
+                "from_input": "Ada",
+                "from_step": "active",
+                "nested": [1, 10]
+            }),
+            "composite resolvedValue should materialize nested envelopes: {entry:#}"
+        );
+        // The raw mapping tree is still surfaced alongside the resolved value.
+        assert!(entry.get("mapping").is_some());
+        assert!(entry.get("resolutionNote").is_none());
+    }
+
+    /// SYN-450: an unresolvable reference inside a composite degrades to null and
+    /// is reported under `unresolvedNestedReferences`.
+    #[test]
+    fn composite_mapping_tracks_unresolved_reference() {
+        let input_mapping = json!({
+            "value": {
+                "valueType": "composite",
+                "value": {
+                    "ok": {"valueType": "reference", "value": "data.customer.name"},
+                    "missing": {"valueType": "reference", "value": "steps.nope.outputs.x"}
+                }
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let entry = &resolved["value"];
+
+        assert_eq!(entry["resolvedValue"]["ok"], json!("Ada"));
+        assert_eq!(entry["resolvedValue"]["missing"], json!(null));
+        assert_eq!(
+            entry["unresolvedNestedReferences"],
+            json!(["steps.nope.outputs.x"])
+        );
+        assert!(entry.get("resolutionNote").is_some());
     }
 
     #[test]
