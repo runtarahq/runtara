@@ -211,6 +211,35 @@ impl WakeScheduler {
             env: stored_env, // Restore env from initial launch
         };
 
+        // Atomically claim the instance before launching. The wake-scan SELECT
+        // requires `sleep_until IS NOT NULL`, so this conditional clear removes
+        // the row from the candidate set. A concurrent poll — or a second
+        // Environment sharing this Core DB — that also selected this instance
+        // gets `false` here and skips, so a duplicate guest never runs the same
+        // (possibly non-idempotent) in-flight step twice.
+        match self
+            .persistence
+            .claim_sleeping_instance(&instance.instance_id)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                info!(
+                    instance_id = %instance.instance_id,
+                    "Instance already claimed by another waker; skipping"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    instance_id = %instance.instance_id,
+                    error = %e,
+                    "Failed to claim instance for wake; will retry next poll"
+                );
+                return Err(e.into());
+            }
+        }
+
         // Launch the instance
         match self.runner.launch_detached(&options).await {
             Ok(handle) => {
@@ -247,14 +276,7 @@ impl WakeScheduler {
                     warn!(error = %e, "Failed to register container (instance still running)");
                 }
 
-                // Clear sleep_until via Core persistence
-                if let Err(e) = self
-                    .persistence
-                    .clear_instance_sleep(&instance.instance_id)
-                    .await
-                {
-                    warn!(error = %e, "Failed to clear sleep_until");
-                }
+                // sleep_until was already cleared atomically by the claim above.
 
                 // Spawn background task to monitor container
                 spawn_container_monitor(
@@ -275,6 +297,21 @@ impl WakeScheduler {
                     error = %e,
                     "Failed to wake instance"
                 );
+                // The claim cleared sleep_until; the launch never started, so
+                // re-stamp it (status is still 'suspended') to make the wake
+                // scan re-select this instance on a later poll instead of
+                // stranding it.
+                if let Err(restore_err) = self
+                    .persistence
+                    .set_instance_sleep(&instance.instance_id, chrono::Utc::now())
+                    .await
+                {
+                    warn!(
+                        instance_id = %instance.instance_id,
+                        error = %restore_err,
+                        "Failed to restore sleep_until after launch failure; instance may not retry"
+                    );
+                }
                 return Err(e.into());
             }
         }

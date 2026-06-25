@@ -224,6 +224,34 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         due.iter().any(|r| r.instance_id == instance_id),
         "suspended instance with past sleep_until must be due to wake"
     );
+
+    // --- atomic claim (double-launch prevention) ----------------------------
+    // The instance is suspended with a past sleep_until (due). The first claim
+    // must win and clear sleep_until; a second claim must lose — this is what
+    // stops two wakers (or two Environments sharing this Core DB) from
+    // launching the same instance twice.
+    let first_claim = backend
+        .claim_sleeping_instance(&instance_id)
+        .await
+        .expect("claim_sleeping_instance (first) failed");
+    assert!(first_claim, "first claim of a due instance must win");
+    let due_after_claim = backend
+        .get_sleeping_instances_due(50)
+        .await
+        .expect("get_sleeping_instances_due failed (after claim)");
+    assert!(
+        due_after_claim.iter().all(|r| r.instance_id != instance_id),
+        "a claimed instance must no longer be due to wake"
+    );
+    let second_claim = backend
+        .claim_sleeping_instance(&instance_id)
+        .await
+        .expect("claim_sleeping_instance (second) failed");
+    assert!(
+        !second_claim,
+        "second claim of an already-claimed instance must lose"
+    );
+
     backend
         .clear_instance_sleep(&instance_id)
         .await

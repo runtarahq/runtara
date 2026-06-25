@@ -591,6 +591,25 @@ pub trait Persistence: Send + Sync {
     /// Clear the sleep_until timestamp for an instance.
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
 
+    /// Atomically claim a due sleeping instance before waking it.
+    ///
+    /// Conditionally clears `sleep_until` only while the instance is still
+    /// `status='suspended'` with a non-null `sleep_until`, and reports whether
+    /// this caller won the claim. Returns `true` if it did, `false` if another
+    /// waker (or a second Environment sharing this Core DB) already took it.
+    /// Callers MUST launch only when this returns `true` — this is what
+    /// prevents concurrent double-launch of the same instance. On a launch
+    /// failure after a successful claim, re-stamp `sleep_until` via
+    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    ///
+    /// The default implementation is a non-atomic best-effort fallback for
+    /// in-memory/mock backends; the SQL backends override it with a single
+    /// conditional UPDATE whose row-count is the claim outcome.
+    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
+        self.clear_instance_sleep(instance_id).await?;
+        Ok(true)
+    }
+
     /// Mark an instance for automatic recovery after an Environment restart.
     ///
     /// Sets `status='suspended'`, `termination_reason='environment_restart'`,

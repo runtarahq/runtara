@@ -70,6 +70,41 @@ macro_rules! impl_sleep_ops {
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
+            /// Atomically claim a due sleeping instance for waking.
+            ///
+            /// Conditional `UPDATE sleep_until = NULL WHERE instance_id = ?
+            /// AND sleep_until IS NOT NULL AND status = 'suspended'`. Returns
+            /// `true` when this caller won the row (exactly one row updated),
+            /// `false` when another waker — or a second Environment sharing this
+            /// Core DB — already claimed it (zero rows updated). Because the
+            /// wake-scan SELECT in `op_get_sleeping_instances_due` requires
+            /// `sleep_until IS NOT NULL`, clearing it here removes the instance
+            /// from the candidate set, so only one caller proceeds to launch.
+            /// Postgres row-level locking serializes concurrent claims, so the
+            /// guarantee holds across processes, not just tasks.
+            pub(crate) async fn op_claim_sleeping_instance(
+                pool: &$Pool,
+                instance_id: &str,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::Dialect;
+                let p1 = <$Dialect>::placeholder(1);
+                let sql = format!(
+                    "UPDATE instances SET sleep_until = NULL \
+                     WHERE instance_id = {p1} \
+                       AND sleep_until IS NOT NULL \
+                       AND status = 'suspended'"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "claim_sleeping_instance".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(result.rows_affected() == 1)
+            }
+
             /// SELECT suspended instances whose `sleep_until` is past,
             /// ordered by `sleep_until` ascending. Excludes the `input`
             /// BLOB — matches legacy behavior on both backends.
