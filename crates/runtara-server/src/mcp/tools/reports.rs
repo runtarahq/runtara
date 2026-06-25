@@ -114,12 +114,12 @@ pub struct RenderReportParams {
     #[schemars(description = "Report id or slug")]
     pub report_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(
         description = "Optional array of block data requests: [{id, page?, sort?, search?, blockFilters?}]. Omit to render non-lazy blocks."
     )]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub blocks: Option<Value>,
     pub timezone: Option<String>,
 }
@@ -132,19 +132,19 @@ pub struct GetReportBlockDataParams {
     #[schemars(description = "Stable block id")]
     pub block_id: String,
     #[schemars(description = "Global report filter values keyed by filter id.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(description = "Pagination request: {offset, size}.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub page: Option<Value>,
     #[schemars(description = "Sort array: [{field, direction}].")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub sort: Option<Value>,
     #[schemars(description = "Table search request: {query, fields?}.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub search: Option<Value>,
     #[schemars(description = "Per-block filter values keyed by filter id.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub block_filters: Option<Value>,
     pub timezone: Option<String>,
 }
