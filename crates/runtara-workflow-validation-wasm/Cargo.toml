@@ -16,8 +16,8 @@ crate-type = ["cdylib", "rlib"]
 # pushes it in via `initAgentCatalog(json)` after a one-shot
 # `GET /api/runtime/agents` on app boot. That's why we don't depend on
 # `runtara-agents` anymore.
-runtara-dsl = { path = "../runtara-dsl", version = "8.0" }
-runtara-workflows = { path = "../runtara-workflows", version = "8.0", default-features = false, features = ["wasm-js"] }
+runtara-dsl = { path = "../runtara-dsl", version = "8.1" }
+runtara-workflows = { path = "../runtara-workflows", version = "8.1", default-features = false, features = ["wasm-js"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = "0.2"
