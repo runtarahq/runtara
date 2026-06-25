@@ -472,6 +472,7 @@ pub struct QueryObjectInstancesParams {
                               IN, NOT_IN, IS_EMPTY, IS_NOT_EMPTY, IS_DEFINED. Compound filters \
                               nest child Conditions inside arguments of AND/OR."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub condition: Option<serde_json::Value>,
     #[schemars(
         description = "Optional computed score expression object, not an escaped JSON string. \
@@ -480,12 +481,14 @@ pub struct QueryObjectInstancesParams {
                        {valueType:'immediate', value:[number,...]}]}} and order by \
                        that alias ASC."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub score_expression: Option<serde_json::Value>,
     #[schemars(
         description = "Optional structured order: [{expression:{kind:'alias'|'column', \
                        name}, direction:'ASC'|'DESC'}]. Use an alias target matching \
                        score_expression.alias for vector nearest-neighbor search."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub order_by: Option<serde_json::Value>,
     #[schemars(
         description = "Max results. Set explicitly for large schemas; use offset for paging."
@@ -512,6 +515,7 @@ pub struct QueryAggregateParams {
                        EQ, NE, GT, LT, GTE, LTE, CONTAINS, IN, NOT_IN, \
                        IS_EMPTY, IS_NOT_EMPTY, IS_DEFINED."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub condition: Option<serde_json::Value>,
     #[schemars(
         description = "Columns to GROUP BY. Empty/omitted → one output row over \
@@ -551,6 +555,7 @@ pub struct QueryAggregateParams {
                        value:[number,...]}, direction:'ASC'|'DESC'}] for vector \
                        nearest-neighbor ordering against a vector field."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub order_by: Option<serde_json::Value>,
     #[schemars(
         description = "Max result rows (server caps at 100000). Omit to let the \
@@ -727,11 +732,13 @@ pub struct BulkUpdateInstancesParams {
         description = "byCondition: filter condition (same DSL as query_object_instances). \
                        Required when mode=byCondition."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub condition: Option<serde_json::Value>,
     #[schemars(
         description = "byCondition: flat object of column → new_value applied to every \
                        matched row. Required when mode=byCondition."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub properties: Option<serde_json::Value>,
     #[schemars(
         description = "byIds: array of {id, properties} entries. Required when mode=byIds."
@@ -980,13 +987,14 @@ fn build_query_object_instances_body(
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
     let mut body = serde_json::json!({});
     if let Some(condition) = params.condition.clone() {
-        body["condition"] = normalize_condition(condition)?;
+        // Recover a client-stringified condition object before validating it.
+        body["condition"] = normalize_condition(normalize_json_arg(condition, "condition")?)?;
     }
-    if let Some(score_expression) = &params.score_expression {
-        body["scoreExpression"] = score_expression.clone();
+    if let Some(score_expression) = params.score_expression.clone() {
+        body["scoreExpression"] = normalize_json_arg(score_expression, "score_expression")?;
     }
-    if let Some(order_by) = &params.order_by {
-        body["orderBy"] = order_by.clone();
+    if let Some(order_by) = params.order_by.clone() {
+        body["orderBy"] = normalize_json_arg(order_by, "order_by")?;
     }
     if let Some(limit) = params.limit {
         body["limit"] = serde_json::json!(limit);
@@ -1007,13 +1015,13 @@ pub async fn query_aggregate(
     let aggregates = normalize_json_arg(params.aggregates, "aggregates")?;
     let mut body = serde_json::json!({ "aggregates": aggregates });
     if let Some(condition) = params.condition {
-        body["condition"] = normalize_condition(condition)?;
+        body["condition"] = normalize_condition(normalize_json_arg(condition, "condition")?)?;
     }
     if let Some(group_by) = params.group_by {
         body["groupBy"] = serde_json::json!(group_by);
     }
     if let Some(order_by) = params.order_by {
-        body["orderBy"] = order_by;
+        body["orderBy"] = normalize_json_arg(order_by, "order_by")?;
     }
     if let Some(limit) = params.limit {
         body["limit"] = serde_json::json!(limit);
@@ -1266,13 +1274,14 @@ pub async fn bulk_update_instances(
                     None,
                 )
             })?;
-            let condition = normalize_condition(condition)?;
+            let condition = normalize_condition(normalize_json_arg(condition, "condition")?)?;
             let properties = params.properties.ok_or_else(|| {
                 rmcp::ErrorData::invalid_params(
                     "mode=byCondition requires `properties`".to_string(),
                     None,
                 )
             })?;
+            let properties = normalize_json_arg(properties, "properties")?;
             serde_json::json!({
                 "mode": "byCondition",
                 "condition": condition,
@@ -1450,6 +1459,55 @@ mod tests {
                 "resultSchema": [{"name": "label", "type": "string"}]
             })
         );
+    }
+
+    /// SYN-447 recovery: a client that stringifies the `condition` / `order_by`
+    /// args (because, before the schema_with fix, they advertised no `type`) is
+    /// still recovered — the stringified condition is parsed back, validated, and
+    /// the order_by is parsed back to an array. Guards the handler-side recovery
+    /// wiring (the schema guard in server.rs guards the advertised type).
+    #[test]
+    fn query_object_instances_recovers_stringified_condition_and_order_by() {
+        let params = QueryObjectInstancesParams {
+            schema_name: "Order".to_string(),
+            condition: Some(json!(r#"{"op":"EQ","arguments":["status","active"]}"#)),
+            score_expression: None,
+            order_by: Some(json!(
+                r#"[{"expression":{"kind":"column","name":"created_at"},"direction":"DESC"}]"#
+            )),
+            limit: None,
+            offset: None,
+            connection_id: None,
+        };
+
+        let body = build_query_object_instances_body(&params).expect("stringified args recovered");
+
+        assert!(
+            body["condition"].is_object(),
+            "stringified condition should be recovered to an object: {body:#}"
+        );
+        assert_eq!(body["condition"]["op"], json!("EQ"));
+        assert!(
+            body["orderBy"].is_array(),
+            "stringified order_by should be recovered to an array: {body:#}"
+        );
+        assert_eq!(body["orderBy"][0]["direction"], json!("DESC"));
+    }
+
+    /// An unparseable stringified condition surfaces a clear error (not a silent
+    /// pass-through), via the shared normalize_json_arg hint.
+    #[test]
+    fn query_object_instances_rejects_unparseable_stringified_condition() {
+        let params = QueryObjectInstancesParams {
+            schema_name: "Order".to_string(),
+            condition: Some(json!("not json at all")),
+            score_expression: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            connection_id: None,
+        };
+        assert!(build_query_object_instances_body(&params).is_err());
     }
 
     #[test]

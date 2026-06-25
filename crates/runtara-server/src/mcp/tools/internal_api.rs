@@ -84,6 +84,25 @@ pub fn json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
     })
 }
 
+/// Nullable object schema for `Option<serde_json::Value>` object params. Emits
+/// `type: [object, null]` so the field is advertised as an object when present
+/// (preventing client stringification) while remaining optional.
+pub fn optional_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["object", "null"],
+        "additionalProperties": true
+    })
+}
+
+/// Nullable array schema for `Option<serde_json::Value>` array params. Emits
+/// `type: [array, null]` so the field is advertised as an array when present.
+pub fn optional_json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["array", "null"],
+        "items": {}
+    })
+}
+
 /// JSON Schema for canonical workflow execution inputs.
 pub fn workflow_inputs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({

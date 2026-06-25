@@ -4,7 +4,8 @@ use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
-    api_get, api_post, encode_path_param, validate_identifier_param, validate_path_param,
+    api_get, api_post, encode_path_param, normalize_json_arg, validate_identifier_param,
+    validate_path_param,
 };
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -47,6 +48,7 @@ pub struct SubmitSignalResponseParams {
     #[schemars(
         description = "Response payload as JSON. Should conform to the response_schema from the pending input."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub payload: serde_json::Value,
 }
 
@@ -60,6 +62,7 @@ pub struct SubmitActionResponseParams {
     #[schemars(
         description = "Response payload as JSON. Validated against the action input schema."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub payload: serde_json::Value,
     #[schemars(
         description = "Workflow ID for direct workflow action submission. Provide with instance_id, or omit when using report_id + block_id."
@@ -80,8 +83,10 @@ pub struct SubmitActionResponseParams {
     #[schemars(
         description = "Global report filter values keyed by filter id. Report context only."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub filters: Option<serde_json::Value>,
     #[schemars(description = "Per-block filter values keyed by filter id. Report context only.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub block_filters: Option<serde_json::Value>,
 }
 
@@ -157,9 +162,12 @@ pub async fn submit_signal_response(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("instance_id", &params.instance_id)?;
     validate_identifier_param("signal_id", &params.signal_id)?;
+    // Recover a client-stringified payload object so the waiting step receives an
+    // object, not a JSON string.
+    let payload = normalize_json_arg(params.payload, "payload")?;
     let body = serde_json::json!({
         "signalId": params.signal_id,
-        "payload": params.payload,
+        "payload": payload,
     });
     let result = api_post(
         server,
@@ -176,6 +184,9 @@ pub async fn submit_action_response(
     params: SubmitActionResponseParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_identifier_param("action_id", &params.action_id)?;
+
+    // Recover a client-stringified payload object before it reaches the action.
+    let payload = normalize_json_arg(params.payload, "payload")?;
 
     match (
         params.workflow_id,
@@ -201,7 +212,7 @@ pub async fn submit_action_response(
                     instance_id,
                     encode_path_param(&params.action_id)
                 ),
-                Some(serde_json::json!({ "payload": params.payload })),
+                Some(serde_json::json!({ "payload": payload })),
             )
             .await?;
             json_result(result)
@@ -209,6 +220,16 @@ pub async fn submit_action_response(
         (None, None, Some(report_id), Some(block_id)) => {
             validate_path_param("report_id", &report_id)?;
             validate_path_param("block_id", &block_id)?;
+
+            // Recover client-stringified filter objects (keyed-by-id maps).
+            let filters = match params.filters {
+                Some(filters) => normalize_json_arg(filters, "filters")?,
+                None => serde_json::json!({}),
+            };
+            let block_filters = match params.block_filters {
+                Some(block_filters) => normalize_json_arg(block_filters, "block_filters")?,
+                None => serde_json::json!({}),
+            };
 
             let result = api_post(
                 server,
@@ -219,11 +240,9 @@ pub async fn submit_action_response(
                     encode_path_param(&params.action_id)
                 ),
                 Some(serde_json::json!({
-                    "payload": params.payload,
-                    "filters": params.filters.unwrap_or_else(|| serde_json::json!({})),
-                    "blockFilters": params
-                        .block_filters
-                        .unwrap_or_else(|| serde_json::json!({})),
+                    "payload": payload,
+                    "filters": filters,
+                    "blockFilters": block_filters,
                 })),
             )
             .await?;

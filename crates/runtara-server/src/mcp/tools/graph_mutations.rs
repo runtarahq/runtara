@@ -7,7 +7,8 @@ use crate::mcp::entitlement::require_agent;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
-    api_get, api_post, api_put, json_object_schema, normalize_json_arg, validate_path_param,
+    any_json_schema, api_get, api_post, api_put, json_object_schema, normalize_json_arg,
+    optional_json_object_schema, validate_path_param,
 };
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -394,6 +395,7 @@ pub struct PatchStepOp {
     )]
     pub path: String,
     #[schemars(description = "Value for 'replace' and 'add' (ignored for 'remove')")]
+    #[schemars(schema_with = "any_json_schema")]
     pub value: Option<serde_json::Value>,
 }
 
@@ -430,6 +432,7 @@ pub struct ConnectStepsParams {
     #[schemars(
         description = "Condition expression JSON for the edge. Do not set this on edges from a Conditional step; put the predicate in the Conditional step's condition field."
     )]
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub condition: Option<serde_json::Value>,
     #[schemars(description = "Edge priority (lower = evaluated first)")]
     pub priority: Option<i64>,
@@ -497,6 +500,7 @@ pub struct SetMappingParams {
     #[schemars(
         description = "Set a literal/immediate value (string, number, boolean, object, array)"
     )]
+    #[schemars(schema_with = "any_json_schema")]
     pub immediate_value: Option<serde_json::Value>,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -656,6 +660,7 @@ pub struct SetInputSchemaParams {
     #[schemars(
         description = "Input schema fields in DSL flat-map format (e.g., {\"orderId\": {\"type\": \"string\", \"required\": true}})"
     )]
+    #[schemars(schema_with = "json_object_schema")]
     pub fields: serde_json::Value,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -673,6 +678,7 @@ pub struct SetInputSchemaFieldParams {
     #[schemars(
         description = "Input field schema definition in DSL format (e.g., {\"type\": \"string\", \"required\": true})"
     )]
+    #[schemars(schema_with = "json_object_schema")]
     pub field: serde_json::Value,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -712,6 +718,7 @@ pub struct SetOutputSchemaParams {
     #[schemars(
         description = "Output schema fields in DSL flat-map format (e.g., {\"result\": {\"type\": \"string\", \"required\": true}})"
     )]
+    #[schemars(schema_with = "json_object_schema")]
     pub fields: serde_json::Value,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -791,6 +798,7 @@ pub struct SetVariableParams {
     #[schemars(description = "Variable name")]
     pub name: String,
     #[schemars(description = "Variable definition JSON")]
+    #[schemars(schema_with = "json_object_schema")]
     pub variable: serde_json::Value,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -825,26 +833,24 @@ pub struct BatchGraphMutation {
     pub from_step: Option<String>,
     pub to_step: Option<String>,
     pub label: Option<String>,
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub condition: Option<serde_json::Value>,
     pub priority: Option<i64>,
     pub input_name: Option<String>,
     pub from_output: Option<String>,
     pub from_input: Option<String>,
     pub from_variable: Option<String>,
+    #[schemars(schema_with = "any_json_schema")]
     pub immediate_value: Option<serde_json::Value>,
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub fields: Option<serde_json::Value>,
     pub field_name: Option<String>,
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub field: Option<serde_json::Value>,
     pub name: Option<String>,
     pub description: Option<String>,
+    #[schemars(schema_with = "optional_json_object_schema")]
     pub variable: Option<serde_json::Value>,
-}
-
-fn optional_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": ["object", "null"],
-        "additionalProperties": true
-    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1958,7 +1964,8 @@ pub async fn connect_steps(
         edge["label"] = serde_json::Value::String(label.clone());
     }
     if let Some(condition) = params.condition {
-        edge["condition"] = condition;
+        // Recover a client-stringified edge condition object.
+        edge["condition"] = normalize_json_arg(condition, "condition")?;
     }
     if let Some(priority) = params.priority {
         edge["priority"] = serde_json::Value::Number(priority.into());
@@ -2272,7 +2279,7 @@ pub async fn set_input_schema(
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
-    target["inputSchema"] = params.fields;
+    target["inputSchema"] = normalize_json_arg(params.fields, "fields")?;
 
     let (version, new_version) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
@@ -2301,7 +2308,7 @@ pub async fn set_input_schema_field(
         target["inputSchema"] = serde_json::json!({});
     }
 
-    target["inputSchema"][&params.field_name] = params.field;
+    target["inputSchema"][&params.field_name] = normalize_json_arg(params.field, "field")?;
 
     let (version, new_version) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
@@ -2380,7 +2387,7 @@ pub async fn set_output_schema(
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
-    target["outputSchema"] = params.fields;
+    target["outputSchema"] = normalize_json_arg(params.fields, "fields")?;
 
     let (version, new_version) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
@@ -2640,7 +2647,7 @@ pub async fn set_variable(
         target["variables"] = serde_json::json!({});
     }
 
-    target["variables"][&params.name] = params.variable;
+    target["variables"][&params.name] = normalize_json_arg(params.variable, "variable")?;
 
     let (version, new_version) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
@@ -3304,7 +3311,9 @@ pub async fn apply_graph_mutations(
                         edge["label"] = serde_json::Value::String(label.clone());
                     }
                     if let Some(condition) = &operation.condition {
-                        edge["condition"] = condition.clone();
+                        // Recover a client-stringified edge condition object, matching
+                        // the standalone connect_steps handler.
+                        edge["condition"] = normalize_json_arg(condition.clone(), "condition")?;
                     }
                     if let Some(priority) = operation.priority {
                         edge["priority"] = serde_json::Value::Number(priority.into());
@@ -3477,7 +3486,7 @@ pub async fn apply_graph_mutations(
                 }
                 "set_input_schema" => {
                     target["inputSchema"] =
-                        required_value(operation.fields.as_ref(), "fields", &operation.op)?;
+                        required_object_value(operation.fields.as_ref(), "fields", &operation.op)?;
                 }
                 "set_input_schema_field" => {
                     let field_name = required_string(
@@ -3485,7 +3494,8 @@ pub async fn apply_graph_mutations(
                         "field_name",
                         &operation.op,
                     )?;
-                    let field = required_value(operation.field.as_ref(), "field", &operation.op)?;
+                    let field =
+                        required_object_value(operation.field.as_ref(), "field", &operation.op)?;
                     if target.get("inputSchema").is_none() || !target["inputSchema"].is_object() {
                         target["inputSchema"] = serde_json::json!({});
                     }
@@ -3507,12 +3517,15 @@ pub async fn apply_graph_mutations(
                 }
                 "set_output_schema" => {
                     target["outputSchema"] =
-                        required_value(operation.fields.as_ref(), "fields", &operation.op)?;
+                        required_object_value(operation.fields.as_ref(), "fields", &operation.op)?;
                 }
                 "set_variable" => {
                     let name = required_string(operation.name.as_ref(), "name", &operation.op)?;
-                    let variable =
-                        required_value(operation.variable.as_ref(), "variable", &operation.op)?;
+                    let variable = required_object_value(
+                        operation.variable.as_ref(),
+                        "variable",
+                        &operation.op,
+                    )?;
                     if target.get("variables").is_none() || !target["variables"].is_object() {
                         target["variables"] = serde_json::json!({});
                     }

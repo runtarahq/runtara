@@ -41,6 +41,7 @@ pub struct CreateTriggerParams {
                        {expression: \"0 0 * * *\", timezone?: \"UTC\", inputs?: {...}, debug?: false}. \
                        CHANNEL: {connection_id: \"...\"}. Field `inputs` carries the workflow input \
                        payload for CRON triggers.")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub configuration: Option<serde_json::Value>,
     #[schemars(description = "Only allow one concurrent run (default: false)")]
     pub single_instance: Option<bool>,
@@ -64,6 +65,7 @@ pub struct UpdateTriggerParams {
     #[schemars(
         description = "Full trigger configuration (replaces existing). See create_trigger for shape."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub configuration: Option<serde_json::Value>,
     #[schemars(description = "Only allow one concurrent run")]
     pub single_instance: bool,

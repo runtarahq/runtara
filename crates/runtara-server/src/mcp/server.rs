@@ -1275,4 +1275,111 @@ mod tests {
             Some("object"),
         );
     }
+
+    /// A param schema is "stringify-prone" when it advertises no concrete JSON
+    /// type — no `type`, `$ref`, `oneOf`/`anyOf`/`allOf`, `enum`, or `const`. MCP
+    /// clients (Claude Code included) forward such description-only params as a
+    /// JSON-encoded string, which the server then rejects or silently mishandles
+    /// (SYN-447 class).
+    fn schema_advertises_type(schema: &serde_json::Value) -> bool {
+        ["type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"]
+            .iter()
+            .any(|k| schema.get(*k).is_some())
+    }
+
+    /// Check one `properties` map: every parameter schema must advertise a type.
+    /// We deliberately do NOT recurse into a property's schema *body* — the
+    /// internals of a hand-authored leaf schema (e.g. `workflow_inputs_schema`'s
+    /// intentionally any-JSON `data`, or `json_object_schema`'s
+    /// `additionalProperties`) are not "params we forgot to type". Nested *struct*
+    /// params are covered instead by iterating `$defs` (every referenced struct
+    /// definition lives there with its own `properties`).
+    fn check_property_map(label: &str, props: Option<&serde_json::Value>, out: &mut Vec<String>) {
+        let Some(props) = props.and_then(|p| p.as_object()) else {
+            return;
+        };
+        for (prop_name, prop_schema) in props {
+            if !schema_advertises_type(prop_schema) {
+                out.push(format!("{label}\t{prop_name}"));
+            }
+        }
+    }
+
+    /// KEYSTONE GUARD (SYN-447): every parameter of every registered MCP tool —
+    /// including parameters nested inside batch/struct params — must advertise a
+    /// concrete JSON type so clients never stringify object/array arguments.
+    ///
+    /// To fix a violation, annotate the field with the matching helper:
+    ///   object   -> `schema_with = "crate::mcp::tools::internal_api::json_object_schema"`
+    ///              (or `optional_json_object_schema` for `Option<…>` fields)
+    ///   array    -> `json_array_schema` / `optional_json_array_schema`
+    ///   any-JSON -> `any_json_schema` (a scalar/string is a legitimate value)
+    ///
+    /// Coverage relies on schemars emitting every referenced struct flat under
+    /// `$defs`/`definitions` with a `$ref` (verified for schemars 1.x). Revisit
+    /// this walk if schemars starts inlining nested struct bodies, or if
+    /// `#[serde(flatten)]` is introduced in an MCP param struct.
+    #[test]
+    fn every_tool_param_advertises_a_concrete_type() {
+        let router = SmoMcpServer::tool_router();
+        let mut violations: Vec<String> = Vec::new();
+
+        for tool in router.list_all() {
+            // Direct params.
+            check_property_map(
+                &tool.name,
+                tool.input_schema.get("properties"),
+                &mut violations,
+            );
+            // Nested struct params: schemars emits referenced structs (e.g.
+            // BatchGraphMutation, PatchStepOp) under `$defs`/`definitions`.
+            for defs_key in ["$defs", "definitions"] {
+                if let Some(defs) = tool.input_schema.get(defs_key).and_then(|d| d.as_object()) {
+                    for (def_name, def_schema) in defs {
+                        let label = format!("{} ($defs.{def_name})", tool.name);
+                        check_property_map(&label, def_schema.get("properties"), &mut violations);
+                    }
+                }
+            }
+        }
+
+        violations.sort();
+        violations.dedup();
+
+        assert!(
+            violations.is_empty(),
+            "{} MCP param(s) advertise no concrete JSON type — clients will stringify \
+             object/array args (SYN-447 class). Annotate each with the matching \
+             schema_with helper (see this test's doc comment):\n{}",
+            violations.len(),
+            violations.join("\n"),
+        );
+    }
+
+    /// Self-test for the keystone guard's machinery: a future refactor must not be
+    /// able to make `every_tool_param_advertises_a_concrete_type` pass vacuously
+    /// (e.g. by breaking `schema_advertises_type` or if `list_all()` returned no
+    /// tools).
+    #[test]
+    fn type_predicate_distinguishes_typed_from_typeless() {
+        // Description-only / bare-`serde_json::Value` shapes must be flagged.
+        assert!(!schema_advertises_type(&serde_json::json!({})));
+        assert!(!schema_advertises_type(&serde_json::json!(true)));
+        assert!(!schema_advertises_type(
+            &serde_json::json!({ "description": "x" })
+        ));
+        // Concrete-type shapes the schema_with helpers emit must pass.
+        assert!(schema_advertises_type(
+            &serde_json::json!({ "type": "object" })
+        ));
+        assert!(schema_advertises_type(
+            &serde_json::json!({ "type": ["object", "null"] })
+        ));
+        assert!(schema_advertises_type(&serde_json::json!({ "oneOf": [] })));
+        assert!(schema_advertises_type(
+            &serde_json::json!({ "$ref": "#/$defs/X" })
+        ));
+        // The guard's walk can never pass vacuously: there must be tools to check.
+        assert!(!SmoMcpServer::tool_router().list_all().is_empty());
+    }
 }
