@@ -225,6 +225,7 @@ async fn validate_report_snapshots() {
             agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
                 Vec::new(),
             )),
+            connection_events: None,
         },
     )));
 
@@ -307,6 +308,7 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
             agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
                 Vec::new(),
             )),
+            connection_events: None,
         },
     )));
 
@@ -487,6 +489,7 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
             cipher: Arc::new(NoOpCipher),
             compatibility: Arc::new(IntegrationCompatibility::default()),
             agent_catalog: agent_catalog.clone(),
+            connection_events: None,
         },
     )));
     let manager = Arc::new(ObjectStoreManager::new(fixture.object_url.clone()));

@@ -138,6 +138,7 @@ fn facade(pool: PgPool) -> ConnectionsFacade {
         cipher: Arc::new(NoOpCipher),
         compatibility: test_compatibility(),
         agent_catalog: test_agent_catalog(),
+        connection_events: None,
     }))
 }
 

@@ -38,21 +38,33 @@ pub async fn create_connection_handler(
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(events): State<crate::events::ConnectionEvents>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository, compatibility);
 
+    // Capture the integration id before `payload` is consumed by the service.
+    let integration = payload.integration_id.clone();
     match service.create_connection(payload, &tenant_id).await {
-        Ok(connection_id) => Ok((
-            StatusCode::CREATED,
-            Json(CreateConnectionResponse {
-                success: true,
-                message: "Connection created successfully".to_string(),
-                connection_id,
-            }),
-        )),
+        Ok(connection_id) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::Created {
+                    connection_id: connection_id.clone(),
+                    integration,
+                },
+            );
+            Ok((
+                StatusCode::CREATED,
+                Json(CreateConnectionResponse {
+                    success: true,
+                    message: "Connection created successfully".to_string(),
+                    connection_id,
+                }),
+            ))
+        }
         Err(ServiceError::ValidationError(msg)) => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -314,6 +326,7 @@ pub async fn delete_connection_handler(
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(events): State<crate::events::ConnectionEvents>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
@@ -321,10 +334,18 @@ pub async fn delete_connection_handler(
     let service = ConnectionService::new(repository, compatibility);
 
     match service.delete_connection(&id, &tenant_id).await {
-        Ok(()) => Ok(Json(DeleteConnectionResponse {
-            success: true,
-            message: "Connection deleted successfully".to_string(),
-        })),
+        Ok(()) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::Deleted {
+                    connection_id: id.clone(),
+                },
+            );
+            Ok(Json(DeleteConnectionResponse {
+                success: true,
+                message: "Connection deleted successfully".to_string(),
+            }))
+        }
         Err(ServiceError::NotFound(msg)) => Err((
             StatusCode::NOT_FOUND,
             Json(json!({

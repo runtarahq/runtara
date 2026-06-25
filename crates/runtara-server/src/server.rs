@@ -940,6 +940,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtara_connections::IntegrationCompatibility::from_catalog(&agent_catalog),
     );
 
+    // Product-analytics: build the channel + sink up front so it can be injected into the
+    // connections crate (constructed just below). The drain (single consumer) is spawned
+    // later, once the shutdown signal exists — it holds `product_event_rx`.
+    let product_events_config = product_events::ProductEventConfig::from_env();
+    let (product_event_tx, product_event_rx) =
+        tokio::sync::mpsc::channel(product_events_config.channel_capacity());
+    let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
     // back to NoOp (plaintext at rest) with a loud warning if missing. See
@@ -953,6 +961,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         cipher: runtara_connections::cipher_from_env(),
         compatibility: integration_compatibility.clone(),
         agent_catalog: agent_catalog.clone(),
+        // Connection lifecycle analytics → the product-events pipeline (dependency inversion;
+        // the crate calls this trait, we translate to `ProductEvent` and emit onto the sink).
+        connection_events: Some(Arc::new(product_events::ConnectionEventBridge::new(
+            product_event_sink.clone(),
+        ))),
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -1212,21 +1225,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Product-analytics pipeline. Build the bounded channel, spawn the single drain
-    // (the consumer), and keep the sink for AppState. Handlers `emit` onto the sink
-    // off the request path; the drain batches into `product_events`.
-    let product_event_sink = {
-        let events_config = product_events::ProductEventConfig::from_env();
-        let (tx, rx) = tokio::sync::mpsc::channel(events_config.channel_capacity());
+    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
+    // signal exists. The channel + sink were built earlier (so the sink could be injected
+    // into the connections crate); the drain owns `product_event_rx` and batches into
+    // `product_events`.
+    {
         let drain = product_events::ProductEventDrain::new(
             pool.clone(),
-            rx,
-            events_config,
+            product_event_rx,
+            product_events_config,
             shutdown_signal.clone(),
         );
         tokio::spawn(drain.run());
-        product_events::ProductEventSink::new(tx)
-    };
+    }
 
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();

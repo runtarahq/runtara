@@ -73,6 +73,12 @@ pub enum EventType {
     // Triggers
     TriggerCreated,
     TriggerFired,
+    // Connections (the integration funnel)
+    ConnectionCreated,
+    ConnectionDeleted,
+    ConnectionOauthStarted,
+    ConnectionOauthCompleted,
+    ConnectionOauthFailed,
 }
 
 impl EventType {
@@ -91,6 +97,11 @@ impl EventType {
             EventType::ExecutionFailed => "execution.failed",
             EventType::TriggerCreated => "trigger.created",
             EventType::TriggerFired => "trigger.fired",
+            EventType::ConnectionCreated => "connection.created",
+            EventType::ConnectionDeleted => "connection.deleted",
+            EventType::ConnectionOauthStarted => "connection.oauth_started",
+            EventType::ConnectionOauthCompleted => "connection.oauth_completed",
+            EventType::ConnectionOauthFailed => "connection.oauth_failed",
         }
     }
 }
@@ -387,6 +398,63 @@ impl ProductEventSink {
                 tracing::warn!("product event dropped: channel closed");
             }
         }
+    }
+}
+
+/// Bridges `runtara-connections` lifecycle events into product-analytics events.
+///
+/// The connections crate can't depend on this module (circular dependency), so it defines a
+/// `ConnectionEventSink` trait and the host implements it. This is that implementation: it
+/// translates each [`runtara_connections::events::ConnectionLifecycleEvent`] into a
+/// [`ProductEvent`] and forwards it onto the one shared [`ProductEventSink`].
+///
+/// Connection events are **tenant-scoped and system-attributed** — the crate boundary only
+/// exposes a `TenantId`, no caller identity, so they carry no `user_id` (`actor_type=system`,
+/// `source` unset). The integration / outcome lives in `properties`.
+#[derive(Clone)]
+pub struct ConnectionEventBridge {
+    sink: ProductEventSink,
+}
+
+impl ConnectionEventBridge {
+    pub fn new(sink: ProductEventSink) -> Self {
+        Self { sink }
+    }
+}
+
+impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge {
+    fn emit(&self, event: runtara_connections::events::ConnectionLifecycleEvent) {
+        use runtara_connections::events::ConnectionLifecycleEvent as Lifecycle;
+
+        let product_event = match event {
+            Lifecycle::Created {
+                connection_id,
+                integration,
+            } => ProductEvent::new(EventType::ConnectionCreated)
+                .no_user_actor("connections", ActorType::System)
+                .resource(connection_id, "connection")
+                .properties(serde_json::json!({ "integration": integration })),
+            Lifecycle::Deleted { connection_id } => ProductEvent::new(EventType::ConnectionDeleted)
+                .no_user_actor("connections", ActorType::System)
+                .resource(connection_id, "connection"),
+            Lifecycle::OAuthStarted { connection_id } => {
+                ProductEvent::new(EventType::ConnectionOauthStarted)
+                    .no_user_actor("connections", ActorType::System)
+                    .resource(connection_id, "connection")
+            }
+            Lifecycle::OAuthCompleted { connection_id } => {
+                ProductEvent::new(EventType::ConnectionOauthCompleted)
+                    .no_user_actor("connections", ActorType::System)
+                    .resource(connection_id, "connection")
+            }
+            Lifecycle::OAuthFailed { reason } => {
+                ProductEvent::new(EventType::ConnectionOauthFailed)
+                    .no_user_actor("connections", ActorType::System)
+                    .properties(serde_json::json!({ "reason": reason }))
+            }
+        };
+
+        self.sink.emit(product_event);
     }
 }
 
