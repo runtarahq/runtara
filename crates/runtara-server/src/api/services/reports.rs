@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
+use futures::StreamExt;
 use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -561,43 +562,79 @@ impl ReportService {
             .map(|block| (block.id.clone(), block))
             .collect();
 
-        let mut blocks = HashMap::new();
-        let mut errors = Vec::new();
+        // Render blocks concurrently (bounded) instead of serially. Each block
+        // is an independent DB/runtime fan-out, so against a high-RTT object
+        // store the serial sum of per-block latencies dominated wall-clock.
+        // Bound concurrency below the object-store pool size
+        // (DEFAULT_POOL_MAX_CONNECTIONS = 10) so a wide dashboard can't exhaust
+        // connections; a block holds at most one object-store connection at a
+        // time (its queries run sequentially within the block).
+        const MAX_CONCURRENT_BLOCKS: usize = 8;
 
-        for block in requested_blocks {
-            let block_request = request_by_id.get(&block.id);
-            let result = self
-                .render_block(
-                    tenant_id,
-                    definition,
-                    block,
-                    &resolved_filters,
-                    block_request,
-                )
-                .await;
+        // Borrow the shared inputs so the per-block `async move` futures capture
+        // references (Copy), leaving the owned values available afterwards.
+        let resolved_filters_ref = &resolved_filters;
+        let request_by_id_ref = &request_by_id;
 
-            match result {
-                Ok(rendered) => {
-                    blocks.insert(block.id.clone(), rendered);
-                }
-                Err(error) => {
-                    let block_error = ReportBlockError {
-                        code: "BLOCK_RENDER_FAILED".to_string(),
-                        message: error.to_string(),
-                        block_id: Some(block.id.clone()),
-                    };
-                    errors.push(block_error.clone());
-                    blocks.insert(
-                        block.id.clone(),
-                        ReportBlockRenderResult {
+        // Build the per-block futures in an explicit loop (concrete lifetimes,
+        // no closure HRTB) and drive them with bounded concurrency.
+        let mut block_futures = Vec::with_capacity(requested_blocks.len());
+        for block in requested_blocks.iter().copied() {
+            let block_request = request_by_id_ref.get(&block.id);
+            block_futures.push(async move {
+                match self
+                    .render_block(
+                        tenant_id,
+                        definition,
+                        block,
+                        resolved_filters_ref,
+                        block_request,
+                    )
+                    .await
+                {
+                    Ok(rendered) => (block.id.clone(), rendered, None),
+                    Err(error) => {
+                        let block_error = ReportBlockError {
+                            code: "BLOCK_RENDER_FAILED".to_string(),
+                            message: error.to_string(),
+                            block_id: Some(block.id.clone()),
+                        };
+                        let result = ReportBlockRenderResult {
                             block_type: block.block_type,
                             status: ReportBlockStatus::Error,
                             title: block.title.clone(),
                             data: None,
-                            error: Some(block_error),
-                        },
-                    );
+                            error: Some(block_error.clone()),
+                        };
+                        (block.id.clone(), result, Some(block_error))
+                    }
                 }
+            });
+        }
+
+        let rendered: Vec<(String, ReportBlockRenderResult, Option<ReportBlockError>)> =
+            futures::stream::iter(block_futures)
+                .buffer_unordered(MAX_CONCURRENT_BLOCKS)
+                .collect()
+                .await;
+
+        // Reassemble deterministically in requested order, so the error list and
+        // any order-sensitive consumers stay stable despite out-of-order
+        // completion.
+        let mut by_id: HashMap<String, (ReportBlockRenderResult, Option<ReportBlockError>)> =
+            rendered
+                .into_iter()
+                .map(|(id, result, err)| (id, (result, err)))
+                .collect();
+
+        let mut blocks = HashMap::new();
+        let mut errors = Vec::new();
+        for block in &requested_blocks {
+            if let Some((result, err)) = by_id.remove(&block.id) {
+                if let Some(err) = err {
+                    errors.push(err);
+                }
+                blocks.insert(block.id.clone(), result);
             }
         }
 
@@ -2962,21 +2999,29 @@ impl ReportService {
                 .filter(|(_, column)| column.is_chart())
                 .collect();
             if !chart_columns.is_empty() {
-                for (row_index, row) in rows.iter_mut().enumerate() {
-                    let Some(row_map) = row_maps.get_mut(row_index) else {
-                        continue;
-                    };
-                    for (column_index, chart_column) in &chart_columns {
-                        let cell = self
-                            .render_table_chart_cell(
-                                tenant_id,
-                                condition_context,
-                                chart_column,
-                                row_map,
-                            )
-                            .await?;
-                        row_map.insert(chart_column.field.clone(), cell.clone());
-                        if let Some(slot) = row.get_mut(*column_index) {
+                // Batch each chart column across the page (one grouped query per
+                // column) instead of one aggregate per row.
+                let mut batched: Vec<Vec<Value>> = Vec::with_capacity(chart_columns.len());
+                for &(_, chart_column) in &chart_columns {
+                    batched.push(
+                        self.render_chart_column_cells(
+                            tenant_id,
+                            condition_context,
+                            chart_column,
+                            &row_maps,
+                        )
+                        .await?,
+                    );
+                }
+                for (col_pos, &(column_index, chart_column)) in chart_columns.iter().enumerate() {
+                    for (row_index, row) in rows.iter_mut().enumerate() {
+                        let Some(cell) = batched[col_pos].get(row_index).cloned() else {
+                            continue;
+                        };
+                        if let Some(row_map) = row_maps.get_mut(row_index) {
+                            row_map.insert(chart_column.field.clone(), cell.clone());
+                        }
+                        if let Some(slot) = row.get_mut(column_index) {
                             *slot = cell;
                         }
                     }
@@ -3053,13 +3098,27 @@ impl ReportService {
             .await?;
         }
 
+        // Batch each chart column across the whole page (one grouped query per
+        // column) instead of one aggregate per row.
+        let mut chart_cells: Vec<Vec<Value>> = Vec::with_capacity(chart_columns.len());
+        for &column in &chart_columns {
+            chart_cells.push(
+                self.render_chart_column_cells(
+                    tenant_id,
+                    condition_context,
+                    column,
+                    &hydrated_rows,
+                )
+                .await?,
+            );
+        }
+
         let mut output_rows = Vec::with_capacity(hydrated_rows.len());
-        for mut object in hydrated_rows {
-            for column in &chart_columns {
-                let cell = self
-                    .render_table_chart_cell(tenant_id, condition_context, column, &object)
-                    .await?;
-                object.insert(column.field.clone(), cell);
+        for (row_index, mut object) in hydrated_rows.into_iter().enumerate() {
+            for (col_index, column) in chart_columns.iter().enumerate() {
+                if let Some(cell) = chart_cells[col_index].get(row_index) {
+                    object.insert(column.field.clone(), cell.clone());
+                }
             }
             output_rows.push(Value::Object(object));
         }
@@ -3440,6 +3499,210 @@ impl ReportService {
             "columns": result.columns,
             "rows": result.rows,
         }))
+    }
+
+    /// Compute every chart cell for one column across a whole page.
+    ///
+    /// The naive path runs one aggregate per row (an N+1 that dominates render
+    /// time against a high-RTT object store). When the column's source uses a
+    /// single equality join we instead issue ONE grouped aggregate —
+    /// `GROUP BY <child_field>, <source.group_by…> WHERE <child_field> IN (keys)`
+    /// — and partition the result back to each row by its parent key, collapsing
+    /// N round trips to 1. Shapes that can't be reconstructed by partitioning
+    /// (non-equality or composite joins, empty parent keys, or a result large
+    /// enough that a per-group series might be truncated) fall back to the exact
+    /// per-row path. Returns one cell per input row, aligned by index.
+    async fn render_chart_column_cells(
+        &self,
+        tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
+        column: &ReportTableColumn,
+        rows: &[serde_json::Map<String, Value>],
+    ) -> Result<Vec<Value>, ReportServiceError> {
+        // Fetch budget for the batched query. If we hit it a parent's series may
+        // be incomplete, so we fall back rather than serve a truncated chart.
+        const CHART_BATCH_ROW_CAP: i64 = 5_000;
+
+        let Some(source) = &column.source else {
+            return Ok(vec![Value::Null; rows.len()]);
+        };
+
+        // Only a single equality join can be reconstructed by partitioning on the
+        // child key; everything else uses the exact per-row path.
+        let join = match source.join.as_slice() {
+            [join] if join.op.eq_ignore_ascii_case("eq") => join,
+            _ => {
+                return self
+                    .render_chart_cells_per_row(tenant_id, condition_context, column, rows)
+                    .await;
+            }
+        };
+
+        // Distinct, non-empty parent keys for this page.
+        let mut seen = HashSet::new();
+        let mut keys: Vec<Value> = Vec::new();
+        for row in rows {
+            if let Some(value) = row.get(&join.parent_field)
+                && !value_is_empty(value)
+                && seen.insert(value_to_lookup_key(value))
+            {
+                keys.push(value.clone());
+            }
+        }
+        if keys.is_empty() {
+            return self
+                .render_chart_cells_per_row(tenant_id, condition_context, column, rows)
+                .await;
+        }
+
+        // Resolve the source's static condition once (it does not depend on the
+        // row) and AND it with the batched `IN (keys)` membership.
+        let filter_defs = block_condition_filter_definitions(
+            condition_context.definition,
+            condition_context.block,
+        );
+        let filter_values = block_condition_filter_values(
+            condition_context.block,
+            condition_context.resolved_filters,
+            condition_context.block_request,
+        );
+        let context = format!(
+            "block '{}' chart column '{}' source",
+            condition_context.block.id, column.field
+        );
+        let mut conditions = Vec::new();
+        if let Some(resolved) = resolve_optional_report_condition(
+            source.condition.as_ref(),
+            &filter_defs,
+            &filter_values,
+            &context,
+        )? {
+            conditions.push(resolved);
+        }
+        conditions.push(Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![Value::String(join.field.clone()), Value::Array(keys)]),
+        });
+
+        // Group by the child key first (so we can partition), then the source's
+        // own grouping; order by the child key first so each parent's rows are
+        // contiguous and in the source's requested order within the group.
+        let mut group_by = Vec::with_capacity(source.group_by.len() + 1);
+        group_by.push(join.field.clone());
+        for field in &source.group_by {
+            if field != &join.field {
+                group_by.push(field.clone());
+            }
+        }
+        let mut order_by = Vec::with_capacity(source.order_by.len() + 1);
+        order_by.push(ReportOrderBy {
+            field: join.field.clone(),
+            direction: "asc".to_string(),
+        });
+        order_by.extend(source.order_by.iter().cloned());
+
+        let request = build_aggregate_request_from_parts(
+            "chart column batch",
+            &group_by,
+            &source.aggregates,
+            &order_by,
+            Some(CHART_BATCH_ROW_CAP),
+            Some(0),
+            combine_conditions(conditions),
+        )?;
+
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &source.schema,
+                request,
+                source.connection_id.as_deref(),
+            )
+            .await?;
+
+        // Hit the cap → a per-group series might be truncated; fall back to the
+        // exact per-row path for correctness.
+        if result.rows.len() as i64 >= CHART_BATCH_ROW_CAP {
+            return self
+                .render_chart_cells_per_row(tenant_id, condition_context, column, rows)
+                .await;
+        }
+
+        // Locate the partition key column we prepended.
+        let Some(key_idx) = result.columns.iter().position(|c| c == &join.field) else {
+            return self
+                .render_chart_cells_per_row(tenant_id, condition_context, column, rows)
+                .await;
+        };
+        // Per-cell columns are the source columns minus the partition key, so the
+        // cell shape matches the per-row path exactly.
+        let cell_columns: Vec<String> = result
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != key_idx)
+            .map(|(_, c)| c.clone())
+            .collect();
+
+        let mut by_key: HashMap<String, Vec<Vec<Value>>> = HashMap::new();
+        for row in result.rows {
+            let Some(key_value) = row.get(key_idx) else {
+                continue;
+            };
+            let key = value_to_lookup_key(key_value);
+            let stripped: Vec<Value> = row
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| *i != key_idx)
+                .map(|(_, v)| v)
+                .collect();
+            by_key.entry(key).or_default().push(stripped);
+        }
+
+        let per_cell_limit = source.limit.unwrap_or(30).max(0) as usize;
+        let mut cells = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cell = match row.get(&join.parent_field) {
+                Some(value) if !value_is_empty(value) => {
+                    let mut series = by_key
+                        .get(&value_to_lookup_key(value))
+                        .cloned()
+                        .unwrap_or_default();
+                    if per_cell_limit > 0 && series.len() > per_cell_limit {
+                        series.truncate(per_cell_limit);
+                    }
+                    json!({ "columns": cell_columns.clone(), "rows": series })
+                }
+                // Empty parent key aggregates over the whole schema in the
+                // per-row path; reproduce that exactly for the rare empty rows.
+                _ => {
+                    self.render_table_chart_cell(tenant_id, condition_context, column, row)
+                        .await?
+                }
+            };
+            cells.push(cell);
+        }
+        Ok(cells)
+    }
+
+    /// Exact (non-batched) fallback: one aggregate per row, serially. Used for
+    /// chart-column shapes that cannot be safely batched.
+    async fn render_chart_cells_per_row(
+        &self,
+        tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
+        column: &ReportTableColumn,
+        rows: &[serde_json::Map<String, Value>],
+    ) -> Result<Vec<Value>, ReportServiceError> {
+        let mut cells = Vec::with_capacity(rows.len());
+        for row in rows {
+            cells.push(
+                self.render_table_chart_cell(tenant_id, condition_context, column, row)
+                    .await?,
+            );
+        }
+        Ok(cells)
     }
 
     pub(super) async fn render_aggregate_block(

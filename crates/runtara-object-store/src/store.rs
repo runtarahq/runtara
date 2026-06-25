@@ -6,6 +6,8 @@
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
@@ -33,11 +35,28 @@ type ValidatedRow = (String, serde_json::Map<String, serde_json::Value>);
 /// Manages schemas and instances in a single PostgreSQL database.
 /// Schema metadata is stored in a configurable metadata table (default: `__schema`).
 /// Instance data is stored in dynamically created tables.
+/// How long a schema definition stays cached before the next read re-fetches
+/// it. Schema reads sit on the hot path of every query (filter and aggregate
+/// each do a `get_schema` round trip before the real query); caching collapses
+/// that to one fetch per schema per window. The short TTL bounds staleness, and
+/// local mutations invalidate eagerly so a same-process schema edit is visible
+/// immediately.
+const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedSchema {
+    schema: Arc<Schema>,
+    expires_at: Instant,
+}
+
 pub struct ObjectStore {
     /// Database connection pool
     pool: PgPool,
     /// Store configuration
     config: StoreConfig,
+    /// Short-TTL cache of schema metadata keyed by name.
+    schema_cache_by_name: RwLock<HashMap<String, CachedSchema>>,
+    /// Short-TTL cache of schema metadata keyed by id.
+    schema_cache_by_id: RwLock<HashMap<String, CachedSchema>>,
 }
 
 impl ObjectStore {
@@ -73,7 +92,12 @@ impl ObjectStore {
                 ObjectStoreError::Connection(format!("Database connection failed: {}", e))
             })?;
 
-        let store = Self { pool, config };
+        let store = Self {
+            pool,
+            config,
+            schema_cache_by_name: RwLock::new(HashMap::new()),
+            schema_cache_by_id: RwLock::new(HashMap::new()),
+        };
         store.ensure_metadata_table().await?;
 
         Ok(store)
@@ -84,7 +108,12 @@ impl ObjectStore {
     /// Use this when you already have a connection pool and want to
     /// share it with the object store.
     pub async fn from_pool(pool: PgPool, config: StoreConfig) -> Result<Self> {
-        let store = Self { pool, config };
+        let store = Self {
+            pool,
+            config,
+            schema_cache_by_name: RwLock::new(HashMap::new()),
+            schema_cache_by_id: RwLock::new(HashMap::new()),
+        };
         store.ensure_metadata_table().await?;
         Ok(store)
     }
@@ -252,7 +281,7 @@ impl ObjectStore {
 
         tx.commit().await?;
 
-        Ok(Schema {
+        let schema = Schema {
             id: schema_id,
             created_at: created_at.to_rfc3339(),
             updated_at: updated_at.to_rfc3339(),
@@ -261,11 +290,26 @@ impl ObjectStore {
             table_name: request.table_name,
             columns: request.columns,
             indexes: request.indexes,
-        })
+        };
+        self.cache_schema(&schema);
+        Ok(schema)
     }
 
-    /// Get schema by name
+    /// Get schema by name (cached; see [`SCHEMA_CACHE_TTL`]).
     pub async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
+        if let Some(schema) = Self::schema_from_cache(&self.schema_cache_by_name, name) {
+            return Ok(Some((*schema).clone()));
+        }
+        let fetched = self.get_schema_uncached(name).await?;
+        if let Some(schema) = &fetched {
+            self.cache_schema(schema);
+        }
+        Ok(fetched)
+    }
+
+    /// Get schema by name, bypassing the cache. Used by mutations that must diff
+    /// against the current persisted state.
+    async fn get_schema_uncached(&self, name: &str) -> Result<Option<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
         let select_sql = format!(
@@ -288,8 +332,20 @@ impl ObjectStore {
         }
     }
 
-    /// Get schema by ID
+    /// Get schema by ID (cached; see [`SCHEMA_CACHE_TTL`]).
     pub async fn get_schema_by_id(&self, id: &str) -> Result<Option<Schema>> {
+        if let Some(schema) = Self::schema_from_cache(&self.schema_cache_by_id, id) {
+            return Ok(Some((*schema).clone()));
+        }
+        let fetched = self.get_schema_by_id_uncached(id).await?;
+        if let Some(schema) = &fetched {
+            self.cache_schema(schema);
+        }
+        Ok(fetched)
+    }
+
+    /// Get schema by ID, bypassing the cache.
+    async fn get_schema_by_id_uncached(&self, id: &str) -> Result<Option<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
         let select_sql = format!(
@@ -310,6 +366,46 @@ impl ObjectStore {
             Some(row) => Ok(Some(self.row_to_schema(&row)?)),
             None => Ok(None),
         }
+    }
+
+    /// Look up a live (unexpired) schema from one of the caches.
+    fn schema_from_cache(
+        cache: &RwLock<HashMap<String, CachedSchema>>,
+        key: &str,
+    ) -> Option<Arc<Schema>> {
+        let guard = cache.read().unwrap();
+        let entry = guard.get(key)?;
+        if entry.expires_at > Instant::now() {
+            Some(entry.schema.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Insert (or refresh) a schema in both caches.
+    fn cache_schema(&self, schema: &Schema) {
+        let arc = Arc::new(schema.clone());
+        let expires_at = Instant::now() + SCHEMA_CACHE_TTL;
+        self.schema_cache_by_name.write().unwrap().insert(
+            schema.name.clone(),
+            CachedSchema {
+                schema: arc.clone(),
+                expires_at,
+            },
+        );
+        self.schema_cache_by_id.write().unwrap().insert(
+            schema.id.clone(),
+            CachedSchema {
+                schema: arc,
+                expires_at,
+            },
+        );
+    }
+
+    /// Drop a schema from both caches (after a mutation).
+    fn invalidate_schema(&self, name: &str, id: &str) {
+        self.schema_cache_by_name.write().unwrap().remove(name);
+        self.schema_cache_by_id.write().unwrap().remove(id);
     }
 
     /// List all schemas
@@ -336,7 +432,7 @@ impl ObjectStore {
     /// This will update schema metadata and alter the table if columns changed.
     pub async fn update_schema(&self, name: &str, request: UpdateSchemaRequest) -> Result<Schema> {
         let existing = self
-            .get_schema(name)
+            .get_schema_uncached(name)
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(name))?;
 
@@ -425,6 +521,10 @@ impl ObjectStore {
 
         tx.commit().await?;
 
+        // Drop the old entry (the name may have changed) and cache the new one.
+        self.invalidate_schema(name, &existing.id);
+        self.cache_schema(&schema);
+
         Ok(schema)
     }
 
@@ -434,7 +534,7 @@ impl ObjectStore {
     /// Otherwise, drops the table and removes the metadata.
     pub async fn delete_schema(&self, name: &str) -> Result<()> {
         let schema = self
-            .get_schema(name)
+            .get_schema_uncached(name)
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(name))?;
 
@@ -461,6 +561,8 @@ impl ObjectStore {
                 .execute(&self.pool)
                 .await?;
         }
+
+        self.invalidate_schema(name, &schema.id);
 
         Ok(())
     }
