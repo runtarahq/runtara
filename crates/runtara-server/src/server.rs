@@ -668,6 +668,17 @@ async fn me_handler(
     }))
 }
 
+/// Maximum request body size for tenant-scoped API routes.
+///
+/// File inputs (workflow `file` fields, CSV imports) travel as base64-encoded
+/// JSON. The UI caps a raw upload at 50 MB (`MAX_FILE_SIZE_BYTES`); base64
+/// inflates that by ~4/3 to ~67 MB, and the JSON envelope adds a little more.
+/// Axum's default body limit is only 2 MB, so a file-input workflow execution
+/// or CSV import larger than ~1.5 MB was rejected with 413 before the handler
+/// ran (SYN-457), even though the product intends to accept ~50 MB files.
+/// 96 MB leaves headroom above the base64-encoded size of a 50 MB file.
+const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
@@ -1766,7 +1777,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route_layer(from_fn_with_state(
             auth_state.clone(),
             crate::middleware::auth::authenticate,
-        ));
+        ))
+        // Raise the body limit above Axum's 2 MB default so base64-encoded
+        // file inputs (workflow `file` fields) are not rejected with 413
+        // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
+        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
     // Mounted as a separate router with tenant bridge middleware.
@@ -1916,7 +1931,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route_layer(from_fn_with_state(
             auth_state.clone(),
             crate::middleware::auth::authenticate,
-        ));
+        ))
+        // CSV import accepts multipart / base64-JSON bodies up to ~50 MB; the
+        // handler already reads up to 50 MB via to_bytes, but Axum's 2 MB
+        // default body limit rejected them first with 413 (SYN-457).
+        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
 
     // Create router for public/global endpoints (no tenant auth required)
     let public_routes = Router::new()
