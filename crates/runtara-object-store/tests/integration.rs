@@ -1356,6 +1356,60 @@ async fn test_pagination() {
     cleanup_test(&store, &prefix).await;
 }
 
+#[tokio::test]
+async fn test_filter_limit_is_clamped() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let request = CreateSchemaRequest {
+        name: "clamped".to_string(),
+        description: None,
+        table_name: format!("{}_clamped", prefix),
+        columns: vec![ColumnDefinition::new("index", ColumnType::Integer).not_null()],
+        indexes: None,
+    };
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    for i in 1..=5 {
+        store
+            .create_instance("clamped", serde_json::json!({"index": i}))
+            .await
+            .expect("Should create instance");
+    }
+
+    // An absurdly large limit must not error (no full-table-materialization
+    // blowup, no negative/overflow SQL) and returns all available rows.
+    let filter = FilterRequest {
+        limit: i64::MAX,
+        ..Default::default()
+    };
+    let (instances, total) = store
+        .filter_instances("clamped", filter)
+        .await
+        .expect("Should filter with an oversized limit");
+    assert_eq!(total, 5);
+    assert_eq!(instances.len(), 5);
+
+    // A negative limit is treated as 0 rather than producing a SQL error.
+    let filter = FilterRequest {
+        limit: -1,
+        ..Default::default()
+    };
+    let (instances, total) = store
+        .filter_instances("clamped", filter)
+        .await
+        .expect("Should filter with a negative limit");
+    assert_eq!(total, 5);
+    assert_eq!(instances.len(), 0);
+
+    cleanup_test(&store, &prefix).await;
+}
+
 // ==================== Bulk Operations Tests ====================
 
 #[tokio::test]
