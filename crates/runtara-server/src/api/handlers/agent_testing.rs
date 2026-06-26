@@ -5,6 +5,7 @@
 //! `?engine=auto|components|legacy` query parameter.
 
 use axum::{
+    Extension,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
@@ -14,8 +15,11 @@ use crate::api::dto::agent_testing::{
     TestAgentErrorResponse, TestAgentQuery, TestAgentRequest, TestAgentResponse,
 };
 use crate::api::services::agent_testing::{AgentTestingService, ServiceError};
+use crate::auth::AuthContext;
 use crate::entitlement_error::EntitlementDenial;
-use crate::middleware::tenant_auth::OrgId;
+use crate::middleware::tenant_auth::{OrgId, Source};
+use crate::product_events::{EventType, ProductEvent, ProductEventSink};
+use serde_json::json;
 
 /// Test an agent capability with given input
 ///
@@ -42,9 +46,13 @@ use crate::middleware::tenant_auth::OrgId;
     ),
     tag = "agents-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn test_agent_handler(
     OrgId(tenant_id): OrgId,
     State(service): State<Option<AgentTestingService>>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path((agent_name, capability_id)): Path<(String, String)>,
     Query(query): Query<TestAgentQuery>,
     Json(request): Json<TestAgentRequest>,
@@ -80,14 +88,27 @@ pub async fn test_agent_handler(
         )
         .await
     {
-        Ok(result) => Ok(Json(TestAgentResponse {
-            success: result.success,
-            output: result.output,
-            error: result.error,
-            execution_time_ms: result.execution_time_ms,
-            max_memory_mb: result.max_memory_mb,
-            engine: Some(result.engine),
-        })),
+        Ok(result) => {
+            // A completed playground test (the agent ran; `success` records pass/fail).
+            events.emit(
+                ProductEvent::from_auth(EventType::AgentCapabilityTested, &ctx)
+                    .resource(&capability_id, "capability")
+                    .properties(json!({
+                        "agentId": agent_name,
+                        "success": result.success,
+                        "engine": result.engine.clone(),
+                    }))
+                    .source(source),
+            );
+            Ok(Json(TestAgentResponse {
+                success: result.success,
+                output: result.output,
+                error: result.error,
+                execution_time_ms: result.execution_time_ms,
+                max_memory_mb: result.max_memory_mb,
+                engine: Some(result.engine),
+            }))
+        }
         Err(err) => {
             let (status, error, message) = match err {
                 ServiceError::NotEnabled => (

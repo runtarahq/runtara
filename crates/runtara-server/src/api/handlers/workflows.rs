@@ -39,7 +39,7 @@ use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::workflows::{ServiceError, WorkflowService};
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
-use crate::product_events::{EventType, ProductEvent, ProductEventSink};
+use crate::product_events::{EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
     ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
@@ -183,6 +183,60 @@ pub async fn create_workflow_handler(
     }
 }
 
+/// Walk a workflow's execution graph and collect the distinct `(agent_id, capability_id)`
+/// pairs it references, recursing into Split/While subgraphs and a WaitForSignal `onWait`
+/// branch. Best-effort: an unparseable graph yields no pairs (the save path itself owns
+/// validation, so this only runs to feed `agent.capability_used` analytics).
+fn collect_workflow_capabilities(execution_graph: &Value) -> Vec<(String, String)> {
+    fn walk(
+        graph: &runtara_dsl::ExecutionGraph,
+        out: &mut std::collections::BTreeSet<(String, String)>,
+    ) {
+        for step in graph.steps.values() {
+            match step {
+                runtara_dsl::Step::Agent(agent) => {
+                    out.insert((agent.agent_id.clone(), agent.capability_id.clone()));
+                }
+                runtara_dsl::Step::Split(split) => walk(&split.subgraph, out),
+                runtara_dsl::Step::While(while_step) => walk(&while_step.subgraph, out),
+                runtara_dsl::Step::WaitForSignal(wait) => {
+                    if let Some(on_wait) = &wait.on_wait {
+                        walk(on_wait, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let Ok(graph) = serde_json::from_value::<runtara_dsl::ExecutionGraph>(execution_graph.clone())
+    else {
+        return Vec::new();
+    };
+    let mut pairs = std::collections::BTreeSet::new();
+    walk(&graph, &mut pairs);
+    pairs.into_iter().collect()
+}
+
+/// Emit one `agent.capability_used` event per distinct capability referenced by a saved
+/// graph, attributed to the saving caller/surface and scoped to the workflow.
+fn emit_capability_used(
+    events: &ProductEventSink,
+    ctx: &AuthContext,
+    source: EventSource,
+    workflow_id: &str,
+    capabilities: &[(String, String)],
+) {
+    for (agent_id, capability_id) in capabilities {
+        events.emit(
+            ProductEvent::from_auth(EventType::AgentCapabilityUsed, ctx)
+                .resource(workflow_id, "workflow")
+                .properties(json!({ "agentId": agent_id, "capabilityId": capability_id }))
+                .source(source),
+        );
+    }
+}
+
 /// Update a workflow by creating a new version
 #[utoipa::path(
     post,
@@ -239,6 +293,10 @@ pub async fn update_workflow_handler(
         agent_catalog.clone(),
     );
 
+    // Collect referenced capabilities before the graph is moved into the service, so a
+    // successful save can emit one `agent.capability_used` per distinct capability.
+    let capabilities = collect_workflow_capabilities(&request.execution_graph);
+
     // Delegate to service (name/description are now inside execution_graph)
     let (version_num, warnings) = match service
         .update_workflow(
@@ -256,6 +314,7 @@ pub async fn update_workflow_handler(
                     .resource(&workflow_id, "workflow")
                     .source(source),
             );
+            emit_capability_used(&events, &ctx, source, &workflow_id, &capabilities);
             result
         }
         Err(e) => return map_service_error_to_response(e),
@@ -386,6 +445,9 @@ pub async fn patch_version_graph_handler(
 
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
+    // Collect referenced capabilities before the graph is moved into the service.
+    let capabilities = collect_workflow_capabilities(&request.execution_graph);
+
     let warnings = match service
         .patch_version_graph(&tenant_id, &workflow_id, version, request.execution_graph)
         .await
@@ -400,6 +462,7 @@ pub async fn patch_version_graph_handler(
             .source(source)
             .properties(json!({ "version": version })),
     );
+    emit_capability_used(&events, &ctx, source, &workflow_id, &capabilities);
 
     let response = json!({
         "success": true,
@@ -2679,5 +2742,83 @@ pub async fn rename_folder_handler(
             )
         }
         Err(e) => map_service_error_to_response(e),
+    }
+}
+
+#[cfg(test)]
+mod capability_walk_tests {
+    use super::collect_workflow_capabilities;
+    use serde_json::json;
+
+    #[test]
+    fn collects_distinct_pairs_including_nested_subgraphs() {
+        // One top-level Agent, plus an Agent nested inside a Split subgraph.
+        let graph = json!({
+            "entryPoint": "split1",
+            "steps": {
+                "split1": {
+                    "stepType": "Split",
+                    "id": "split1",
+                    "subgraph": {
+                        "entryPoint": "inner",
+                        "steps": {
+                            "inner": {
+                                "stepType": "Agent",
+                                "id": "inner",
+                                "agentId": "transform",
+                                "capabilityId": "group-by"
+                            }
+                        }
+                    }
+                },
+                "top": {
+                    "stepType": "Agent",
+                    "id": "top",
+                    "agentId": "http",
+                    "capabilityId": "request"
+                }
+            }
+        });
+
+        let pairs = collect_workflow_capabilities(&graph);
+        // BTreeSet ordering: sorted by (agent_id, capability_id).
+        assert_eq!(
+            pairs,
+            vec![
+                ("http".to_string(), "request".to_string()),
+                ("transform".to_string(), "group-by".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicates_repeated_capabilities() {
+        let graph = json!({
+            "entryPoint": "a",
+            "steps": {
+                "a": {"stepType": "Agent", "id": "a", "agentId": "http", "capabilityId": "request"},
+                "b": {"stepType": "Agent", "id": "b", "agentId": "http", "capabilityId": "request"}
+            }
+        });
+
+        let pairs = collect_workflow_capabilities(&graph);
+        assert_eq!(pairs, vec![("http".to_string(), "request".to_string())]);
+    }
+
+    #[test]
+    fn ignores_non_agent_steps() {
+        let graph = json!({
+            "entryPoint": "f",
+            "steps": {
+                "f": {"stepType": "Finish", "id": "f"}
+            }
+        });
+        assert!(collect_workflow_capabilities(&graph).is_empty());
+    }
+
+    #[test]
+    fn unparseable_graph_yields_no_pairs() {
+        // Missing required `steps`/`entryPoint` — best-effort returns empty, never panics.
+        assert!(collect_workflow_capabilities(&json!({"nonsense": true})).is_empty());
     }
 }

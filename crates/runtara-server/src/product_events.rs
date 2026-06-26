@@ -73,6 +73,9 @@ pub enum EventType {
     // Triggers
     TriggerCreated,
     TriggerFired,
+    // Agents & capabilities
+    AgentCapabilityUsed,
+    AgentCapabilityTested,
     // Connections (the integration funnel)
     ConnectionCreated,
     ConnectionDeleted,
@@ -98,6 +101,8 @@ impl EventType {
             EventType::ExecutionFailed => "execution.failed",
             EventType::TriggerCreated => "trigger.created",
             EventType::TriggerFired => "trigger.fired",
+            EventType::AgentCapabilityUsed => "agent.capability_used",
+            EventType::AgentCapabilityTested => "agent.capability_tested",
             EventType::ConnectionCreated => "connection.created",
             EventType::ConnectionDeleted => "connection.deleted",
             EventType::ConnectionOauthStarted => "connection.oauth_started",
@@ -509,6 +514,14 @@ mod tests {
             "execution.completed"
         );
         assert_eq!(EventType::ExecutionFailed.as_str(), "execution.failed");
+        assert_eq!(
+            EventType::AgentCapabilityUsed.as_str(),
+            "agent.capability_used"
+        );
+        assert_eq!(
+            EventType::AgentCapabilityTested.as_str(),
+            "agent.capability_tested"
+        );
     }
 
     #[test]
