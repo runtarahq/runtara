@@ -119,38 +119,93 @@ impl ReportSourceProvider for ObjectModelProvider {
 /// being pulled out of the DB and serialized on every page — the dominant cost
 /// of a report over a blob-heavy schema once round trips are fixed.
 ///
-/// Returns `None` (= all columns) whenever the block can read row fields we
-/// can't statically enumerate: row/selection-mode workflow actions ship the
-/// whole row, and interaction drilldowns / interaction-button columns reference
-/// arbitrary `valueFrom`/`*_when` fields. Correctness beats savings there.
+/// Returns `None` (= all columns) only for shapes that ship the **whole row**
+/// to a workflow and so can't be enumerated: a row/selection-mode workflow
+/// action, a table-wide action, or row selection. Per-row buttons and
+/// interactions (a `field`-mode "run workflow" button, a row-click
+/// `set_filter`, a `disabledWhen` guard) read a handful of named fields — those
+/// are collected into the set rather than triggering a fall-back, so a table
+/// with a drilldown/action button still projects (and still skips the file
+/// blob it never displays).
 ///
 /// Only the plain (non-join, non-aggregate) filter path routes here, so WHERE /
 /// ORDER BY columns are pushed into SQL and never read back from the row — they
-/// need not be projected. The display-side reads do: each column's `field`, its
-/// `displayField`/`secondaryField`/`linkField`/`tooltipField`, the fields its
-/// `displayTemplate` interpolates, and any value-lookup/chart
-/// `source.join[].parentField` used to hydrate the cell. (`id`/`createdAt`/
-/// `updatedAt` are always selected by the store regardless of projection.)
+/// need not be projected. The reads that DO come back from the row: each
+/// column's `field`, its `displayField`/`secondaryField`/`linkField`/
+/// `tooltipField`, the fields its `displayTemplate` interpolates, value-lookup/
+/// chart `source.join[].parentField`, plus per-row button/interaction
+/// `field`/`valueFrom`/`*When` references. (`id`/`createdAt`/`updatedAt` are
+/// always selected by the store regardless of projection.)
 fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> {
+    use crate::api::dto::reports::ReportWorkflowActionContextMode as Mode;
+
     let table = block.table.as_ref()?;
 
-    // Bail to "all columns" for shapes that read un-enumerable row fields.
-    if !block.interactions.is_empty() || !table.actions.is_empty() || table.selectable {
+    // Table-wide actions and row selection ship the whole selected row(s) to a
+    // workflow — we can't statically enumerate which fields that needs.
+    if !table.actions.is_empty() || table.selectable {
         return None;
-    }
-    for column in &table.columns {
-        if column.is_workflow_button()
-            || matches!(
-                column.column_type,
-                Some(ReportTableColumnType::InteractionButtons)
-            )
-        {
-            return None;
-        }
     }
 
     let mut cols: HashSet<String> = HashSet::new();
+
+    // Block interactions (e.g. row_click -> set_filter) read named row fields
+    // via `valueFrom` ("datum.<field>"). Collect them; only fall back if a ref
+    // can't be resolved to a single field.
+    for interaction in &block.interactions {
+        for action in &interaction.actions {
+            if let Some(value_from) = &action.value_from {
+                match datum_field_ref(value_from) {
+                    Some(field) => {
+                        cols.insert(field);
+                    }
+                    None => return None,
+                }
+            }
+        }
+    }
+
     for column in &table.columns {
+        // Workflow-button column: a field/value-mode action sends one named
+        // field; a row/selection-mode one ships the whole row.
+        if let Some(action) = &column.workflow_action {
+            match action.context.mode {
+                Mode::Row | Mode::Selection => return None,
+                Mode::Field | Mode::Value => {
+                    if let Some(field) = &action.context.field {
+                        cols.insert(field.clone());
+                    }
+                }
+            }
+            if let Some(when) = &action.disabled_when {
+                collect_condition_refs(when, &mut cols);
+            }
+        }
+
+        // Per-row interaction buttons carry their own actions + `*When` guards.
+        for button in &column.interaction_buttons {
+            for action in &button.actions {
+                if let Some(value_from) = &action.value_from {
+                    match datum_field_ref(value_from) {
+                        Some(field) => {
+                            cols.insert(field);
+                        }
+                        None => return None,
+                    }
+                }
+            }
+            for when in [
+                &button.visible_when,
+                &button.hidden_when,
+                &button.disabled_when,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                collect_condition_refs(when, &mut cols);
+            }
+        }
+
         cols.insert(column.field.clone());
         for name in [
             &column.display_field,
@@ -174,6 +229,56 @@ fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> 
     }
 
     Some(cols.into_iter().collect())
+}
+
+/// Resolve an interaction `valueFrom` path (`datum.<field>` / `row.<field>` /
+/// `<field>`) to the single schema column it reads, or `None` if it can't be
+/// reduced to one — in which case the caller falls back to selecting all
+/// columns rather than risk dropping a needed field.
+fn datum_field_ref(value_from: &str) -> Option<String> {
+    let path = value_from
+        .strip_prefix("datum.")
+        .or_else(|| value_from.strip_prefix("row."))
+        .unwrap_or(value_from);
+    let seg = path.split(['.', '[']).next().unwrap_or("").trim();
+    (!seg.is_empty()).then(|| seg.to_string())
+}
+
+/// Collect the first path segment of every `{valueType: "reference", value:
+/// "<field>"}` operand in a serialized condition expression (a button's
+/// `disabledWhen`/`visibleWhen`/`hiddenWhen`) — the row fields it evaluates.
+fn collect_condition_refs<T: serde::Serialize>(cond: &T, out: &mut HashSet<String>) {
+    if let Ok(value) = serde_json::to_value(cond) {
+        collect_reference_fields(&value, out);
+    }
+}
+
+fn collect_reference_fields(value: &Value, out: &mut HashSet<String>) {
+    match value {
+        Value::Object(map) => {
+            let is_ref = map
+                .get("valueType")
+                .or_else(|| map.get("value_type"))
+                .and_then(|v| v.as_str())
+                == Some("reference");
+            if is_ref
+                && let Some(field) = map.get("value").and_then(|v| v.as_str())
+                && let Some(seg) = field.split(['.', '[']).next()
+                && !seg.is_empty()
+            {
+                out.insert(seg.to_string());
+            }
+            for nested in map.values() {
+                collect_reference_fields(nested, out);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_reference_fields(nested, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Collect the first path segment of each `{{ path | format }}` token in a
@@ -437,4 +542,82 @@ async fn resolve_join(
         parent_keys,
         by_key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn projection_collects_button_and_interaction_refs_excluding_blob() {
+        // The "Spend file inbox" files_table shape: a field-mode workflow button
+        // (with a `disabledWhen` on `status`) plus a row-click `set_filter`
+        // interaction (valueFrom `datum.id`). None of the columns is the file
+        // blob, so the blob column must NOT end up in the projection.
+        let block: ReportBlockDefinition = serde_json::from_value(serde_json::json!({
+            "id": "files_table",
+            "type": "table",
+            "source": { "schema": "CustomerTransactionsFile", "mode": "filter" },
+            "table": {
+                "columns": [
+                    {
+                        "field": "id",
+                        "type": "workflow_button",
+                        "workflowAction": {
+                            "workflowId": "wf",
+                            "context": { "mode": "field", "field": "id", "inputKey": "file_id" },
+                            "disabledWhen": {
+                                "type": "operation",
+                                "op": "IN",
+                                "arguments": [
+                                    { "valueType": "reference", "value": "status" },
+                                    { "valueType": "immediate", "value": ["done"] }
+                                ]
+                            }
+                        }
+                    },
+                    { "field": "file_name" },
+                    { "field": "status" }
+                ]
+            },
+            "interactions": [
+                {
+                    "id": "open_file",
+                    "trigger": { "event": "row_click" },
+                    "actions": [
+                        { "type": "set_filter", "filterId": "file_id", "valueFrom": "datum.id" }
+                    ]
+                }
+            ]
+        }))
+        .expect("block should deserialize");
+
+        let cols: HashSet<String> = table_block_projection(&block)
+            .expect("a field-mode button + row-click interaction must still project")
+            .into_iter()
+            .collect();
+
+        for needed in ["id", "file_name", "status"] {
+            assert!(
+                cols.contains(needed),
+                "projection missing {needed}: {cols:?}"
+            );
+        }
+        // Undisplayed file-content columns are never referenced -> excluded.
+        assert!(!cols.contains("file_content"));
+        assert!(!cols.contains("raw_csv"));
+    }
+
+    #[test]
+    fn projection_bails_for_selectable_table() {
+        let block: ReportBlockDefinition = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "type": "table",
+            "source": { "schema": "S", "mode": "filter" },
+            "table": { "selectable": true, "columns": [{ "field": "a" }] }
+        }))
+        .expect("block should deserialize");
+        assert!(table_block_projection(&block).is_none());
+    }
 }
