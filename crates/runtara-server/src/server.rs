@@ -2009,6 +2009,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/object-model/schemas",
             post(api::handlers::internal_object_model::create_schema),
         )
+        // Body limit raised to 64 MB: WASM workflows write multi-MB Object
+        // Model column values (file blobs, bulk imports) as base64/JSON that
+        // exceed Axum's default 2 MB limit. Without this layer the `Json`
+        // extractor rejects the body with a plain-text 413 before any handler
+        // runs, and the object-model agent — which parses the response without
+        // checking status — surfaces it as a misleading OBJECT_MODEL_PARSE_ERROR
+        // (SYN-491). Mirrors internal_proxy_routes / internal_agent_routes below.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_object_model_state)
         // Apply the `database` entitlement gate. Disabling the feature
         // short-circuits with 403 ENTITLEMENT_REQUIRED before any handler

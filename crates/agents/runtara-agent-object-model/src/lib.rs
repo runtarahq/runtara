@@ -145,11 +145,75 @@ fn with_connection_in_body(mut body: Value, connection_id: &str) -> Value {
 // HTTP helpers (use .call() directly — internal API, no proxy)
 // ============================================================================
 
+/// Truncate a string to at most `max` bytes on a UTF-8 char boundary, appending
+/// an ellipsis when clipped. Used to bound the body sample attached to errors.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut t = s[..end].to_string();
+    t.push('…');
+    t
+}
+
+/// Reject a non-2xx object-model API response **before** attempting to parse it
+/// as JSON. `runtara_http::HttpClient::call()` returns `Ok` for every valid HTTP
+/// response (only transport failures are `Err`), so without this guard a
+/// plain-text 413 "Payload Too Large" body (e.g. from Axum's `Json` extractor
+/// when a column write exceeds the internal API body limit) would reach
+/// `into_json()` and surface as a misleading `OBJECT_MODEL_PARSE_ERROR`
+/// ("expected value at line 1 column 1"). See SYN-491.
+fn check_status(
+    resp: runtara_http::HttpResponse,
+) -> Result<runtara_http::HttpResponse, AgentError> {
+    let status = resp.status;
+    if (200..300).contains(&status) {
+        return Ok(resp);
+    }
+    let body_text = String::from_utf8_lossy(&resp.body).to_string();
+    let body_sample = truncate(&body_text, 512);
+    let err = if status == 413 {
+        AgentError::permanent(
+            "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
+            format!(
+                "Object model request body exceeds the internal API size limit \
+                 (HTTP 413). Prefer object storage (s3/sharepoint) for very large \
+                 column values. Response: {body_sample}"
+            ),
+        )
+    } else if status == 429 || (500..600).contains(&status) {
+        // Transient: retrying the same request may succeed.
+        AgentError::transient(
+            "OBJECT_MODEL_UPSTREAM_ERROR",
+            format!("Object model HTTP {status}: {body_sample}"),
+        )
+    } else if status == 401 || status == 403 {
+        AgentError::permanent(
+            "OBJECT_MODEL_UNAUTHORIZED",
+            format!("Object model HTTP {status}: {body_sample}"),
+        )
+    } else {
+        AgentError::permanent(
+            "OBJECT_MODEL_REQUEST_FAILED",
+            format!("Object model HTTP {status}: {body_sample}"),
+        )
+    };
+    Err(err
+        .with_attr("integration", "OBJECT_MODEL")
+        .with_attr("status_code", status.to_string())
+        .with_attr("body", body_sample))
+}
+
 fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
     let tid = tenant_id();
+    let request_bytes = serde_json::to_vec(&body).map(|v| v.len()).unwrap_or(0);
 
     let resp = runtara_http::HttpClient::new()
         .request("POST", &url)
@@ -165,6 +229,9 @@ fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, Agen
             .with_attr("integration", "OBJECT_MODEL")
         })?;
 
+    let resp =
+        check_status(resp).map_err(|e| e.with_attr("requestBytes", request_bytes.to_string()))?;
+
     resp.into_json::<Value>().map_err(|e| {
         AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
@@ -179,6 +246,7 @@ fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, Agent
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
     let tid = tenant_id();
+    let request_bytes = serde_json::to_vec(&body).map(|v| v.len()).unwrap_or(0);
 
     let resp = runtara_http::HttpClient::new()
         .request("PUT", &url)
@@ -193,6 +261,9 @@ fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, Agent
             )
             .with_attr("integration", "OBJECT_MODEL")
         })?;
+
+    let resp =
+        check_status(resp).map_err(|e| e.with_attr("requestBytes", request_bytes.to_string()))?;
 
     resp.into_json::<Value>().map_err(|e| {
         AgentError::permanent(
@@ -219,6 +290,8 @@ fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
             )
             .with_attr("integration", "OBJECT_MODEL")
         })?;
+
+    let resp = check_status(resp)?;
 
     resp.into_json::<Value>().map_err(|e| {
         AgentError::permanent(
@@ -2086,5 +2159,85 @@ mod tests {
         let score_expression = input.score_expression.unwrap();
         assert_eq!(score_expression["alias"], json!("vec_dist"));
         assert_eq!(input.order_by.unwrap().as_array().unwrap().len(), 1);
+    }
+
+    fn resp(status: u16, body: &str) -> runtara_http::HttpResponse {
+        runtara_http::HttpResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+            headers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn check_status_passes_2xx_through() {
+        // The success path Test A exercises end-to-end: a 2xx response is
+        // returned untouched so the caller can parse it.
+        let r = check_status(resp(201, "{\"success\":true}")).expect("2xx is Ok");
+        assert_eq!(r.status, 201);
+        assert_eq!(r.body, b"{\"success\":true}");
+    }
+
+    #[test]
+    fn check_status_413_is_permanent_payload_too_large() {
+        // Regression for SYN-491: a 413 with the plain-text body Axum's `Json`
+        // extractor returns must surface as a distinct, actionable error —
+        // NOT the cryptic OBJECT_MODEL_PARSE_ERROR that serde produced when the
+        // body was parsed as JSON without a status check.
+        let err = check_status(resp(413, "Failed to buffer the request body"))
+            .err()
+            .expect("413 must be an error");
+        assert_eq!(err.code, "OBJECT_MODEL_PAYLOAD_TOO_LARGE");
+        assert_eq!(err.category, "permanent");
+        assert_eq!(
+            err.attributes.get("status_code"),
+            Some(&Value::String("413".to_string()))
+        );
+        assert_eq!(
+            err.attributes.get("body"),
+            Some(&Value::String(
+                "Failed to buffer the request body".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn check_status_5xx_is_transient() {
+        let err = check_status(resp(503, "upstream down"))
+            .err()
+            .expect("503 must be an error");
+        assert_eq!(err.code, "OBJECT_MODEL_UPSTREAM_ERROR");
+        assert_eq!(err.category, "transient");
+    }
+
+    #[test]
+    fn check_status_auth_and_other_4xx_are_permanent() {
+        let unauthorized = check_status(resp(403, "forbidden"))
+            .err()
+            .expect("403 must be an error");
+        assert_eq!(unauthorized.code, "OBJECT_MODEL_UNAUTHORIZED");
+        assert_eq!(unauthorized.category, "permanent");
+
+        let other = check_status(resp(404, "not found"))
+            .err()
+            .expect("404 must be an error");
+        assert_eq!(other.code, "OBJECT_MODEL_REQUEST_FAILED");
+        assert_eq!(other.category, "permanent");
+    }
+
+    #[test]
+    fn check_status_truncates_long_bodies() {
+        let huge = "x".repeat(2000);
+        let err = check_status(resp(500, &huge))
+            .err()
+            .expect("500 must be an error");
+        let body = match err.attributes.get("body") {
+            Some(Value::String(s)) => s.clone(),
+            other => panic!("expected string body attr, got {other:?}"),
+        };
+        // 512 retained bytes + a 3-byte ellipsis char.
+        assert!(body.len() < huge.len());
+        assert!(body.starts_with(&"x".repeat(512)));
+        assert!(body.ends_with('…'));
     }
 }
