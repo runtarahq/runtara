@@ -114,6 +114,7 @@ pub async fn export_csv(
             sort_order: request.sort_order.clone(),
             score_expression: None,
             order_by: None,
+            projection: None,
         };
 
         let (instances, _total_count) =

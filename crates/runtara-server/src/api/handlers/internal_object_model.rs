@@ -415,6 +415,7 @@ pub async fn query_instances(
             sort_order: request.sort_order,
             score_expression: request.score_expression,
             order_by: request.order_by,
+            projection: None,
         };
 
         match service
@@ -462,6 +463,7 @@ pub async fn query_instances(
             sort_order: request.sort_order,
             score_expression: request.score_expression,
             order_by: request.order_by,
+            projection: None,
         };
 
         match service
@@ -519,6 +521,7 @@ pub async fn check_instance_exists(
         sort_order: None,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     match service
@@ -580,6 +583,7 @@ pub async fn create_if_not_exists(
         sort_order: None,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let exists_result = service

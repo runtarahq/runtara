@@ -592,6 +592,7 @@ impl InstanceService {
             order_by: filter_request
                 .order_by
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
+            projection: filter_request.projection,
         };
 
         let (store_instances, total) = store

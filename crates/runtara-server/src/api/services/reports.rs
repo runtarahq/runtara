@@ -2855,6 +2855,7 @@ impl ReportService {
             sort_order: None,
             score_expression: None,
             order_by: None,
+            projection: None,
         };
 
         let (instances, total_candidates) = self
@@ -3361,6 +3362,7 @@ impl ReportService {
             sort_order: Some(vec!["asc".to_string(), "asc".to_string()]),
             score_expression: None,
             order_by: None,
+            projection: None,
         };
         let (instances, total) = self
             .instance_service
@@ -3433,6 +3435,7 @@ impl ReportService {
             sort_order,
             score_expression: None,
             order_by: None,
+            projection: None,
         };
         let (instances, total) = self
             .instance_service
@@ -3801,6 +3804,7 @@ impl ReportService {
                 sort_order: None,
                 score_expression: None,
                 order_by: None,
+                projection: None,
             };
 
             let (dim_instances, total) = self
@@ -3926,6 +3930,7 @@ impl ReportService {
             },
             score_expression: None,
             order_by: None,
+            projection: None,
         };
 
         let (instances, _total_count) = self

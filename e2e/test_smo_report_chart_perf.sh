@@ -118,12 +118,15 @@ echo "  Server up (PID ${SERVER_PID})"
 
 #-------------------------------------------------------------------------
 print_step "Seeding schemas (Store parent, Sale child)..."
+# Store carries a large base64 'file upload' column the report never displays —
+# the column projection must keep it out of the fetched rows / JSON payload.
 api_post /schemas '{
   "name": "Store",
   "tableName": "report_perf_store",
   "columns": [
     {"name": "code", "type": "string"},
-    {"name": "name", "type": "string"}
+    {"name": "name", "type": "string"},
+    {"name": "logo_base64", "type": "string"}
   ]
 }' | jq -e '.schemaId' >/dev/null || fail "Store schema create failed"
 
@@ -138,9 +141,11 @@ api_post /schemas '{
 }' | jq -e '.schemaId' >/dev/null || fail "Sale schema create failed"
 
 print_step "Seeding instances..."
-om_instance '{"schemaName":"Store","properties":{"code":"ST1","name":"Alpha"}}'
-om_instance '{"schemaName":"Store","properties":{"code":"ST2","name":"Beta"}}'
-om_instance '{"schemaName":"Store","properties":{"code":"ST3","name":"Gamma"}}'
+# ~32 kB base64 blob per store (stand-in for a file upload), never displayed.
+BLOB=$(head -c 24000 /dev/zero | base64 | tr -d '\n')
+om_instance "$(jq -nc --arg b "$BLOB" '{schemaName:"Store",properties:{code:"ST1",name:"Alpha",logo_base64:$b}}')"
+om_instance "$(jq -nc --arg b "$BLOB" '{schemaName:"Store",properties:{code:"ST2",name:"Beta",logo_base64:$b}}')"
+om_instance "$(jq -nc --arg b "$BLOB" '{schemaName:"Store",properties:{code:"ST3",name:"Gamma",logo_base64:$b}}')"
 # ST1: Jan 100, Feb 200 ; ST2: Jan 50 ; ST3: (no sales)
 om_instance '{"schemaName":"Sale","properties":{"store_code":"ST1","month":"2026-01","amount":100}}'
 om_instance '{"schemaName":"Sale","properties":{"store_code":"ST1","month":"2026-02","amount":200}}'
@@ -183,13 +188,21 @@ REPORT_DEF='{
         "title": "Stores Copy",
         "source": { "schema": "Store", "mode": "filter", "orderBy": [{"field":"code","direction":"asc"}] },
         "table": { "columns": [ {"field":"code","label":"Code"}, {"field":"name","label":"Name"} ] }
+      },
+      {
+        "id": "stores_sel",
+        "type": "table",
+        "title": "Selectable (must NOT project)",
+        "source": { "schema": "Store", "mode": "filter", "orderBy": [{"field":"code","direction":"asc"}] },
+        "table": { "selectable": true, "columns": [ {"field":"code","label":"Code"}, {"field":"name","label":"Name"} ] }
       }
     ],
     "layout": {
       "id": "root", "columns": 1,
       "items": [
         {"id":"r0","child":{"id":"n0","type":"block","blockId":"stores"}},
-        {"id":"r1","child":{"id":"n1","type":"block","blockId":"stores2"}}
+        {"id":"r1","child":{"id":"n1","type":"block","blockId":"stores2"}},
+        {"id":"r2","child":{"id":"n2","type":"block","blockId":"stores_sel"}}
       ]
     }
   }
@@ -218,6 +231,24 @@ assert() { # desc, jq-filter
 # --- Block presence & parallel rendering (both blocks rendered) ---
 assert "block 'stores' rendered with 3 rows" '.blocks.stores.data.rows | length == 3'
 assert "block 'stores2' rendered with 3 rows (parallel block)" '.blocks.stores2.data.rows | length == 3'
+
+# --- Column projection: the undisplayed base64 blob must NOT be fetched/returned ---
+assert "stores rows still carry displayed columns code+name" \
+  '[.blocks.stores.data.rows[] | (has("code") and has("name"))] | all'
+assert "blob column 'logo_base64' projected OUT of stores rows" \
+  '[.blocks.stores.data.rows[] | has("logo_base64")] | any | not'
+assert "blob column 'logo_base64' projected OUT of stores2 rows" \
+  '[.blocks.stores2.data.rows[] | has("logo_base64")] | any | not'
+# The projected blocks (stores, stores2) carry NO blob bytes; the only blob in
+# the payload comes from the selectable fallback block asserted below.
+PROJECTED_BLOB=$(jq -r '[.blocks.stores, .blocks.stores2] | tostring | contains("AAAAAAAA")' <<<"${RENDER}")
+[ "${PROJECTED_BLOB}" = "false" ] || fail "base64 blob leaked into a projected block's payload"
+echo "  ✓ projected blocks carry no base64 blob bytes"
+# Fallback safety: a selectable block ships whole rows to actions, so projection
+# MUST fall back to all columns — the blob is present there (correctness > savings).
+assert "selectable block falls back: 3 rows" '.blocks.stores_sel.data.rows | length == 3'
+assert "selectable block keeps ALL columns incl. blob (no projection)" \
+  '[.blocks.stores_sel.data.rows[] | has("logo_base64")] | all'
 
 # --- Chart-column batching correctness (per-store series) ---
 # ST1: Jan=100, Feb=200 (ordered by month asc)

@@ -2077,8 +2077,24 @@ impl ObjectStore {
             select_columns.push("updated_at".to_string());
         }
 
+        // Optional projection: select only the requested non-generated columns
+        // (the auto id/created_at/updated_at columns above are always kept).
+        // We intersect against `schema.columns` and quote each name, so an
+        // unknown projected name is simply ignored — never interpolated — and
+        // this stays injection-safe. `None` keeps the original "all columns"
+        // behaviour. This is what lets a report page skip pulling large unused
+        // columns (e.g. base64 uploads) it never displays.
+        let projected: Option<std::collections::HashSet<&str>> = filter
+            .projection
+            .as_ref()
+            .map(|cols| cols.iter().map(String::as_str).collect());
         for col in &schema.columns {
             if col.column_type.is_generated() {
+                continue;
+            }
+            if let Some(set) = &projected
+                && !set.contains(col.name.as_str())
+            {
                 continue;
             }
             select_columns.push(quote_identifier(&col.name));

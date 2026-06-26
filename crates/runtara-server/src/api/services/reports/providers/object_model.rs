@@ -113,6 +113,92 @@ impl ReportSourceProvider for ObjectModelProvider {
     }
 }
 
+/// Schema columns a Filter-mode table block actually needs in each fetched
+/// row, or `None` to fall back to selecting every column. Projecting to this
+/// set stops large unused columns (e.g. 31 kB HTML / base64 file uploads) from
+/// being pulled out of the DB and serialized on every page — the dominant cost
+/// of a report over a blob-heavy schema once round trips are fixed.
+///
+/// Returns `None` (= all columns) whenever the block can read row fields we
+/// can't statically enumerate: row/selection-mode workflow actions ship the
+/// whole row, and interaction drilldowns / interaction-button columns reference
+/// arbitrary `valueFrom`/`*_when` fields. Correctness beats savings there.
+///
+/// Only the plain (non-join, non-aggregate) filter path routes here, so WHERE /
+/// ORDER BY columns are pushed into SQL and never read back from the row — they
+/// need not be projected. The display-side reads do: each column's `field`, its
+/// `displayField`/`secondaryField`/`linkField`/`tooltipField`, the fields its
+/// `displayTemplate` interpolates, and any value-lookup/chart
+/// `source.join[].parentField` used to hydrate the cell. (`id`/`createdAt`/
+/// `updatedAt` are always selected by the store regardless of projection.)
+fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> {
+    let table = block.table.as_ref()?;
+
+    // Bail to "all columns" for shapes that read un-enumerable row fields.
+    if !block.interactions.is_empty() || !table.actions.is_empty() || table.selectable {
+        return None;
+    }
+    for column in &table.columns {
+        if column.is_workflow_button()
+            || matches!(
+                column.column_type,
+                Some(ReportTableColumnType::InteractionButtons)
+            )
+        {
+            return None;
+        }
+    }
+
+    let mut cols: HashSet<String> = HashSet::new();
+    for column in &table.columns {
+        cols.insert(column.field.clone());
+        for name in [
+            &column.display_field,
+            &column.secondary_field,
+            &column.link_field,
+            &column.tooltip_field,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cols.insert(name.clone());
+        }
+        if let Some(template) = &column.display_template {
+            collect_display_template_fields(template, &mut cols);
+        }
+        if let Some(source) = &column.source {
+            for join in &source.join {
+                cols.insert(join.parent_field.clone());
+            }
+        }
+    }
+
+    Some(cols.into_iter().collect())
+}
+
+/// Collect the first path segment of each `{{ path | format }}` token in a
+/// display template — the schema column the client resolves it against. Errs
+/// toward over-collecting (harmless: the store intersects against real columns)
+/// so a referenced column is never dropped.
+fn collect_display_template_fields(template: &str, out: &mut HashSet<String>) {
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        rest = &rest[open + 2..];
+        let Some(close) = rest.find("}}") else { break };
+        let inner = &rest[..close];
+        rest = &rest[close + 2..];
+        let path = inner.split('|').next().unwrap_or("").trim();
+        let path = path.strip_prefix("row.").unwrap_or(path);
+        let seg: String = path
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !seg.is_empty() {
+            out.insert(seg);
+        }
+    }
+}
+
 async fn fetch_rows_inner(
     provider: &ObjectModelProvider,
     tenant_id: &str,
@@ -142,6 +228,7 @@ async fn fetch_rows_inner(
         },
         score_expression: None,
         order_by: None,
+        projection: table_block_projection(block),
     };
 
     let (instances, total_count) = provider
@@ -299,6 +386,7 @@ async fn resolve_join(
         sort_order: None,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (dim_instances, total) = instance_service

@@ -311,6 +311,16 @@ pub struct FilterRequest {
     /// Optional ORDER BY entries. When set, supersedes `sortBy` / `sortOrder`.
     #[serde(rename = "orderBy", skip_serializing_if = "Option::is_none", default)]
     pub order_by: Option<Vec<OrderByEntry>>,
+    /// Optional column projection. When set, only these schema columns are
+    /// selected (system `id`/`createdAt`/`updatedAt` are always included;
+    /// generated columns are always excluded). Omit to select every column.
+    /// Lets callers skip large unused columns (e.g. base64 file uploads).
+    #[serde(
+        rename = "projection",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub projection: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1147,6 +1157,7 @@ impl From<FilterRequest> for StoreFilterRequest {
             order_by: req
                 .order_by
                 .map(|entries| entries.into_iter().map(Into::into).collect()),
+            projection: req.projection,
         }
     }
 }

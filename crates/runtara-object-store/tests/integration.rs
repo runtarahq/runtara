@@ -892,6 +892,7 @@ async fn test_filter_instances_with_condition() {
         offset: 0,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (instances, count) = store
@@ -1251,6 +1252,7 @@ async fn test_sorting() {
         offset: 0,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (instances, _) = store
@@ -1271,6 +1273,7 @@ async fn test_sorting() {
         offset: 0,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (instances, _) = store
@@ -1325,6 +1328,7 @@ async fn test_pagination() {
         offset: 0,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (instances, total) = store
@@ -1344,6 +1348,7 @@ async fn test_pagination() {
         offset: 3,
         score_expression: None,
         order_by: None,
+        projection: None,
     };
 
     let (instances, _) = store
@@ -2290,6 +2295,7 @@ async fn test_create_instances_extended_skip_conflict() {
                 sort_order: None,
                 score_expression: None,
                 order_by: None,
+                projection: None,
             },
         )
         .await
@@ -2366,6 +2372,7 @@ async fn test_create_instances_extended_upsert_conflict() {
                 sort_order: None,
                 score_expression: None,
                 order_by: None,
+                projection: None,
             },
         )
         .await
@@ -2521,6 +2528,7 @@ async fn test_create_instances_extended_partial_columns_typed_null() {
                 sort_order: None,
                 score_expression: None,
                 order_by: None,
+                projection: None,
             },
         )
         .await

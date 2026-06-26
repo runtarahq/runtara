@@ -366,6 +366,18 @@ pub struct FilterRequest {
     /// `sort_order`.
     #[serde(rename = "orderBy", skip_serializing_if = "Option::is_none", default)]
     pub order_by: Option<Vec<OrderByEntry>>,
+    /// Optional column projection. When `Some`, only these schema columns are
+    /// selected; the auto `id`/`created_at`/`updated_at` columns are always
+    /// included and generated columns are always excluded. `None` selects
+    /// every non-generated column. Lets callers avoid pulling large unused
+    /// columns (e.g. base64 file uploads or big text/HTML blobs) they won't
+    /// display — the dominant cost of a report page over a blob-heavy schema.
+    #[serde(
+        rename = "projection",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub projection: Option<Vec<String>>,
 }
 
 impl Default for FilterRequest {
@@ -378,6 +390,7 @@ impl Default for FilterRequest {
             sort_order: None,
             score_expression: None,
             order_by: None,
+            projection: None,
         }
     }
 }
@@ -519,6 +532,7 @@ impl SimpleFilter {
             sort_order: None,
             score_expression: None,
             order_by: None,
+            projection: None,
         }
     }
 }
