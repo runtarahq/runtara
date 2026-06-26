@@ -1469,6 +1469,22 @@ pub async fn execute_workflow_handler(
     }
 }
 
+/// Query for the instance-detail endpoints. `full=true` returns the complete
+/// input/output payload (including inlined base64 file uploads); omitted or any
+/// other value elides large strings for a lean default fetch — the full value
+/// stays retrievable via `?full=true` (used by copy-to-clipboard / MCP trace).
+#[derive(Debug, Default, Deserialize)]
+pub struct InstanceDetailQuery {
+    #[serde(default)]
+    pub full: Option<String>,
+}
+
+impl InstanceDetailQuery {
+    fn want_full(&self) -> bool {
+        matches!(self.full.as_deref(), Some("true") | Some("1") | Some("yes"))
+    }
+}
+
 /// Get execution results for a workflow instance
 #[utoipa::path(
     get,
@@ -1488,9 +1504,13 @@ pub async fn get_execution_metrics_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
+    Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
     match engine.get_execution(&tenant_id, &instance_id).await {
-        Ok(instance) => {
+        Ok(mut instance) => {
+            if !query.want_full() {
+                crate::workers::runtara_dto::elide_instance_io(&mut instance);
+            }
             let response = ApiResponse::success(instance);
             (
                 StatusCode::OK,
@@ -1522,12 +1542,16 @@ pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path((workflow_id, instance_id)): Path<(String, String)>,
+    Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
     match engine
         .get_execution_with_metadata(&workflow_id, &instance_id, &tenant_id)
         .await
     {
-        Ok(execution_data) => {
+        Ok(mut execution_data) => {
+            if !query.want_full() {
+                crate::workers::runtara_dto::elide_instance_io(&mut execution_data.instance);
+            }
             // Build extended response with metadata
             let response_data = json!({
                 "instance": execution_data.instance,

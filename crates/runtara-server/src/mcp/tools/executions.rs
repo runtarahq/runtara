@@ -1082,10 +1082,15 @@ pub async fn inspect_step(
     )
     .await?;
 
-    // Fetch execution for input data
+    // Fetch execution for input data. `?full=true`: step input mappings may
+    // reference `data.X` fields the default detail fetch elides; resolve against
+    // the complete value (the MCP re-truncates its own response).
     let execution = api_get(
         server,
-        &format!("/api/runtime/workflows/instances/{}", params.instance_id),
+        &format!(
+            "/api/runtime/workflows/instances/{}?full=true",
+            params.instance_id
+        ),
     )
     .await?;
 
@@ -1179,9 +1184,16 @@ pub async fn trace_reference(
         }
         "data" => {
             let field = parts[1..].join(".");
+            // `?full=true`: the reference may point *into* a large input field
+            // that the default detail fetch elides; resolve against the complete
+            // value. The MCP response is re-truncated downstream, so the wire
+            // stays bounded.
             let execution = api_get(
                 server,
-                &format!("/api/runtime/workflows/instances/{}", params.instance_id),
+                &format!(
+                    "/api/runtime/workflows/instances/{}?full=true",
+                    params.instance_id
+                ),
             )
             .await?;
 

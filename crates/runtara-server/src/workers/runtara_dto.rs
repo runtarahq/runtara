@@ -284,6 +284,55 @@ pub fn extract_input_fields(input: Option<&Value>) -> (Value, Value) {
     }
 }
 
+/// Per-string ceiling for instance-detail input/output payloads. Strings above
+/// this (overwhelmingly base64 file uploads inlined into the input envelope)
+/// are replaced with a compact stub on the default detail fetch; the full value
+/// is still retrievable via `?full=true`. 16 KB sits just above the 8 KB
+/// step-debug cap so instance detail is never *more* aggressive than step IO.
+pub const ELIDE_THRESHOLD_BYTES: usize = 16 * 1024;
+const ELIDE_PREVIEW_CHARS: usize = 256;
+
+/// Recursively replace any string longer than [`ELIDE_THRESHOLD_BYTES`] with a
+/// `{_truncated,_elided,_original_size,_preview}` stub, walking objects and
+/// arrays. The stub keys match the frontend's existing `truncated-payload`
+/// shape so the truncation badge renders without client changes; `_elided`
+/// marks that the full value is fetchable via `?full=true`. Catches base64
+/// `content` fields, giant prose outputs, and stringified blobs uniformly —
+/// cheaper and more robust than file-shape detection.
+pub fn elide_large_strings(value: Value) -> Value {
+    match value {
+        Value::String(s) if s.len() > ELIDE_THRESHOLD_BYTES => {
+            let mut cut = ELIDE_PREVIEW_CHARS.min(s.len());
+            while cut > 0 && !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            serde_json::json!({
+                "_truncated": true,
+                "_elided": true,
+                "_original_size": s.len(),
+                "_preview": &s[..cut],
+            })
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(elide_large_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, elide_large_strings(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Elide large strings in a detail DTO's input/output payloads in place. Applied
+/// on the default detail fetch; skipped when the caller asks for `?full=true`.
+pub fn elide_instance_io(dto: &mut WorkflowInstanceDto) {
+    dto.inputs.data = elide_large_strings(std::mem::take(&mut dto.inputs.data));
+    dto.inputs.variables = elide_large_strings(std::mem::take(&mut dto.inputs.variables));
+    if let Some(outputs) = dto.outputs.take() {
+        dto.outputs = Some(elide_large_strings(outputs));
+    }
+}
+
 /// Parse `image_id` (format: `"workflow_id:version"`) into
 /// `(workflow_id, version)`. Returns `(workflow_id, 0)` if no colon is found.
 pub fn parse_image_id(image_id: &str) -> (String, i32) {
@@ -300,6 +349,35 @@ pub fn parse_image_id(image_id: &str) -> (String, i32) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn elide_large_strings_collapses_big_strings_and_keeps_small_ones() {
+        let big = "A".repeat(ELIDE_THRESHOLD_BYTES + 1);
+        let input = json!({
+            "data": {
+                "upload": { "content": big, "filename": "big.bin" },
+                "small": "hello",
+                "n": 42,
+            },
+            "list": ["short", "x".repeat(ELIDE_THRESHOLD_BYTES + 10)],
+        });
+
+        let out = elide_large_strings(input);
+
+        // Large string -> stub with the frontend-recognized keys.
+        let stub = &out["data"]["upload"]["content"];
+        assert_eq!(stub["_truncated"], json!(true));
+        assert_eq!(stub["_elided"], json!(true));
+        assert_eq!(stub["_original_size"], json!(ELIDE_THRESHOLD_BYTES + 1));
+        assert!(stub["_preview"].as_str().unwrap().len() <= 256);
+
+        // Small values pass through verbatim, including inside arrays/objects.
+        assert_eq!(out["data"]["upload"]["filename"], json!("big.bin"));
+        assert_eq!(out["data"]["small"], json!("hello"));
+        assert_eq!(out["data"]["n"], json!(42));
+        assert_eq!(out["list"][0], json!("short"));
+        assert_eq!(out["list"][1]["_elided"], json!(true));
+    }
 
     // =========================================================================
     // parse_image_id tests
