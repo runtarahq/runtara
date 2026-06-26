@@ -30,6 +30,13 @@ pub enum ConnectionLifecycleEvent {
     OAuthCompleted { connection_id: String },
     /// The OAuth flow failed (funnel: drop-off). `reason` is a short, non-sensitive description.
     OAuthFailed { reason: String },
+    /// A connection's OAuth access token was refreshed via the refresh-token grant (long-term
+    /// connection health). Fires only on an actual refresh (cache miss), not on every use.
+    TokenRefreshed {
+        connection_id: String,
+        integration: String,
+        success: bool,
+    },
 }
 
 /// Sink the host implements to receive connection lifecycle events.

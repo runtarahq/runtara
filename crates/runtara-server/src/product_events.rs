@@ -79,6 +79,7 @@ pub enum EventType {
     ConnectionOauthStarted,
     ConnectionOauthCompleted,
     ConnectionOauthFailed,
+    ConnectionTokenRefreshed,
 }
 
 impl EventType {
@@ -102,6 +103,7 @@ impl EventType {
             EventType::ConnectionOauthStarted => "connection.oauth_started",
             EventType::ConnectionOauthCompleted => "connection.oauth_completed",
             EventType::ConnectionOauthFailed => "connection.oauth_failed",
+            EventType::ConnectionTokenRefreshed => "connection.token_refreshed",
         }
     }
 }
@@ -452,6 +454,15 @@ impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge 
                     .no_user_actor("connections", ActorType::System)
                     .properties(serde_json::json!({ "reason": reason }))
             }
+            Lifecycle::TokenRefreshed {
+                connection_id,
+                integration,
+                success,
+            } => ProductEvent::new(EventType::ConnectionTokenRefreshed)
+                .no_user_actor("connections", ActorType::System)
+                .source(EventSource::Worker)
+                .resource(connection_id, "connection")
+                .properties(serde_json::json!({ "integration": integration, "success": success })),
         };
 
         self.sink.emit(product_event);

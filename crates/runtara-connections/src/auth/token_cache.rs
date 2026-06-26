@@ -44,6 +44,9 @@ static TOKEN_CACHE: OnceLock<DashMap<String, CachedAccessToken>> = OnceLock::new
 pub(crate) async fn resolve_deferred_auth(
     client: &Client,
     auth: DeferredAuth,
+    events: &crate::events::ConnectionEvents,
+    connection_id: &str,
+    integration: &str,
 ) -> Result<(String, String), String> {
     match auth {
         DeferredAuth::OAuth2ClientCredentials {
@@ -94,14 +97,25 @@ pub(crate) async fn resolve_deferred_auth(
             }
 
             let token = resolve_cached_token(&cache_key, || async {
-                refresh_oauth_access_token(
+                // The closure runs only on a cache miss — i.e. an actual refresh. Emit
+                // `token_refreshed` with the outcome (connection-health signal).
+                let result = refresh_oauth_access_token(
                     client,
                     &token_url,
                     &client_id,
                     &client_secret,
                     &refresh_token,
                 )
-                .await
+                .await;
+                crate::events::emit(
+                    events,
+                    crate::events::ConnectionLifecycleEvent::TokenRefreshed {
+                        connection_id: connection_id.to_string(),
+                        integration: integration.to_string(),
+                        success: result.is_ok(),
+                    },
+                );
+                result
             })
             .await?;
             Ok((header_name, format!("Bearer {}", token)))
@@ -313,7 +327,9 @@ mod tests {
             fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
         };
 
-        let resolved = resolve_deferred_auth(&client, auth).await.unwrap();
+        let resolved = resolve_deferred_auth(&client, auth, &None, "conn-1", "hubspot")
+            .await
+            .unwrap();
         assert_eq!(resolved.0, "Authorization");
         assert_eq!(resolved.1, "Bearer existing-token");
     }
@@ -332,6 +348,91 @@ mod tests {
         assert_eq!(
             encoded,
             "grant_type=client_credentials&scope=https%3A%2F%2Fapi.businesscentral.dynamics.com%2F.default&client%20secret=value%2Bwith%20space"
+        );
+    }
+
+    /// Records every connection lifecycle event it receives, for assertions.
+    #[derive(Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<crate::events::ConnectionLifecycleEvent>>,
+    }
+
+    impl crate::events::ConnectionEventSink for RecordingSink {
+        fn emit(&self, event: crate::events::ConnectionLifecycleEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_token_grant_emits_token_refreshed_on_actual_refresh() {
+        clear_token_cache();
+        let recorder = Arc::new(RecordingSink::default());
+        let events: crate::events::ConnectionEvents = Some(recorder.clone());
+        let client = Client::new();
+
+        // No fresh fallback → the fallback fast-path is skipped and the cache misses, so an
+        // actual refresh is attempted. `token_url` is unreachable, so the refresh *fails* — but
+        // the event must still fire (it's emitted regardless of outcome), with success=false.
+        let auth = DeferredAuth::OAuth2RefreshToken {
+            cache_key: "rec-refresh-cache".to_string(),
+            token_url: "http://127.0.0.1:1/token".to_string(),
+            header_name: "Authorization".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            refresh_token: "refresh".to_string(),
+            fallback_access_token: None,
+            fallback_expires_at: None,
+        };
+
+        let result = resolve_deferred_auth(&client, auth, &events, "conn-42", "hubspot").await;
+        assert!(
+            result.is_err(),
+            "refresh against an unreachable endpoint should fail"
+        );
+
+        let recorded = recorder.events.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one token_refreshed event");
+        match &recorded[0] {
+            crate::events::ConnectionLifecycleEvent::TokenRefreshed {
+                connection_id,
+                integration,
+                success,
+            } => {
+                assert_eq!(connection_id, "conn-42");
+                assert_eq!(integration, "hubspot");
+                assert!(!success, "a failed refresh must report success=false");
+            }
+            other => panic!("expected TokenRefreshed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_fallback_does_not_emit_token_refreshed() {
+        // No refresh happens when the fallback token is still fresh, so we must NOT emit —
+        // `token_refreshed` fires only on an actual refresh, not on every connection use.
+        clear_token_cache();
+        let recorder = Arc::new(RecordingSink::default());
+        let events: crate::events::ConnectionEvents = Some(recorder.clone());
+        let client = Client::new();
+
+        let auth = DeferredAuth::OAuth2RefreshToken {
+            cache_key: "rec-fallback-cache".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            header_name: "Authorization".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            refresh_token: "refresh".to_string(),
+            fallback_access_token: Some("existing".to_string()),
+            fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
+        };
+
+        let resolved = resolve_deferred_auth(&client, auth, &events, "conn-1", "hubspot")
+            .await
+            .unwrap();
+        assert_eq!(resolved.1, "Bearer existing");
+        assert!(
+            recorder.events.lock().unwrap().is_empty(),
+            "a fresh fallback must not emit a token_refreshed event"
         );
     }
 }

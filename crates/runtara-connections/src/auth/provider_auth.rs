@@ -43,11 +43,19 @@ pub async fn resolve_connection_auth(
     integration_id: &str,
     params: &Value,
     headers: &mut HashMap<String, String>,
+    events: &crate::events::ConnectionEvents,
 ) -> Result<ResolvedConnectionAuth, String> {
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
 
     if let Some(deferred_auth) = descriptor.deferred_auth {
-        let resolved = token_cache::resolve_deferred_auth(client, deferred_auth).await?;
+        let resolved = token_cache::resolve_deferred_auth(
+            client,
+            deferred_auth,
+            events,
+            connection_id,
+            integration_id,
+        )
+        .await?;
         headers.insert(resolved.0, resolved.1);
     }
 
