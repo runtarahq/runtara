@@ -136,12 +136,21 @@ export interface WorkflowInstanceWithMetadata extends WorkflowInstanceDto {
 export async function getWorkflowInstance(
   token: string,
   workflowId: string,
-  instanceId: string
+  instanceId: string,
+  options?: { full?: boolean }
 ): Promise<WorkflowInstanceWithMetadata> {
+  // `full=true` bypasses the server's large-string elision so callers that need
+  // the byte-complete input/output (copy-to-clipboard, download) get the real
+  // value. Default fetches stay elided/lean. The query field is serialized at
+  // runtime even though the generated `RequestParams` type omits it.
+  const params = {
+    ...createAuthHeaders(token),
+    ...(options?.full ? { query: { full: 'true' } } : {}),
+  };
   const result = await RuntimeREST.api.getInstanceHandler(
     workflowId,
     instanceId,
-    createAuthHeaders(token)
+    params
   );
 
   // The axios response is { data: { data: { instance, metadata }, message, success } }

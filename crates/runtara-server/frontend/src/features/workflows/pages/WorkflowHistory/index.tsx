@@ -64,6 +64,10 @@ import {
 } from '@/shared/utils/status-display';
 import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
+import {
+  hasElidedPayload,
+  mapElidedForDisplay,
+} from '@/shared/utils/truncated-payload';
 
 const LIST_PAGE_SIZE = 20;
 
@@ -131,6 +135,49 @@ export function WorkflowHistory() {
     payload: Record<string, any>
   ) => {
     signalMutation.mutate({ signalId, payload });
+  };
+
+  // Briefly swap the copy button's icon to a checkmark for feedback.
+  const flashCopied = (btnId: string) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.innerHTML =
+      '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
+    setTimeout(() => {
+      btn.innerHTML =
+        '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
+    }, 2000);
+  };
+
+  // Copy the input/output payload. When the value was elided by the server,
+  // re-fetch the instance with `?full=true` so the clipboard gets the real,
+  // byte-complete value (e.g. a base64 file) rather than the preview stub.
+  const copyPayload = async (
+    which: 'inputs' | 'outputs',
+    current: unknown,
+    btnId: string
+  ) => {
+    let value = current;
+    if (hasElidedPayload(current) && workflowId && instanceId) {
+      try {
+        const full = await getWorkflowInstance(token, workflowId, instanceId, {
+          full: true,
+        });
+        value = which === 'inputs' ? full.inputs : full.outputs;
+      } catch {
+        toast.error(
+          'Could not load the full value; copied the preview instead'
+        );
+      }
+    }
+    const text =
+      typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      flashCopied(btnId);
+    } catch {
+      toast.error('Copy failed');
+    }
   };
 
   // Filters for list view with pagination (oldest first)
@@ -637,20 +684,9 @@ export function WorkflowHistory() {
                     variant="ghost"
                     size="sm"
                     className="h-8 gap-2"
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        JSON.stringify(data.inputs, null, 2)
-                      );
-                      const btn = document.getElementById('copy-inputs');
-                      if (btn) {
-                        btn.innerHTML =
-                          '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
-                        setTimeout(() => {
-                          btn.innerHTML =
-                            '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
-                        }, 2000);
-                      }
-                    }}
+                    onClick={() =>
+                      void copyPayload('inputs', data.inputs, 'copy-inputs')
+                    }
                   >
                     <span id="copy-inputs">
                       <Copy className="h-4 w-4" />
@@ -665,9 +701,23 @@ export function WorkflowHistory() {
                 <div className="relative">
                   <pre className="text-xs font-mono p-6 overflow-auto max-h-[500px]">
                     <code className="text-foreground">
-                      {JSON.stringify(data.inputs, null, 2)}
+                      {JSON.stringify(
+                        mapElidedForDisplay(data.inputs),
+                        null,
+                        2
+                      )}
                     </code>
                   </pre>
+                  {hasElidedPayload(data.inputs) && (
+                    <div className="px-6 pb-3">
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] text-muted-foreground"
+                      >
+                        Large values elided — use Copy for the full value
+                      </Badge>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-12 text-center">
@@ -699,35 +749,9 @@ export function WorkflowHistory() {
                     variant="ghost"
                     size="sm"
                     className="h-8 gap-2"
-                    onClick={() => {
-                      const outputData = (() => {
-                        try {
-                          // If outputs is already an object, stringify it directly
-                          if (typeof data.outputs === 'object') {
-                            return JSON.stringify(data.outputs, null, 2);
-                          }
-                          // If outputs is a string, try to parse and re-stringify
-                          return JSON.stringify(
-                            JSON.parse(data.outputs),
-                            null,
-                            2
-                          );
-                        } catch {
-                          // If all else fails, convert to string
-                          return String(data.outputs);
-                        }
-                      })();
-                      navigator.clipboard.writeText(outputData);
-                      const btn = document.getElementById('copy-outputs');
-                      if (btn) {
-                        btn.innerHTML =
-                          '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
-                        setTimeout(() => {
-                          btn.innerHTML =
-                            '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
-                        }, 2000);
-                      }
-                    }}
+                    onClick={() =>
+                      void copyPayload('outputs', data.outputs, 'copy-outputs')
+                    }
                   >
                     <span id="copy-outputs">
                       <Copy className="h-4 w-4" />
@@ -744,9 +768,14 @@ export function WorkflowHistory() {
                     <code className="text-foreground">
                       {(() => {
                         try {
-                          // If outputs is already an object, stringify it directly
+                          // If outputs is already an object, stringify it
+                          // (eliding any large values for display).
                           if (typeof data.outputs === 'object') {
-                            return JSON.stringify(data.outputs, null, 2);
+                            return JSON.stringify(
+                              mapElidedForDisplay(data.outputs),
+                              null,
+                              2
+                            );
                           }
                           // If outputs is a string, try to parse and re-stringify
                           return JSON.stringify(
@@ -761,6 +790,16 @@ export function WorkflowHistory() {
                       })()}
                     </code>
                   </pre>
+                  {hasElidedPayload(data.outputs) && (
+                    <div className="px-6 pb-3">
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] text-muted-foreground"
+                      >
+                        Large values elided — use Copy for the full value
+                      </Badge>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-12 text-center">

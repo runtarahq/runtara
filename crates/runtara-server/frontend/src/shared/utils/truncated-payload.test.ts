@@ -3,7 +3,37 @@ import {
   isTruncatedPayload,
   formatPayloadForDisplay,
   resolvePayloadForCopy,
+  hasElidedPayload,
+  mapElidedForDisplay,
 } from './truncated-payload';
+
+describe('elided payloads', () => {
+  const elided = {
+    _truncated: true,
+    _elided: true,
+    _original_size: 32 * 1024,
+    _preview: 'AAAA',
+  };
+
+  it('detects an elided stub nested anywhere in the tree', () => {
+    expect(hasElidedPayload({ data: { upload: { content: elided } } })).toBe(
+      true
+    );
+    expect(hasElidedPayload([1, { x: elided }])).toBe(true);
+    expect(hasElidedPayload({ data: { small: 'hi', n: 1 } })).toBe(false);
+  });
+
+  it('replaces elided stubs with a readable placeholder, keeping other values', () => {
+    const out = mapElidedForDisplay({
+      data: { upload: { content: elided, name: 'big.bin' }, n: 42 },
+    }) as { data: { upload: { content: unknown; name: string }; n: number } };
+
+    expect(typeof out.data.upload.content).toBe('string');
+    expect(out.data.upload.content as string).toContain('elided');
+    expect(out.data.upload.name).toBe('big.bin');
+    expect(out.data.n).toBe(42);
+  });
+});
 
 describe('isTruncatedPayload', () => {
   it('returns true for valid truncated payload', () => {
