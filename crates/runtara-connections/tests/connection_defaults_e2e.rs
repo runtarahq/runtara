@@ -4,7 +4,9 @@ use std::sync::Arc;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::service::connections::ConnectionService;
-use runtara_connections::{ConnectionStatus, CreateConnectionRequest, IntegrationCompatibility};
+use runtara_connections::{
+    ConnectionStatus, CreateConnectionRequest, IntegrationCompatibility, RateLimitConfigDto,
+};
 use serde_json::json;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
@@ -187,6 +189,100 @@ async fn default_connection_moves_between_compatible_object_model_connections() 
             .and_then(|value| value.get("database_url"))
             .and_then(|value| value.as_str()),
         Some("postgres://example/Object Model Postgres B")
+    );
+}
+
+#[tokio::test]
+async fn create_applies_default_rate_limit_for_known_integration() {
+    let Some(fixture) = PgFixture::start().await else {
+        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let tenant_id = "tenant_rate_limit_default";
+    let (_repo, service) = service(fixture.pool.clone());
+
+    // No rate_limit_config supplied → the create path should snapshot the
+    // per-integration default (SYN-493).
+    let id = service
+        .create_connection(
+            create_request("Stripe Live", "stripe_api_key", None),
+            tenant_id,
+        )
+        .await
+        .expect("create stripe connection");
+
+    let conn = service
+        .get_connection(&id, tenant_id)
+        .await
+        .expect("load stripe connection");
+    let cfg = conn
+        .rate_limit_config
+        .expect("a known integration must receive its default rate limit at create time");
+    assert_eq!(cfg.requests_per_second, 20);
+    assert_eq!(cfg.burst_size, 40);
+    assert!(cfg.retry_on_limit);
+}
+
+#[tokio::test]
+async fn create_preserves_explicit_rate_limit_over_default() {
+    let Some(fixture) = PgFixture::start().await else {
+        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let tenant_id = "tenant_rate_limit_explicit";
+    let (_repo, service) = service(fixture.pool.clone());
+
+    let mut request = create_request("Stripe Custom", "stripe_api_key", None);
+    request.rate_limit_config = Some(RateLimitConfigDto {
+        requests_per_second: 3,
+        burst_size: 3,
+        retry_on_limit: false,
+        max_retries: 0,
+        max_wait_ms: 1000,
+    });
+    let id = service
+        .create_connection(request, tenant_id)
+        .await
+        .expect("create stripe connection with explicit limit");
+
+    let conn = service
+        .get_connection(&id, tenant_id)
+        .await
+        .expect("load stripe connection");
+    let cfg = conn
+        .rate_limit_config
+        .expect("explicit rate limit must be preserved");
+    // The default (20/40) must NOT clobber the user-supplied config.
+    assert_eq!(cfg.requests_per_second, 3);
+    assert_eq!(cfg.burst_size, 3);
+    assert!(!cfg.retry_on_limit);
+}
+
+#[tokio::test]
+async fn create_leaves_opt_out_integration_without_rate_limit() {
+    let Some(fixture) = PgFixture::start().await else {
+        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let tenant_id = "tenant_rate_limit_opt_out";
+    let (_repo, service) = service(fixture.pool.clone());
+
+    // http_bearer is on RATE_LIMIT_OPT_OUT (generic target) → no default applied.
+    let id = service
+        .create_connection(
+            create_request("Generic Bearer API", "http_bearer", None),
+            tenant_id,
+        )
+        .await
+        .expect("create generic bearer connection");
+
+    let conn = service
+        .get_connection(&id, tenant_id)
+        .await
+        .expect("load generic bearer connection");
+    assert!(
+        conn.rate_limit_config.is_none(),
+        "opt-out integration types must not receive a default rate limit",
     );
 }
 

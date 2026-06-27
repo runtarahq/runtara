@@ -24,7 +24,7 @@ pub struct ErrorResponse {
 // ============================================================================
 
 /// Rate limit configuration stored in PostgreSQL
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitConfigDto {
