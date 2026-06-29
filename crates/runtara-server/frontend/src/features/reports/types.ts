@@ -23,7 +23,6 @@ import type {
   ReportBlockType,
   ReportDatasetDefinition as GenReportDatasetDefinition,
   ReportDefinition as GenReportDefinition,
-  ReportInteractionDefinition as GenReportInteractionDefinition,
 } from '../../generated/RuntaraRuntimeApi';
 
 // ---------------------------------------------------------------------------
@@ -169,13 +168,6 @@ export type ReportDatasetDefinition = Omit<
   measures: import('../../generated/RuntaraRuntimeApi').ReportDatasetMeasure[];
 };
 
-// `ReportInteractionDefinition.actions` is `Option<Vec>` on the wire and so
-// surfaces as optional in the generated type. FE call sites already guard
-// with `?? []`; keep the alias as-is to avoid structural mismatches when
-// passing definitions through wizard/serialization layers.
-export type ReportInteractionDefinition = GenReportInteractionDefinition;
-
-
 // `ReportDefinition` is the parent of the others — its array fields use the
 // FE-tightened element types so consumers walking the tree never re-fall
 // back to generated optional fields. `layout` is the mandatory single root
@@ -216,22 +208,6 @@ export type ReportCondition = GenCondition;
 export type ReportRowCondition =
   import('../../generated/RuntaraRuntimeApi').ConditionExpression;
 
-/** Reference operand used inside FE-resolved condition argument lists. */
-export interface ReportConditionFilterRef {
-  filter: string;
-  path: string;
-}
-
-/** Subquery operand used inside FE-resolved condition argument lists. */
-export interface ReportConditionSubquery {
-  subquery: {
-    schema: string;
-    select: string;
-    connectionId?: string;
-    condition?: GenCondition;
-  };
-}
-
 /** Visibility-condition shape used on layout nodes (`showWhen`). FE-internal. */
 export interface ReportVisibilityCondition {
   filter: string;
@@ -239,16 +215,6 @@ export interface ReportVisibilityCondition {
   equals?: unknown;
   notEquals?: unknown;
 }
-
-/** Pill cell variants the FE knows how to render. */
-export type ReportPillVariant =
-  | 'success'
-  | 'warning'
-  | 'muted'
-  | 'secondary'
-  | 'destructive'
-  | 'outline'
-  | 'default';
 
 /** FE filter options config used by the filter editor; mirrors the wire shape
  * with a few FE-only refinements. */

@@ -23,7 +23,6 @@ export {
 } from './TableStatusFooter';
 export {
   TablePagination,
-  PAGE_SIZE_OPTIONS,
   type TablePaginationProps,
 } from './TablePagination';
 export {

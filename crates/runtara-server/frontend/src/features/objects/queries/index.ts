@@ -106,40 +106,6 @@ export async function getSchemaById(token: string, context: any) {
   return result.data.schema || null;
 }
 
-export async function createSchema(token: string, schema: CreateSchemaRequest) {
-  try {
-    const result = await RuntimeREST.api.createSchema(
-      schema,
-      {},
-      createAuthHeaders(token)
-    );
-
-    // Return the created schema ID in a format compatible with the old API
-    // We need to fetch the schema to return the full object
-    if (result.data.success && result.data.schemaId) {
-      const schemaResult = await RuntimeREST.api.getSchemaById(
-        result.data.schemaId,
-        {},
-        createAuthHeaders(token)
-      );
-      return schemaResult.data.schema;
-    }
-
-    throw new Error(result.data.message || 'Failed to create schema');
-  } catch (error) {
-    // Rethrow with user-friendly message for duplicate schema name errors
-    const err = error as {
-      response?: { status?: number; data?: { message?: string } };
-    };
-    if (err.response?.status === 409) {
-      throw Object.assign(new Error('Schema with this name already exists'), {
-        response: err.response,
-      });
-    }
-    throw error;
-  }
-}
-
 export async function updateSchema(
   token: string,
   id: string,

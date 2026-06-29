@@ -151,10 +151,3 @@ export const paginated = <T>(
   totalElements: total ?? items.length,
   totalPages: Math.max(1, Math.ceil((total ?? items.length) / size)),
 });
-
-export const listResponse = <T>(items: T[], key: string, total?: number) =>
-  ({
-    [key]: items,
-    total: total ?? items.length,
-    totalCount: total ?? items.length,
-  }) as Record<string, unknown>;

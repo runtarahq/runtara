@@ -828,38 +828,6 @@ export function SimpleInputMappingEditor({
     [nodeId, setFieldValueType, syncToParent]
   );
 
-  // Legacy object fields handler - saves as separate dot-notation entries
-  const handleLegacyObjectFieldsChange = useCallback(
-    (fieldName: string, fields: Array<{ path: string; value: any }>) => {
-      // Get current legacy fields to find which ones to remove
-      const existingLegacyFields = collectLegacyObjectFields(
-        nodeData,
-        fieldName
-      );
-      const existingPaths = new Set(existingLegacyFields.map((f) => f.path));
-      const newPaths = new Set(fields.map((f) => f.path));
-
-      // Remove fields that no longer exist
-      existingPaths.forEach((path) => {
-        if (!newPaths.has(path)) {
-          removeField(nodeId, `${fieldName}.${path}`);
-        }
-      });
-
-      // Add/update fields
-      fields.forEach((field) => {
-        if (field.path) {
-          const fullKey = `${fieldName}.${field.path}`;
-          setFieldValue(nodeId, fullKey, field.value);
-        }
-      });
-
-      // Sync changes immediately
-      syncToParent();
-    },
-    [nodeId, nodeData, setFieldValue, removeField, syncToParent]
-  );
-
   // Previously closed array/object editor when clicking on other fields,
   // but now we keep it open to allow editing multiple fields simultaneously.
   // The user can explicitly close the editor using the close button.
@@ -1013,13 +981,6 @@ export function SimpleInputMappingEditor({
                                   }
                                   schema={field.items as any}
                                   onClose={handleObjectClose}
-                                  legacyFields={legacyFields}
-                                  onLegacyFieldsChange={(fields) =>
-                                    handleLegacyObjectFieldsChange(
-                                      field.name,
-                                      fields
-                                    )
-                                  }
                                 />
                               </div>
                             </TableCell>

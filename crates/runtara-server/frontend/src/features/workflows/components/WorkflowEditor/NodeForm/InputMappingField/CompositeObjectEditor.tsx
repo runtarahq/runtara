@@ -126,22 +126,6 @@ export function CompositeObjectEditor({
     [value, onChange]
   );
 
-  // Handle renaming a field (commented out for future use)
-  // const handleRenameField = useCallback(
-  //   (oldName: string, newName: string) => {
-  //     const trimmedNewName = newName.trim();
-  //     if (!trimmedNewName || trimmedNewName === oldName) return;
-  //     if (value[trimmedNewName]) return; // Duplicate
-  //
-  //     const entries = Object.entries(value);
-  //     const newEntries = entries.map(([key, val]) =>
-  //       key === oldName ? [trimmedNewName, val] : [key, val]
-  //     );
-  //     onChange(Object.fromEntries(newEntries));
-  //   },
-  //   [value, onChange]
-  // );
-
   // Get errors for a specific field
   const getFieldErrors = useCallback(
     (fieldName: string) => {
