@@ -49,8 +49,9 @@ zeroize = "1.8"
 # Error handling
 thiserror = "2"
 
-# Logging
+# Logging / metrics
 tracing = "0.1"
+opentelemetry = { version = "0.31", features = ["metrics"] }
 
 # Connection type metadata
 runtara-dsl = { path = "../runtara-dsl" }

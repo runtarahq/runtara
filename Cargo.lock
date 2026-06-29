@@ -4604,6 +4604,7 @@ dependencies = [
  "dashmap",
  "hex",
  "hmac 0.12.1",
+ "opentelemetry",
  "rand 0.9.4",
  "redis",
  "reqwest",

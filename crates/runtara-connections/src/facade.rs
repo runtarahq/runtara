@@ -5,8 +5,12 @@
 //! surface for host applications and other crates.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock};
 
+use opentelemetry::KeyValue;
+use opentelemetry::global;
+use opentelemetry::metrics::Counter;
 use serde_json::Value;
 
 use crate::auth::provider_auth::{self, ResolvedConnectionAuth};
@@ -23,6 +27,71 @@ use crate::types::{ConnectionDto, ConnectionStatus, CreateConnectionRequest, Rat
 #[derive(Clone)]
 pub struct ConnectionsFacade {
     state: ConnectionsState,
+}
+
+// ── Rate-limit fail-open observability ───────────────────────────────────────
+// `check_rate_limit` deliberately *fails open* (allows the request) when
+// rate-limit tracking is unavailable, so a Redis/Valkey outage never blocks
+// egress. But a *silent* fail-open means a tenant's configured limits can be off
+// indefinitely with nothing to alert on — discovered only after a provider
+// retaliates. Count every fail-open and warn (throttled) when it happens.
+
+/// Total requests allowed without rate-limit enforcement, by `reason`.
+static FAIL_OPEN_COUNTER: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("runtara-connections")
+        .u64_counter("runtara.rate_limit.fail_open.total")
+        .with_description(
+            "Requests allowed without rate-limit enforcement because rate-limit tracking was unavailable",
+        )
+        .build()
+});
+
+/// Warn at most once per process per this interval — `check_rate_limit` runs on
+/// every proxied request, so an unthrottled warn would flood the logs during a
+/// sustained outage. The process is per-tenant, so a process-global throttle is
+/// the correct (tenant-wide) granularity.
+const FAIL_OPEN_WARN_INTERVAL_MS: i64 = 60_000;
+static LAST_FAIL_OPEN_WARN_MS: AtomicI64 = AtomicI64::new(0);
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Claim the warn slot at most once per `interval_ms`. Pure + testable; the CAS
+/// makes concurrent callers race to a single winner.
+fn claim_warn_slot(last_warn_ms: &AtomicI64, now_ms: i64, interval_ms: i64) -> bool {
+    let last = last_warn_ms.load(Ordering::Relaxed);
+    now_ms.saturating_sub(last) >= interval_ms
+        && last_warn_ms
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
+/// Increment the fail-open counter (always — counters are cheap and accurate).
+fn count_fail_open(reason: &'static str) {
+    FAIL_OPEN_COUNTER.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+/// Count *and* emit a throttled warning that the limiter is failing open. Used
+/// on the otherwise-silent "no tracking backend" path.
+fn record_rate_limit_fail_open(reason: &'static str) {
+    count_fail_open(reason);
+    if claim_warn_slot(
+        &LAST_FAIL_OPEN_WARN_MS,
+        epoch_ms(),
+        FAIL_OPEN_WARN_INTERVAL_MS,
+    ) {
+        tracing::warn!(
+            target: "runtara_connections::rate_limit",
+            reason,
+            "Rate limiting is NOT being enforced — rate-limit tracking is unavailable, so all \
+             configured connection rate limits are failing open for this tenant. Requests pass \
+             through unthrottled; a misbehaving workflow can now trigger provider 429s or bans."
+        );
+    }
 }
 
 impl ConnectionsFacade {
@@ -275,7 +344,12 @@ impl ConnectionsFacade {
 
         let mut conn = match self.state.redis_manager.clone() {
             Some(m) => m,
-            None => return Ok(()), // No Redis — fail open
+            None => {
+                // No tracking backend — fail open, but make the lost enforcement
+                // observable (counter + throttled warn) so it can be alerted on.
+                record_rate_limit_fail_open("tracking_unavailable");
+                return Ok(());
+            }
         };
 
         let key = format!("rate_limit:{}", connection_id);
@@ -299,10 +373,14 @@ impl ConnectionsFacade {
                 Err(retry_after_ms)
             }
             Err(e) => {
+                // The Lua check errored — fail open. This path already warns per
+                // error; add the fail-open counter so it shows up in the same
+                // metric as the no-backend path.
+                count_fail_open("tracking_error");
                 tracing::warn!(
                     connection_id = connection_id,
                     error = %e,
-                    "Token bucket Lua script failed — allowing request"
+                    "Token bucket Lua script failed — allowing request (rate limit not enforced)"
                 );
                 Ok(())
             }
@@ -340,3 +418,26 @@ else
     return -wait_ms
 end
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot};
+    use std::sync::atomic::AtomicI64;
+
+    #[test]
+    fn warn_slot_fires_once_then_throttles_until_interval_elapses() {
+        let last = AtomicI64::new(0);
+        let iv = FAIL_OPEN_WARN_INTERVAL_MS;
+        // Realistic epoch-ms base so `now - 0 >= interval` on the first call.
+        let base: i64 = 1_700_000_000_000;
+
+        // First occurrence claims the slot (warns).
+        assert!(claim_warn_slot(&last, base, iv));
+        // Subsequent calls within the interval are throttled.
+        assert!(!claim_warn_slot(&last, base + 1, iv));
+        assert!(!claim_warn_slot(&last, base + iv - 1, iv));
+        // Once the interval elapses it warns again, then throttles again.
+        assert!(claim_warn_slot(&last, base + iv, iv));
+        assert!(!claim_warn_slot(&last, base + iv + 1, iv));
+    }
+}
