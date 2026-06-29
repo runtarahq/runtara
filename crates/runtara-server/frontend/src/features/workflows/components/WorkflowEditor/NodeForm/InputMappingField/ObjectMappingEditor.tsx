@@ -45,16 +45,6 @@ interface ObjectMappingEditorProps {
   };
   /** Called when closing the object editor */
   onClose: () => void;
-  /**
-   * Legacy format support: Pre-flattened fields from dot-notation entries
-   * @deprecated - kept for backwards compatibility
-   */
-  legacyFields?: Array<{ path: string; value: any }>;
-  /**
-   * Legacy format callback: Called when fields change in legacy mode
-   * @deprecated - kept for backwards compatibility
-   */
-  onLegacyFieldsChange?: (fields: Array<{ path: string; value: any }>) => void;
 }
 
 export function ObjectMappingEditor({
@@ -68,14 +58,6 @@ export function ObjectMappingEditor({
   // Mode is derived from valueType: reference stays as reference, everything else is build (composite)
   const mode: ObjectMode = valueType === 'reference' ? 'reference' : 'build';
 
-  // Debug: log incoming props
-  console.log('[ObjectMappingEditor] render', {
-    value,
-    valueType,
-    mode,
-    isValueObject: typeof value === 'object' && value !== null,
-  });
-
   // For build mode, get the composite value
   const compositeValue = useMemo(() => {
     if (mode !== 'build') return {};
@@ -84,8 +66,6 @@ export function ObjectMappingEditor({
     }
     return {};
   }, [mode, value]);
-
-  console.log('[ObjectMappingEditor] compositeValue', compositeValue);
 
   // Get schema fields for hints
   const schemaFields = useMemo(() => {
@@ -99,37 +79,18 @@ export function ObjectMappingEditor({
   }, [schema]);
 
   const handleModeChange = (newMode: ObjectMode) => {
-    console.log('[ObjectMappingEditor] handleModeChange called', {
-      newMode,
-      currentMode: mode,
-    });
     if (newMode === 'reference') {
-      console.log('[ObjectMappingEditor] switching to reference mode');
       onValueTypeChange('reference');
       onChange('');
     } else {
-      console.log(
-        '[ObjectMappingEditor] switching to build mode - calling onValueTypeChange first'
-      );
       onValueTypeChange('composite');
-      console.log(
-        '[ObjectMappingEditor] switching to build mode - calling onChange({})'
-      );
       onChange({});
     }
-    console.log('[ObjectMappingEditor] handleModeChange done');
   };
 
   // Handle composite value changes
   const handleCompositeChange = useCallback(
     (newValue: CompositeObjectValue | CompositeArrayValue) => {
-      console.log('[ObjectMappingEditor] handleCompositeChange called', {
-        newValue,
-        isArray: Array.isArray(newValue),
-        fieldCount: Array.isArray(newValue)
-          ? newValue.length
-          : Object.keys(newValue).length,
-      });
       onChange(newValue);
     },
     [onChange]

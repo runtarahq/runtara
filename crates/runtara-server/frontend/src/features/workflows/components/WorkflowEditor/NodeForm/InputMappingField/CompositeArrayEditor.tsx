@@ -179,28 +179,6 @@ export function CompositeArrayEditor({
     [value, onChange]
   );
 
-  // Handle moving an item up (commented out for future use)
-  // const handleMoveUp = useCallback(
-  //   (index: number) => {
-  //     if (index === 0) return;
-  //     const newArray = [...value];
-  //     [newArray[index - 1], newArray[index]] = [newArray[index], newArray[index - 1]];
-  //     onChange(newArray);
-  //   },
-  //   [value, onChange]
-  // );
-
-  // Handle moving an item down (commented out for future use)
-  // const handleMoveDown = useCallback(
-  //   (index: number) => {
-  //     if (index === value.length - 1) return;
-  //     const newArray = [...value];
-  //     [newArray[index], newArray[index + 1]] = [newArray[index + 1], newArray[index]];
-  //     onChange(newArray);
-  //   },
-  //   [value, onChange]
-  // );
-
   // Get errors for a specific index
   const getItemErrors = useCallback(
     (index: number) => {

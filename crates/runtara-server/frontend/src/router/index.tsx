@@ -140,8 +140,6 @@ const ReportExplorePage = lazy(() =>
     default: m.ReportExplorePage,
   }))
 );
-// ReportEditorPage / ReportViewerPage are now folded into ReportPage. They
-// remain in the codebase for now but aren't routed directly.
 const Settings = lazy(() =>
   import('@/features/settings/pages/Settings').then((m) => ({
     default: m.Settings,

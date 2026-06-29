@@ -4,7 +4,6 @@ import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportGridLayoutNode,
-  ReportLayoutNode,
   ReportRowCondition,
   ReportViewBreadcrumb,
   ReportViewDefinition,
@@ -85,29 +84,6 @@ export function decodeFilterValue(
   return value;
 }
 
-export function extractLayoutBlockReferences(
-  layout: ReportGridLayoutNode | undefined
-) {
-  const ids: string[] = [];
-  if (!layout) return ids;
-  for (const item of layout.items ?? []) {
-    collectLayoutBlockReferences(item.child, ids);
-  }
-  return ids;
-}
-
-function collectLayoutBlockReferences(node: ReportLayoutNode, ids: string[]) {
-  if (node.type === 'block') {
-    ids.push(node.blockId);
-    return;
-  }
-  if (node.type === 'grid') {
-    for (const item of node.items ?? []) {
-      collectLayoutBlockReferences(item.child, ids);
-    }
-  }
-}
-
 export function getActiveReportView(
   definition: ReportDefinition,
   viewId?: string | null
@@ -172,29 +148,6 @@ export function getReportViewBreadcrumbs(
       viewId: ancestor.id,
       clearFilters: Array.from(clearFilters),
     };
-  });
-}
-
-export function getEagerBlocks(
-  definition: ReportDefinition,
-  filters: Record<string, unknown> = {},
-  viewId?: string | null
-) {
-  const layout = getActiveReportLayout(definition, viewId);
-  const hasItems = (layout.items ?? []).length > 0;
-  const visibleBlockIds = new Set(
-    hasItems
-      ? extractVisibleLayoutBlockReferences(layout, filters)
-      : definition.blocks
-          .filter((block) => isVisibleByShowWhen(block.showWhen, filters))
-          .map((block) => block.id)
-  );
-
-  return definition.blocks.filter((block) => {
-    if (block.lazy || !isVisibleByShowWhen(block.showWhen, filters)) {
-      return false;
-    }
-    return !hasItems || visibleBlockIds.has(block.id);
   });
 }
 
@@ -460,35 +413,6 @@ export function renderDisplayTemplate(
     return reportDsl().renderTemplate(template, row, defaultRenderContext());
   } catch {
     return '';
-  }
-}
-
-function extractVisibleLayoutBlockReferences(
-  layout: ReportGridLayoutNode,
-  filters: Record<string, unknown>
-) {
-  const ids: string[] = [];
-  if (!isVisibleByShowWhen(layout.showWhen, filters)) return ids;
-  for (const item of layout.items ?? []) {
-    collectVisibleLayoutBlockReferences(item.child, filters, ids);
-  }
-  return ids;
-}
-
-function collectVisibleLayoutBlockReferences(
-  node: ReportLayoutNode,
-  filters: Record<string, unknown>,
-  ids: string[]
-) {
-  if (!isVisibleByShowWhen(node.showWhen, filters)) return;
-  if (node.type === 'block') {
-    ids.push(node.blockId);
-    return;
-  }
-  if (node.type === 'grid') {
-    for (const item of node.items ?? []) {
-      collectVisibleLayoutBlockReferences(item.child, filters, ids);
-    }
   }
 }
 
