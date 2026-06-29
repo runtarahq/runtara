@@ -231,6 +231,43 @@ fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> 
     Some(cols.into_iter().collect())
 }
 
+/// Report-agnostic safety net, applied to a rendered object-model **table**
+/// block: collapse oversized string values in the row fields the block does NOT
+/// display or need, reusing the same keep-set as [`table_block_projection`].
+///
+/// This is what makes blob-heavy reports "just work" with no authoring: SQL
+/// projection only covers the plain filter path, but this runs on the final
+/// rendered rows, so it also catches the joined-filter path (which fetches
+/// every column) and any undisplayed blob that otherwise reaches the response.
+/// It never touches a value the report shows — displayed columns are in the
+/// keep-set — and small fields (`id`/`createdAt`/...) pass through unchanged
+/// because only strings over the threshold are collapsed. Whole-row shapes
+/// (selectable / row-mode action), where the keep-set is `None`, are left
+/// intact since the client ships every field to a workflow.
+pub fn elide_undisplayed_row_blobs(block: &ReportBlockDefinition, data: &mut Value) {
+    if block.source.kind != ReportSourceKind::ObjectModel {
+        return;
+    }
+    let Some(keep) = table_block_projection(block) else {
+        return;
+    };
+    let keep: HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let Some(rows) = data.get_mut("rows").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for row in rows {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        for (field, value) in obj.iter_mut() {
+            if keep.contains(field.as_str()) {
+                continue;
+            }
+            *value = crate::workers::runtara_dto::elide_large_strings(std::mem::take(value));
+        }
+    }
+}
+
 /// Resolve an interaction `valueFrom` path (`datum.<field>` / `row.<field>` /
 /// `<field>`) to the single schema column it reads, or `None` if it can't be
 /// reduced to one — in which case the caller falls back to selecting all
@@ -619,5 +656,68 @@ mod tests {
         }))
         .expect("block should deserialize");
         assert!(table_block_projection(&block).is_none());
+    }
+
+    fn big_string() -> String {
+        "X".repeat(crate::workers::runtara_dto::ELIDE_THRESHOLD_BYTES + 1)
+    }
+
+    #[test]
+    fn response_elision_collapses_undisplayed_blob_keeps_displayed_and_small() {
+        let block: ReportBlockDefinition = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "type": "table",
+            "source": { "schema": "Files", "mode": "filter" },
+            "table": { "columns": [{ "field": "code" }, { "field": "name" }] }
+        }))
+        .unwrap();
+        let mut data = serde_json::json!({
+            "rows": [{ "id": "1", "code": "A", "name": "n", "file_content": big_string() }],
+            "columns": [],
+            "page": {}
+        });
+
+        elide_undisplayed_row_blobs(&block, &mut data);
+
+        let row = &data["rows"][0];
+        assert_eq!(row["code"], serde_json::json!("A")); // displayed -> kept
+        assert_eq!(row["name"], serde_json::json!("n"));
+        assert_eq!(row["id"], serde_json::json!("1")); // small -> kept verbatim
+        // Undisplayed blob -> collapsed to the elision stub.
+        assert_eq!(row["file_content"]["_elided"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn response_elision_keeps_a_displayed_blob_column() {
+        let block: ReportBlockDefinition = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "type": "table",
+            "source": { "schema": "Files", "mode": "filter" },
+            "table": { "columns": [{ "field": "file_content" }] }
+        }))
+        .unwrap();
+        let big = big_string();
+        let mut data = serde_json::json!({ "rows": [{ "file_content": big }] });
+
+        elide_undisplayed_row_blobs(&block, &mut data);
+
+        // file_content IS a displayed column -> never elided.
+        assert!(data["rows"][0]["file_content"].is_string());
+        assert!(data["rows"][0]["file_content"].as_str().unwrap().len() > 1000);
+    }
+
+    #[test]
+    fn response_elision_skips_non_object_model_sources() {
+        let block: ReportBlockDefinition = serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "type": "table",
+            "source": { "kind": "workflow_runtime", "schema": "", "mode": "filter" },
+            "table": { "columns": [{ "field": "a" }] }
+        }))
+        .unwrap();
+        let mut data = serde_json::json!({ "rows": [{ "blob": big_string() }] });
+        elide_undisplayed_row_blobs(&block, &mut data);
+        // Non-object-model sources are untouched (no schema-column blobs).
+        assert!(data["rows"][0]["blob"].is_string());
     }
 }

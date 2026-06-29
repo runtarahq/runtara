@@ -592,7 +592,16 @@ impl ReportService {
                     )
                     .await
                 {
-                    Ok(rendered) => (block.id.clone(), rendered, None),
+                    Ok(mut rendered) => {
+                        // Report-agnostic safety net: drop oversized values in
+                        // undisplayed object-model columns from the response,
+                        // regardless of which render path produced the rows
+                        // (covers joined-filter, which the SQL projection skips).
+                        if let Some(data) = rendered.data.as_mut() {
+                            providers::object_model::elide_undisplayed_row_blobs(block, data);
+                        }
+                        (block.id.clone(), rendered, None)
+                    }
                     Err(error) => {
                         let block_error = ReportBlockError {
                             code: "BLOCK_RENDER_FAILED".to_string(),
