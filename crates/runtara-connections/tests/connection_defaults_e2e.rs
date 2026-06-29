@@ -287,6 +287,32 @@ async fn create_leaves_opt_out_integration_without_rate_limit() {
 }
 
 #[tokio::test]
+async fn create_rejects_a_zero_rate_limit() {
+    let Some(fixture) = PgFixture::start().await else {
+        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let tenant_id = "tenant_rate_limit_zero";
+    let (_repo, service) = service(fixture.pool.clone());
+
+    // requests_per_second=0 looks "configured" but the limiter treats it as
+    // "no limit" — a silent bypass. The service must reject it (SYN-500).
+    let mut request = create_request("Zero RPS Stripe", "stripe_api_key", None);
+    request.rate_limit_config = Some(RateLimitConfigDto {
+        requests_per_second: 0,
+        burst_size: 4,
+        retry_on_limit: true,
+        max_retries: 3,
+        max_wait_ms: 60000,
+    });
+    let result = service.create_connection(request, tenant_id).await;
+    assert!(
+        result.is_err(),
+        "creating a connection with requests_per_second=0 must be rejected"
+    );
+}
+
+#[tokio::test]
 async fn object_storage_default_bridges_legacy_file_storage_flag() {
     let Some(fixture) = PgFixture::start().await else {
         eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");

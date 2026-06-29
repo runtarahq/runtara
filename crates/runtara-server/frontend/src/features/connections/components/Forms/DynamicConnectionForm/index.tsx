@@ -514,8 +514,56 @@ export function DynamicConnectionForm({
       ? baseSchema.merge(rateLimitFields).merge(fileStorageFields)
       : baseSchema.merge(rateLimitFields);
 
+    // When the override is enabled the rate-limit numbers must be enforceable
+    // (mirrors the backend validate_rate_limit_config): rps >= 1 (0 silently
+    // disables enforcement), burst >= 1 and burst >= rps, plus sane caps. SYN-500.
+    const refinedSchema = mergedSchema.superRefine((data, ctx) => {
+      const d = data as Record<string, unknown>;
+      if (!d.rateLimitEnabled) return;
+      const rps = Number(d.requestsPerSecond);
+      const burst = Number(d.burstSize);
+      if (!Number.isFinite(rps) || rps < 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['requestsPerSecond'],
+          message:
+            'Must be at least 1 — 0 disables rate limiting. Turn off the override to leave this connection unlimited.',
+        });
+      }
+      if (!Number.isFinite(burst) || burst < 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['burstSize'],
+          message: 'Must be at least 1.',
+        });
+      }
+      if (Number.isFinite(rps) && Number.isFinite(burst) && burst < rps) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['burstSize'],
+          message: 'Burst size must be ≥ requests per second.',
+        });
+      }
+      const maxRetries = Number(d.maxRetries);
+      if (Number.isFinite(maxRetries) && maxRetries > 100) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['maxRetries'],
+          message: 'Must be 100 or fewer.',
+        });
+      }
+      const maxWaitMs = Number(d.maxWaitMs);
+      if (Number.isFinite(maxWaitMs) && maxWaitMs > 3_600_000) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['maxWaitMs'],
+          message: 'Must be 3600000 ms (1 hour) or less.',
+        });
+      }
+    });
+
     return {
-      schema: mergedSchema,
+      schema: refinedSchema,
       fieldsConfig: config,
       initialValues: buildInitialValues(fields),
       groupedFields: groupFieldsIntoSections(config),

@@ -12,6 +12,51 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Validate a rate-limit config before it is persisted.
+///
+/// The token-bucket limiter treats `requests_per_second == 0` as "no limit"
+/// (a silent bypass), so a config with 0 looks enabled in the UI but enforces
+/// nothing — harder to diagnose than having no config at all. Reject the
+/// degenerate values here (the authoritative gate, since the HTTP API and MCP
+/// bypass the frontend) so the only ways to be unlimited are an explicit "no
+/// config" or an opt-out integration type.
+fn validate_rate_limit_config(cfg: &RateLimitConfigDto) -> Result<(), ServiceError> {
+    if cfg.requests_per_second < 1 {
+        return Err(ServiceError::ValidationError(
+            "rate_limit_config.requests_per_second must be at least 1 (0 would silently \
+             disable enforcement — clear the rate limit instead to leave the connection \
+             unlimited)"
+                .to_string(),
+        ));
+    }
+    if cfg.burst_size < 1 {
+        return Err(ServiceError::ValidationError(
+            "rate_limit_config.burst_size must be at least 1".to_string(),
+        ));
+    }
+    if cfg.burst_size < cfg.requests_per_second {
+        return Err(ServiceError::ValidationError(format!(
+            "rate_limit_config.burst_size ({}) must be >= requests_per_second ({})",
+            cfg.burst_size, cfg.requests_per_second
+        )));
+    }
+    const MAX_RETRIES: u32 = 100;
+    if cfg.max_retries > MAX_RETRIES {
+        return Err(ServiceError::ValidationError(format!(
+            "rate_limit_config.max_retries ({}) must be <= {MAX_RETRIES}",
+            cfg.max_retries
+        )));
+    }
+    const MAX_WAIT_MS: u64 = 3_600_000; // 1 hour
+    if cfg.max_wait_ms > MAX_WAIT_MS {
+        return Err(ServiceError::ValidationError(format!(
+            "rate_limit_config.max_wait_ms ({}) must be <= {MAX_WAIT_MS} (1 hour)",
+            cfg.max_wait_ms
+        )));
+    }
+    Ok(())
+}
+
 pub struct ConnectionService {
     repository: Arc<ConnectionRepository>,
     compatibility: Arc<IntegrationCompatibility>,
@@ -128,6 +173,11 @@ impl ConnectionService {
             request.rate_limit_config = get_default_rate_limit_config(integration_id);
         }
 
+        // Validate the effective rate-limit config (user-supplied or default).
+        if let Some(ref cfg) = request.rate_limit_config {
+            validate_rate_limit_config(cfg)?;
+        }
+
         let default_for = Self::normalize_default_for(
             request.default_for.clone(),
             request.is_default_file_storage,
@@ -230,6 +280,11 @@ impl ConnectionService {
             return Err(ServiceError::ValidationError(
                 "valid_until must be a valid RFC3339 datetime".to_string(),
             ));
+        }
+
+        // Validation: rate-limit config if one is being set.
+        if let Some(ref cfg) = request.rate_limit_config {
+            validate_rate_limit_config(cfg)?;
         }
 
         let default_for = request.default_for.clone().map(|default_for| {
@@ -423,4 +478,79 @@ pub enum ServiceError {
     NotFound(String),
     Conflict(String),
     DatabaseError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServiceError, validate_rate_limit_config};
+    use crate::types::RateLimitConfigDto;
+
+    fn valid() -> RateLimitConfigDto {
+        RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60_000,
+        }
+    }
+
+    fn assert_rejected(cfg: &RateLimitConfigDto) {
+        assert!(
+            matches!(
+                validate_rate_limit_config(cfg),
+                Err(ServiceError::ValidationError(_))
+            ),
+            "expected a ValidationError"
+        );
+    }
+
+    #[test]
+    fn accepts_a_sane_config() {
+        assert!(validate_rate_limit_config(&valid()).is_ok());
+    }
+
+    #[test]
+    fn accepts_burst_equal_to_rate() {
+        let mut cfg = valid();
+        cfg.requests_per_second = 10;
+        cfg.burst_size = 10;
+        assert!(validate_rate_limit_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_requests_per_second() {
+        let mut cfg = valid();
+        cfg.requests_per_second = 0;
+        assert_rejected(&cfg);
+    }
+
+    #[test]
+    fn rejects_zero_burst_size() {
+        let mut cfg = valid();
+        cfg.burst_size = 0;
+        assert_rejected(&cfg);
+    }
+
+    #[test]
+    fn rejects_burst_smaller_than_rate() {
+        let mut cfg = valid();
+        cfg.requests_per_second = 10;
+        cfg.burst_size = 5;
+        assert_rejected(&cfg);
+    }
+
+    #[test]
+    fn rejects_absurd_max_retries() {
+        let mut cfg = valid();
+        cfg.max_retries = 1_000;
+        assert_rejected(&cfg);
+    }
+
+    #[test]
+    fn rejects_absurd_max_wait_ms() {
+        let mut cfg = valid();
+        cfg.max_wait_ms = 7_200_000;
+        assert_rejected(&cfg);
+    }
 }
