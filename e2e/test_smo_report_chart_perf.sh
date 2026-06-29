@@ -157,7 +157,9 @@ REPORT_DEF='{
   "name": "Store Trends",
   "definition": {
     "definitionVersion": 1,
-    "filters": [],
+    "filters": [
+      { "id": "store_filter", "label": "Store", "type": "text", "appliesTo": [{ "field": "code", "op": "eq" }] }
+    ],
     "blocks": [
       {
         "id": "stores",
@@ -195,6 +197,27 @@ REPORT_DEF='{
         "title": "Selectable (must NOT project)",
         "source": { "schema": "Store", "mode": "filter", "orderBy": [{"field":"code","direction":"asc"}] },
         "table": { "selectable": true, "columns": [ {"field":"code","label":"Code"}, {"field":"name","label":"Name"} ] }
+      },
+      {
+        "id": "stores_interactive",
+        "type": "table",
+        "title": "Row-click drilldown (interaction must NOT disable projection)",
+        "source": { "schema": "Store", "mode": "filter", "orderBy": [{"field":"code","direction":"asc"}] },
+        "table": { "columns": [ {"field":"code","label":"Code"}, {"field":"name","label":"Name"} ] },
+        "interactions": [
+          { "id": "open_store", "trigger": {"event":"row_click"},
+            "actions": [{"type":"set_filter","filterId":"store_filter","valueFrom":"datum.code"}] }
+        ]
+      },
+      {
+        "id": "stores_joined",
+        "type": "table",
+        "title": "Joined-filter table (blob elided by catch-all)",
+        "source": {
+          "schema": "Store", "mode": "filter",
+          "join": [{ "alias": "sale", "schema": "Sale", "parentField": "code", "field": "store_code", "kind": "left" }]
+        },
+        "table": { "columns": [ {"field":"code","label":"Code"}, {"field":"name","label":"Name"}, {"field":"sale.month","label":"Month"} ] }
       }
     ],
     "layout": {
@@ -202,7 +225,9 @@ REPORT_DEF='{
       "items": [
         {"id":"r0","child":{"id":"n0","type":"block","blockId":"stores"}},
         {"id":"r1","child":{"id":"n1","type":"block","blockId":"stores2"}},
-        {"id":"r2","child":{"id":"n2","type":"block","blockId":"stores_sel"}}
+        {"id":"r2","child":{"id":"n2","type":"block","blockId":"stores_sel"}},
+        {"id":"r3","child":{"id":"n3","type":"block","blockId":"stores_interactive"}},
+        {"id":"r4","child":{"id":"n4","type":"block","blockId":"stores_joined"}}
       ]
     }
   }
@@ -249,6 +274,29 @@ echo "  ✓ projected blocks carry no base64 blob bytes"
 assert "selectable block falls back: 3 rows" '.blocks.stores_sel.data.rows | length == 3'
 assert "selectable block keeps ALL columns incl. blob (no projection)" \
   '[.blocks.stores_sel.data.rows[] | has("logo_base64")] | all'
+
+# A row-click interaction must NOT disable projection (the reported bug): its
+# valueFrom field is collected, so the blob is still projected OUT.
+assert "interaction table rendered 3 rows" \
+  '.blocks.stores_interactive.data.rows | length == 3'
+assert "interaction table keeps displayed code+name" \
+  '[.blocks.stores_interactive.data.rows[] | (has("code") and has("name"))] | all'
+assert "row-click interaction does NOT disable projection (blob excluded)" \
+  '[.blocks.stores_interactive.data.rows[] | has("logo_base64")] | any | not'
+
+# Report-agnostic catch-all: a joined-filter table is NOT SQL-projected (it
+# fetches all columns), but the undisplayed blob is ELIDED in the response —
+# present as a stub, never the full base64 — while displayed fields are kept.
+assert "joined table rendered rows" '.blocks.stores_joined.data.rows | length >= 1'
+assert "joined table keeps displayed code+name" \
+  '[.blocks.stores_joined.data.rows[] | (has("code") and has("name"))] | all'
+assert "joined table blob ELIDED by catch-all (stub, not full value)" \
+  '[.blocks.stores_joined.data.rows[] | .logo_base64._elided == true] | all'
+# The full ~32 kB-per-row blob must be gone; only the <=256-char preview stub
+# remains. Size-bound the whole block: un-elided it would be 3 x ~32 kB.
+JOINED_LEN=$(jq -r '.blocks.stores_joined | tostring | length' <<<"${RENDER}")
+[ "${JOINED_LEN}" -lt 8000 ] || fail "joined-table block is ${JOINED_LEN} bytes — full blob not elided"
+echo "  ✓ joined-table block compact (${JOINED_LEN} bytes — blob reduced to a preview stub)"
 
 # --- Chart-column batching correctness (per-store series) ---
 # ST1: Jan=100, Feb=200 (ordered by month asc)
