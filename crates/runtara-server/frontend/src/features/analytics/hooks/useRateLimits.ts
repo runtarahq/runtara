@@ -2,6 +2,7 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
   getRateLimits,
+  getConnectionRateLimitStatus,
   getConnectionRateLimitHistory,
   getConnectionRateLimitTimeline,
   type RateLimitHistoryParams,
@@ -12,6 +13,20 @@ export function useRateLimits(interval?: string) {
   return useCustomQuery({
     queryKey: ['analytics', 'rateLimits', interval],
     queryFn: (token: string) => getRateLimits(token, interval),
+    refetchInterval: 30 * 1000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** Live rate-limit status for a single connection (config + Redis state). */
+export function useConnectionRateLimitStatus(
+  connectionId: string | null | undefined
+) {
+  return useCustomQuery({
+    queryKey: ['analytics', 'rateLimitStatus', connectionId],
+    queryFn: (token: string) =>
+      getConnectionRateLimitStatus(token, connectionId!),
+    enabled: !!connectionId,
     refetchInterval: 30 * 1000,
     refetchIntervalInBackground: false,
   });

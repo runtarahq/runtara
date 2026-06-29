@@ -12,6 +12,7 @@ import {
   ConnectionTypeDto,
   ConnectionFieldDto,
   RateLimitConfigDto,
+  RateLimitStatusDto,
 } from '@/generated/RuntaraRuntimeApi';
 import { RateLimitSection } from '../RateLimitSection';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
@@ -470,6 +471,8 @@ type DynamicConnectionFormProps = {
   mode?: 'create' | 'edit';
   onDelete?: () => void;
   isDeleting?: boolean;
+  /** Live rate-limit status for this connection (edit mode), if loaded. */
+  rateLimitStatus?: RateLimitStatusDto | null;
 };
 
 /**
@@ -483,6 +486,7 @@ export function DynamicConnectionForm({
   mode = 'create',
   onDelete,
   isDeleting,
+  rateLimitStatus,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
@@ -641,6 +645,7 @@ export function DynamicConnectionForm({
         {/* Rate Limiting Section */}
         <RateLimitSection
           defaultConfig={connectionType.defaultRateLimitConfig}
+          liveStatus={rateLimitStatus}
         />
       </div>
     </ConnectionFormLayout>

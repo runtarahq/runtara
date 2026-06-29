@@ -9,6 +9,17 @@ export async function getRateLimits(token: string, interval?: string) {
   return result.data;
 }
 
+export async function getConnectionRateLimitStatus(
+  token: string,
+  connectionId: string
+) {
+  const result = await RuntimeREST.api.getConnectionRateLimitStatusHandler(
+    connectionId,
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
 export interface RateLimitHistoryParams {
   connectionId: string;
   limit?: number;

@@ -8,6 +8,7 @@ import {
   Clock,
 } from 'lucide-react';
 import type { RateLimitStatusDto } from '@/generated/RuntaraRuntimeApi';
+import { getRateLimitBadge } from '@/shared/lib/rate-limit-status';
 
 interface RateLimitCardProps {
   rateLimitStatus: RateLimitStatusDto;
@@ -72,6 +73,14 @@ export function RateLimitCard({
   const capacityPercent = metrics.capacityPercent;
   const isRateLimited = metrics.isRateLimited;
 
+  // Honest protection state — a connection with no config is "No limit",
+  // never the green "OK" badge (SYN-495).
+  const badge = getRateLimitBadge({
+    hasConfig,
+    redisAvailable: isRedisAvailable,
+    isRateLimited,
+  });
+
   const showLearnedLimitWarning =
     hasConfig &&
     state.learnedLimit !== null &&
@@ -103,10 +112,11 @@ export function RateLimitCard({
           </div>
           <div className="flex items-center gap-2">
             <Badge
-              variant={isRateLimited ? 'destructive' : 'success'}
+              variant={badge.variant}
               className="shrink-0"
+              title={badge.description}
             >
-              {isRateLimited ? 'Rate Limited' : 'OK'}
+              {badge.label}
             </Badge>
             {onClick && (
               <ChevronRight
@@ -127,7 +137,7 @@ export function RateLimitCard({
         {/* No Rate Limit Configured */}
         {!hasConfig && (
           <div className="text-sm text-muted-foreground">
-            No rate limit configured
+            No rate limit configured — requests are not throttled.
           </div>
         )}
 

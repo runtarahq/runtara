@@ -13,6 +13,7 @@ import {
   removeConnection,
 } from '@/features/connections/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import { useConnectionRateLimitStatus } from '@/features/analytics/hooks/useRateLimits';
 import { queryClient } from '@/main.tsx';
 
 export function Connection() {
@@ -30,6 +31,9 @@ export function Connection() {
     queryKey: queryKeys.connections.types(),
     queryFn: getConnectionTypes,
   });
+
+  // Live rate-limit status for the honest protection badge in the form.
+  const rateLimitStatusQuery = useConnectionRateLimitStatus(id);
 
   const mutation = useCustomMutation({
     mutationFn: updateConnection,
@@ -142,6 +146,7 @@ export function Connection() {
       mode="edit"
       onDelete={handleDelete}
       isDeleting={deleteMutation.isPending}
+      rateLimitStatus={rateLimitStatusQuery.data?.data}
     />
   );
 }
