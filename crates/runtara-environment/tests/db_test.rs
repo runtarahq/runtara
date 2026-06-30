@@ -40,7 +40,7 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None)
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
         .await
         .expect("Failed to associate instance image");
 }
@@ -58,7 +58,7 @@ async fn create_test_instance_with_env(
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, env)
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, env, None)
         .await
         .expect("Failed to associate instance image");
 }
@@ -524,4 +524,86 @@ async fn test_get_instance_image_with_env_not_found() {
         .expect("Query should succeed");
 
     assert!(result.is_none(), "Expected None for nonexistent instance");
+}
+
+#[tokio::test]
+async fn test_instance_timeout_seconds_round_trips() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-timeout";
+    let image_id = Uuid::new_v4().to_string();
+
+    create_test_image(&pool, &image_id, tenant_id)
+        .await
+        .expect("Failed to create test image");
+
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .register_instance(&instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+
+    // Persist a per-instance timeout larger than the legacy hardcoded 300s.
+    db::associate_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800))
+        .await
+        .expect("Failed to associate instance image");
+
+    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+        .await
+        .expect("Query should succeed");
+    assert_eq!(timeout, Some(1800), "Persisted timeout should round-trip");
+
+    // Cleanup
+    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+        .bind(&instance_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_instance_timeout_seconds_absent_is_none() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-timeout-none";
+    let image_id = Uuid::new_v4().to_string();
+
+    create_test_image(&pool, &image_id, tenant_id)
+        .await
+        .expect("Failed to create test image");
+
+    // Associate without a timeout (e.g. rows predating the column).
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+
+    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+        .await
+        .expect("Query should succeed");
+    assert_eq!(timeout, None, "Absent timeout should read back as None");
+
+    // A nonexistent instance is also None (no row).
+    let missing = db::get_instance_timeout_seconds(&pool, "nonexistent-instance")
+        .await
+        .expect("Query should succeed");
+    assert_eq!(missing, None);
+
+    // Cleanup
+    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+        .bind(&instance_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
 }

@@ -83,7 +83,7 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None)
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
         .await
         .expect("Failed to associate instance image");
 }
