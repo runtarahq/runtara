@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ColumnDefinition, IndexDefinition};
+use crate::types::{ColumnDefinition, ColumnRename, IndexDefinition};
 
 /// Schema metadata stored in the `__schema` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +122,17 @@ pub struct UpdateSchemaRequest {
     pub columns: Option<Vec<ColumnDefinition>>,
     /// New index definitions (optional)
     pub indexes: Option<Vec<IndexDefinition>>,
+    /// Explicit column renames applied before diffing the column list. A rename
+    /// listed here emits `ALTER TABLE ... RENAME COLUMN` (preserving data)
+    /// instead of the drop+add a bare name change would otherwise produce.
+    #[serde(default)]
+    pub column_renames: Vec<ColumnRename>,
+    /// Acknowledge that this update may drop columns and lose their data. When
+    /// `false` (the default), an update that would `DROP COLUMN` is rejected so a
+    /// rename or accidental removal can't silently destroy data; declare the
+    /// change as a [`ColumnRename`] or set this to `true` to proceed.
+    #[serde(default)]
+    pub allow_destructive: bool,
 }
 
 impl UpdateSchemaRequest {
@@ -151,6 +162,18 @@ impl UpdateSchemaRequest {
     /// Set new indexes
     pub fn with_indexes(mut self, indexes: Vec<IndexDefinition>) -> Self {
         self.indexes = Some(indexes);
+        self
+    }
+
+    /// Declare explicit column renames (data-preserving).
+    pub fn with_column_renames(mut self, renames: Vec<ColumnRename>) -> Self {
+        self.column_renames = renames;
+        self
+    }
+
+    /// Acknowledge that this update may drop columns and lose their data.
+    pub fn allow_destructive(mut self, allow: bool) -> Self {
+        self.allow_destructive = allow;
         self
     }
 }

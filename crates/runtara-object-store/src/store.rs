@@ -494,8 +494,82 @@ impl ObjectStore {
 
         // Alter table if columns changed
         if let Some(new_columns) = &request.columns {
-            let alter_statements =
-                ddl.generate_alter_table(&existing.table_name, &existing.columns, new_columns);
+            let renames = &request.column_renames;
+
+            // Validate declared renames against the actual columns: the source
+            // must exist now and the target must be present in the new list, so
+            // a typo can't silently turn into a drop + add.
+            for r in renames {
+                if r.from == r.to {
+                    continue;
+                }
+                if !existing.columns.iter().any(|c| c.name == r.from) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "column rename source '{}' does not exist on schema '{}'",
+                        r.from, existing.name
+                    )));
+                }
+                if !new_columns.iter().any(|c| c.name == r.to) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "column rename target '{}' is not present in the new column list",
+                        r.to
+                    )));
+                }
+                if existing.columns.iter().any(|c| c.name == r.to) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "column rename target '{}' already exists on schema '{}'",
+                        r.to, existing.name
+                    )));
+                }
+            }
+            // A source/target may each appear in only one rename.
+            for (i, r) in renames.iter().enumerate() {
+                if renames[..i].iter().any(|p| p.from == r.from) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "duplicate column rename source '{}'",
+                        r.from
+                    )));
+                }
+                if renames[..i].iter().any(|p| p.to == r.to) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "duplicate column rename target '{}'",
+                        r.to
+                    )));
+                }
+            }
+
+            // Destructive-change guard: a column present now but absent from the
+            // new list (and not declared as a rename source) would be dropped,
+            // losing its data. Reject unless the caller acknowledges it — this is
+            // the safety net that stops an undeclared rename from silently
+            // destroying a column.
+            if !request.allow_destructive {
+                let dropped: Vec<&str> = existing
+                    .columns
+                    .iter()
+                    .filter(|c| {
+                        !renames.iter().any(|r| r.from == c.name)
+                            && !new_columns.iter().any(|n| n.name == c.name)
+                    })
+                    .map(|c| c.name.as_str())
+                    .collect();
+                if !dropped.is_empty() {
+                    return Err(ObjectStoreError::validation(format!(
+                        "update would drop column(s) [{}] on schema '{}', losing their data; \
+                         declare a rename via `column_renames` or set `allow_destructive = true` \
+                         to proceed",
+                        dropped.join(", "),
+                        existing.name
+                    )));
+                }
+            }
+
+            let alter_statements = ddl.generate_alter_table_with_renames(
+                &existing.table_name,
+                &existing.columns,
+                new_columns,
+                renames,
+            );
 
             for statement in alter_statements {
                 sqlx::query(&statement).execute(&mut *tx).await?;

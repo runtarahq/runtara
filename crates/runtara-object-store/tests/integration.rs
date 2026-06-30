@@ -9,7 +9,7 @@
 //! ```
 
 use runtara_object_store::instance::{BulkCreateOptions, Condition, ConflictMode, ValidationMode};
-use runtara_object_store::types::{ColumnDefinition, ColumnType, IndexDefinition};
+use runtara_object_store::types::{ColumnDefinition, ColumnRename, ColumnType, IndexDefinition};
 use runtara_object_store::{
     AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, CreateSchemaRequest,
     FilterRequest, ObjectStore, OrderByEntry, OrderByTarget, ScoreExpression, SimpleFilter,
@@ -455,6 +455,140 @@ async fn test_duplicate_schema_name_error() {
 }
 
 // ==================== Instance Tests ====================
+
+#[tokio::test]
+async fn test_update_schema_rename_preserves_data() {
+    // SYN-485: a declared column rename must preserve the column's data instead
+    // of dropping it and adding an empty replacement.
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let request = CreateSchemaRequest {
+        name: "renamable".to_string(),
+        description: None,
+        table_name: format!("{}_renamable", prefix),
+        columns: vec![
+            ColumnDefinition::new("old_name", ColumnType::String).not_null(),
+            ColumnDefinition::new("keep", ColumnType::Integer),
+        ],
+        indexes: None,
+    };
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    let id = store
+        .create_instance(
+            "renamable",
+            serde_json::json!({"old_name": "important value", "keep": 7}),
+        )
+        .await
+        .expect("Should create instance");
+
+    // Rename old_name -> new_name via the rename map.
+    store
+        .update_schema(
+            "renamable",
+            UpdateSchemaRequest {
+                columns: Some(vec![
+                    ColumnDefinition::new("new_name", ColumnType::String).not_null(),
+                    ColumnDefinition::new("keep", ColumnType::Integer),
+                ]),
+                column_renames: vec![ColumnRename {
+                    from: "old_name".to_string(),
+                    to: "new_name".to_string(),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Rename should succeed");
+
+    // The data must survive under the new column name.
+    let instance = store
+        .get_instance("renamable", &id)
+        .await
+        .expect("Should not error")
+        .expect("Instance should exist");
+    assert_eq!(instance.properties["new_name"], "important value");
+    assert_eq!(instance.properties["keep"], 7);
+    assert!(instance.properties.get("old_name").is_none());
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_update_schema_undeclared_drop_is_rejected() {
+    // SYN-485: dropping a column (e.g. an undeclared rename) without
+    // acknowledgement must be rejected so data isn't silently destroyed.
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let request = CreateSchemaRequest {
+        name: "guarded".to_string(),
+        description: None,
+        table_name: format!("{}_guarded", prefix),
+        columns: vec![
+            ColumnDefinition::new("a", ColumnType::String),
+            ColumnDefinition::new("b", ColumnType::String),
+        ],
+        indexes: None,
+    };
+    store
+        .create_schema(request)
+        .await
+        .expect("Should create schema");
+
+    // Drop column `b` with no rename and no acknowledgement -> rejected.
+    let err = store
+        .update_schema(
+            "guarded",
+            UpdateSchemaRequest {
+                columns: Some(vec![ColumnDefinition::new("a", ColumnType::String)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("Undeclared destructive drop must be rejected");
+    assert!(
+        err.to_string().contains("drop column"),
+        "unexpected error: {err}"
+    );
+
+    // The column must still be there (no DDL applied).
+    let schema = store
+        .get_schema("guarded")
+        .await
+        .expect("Should get schema")
+        .expect("Schema exists");
+    assert!(schema.columns.iter().any(|c| c.name == "b"));
+
+    // With explicit acknowledgement the drop proceeds.
+    store
+        .update_schema(
+            "guarded",
+            UpdateSchemaRequest {
+                columns: Some(vec![ColumnDefinition::new("a", ColumnType::String)]),
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Acknowledged drop should succeed");
+    let schema = store
+        .get_schema("guarded")
+        .await
+        .expect("Should get schema")
+        .expect("Schema exists");
+    assert!(schema.columns.iter().all(|c| c.name != "b"));
+
+    cleanup_test(&store, &prefix).await;
+}
 
 #[tokio::test]
 async fn test_create_and_get_instance() {

@@ -422,6 +422,19 @@ pub struct UpdateObjectSchemaParams {
     )]
     pub indexes: Option<Vec<Value>>,
     #[schemars(
+        description = "Explicit column renames as [{\"from\": \"old\", \"to\": \"new\"}]. A \
+                       rename here preserves the column's data (emits RENAME COLUMN); without \
+                       it a name change is a drop + add that DESTROYS the old data. The `to` \
+                       name must appear in the replacement `columns` list."
+    )]
+    pub column_renames: Option<Vec<Value>>,
+    #[schemars(
+        description = "Acknowledge that this update may DROP columns and lose their data. \
+                       Defaults to false: an update that would drop a column is rejected \
+                       unless the drop is declared as a rename or this is set to true."
+    )]
+    pub allow_destructive: Option<bool>,
+    #[schemars(
         description = "Optional connection ID to target a specific Object Model \
                        connection's database. Omit to use the default object-model database."
     )]
@@ -888,6 +901,12 @@ pub async fn update_object_schema(
     }
     if let Some(i) = params.indexes {
         body["indexes"] = Value::Array(i);
+    }
+    if let Some(r) = params.column_renames {
+        body["column_renames"] = Value::Array(r);
+    }
+    if let Some(d) = params.allow_destructive {
+        body["allow_destructive"] = Value::Bool(d);
     }
     ensure_request_payload_reasonable("update_object_schema", &body)?;
     let path = with_connection_id_query(
