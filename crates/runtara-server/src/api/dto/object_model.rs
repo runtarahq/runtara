@@ -414,12 +414,31 @@ pub struct CreateSchemaRequest {
     pub indexes: Option<Vec<IndexDefinition>>,
 }
 
+/// An explicit column rename applied before the column diff, so the change
+/// emits `RENAME COLUMN` (preserving data) instead of drop + add.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ColumnRename {
+    /// Current column name.
+    pub from: String,
+    /// New column name (must be present in the new `columns` list).
+    pub to: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSchemaRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub columns: Option<Vec<ColumnDefinition>>,
     pub indexes: Option<Vec<IndexDefinition>>,
+    /// Explicit column renames; preserves data across a name change instead of
+    /// dropping the old column and adding an empty new one.
+    #[serde(default)]
+    pub column_renames: Option<Vec<ColumnRename>>,
+    /// Acknowledge that this update may drop columns and lose their data.
+    /// Defaults to `false`: an update that would drop a column is rejected
+    /// unless the drop is declared as a rename or this is set to `true`.
+    #[serde(default)]
+    pub allow_destructive: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1131,6 +1150,16 @@ impl From<UpdateSchemaRequest> for runtara_object_store::UpdateSchemaRequest {
             indexes: req
                 .indexes
                 .map(|idxs| idxs.into_iter().map(|i| i.into()).collect()),
+            column_renames: req
+                .column_renames
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| runtara_object_store::ColumnRename {
+                    from: r.from,
+                    to: r.to,
+                })
+                .collect(),
+            allow_destructive: req.allow_destructive.unwrap_or(false),
         }
     }
 }

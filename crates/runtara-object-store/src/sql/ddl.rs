@@ -4,7 +4,7 @@
 
 use crate::config::StoreConfig;
 use crate::sql::sanitize::quote_identifier;
-use crate::types::{ColumnDefinition, IndexDefinition};
+use crate::types::{ColumnDefinition, ColumnRename, IndexDefinition};
 
 /// DDL Generator for object model tables
 pub struct DdlGenerator<'a> {
@@ -70,18 +70,68 @@ impl<'a> DdlGenerator<'a> {
             .collect()
     }
 
-    /// Generate ALTER TABLE statements to modify table structure
+    /// Generate ALTER TABLE statements to modify table structure.
+    ///
+    /// Diffs columns by name only, so a renamed column appears as a drop + add.
+    /// Use [`generate_alter_table_with_renames`](Self::generate_alter_table_with_renames)
+    /// to preserve data across renames.
     pub fn generate_alter_table(
         &self,
         table_name: &str,
         old_columns: &[ColumnDefinition],
         new_columns: &[ColumnDefinition],
     ) -> Vec<String> {
+        self.generate_alter_table_with_renames(table_name, old_columns, new_columns, &[])
+    }
+
+    /// Generate ALTER TABLE statements, honoring explicit column renames.
+    ///
+    /// Each rename emits `ALTER TABLE ... RENAME COLUMN` (and renames the
+    /// column's auto-managed indexes), and is excluded from the add/drop diff —
+    /// so a declared rename preserves the column's data instead of dropping it
+    /// and re-adding an empty column. The remaining add/drop/modify logic is
+    /// unchanged; modified-column detection matches a rename target back to its
+    /// source so a simultaneous rename + type/nullable/default change works.
+    pub fn generate_alter_table_with_renames(
+        &self,
+        table_name: &str,
+        old_columns: &[ColumnDefinition],
+        new_columns: &[ColumnDefinition],
+        renames: &[ColumnRename],
+    ) -> Vec<String> {
+        use std::collections::{HashMap, HashSet};
         let quoted_table = quote_identifier(table_name);
         let mut statements = Vec::new();
 
-        // Find added columns
+        let rename_from: HashSet<&str> = renames.iter().map(|r| r.from.as_str()).collect();
+        let rename_to: HashSet<&str> = renames.iter().map(|r| r.to.as_str()).collect();
+        let rename_to_from: HashMap<&str, &str> = renames
+            .iter()
+            .map(|r| (r.to.as_str(), r.from.as_str()))
+            .collect();
+
+        // Renames first, so later add/drop/modify statements address the new
+        // name. The column's auto-managed indexes are renamed alongside it.
+        for r in renames {
+            if r.from == r.to {
+                continue;
+            }
+            if let Some(old_col) = old_columns.iter().find(|c| c.name == r.from) {
+                statements.extend(Self::rename_column_indexes(table_name, old_col, &r.to));
+            }
+            statements.push(format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                quoted_table,
+                quote_identifier(&r.from),
+                quote_identifier(&r.to)
+            ));
+        }
+
+        // Find added columns (a rename target is not "added").
         for new_col in new_columns {
+            if rename_to.contains(new_col.name.as_str()) {
+                continue;
+            }
             if !old_columns.iter().any(|c| c.name == new_col.name) {
                 statements.push(format!(
                     "ALTER TABLE {} ADD COLUMN {}",
@@ -106,8 +156,11 @@ impl<'a> DdlGenerator<'a> {
             }
         }
 
-        // Find dropped columns
+        // Find dropped columns (a rename source is not "dropped").
         for old_col in old_columns {
+            if rename_from.contains(old_col.name.as_str()) {
+                continue;
+            }
             if !new_columns.iter().any(|c| c.name == old_col.name) {
                 if old_col.unique {
                     statements.push(Self::unique_column_index_drop(table_name, &old_col.name));
@@ -129,9 +182,15 @@ impl<'a> DdlGenerator<'a> {
             }
         }
 
-        // Find modified columns
+        // Find modified columns. A rename target is matched back to its source
+        // (already renamed above), so a rename combined with a type/nullable/
+        // default/unique change emits the right ALTER against the new name.
         for new_col in new_columns {
-            if let Some(old_col) = old_columns.iter().find(|c| c.name == new_col.name) {
+            let old_match = match rename_to_from.get(new_col.name.as_str()) {
+                Some(from) => old_columns.iter().find(|c| c.name == *from),
+                None => old_columns.iter().find(|c| c.name == new_col.name),
+            };
+            if let Some(old_col) = old_match {
                 // Type change
                 if old_col.column_type != new_col.column_type {
                     statements.push(format!(
@@ -295,6 +354,61 @@ impl<'a> DdlGenerator<'a> {
     fn unique_column_index_drop(table_name: &str, column: &str) -> String {
         let quoted_index = quote_identifier(&Self::unique_column_index_name(table_name, column));
         format!("DROP INDEX IF EXISTS {}", quoted_index)
+    }
+
+    fn alter_index_rename(old_name: &str, new_name: &str) -> String {
+        format!(
+            "ALTER INDEX IF EXISTS {} RENAME TO {}",
+            quote_identifier(old_name),
+            quote_identifier(new_name)
+        )
+    }
+
+    /// Rename a renamed column's auto-managed indexes from the old column name
+    /// to the new one. `RENAME COLUMN` leaves these index names stale, which
+    /// would desync a later unique/index toggle (the drop targets the new-name
+    /// index), so keep them aligned with the column.
+    fn rename_column_indexes(
+        table_name: &str,
+        old_col: &ColumnDefinition,
+        to: &str,
+    ) -> Vec<String> {
+        use crate::types::{ColumnType, VectorIndexMethod};
+        let from = old_col.name.as_str();
+        let mut out = Vec::new();
+        if old_col.unique {
+            out.push(Self::alter_index_rename(
+                &Self::unique_column_index_name(table_name, from),
+                &Self::unique_column_index_name(table_name, to),
+            ));
+        }
+        if old_col.requires_trigram_index() {
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_trgm", table_name, from),
+                &format!("idx_{}_{}_trgm", table_name, to),
+            ));
+        }
+        if matches!(old_col.column_type, ColumnType::Tsvector { .. }) {
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_fts", table_name, from),
+                &format!("idx_{}_{}_fts", table_name, to),
+            ));
+        }
+        if let ColumnType::Vector {
+            index_method: Some(method),
+            ..
+        } = &old_col.column_type
+        {
+            let suffix = match method {
+                VectorIndexMethod::Hnsw => "hnsw",
+                VectorIndexMethod::IvfFlat { .. } => "ivf",
+            };
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_{}", table_name, from, suffix),
+                &format!("idx_{}_{}_{}", table_name, to, suffix),
+            ));
+        }
+        out
     }
 
     /// Emit `CREATE INDEX … USING GIN … gin_trgm_ops` statements for every
@@ -1037,6 +1151,146 @@ mod tests {
         let statements = generator.generate_alter_table("items", &columns, &columns);
 
         assert!(statements.is_empty());
+    }
+
+    // ==================== Column Rename Tests (SYN-485) ====================
+
+    #[test]
+    fn test_no_rename_map_is_drop_plus_add() {
+        // Without a declared rename, a name change is still a destructive
+        // drop + add — this is the behavior the rename map exists to avoid.
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("old_name", ColumnType::String)];
+        let new_columns = vec![ColumnDefinition::new("new_name", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 2);
+        let combined = statements.join(" | ");
+        assert!(combined.contains("ADD COLUMN"));
+        assert!(combined.contains("DROP COLUMN"));
+        assert!(!combined.contains("RENAME COLUMN"));
+    }
+
+    #[test]
+    fn test_declared_rename_preserves_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("old_name", ColumnType::String)];
+        let new_columns = vec![ColumnDefinition::new("new_name", ColumnType::String)];
+        let renames = vec![ColumnRename {
+            from: "old_name".to_string(),
+            to: "new_name".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "products",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        assert_eq!(
+            statements,
+            vec!["ALTER TABLE \"products\" RENAME COLUMN \"old_name\" TO \"new_name\""]
+        );
+        // Crucially, no destructive DROP/ADD.
+        assert!(statements.iter().all(|s| !s.contains("DROP COLUMN")));
+        assert!(statements.iter().all(|s| !s.contains("ADD COLUMN")));
+    }
+
+    #[test]
+    fn test_rename_renames_unique_index() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("sku", ColumnType::String).unique()];
+        let new_columns = vec![ColumnDefinition::new("code", ColumnType::String).unique()];
+        let renames = vec![ColumnRename {
+            from: "sku".to_string(),
+            to: "code".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "products",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        // Index rename precedes the column rename; no unique drop/create churn.
+        assert_eq!(
+            statements,
+            vec![
+                "ALTER INDEX IF EXISTS \"idx_products_sku_unique_live\" RENAME TO \"idx_products_code_unique_live\"",
+                "ALTER TABLE \"products\" RENAME COLUMN \"sku\" TO \"code\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rename_plus_type_change() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("qty", ColumnType::Integer)];
+        let new_columns = vec![ColumnDefinition::new(
+            "quantity",
+            ColumnType::decimal(10, 2),
+        )];
+        let renames = vec![ColumnRename {
+            from: "qty".to_string(),
+            to: "quantity".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "items",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        // Rename first, then the type change addresses the NEW name.
+        assert_eq!(statements.len(), 2);
+        assert_eq!(
+            statements[0],
+            "ALTER TABLE \"items\" RENAME COLUMN \"qty\" TO \"quantity\""
+        );
+        assert!(statements[1].contains("ALTER COLUMN \"quantity\" TYPE"));
+        assert!(statements[1].contains("NUMERIC(10,2)"));
+    }
+
+    #[test]
+    fn test_rename_alongside_genuine_add_and_drop() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![
+            ColumnDefinition::new("a", ColumnType::String),
+            ColumnDefinition::new("obsolete", ColumnType::String),
+        ];
+        let new_columns = vec![
+            ColumnDefinition::new("renamed_a", ColumnType::String),
+            ColumnDefinition::new("brand_new", ColumnType::String),
+        ];
+        let renames = vec![ColumnRename {
+            from: "a".to_string(),
+            to: "renamed_a".to_string(),
+        }];
+
+        let statements =
+            generator.generate_alter_table_with_renames("t", &old_columns, &new_columns, &renames);
+
+        let combined = statements.join(" | ");
+        // `a` is renamed (not dropped), `obsolete` is dropped, `brand_new` added.
+        assert!(combined.contains("RENAME COLUMN \"a\" TO \"renamed_a\""));
+        assert!(combined.contains("DROP COLUMN \"obsolete\""));
+        assert!(combined.contains("ADD COLUMN \"brand_new\""));
+        assert!(!combined.contains("DROP COLUMN \"a\""));
+        assert!(!combined.contains("ADD COLUMN \"renamed_a\""));
     }
 
     // ==================== format_column_definition Tests ====================

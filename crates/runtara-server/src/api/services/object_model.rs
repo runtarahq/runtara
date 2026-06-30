@@ -383,6 +383,17 @@ impl SchemaService {
                 .indexes
                 .as_ref()
                 .map(|idxs| idxs.iter().map(|i| i.clone().into()).collect()),
+            column_renames: request
+                .column_renames
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| runtara_object_store::ColumnRename {
+                    from: r.from,
+                    to: r.to,
+                })
+                .collect(),
+            allow_destructive: request.allow_destructive.unwrap_or(false),
         };
 
         store

@@ -4929,11 +4929,20 @@ export interface UpdateReportRequest {
   tags?: string[];
 }
 
+export interface ColumnRename {
+  from: string;
+  to: string;
+}
+
 export interface UpdateSchemaRequest {
   columns?: ColumnDefinition[] | null;
   description?: string | null;
   indexes?: IndexDefinition[] | null;
   name?: string | null;
+  /** Explicit column renames; preserves data across a name change. */
+  column_renames?: ColumnRename[] | null;
+  /** Acknowledge that the update may drop columns and lose their data. */
+  allow_destructive?: boolean | null;
 }
 
 export interface UpdateSchemaResponse {

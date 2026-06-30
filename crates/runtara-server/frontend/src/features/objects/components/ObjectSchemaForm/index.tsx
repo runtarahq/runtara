@@ -14,6 +14,7 @@ import {
   CreateSchemaRequest,
   UpdateSchemaRequest,
   ColumnDefinition,
+  ColumnRename,
 } from '@/generated/RuntaraRuntimeApi';
 import { SQLPreview } from '../SQLPreview';
 import {
@@ -195,6 +196,16 @@ export function ObjectSchemaDtoForm({
   const [errors, setErrors] = useState<FormErrors>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
+  // Capture each existing column's original name keyed by the field's stable
+  // client-side `__id`, so we can tell a rename (same field, changed name) from
+  // a drop + add when submitting. Initialized once from the loaded fields.
+  const originalNamesByIdRef = React.useRef<Record<string, string> | null>(null);
+  if (originalNamesByIdRef.current === null) {
+    originalNamesByIdRef.current = Object.fromEntries(
+      fields.filter((f) => f.name.trim()).map((f) => [f.__id, f.name])
+    );
+  }
+
   const createObjectSchemaDto = useCreateObjectSchemaDto(connectionId);
   const updateObjectSchemaDto = useUpdateObjectSchemaDto(connectionId);
 
@@ -323,10 +334,45 @@ export function ObjectSchemaDtoForm({
 
     try {
       if (isEditing && objectSchemaDto?.id) {
+        const originalNames = originalNamesByIdRef.current ?? {};
+        const namedFields = fields.filter((f) => f.name.trim());
+
+        // A field that kept its __id but changed name is a rename — declare it
+        // so the column's data is preserved instead of dropped + re-added.
+        const columnRenames: ColumnRename[] = namedFields
+          .filter((f) => {
+            const from = originalNames[f.__id];
+            return from && from !== f.name.trim();
+          })
+          .map((f) => ({ from: originalNames[f.__id], to: f.name.trim() }));
+
+        // A column whose field is gone (removed, or its name cleared) is a real
+        // drop that destroys data — confirm before acknowledging it.
+        const currentIds = new Set(namedFields.map((f) => f.__id));
+        const droppedColumns = Object.entries(originalNames)
+          .filter(([id]) => !currentIds.has(id))
+          .map(([, colName]) => colName);
+
+        let allowDestructive = false;
+        if (droppedColumns.length > 0) {
+          const confirmed = window.confirm(
+            `This will permanently delete the following column(s) and all their ` +
+              `data:\n\n  ${droppedColumns.join(', ')}\n\nThis cannot be undone. Continue?`
+          );
+          if (!confirmed) {
+            return;
+          }
+          allowDestructive = true;
+        }
+
         const updateRequest: UpdateSchemaRequest = {
           name,
           description: description || '',
           columns,
+          ...(columnRenames.length > 0
+            ? { column_renames: columnRenames }
+            : {}),
+          ...(allowDestructive ? { allow_destructive: true } : {}),
         };
 
         await updateObjectSchemaDto.mutateAsync({

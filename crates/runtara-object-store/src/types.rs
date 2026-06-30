@@ -343,6 +343,20 @@ impl ColumnDefinition {
     }
 }
 
+/// An explicit column rename for a schema update.
+///
+/// Schema diffing identifies columns by name, so without a declared rename a
+/// changed name looks like "drop the old column, add a new one" — which
+/// destroys the old column's data. Declaring the rename here makes the update
+/// emit `ALTER TABLE ... RENAME COLUMN`, preserving the data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColumnRename {
+    /// Current column name (must exist in the old schema).
+    pub from: String,
+    /// New column name (must be present in the new column list).
+    pub to: String,
+}
+
 /// Index definition for dynamic schema
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexDefinition {
