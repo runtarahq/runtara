@@ -119,6 +119,12 @@ pub const DEFAULT_BULK_REQUEST_LIMIT: usize = 10_000;
 /// request is rejected so the caller must add an explicit `limit`.
 pub const DEFAULT_AGGREGATE_RESULT_ROW_LIMIT: usize = 100_000;
 
+/// Default cap on the number of result rows returned by `filter_instances`.
+/// `FilterRequest::limit` is silently clamped to this value (mirroring the
+/// aggregate cap) so a caller-supplied `limit` can never force a full-table
+/// materialization.
+pub const DEFAULT_FILTER_RESULT_ROW_LIMIT: usize = 100_000;
+
 /// Builder for StoreConfig
 #[derive(Debug)]
 pub struct StoreConfigBuilder {

@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
+use crate::config::{
+    DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, DEFAULT_FILTER_RESULT_ROW_LIMIT, StoreConfig,
+};
 use crate::error::{ObjectStoreError, Result};
 use crate::instance::{
     Condition, FilterRequest, Instance, OrderByEntry, OrderByTarget, SimpleFilter,
@@ -2154,6 +2156,15 @@ impl ObjectStore {
                 .map_err(ObjectStoreError::validation)?
         };
 
+        // Clamp the caller-supplied LIMIT to a server cap so a large (or
+        // `i64::MAX`) `limit` can't force a full-table materialization. A
+        // negative limit is treated as 0. Mirrors the silent clamp applied by
+        // `aggregate_instances`.
+        let effective_limit = filter
+            .limit
+            .clamp(0, DEFAULT_FILTER_RESULT_ROW_LIMIT as i64);
+        let effective_offset = filter.offset.max(0);
+
         let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
         // Count query: only WHERE params bind, no score params (score column
@@ -2205,8 +2216,8 @@ impl ObjectStore {
             select_query_builder = select_query_builder.bind(param_str);
         }
         let rows = select_query_builder
-            .bind(filter.limit)
-            .bind(filter.offset)
+            .bind(effective_limit)
+            .bind(effective_offset)
             .fetch_all(&self.pool)
             .await?;
 
