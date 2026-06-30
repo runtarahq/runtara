@@ -112,6 +112,26 @@ pub struct EnvironmentHandlerState {
 /// Default request timeout for database operations (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fallback per-instance execution timeout when no value is persisted and the
+/// caller supplies none (1 hour). Generous by design: the timeout is a safety
+/// net for stuck guests, not the completion mechanism — workflows that finish
+/// report completion immediately via the SDK. Override with
+/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS`.
+const FALLBACK_INSTANCE_TIMEOUT_SECS: u64 = 3600;
+
+/// Resolve the default per-instance execution timeout, honoring
+/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS` and falling back to
+/// [`FALLBACK_INSTANCE_TIMEOUT_SECS`]. Used for first launch when the request
+/// omits a timeout, and on wake/resume when no per-instance value was persisted.
+pub fn default_instance_timeout() -> Duration {
+    let secs = std::env::var("RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(FALLBACK_INSTANCE_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
 impl EnvironmentHandlerState {
     /// Create a new environment handler state.
     ///
@@ -539,13 +559,23 @@ pub async fn handle_start_instance(
         warn!(error = %e, "Failed to store instance input (non-fatal)");
     }
 
-    // Associate instance with image in Environment's table (Environment-specific data)
+    // Resolve the effective execution timeout once, so the value persisted for
+    // wake/resume matches the one the monitor enforces on this first run.
+    let timeout = Duration::from_secs(
+        request
+            .timeout_seconds
+            .unwrap_or(default_instance_timeout().as_secs()),
+    );
+
+    // Associate instance with image in Environment's table (Environment-specific data).
+    // The timeout is persisted here so wake/resume can honor the same budget.
     if let Err(e) = db::associate_instance_image(
         &state.pool,
         &instance_id,
         &request.image_id,
         &request.tenant_id,
         env_for_db,
+        Some(timeout.as_secs() as i64),
     )
     .await
     {
@@ -558,7 +588,6 @@ pub async fn handle_start_instance(
     }
 
     // Build launch options (using the shared image bundle)
-    let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300));
     let options = LaunchOptions {
         instance_id: instance_id.clone(),
         tenant_id: request.tenant_id.clone(),
@@ -891,13 +920,23 @@ pub async fn handle_resume_instance(
     // Every image is wasm now, so always read binary directly.
     let bundle_path = PathBuf::from(&image.binary_path);
 
+    // Honor the per-instance timeout persisted at first launch so a long replay
+    // isn't force-killed by a hardcoded default; fall back to the configured
+    // default for instances predating the persisted value.
+    let timeout = db::get_instance_timeout_seconds(&state.pool, &request.instance_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| Duration::from_secs(s as u64))
+        .unwrap_or_else(default_instance_timeout);
+
     // Build launch options with checkpoint and restored env
     let options = LaunchOptions {
         instance_id: request.instance_id.clone(),
         tenant_id: instance.tenant_id.clone(),
         bundle_path,
         input: serde_json::json!({}), // Input was consumed on first run
-        timeout: Duration::from_secs(300),
+        timeout,
         runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: checkpoint_id.clone(),
         env: stored_env, // Restore env from initial launch
@@ -976,7 +1015,7 @@ pub async fn handle_resume_instance(
                 bundle_path: image.bundle_path,
                 started_at: handle.started_at,
                 pid,
-                timeout_seconds: Some(300),
+                timeout_seconds: Some(timeout.as_secs() as i64),
                 process_killed: false,
             };
             if let Err(e) = container_registry.register(&container_info).await {

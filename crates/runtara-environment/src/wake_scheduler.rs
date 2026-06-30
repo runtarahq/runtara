@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
-use crate::handlers::{DrainController, spawn_container_monitor};
+use crate::handlers::{DrainController, default_instance_timeout, spawn_container_monitor};
 use crate::image_registry::ImageRegistry;
 use crate::runner::{LaunchOptions, Runner};
 
@@ -199,13 +199,23 @@ impl WakeScheduler {
         // is a legacy field that in-process compile registration leaves unset.
         let bundle_path = std::path::PathBuf::from(&image.binary_path);
 
+        // Honor the per-instance timeout persisted at first launch so a workflow
+        // that durably sleeps longer than the old hardcoded 300s isn't force-killed
+        // on relaunch; fall back to the configured default when none was persisted.
+        let timeout = db::get_instance_timeout_seconds(&self.pool, &instance.instance_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| Duration::from_secs(s as u64))
+            .unwrap_or_else(default_instance_timeout);
+
         // Build launch options with restored env
         let options = LaunchOptions {
             instance_id: instance.instance_id.clone(),
             tenant_id: instance.tenant_id.clone(),
             bundle_path,
             input: serde_json::json!({}), // Input was already consumed on first run
-            timeout: Duration::from_secs(300),
+            timeout,
             runtara_core_addr: self.config.core_addr.clone(),
             checkpoint_id,
             env: stored_env, // Restore env from initial launch
@@ -269,7 +279,7 @@ impl WakeScheduler {
                     bundle_path: image.bundle_path.clone(),
                     started_at: handle.started_at,
                     pid,
-                    timeout_seconds: Some(300),
+                    timeout_seconds: Some(options.timeout.as_secs() as i64),
                     process_killed: false,
                 };
                 if let Err(e) = container_registry.register(&container_info).await {

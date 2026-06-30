@@ -300,12 +300,18 @@ pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
 // ============================================================================
 
 /// Associate an instance with an image and store custom env vars.
+///
+/// `timeout_seconds` is the effective per-instance execution timeout chosen at
+/// first launch. It is persisted here (rather than only in the ephemeral
+/// `container_registry`, which is cleaned up when the guest process exits) so
+/// that wake/resume can honor the same budget instead of a hardcoded default.
 pub async fn associate_instance_image(
     pool: &PgPool,
     instance_id: &str,
     image_id: &str,
     tenant_id: &str,
     env: Option<&std::collections::HashMap<String, String>>,
+    timeout_seconds: Option<i64>,
 ) -> Result<(), sqlx::Error> {
     let env_json = env
         .filter(|e| !e.is_empty())
@@ -313,22 +319,41 @@ pub async fn associate_instance_image(
 
     sqlx::query(
         r#"
-        INSERT INTO instance_images (instance_id, image_id, tenant_id, env, created_at)
-        VALUES ($1, $2, $3, $4, NOW())
+        INSERT INTO instance_images (instance_id, image_id, tenant_id, env, timeout_seconds, created_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
         ON CONFLICT (instance_id) DO UPDATE SET
             image_id = $2,
             tenant_id = $3,
-            env = $4
+            env = $4,
+            timeout_seconds = $5
         "#,
     )
     .bind(instance_id)
     .bind(image_id)
     .bind(tenant_id)
     .bind(env_json)
+    .bind(timeout_seconds)
     .execute(pool)
     .await?;
 
     Ok(())
+}
+
+/// Get the effective per-instance execution timeout recorded at first launch.
+///
+/// Returns `None` when no value was persisted (e.g. instances created before
+/// this column existed); callers should fall back to a configured default.
+pub async fn get_instance_timeout_seconds(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let result: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT timeout_seconds FROM instance_images WHERE instance_id = $1")
+            .bind(instance_id)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(result.and_then(|(timeout,)| timeout))
 }
 
 /// Get the image ID for an instance.
