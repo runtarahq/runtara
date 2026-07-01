@@ -1,6 +1,6 @@
 {
   "input": {
-    "include_time": true,
+    "includeTime": true,
     "timezone": "UTC"
   },
   "expect": {

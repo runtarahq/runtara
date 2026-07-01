@@ -244,10 +244,13 @@ struct InputContainerArgs {
 
 /// Field attributes for CapabilityOutput derive
 #[derive(Debug, FromField)]
-#[darling(attributes(field))]
+#[darling(attributes(field), forward_attrs(serde))]
 struct OutputFieldArgs {
     ident: Option<syn::Ident>,
     ty: syn::Type,
+    /// Forwarded serde attributes so the emitted metadata field name honors
+    /// `#[serde(rename = "...")]` — otherwise it diverges from the wire name.
+    attrs: Vec<syn::Attribute>,
     #[darling(default)]
     display_name: Option<String>,
     #[darling(default)]
@@ -635,6 +638,11 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
         }
     };
 
+    // A container `#[serde(rename_all = ...)]` transforms every field's wire
+    // name; per-field `#[serde(rename)]` overrides it. Read it once here so the
+    // emitted metadata name matches what serde actually deserializes.
+    let container_rename_all = serde_rename_all(&input.attrs);
+
     let field_metas: Vec<_> = fields
         .iter()
         .filter(|f| !f.skip)
@@ -643,7 +651,18 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
             f.ident.as_ref().map(|i| i.to_string()) != Some("connection_id".to_string())
         })
         .map(|f| {
-            let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let name = f
+                .ident
+                .as_ref()
+                .map(|i| {
+                    capability_wire_name(
+                        &i.to_string(),
+                        &f.attrs,
+                        container_rename_all.as_deref(),
+                        true, // inputs: a serde alias equal to the ident keeps the snake name
+                    )
+                })
+                .unwrap_or_default();
             let type_str = type_to_string(&f.ty);
             let (inner_type, is_option_type) = unwrap_option_type(&type_str);
             // Field is optional if it's Option<T>, has #[field(default = "...")], or has #[serde(default)]
@@ -1024,6 +1043,148 @@ fn has_serde_default(attrs: &[syn::Attribute]) -> bool {
     false
 }
 
+/// Compute a capability field's on-the-wire name, honoring serde renames so the
+/// emitted metadata matches exactly what the runtime deserializer accepts (for
+/// inputs) and produces (for outputs). Per-field `#[serde(rename = "...")]`
+/// wins; otherwise a container `#[serde(rename_all = "...")]` rule is applied to
+/// the ident; otherwise the raw ident is used.
+///
+/// The macro previously always emitted the raw Rust ident, so any renamed field
+/// advertised a name the runtime never used — input mappings silently failed
+/// ("field required") and output references resolved to null. See the
+/// compression/datetime field-naming bugs.
+fn capability_wire_name(
+    ident: &str,
+    field_attrs: &[syn::Attribute],
+    container_rename_all: Option<&str>,
+    honor_aliases: bool,
+) -> String {
+    // The primary wire name serde uses (per-field rename wins over a container
+    // rename_all rule; otherwise the ident).
+    let primary = serde_rename(field_attrs)
+        .or_else(|| container_rename_all.map(|rule| apply_rename_rule(ident, rule)));
+
+    match primary {
+        // No rename in effect → the ident is the wire name.
+        None => ident.to_string(),
+        Some(ref p) if p == ident => ident.to_string(),
+        Some(p) => {
+            // A rename is in effect, so the ident normally is NOT accepted. But
+            // for inputs a `#[serde(alias = "<ident>")]` keeps the snake_case
+            // ident working (deserialize-only) — that's a deliberate backward-
+            // compat name we must keep advertising, not silently flip to the
+            // renamed form (which would invalidate existing workflow mappings).
+            // Aliases don't affect serialization, so outputs always use the
+            // renamed (serialized) name.
+            if honor_aliases && serde_aliases(field_attrs).iter().any(|a| a == ident) {
+                ident.to_string()
+            } else {
+                p
+            }
+        }
+    }
+}
+
+/// Collect all `#[serde(alias = "...")]` names on a field (serde allows several).
+fn serde_aliases(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for attr in attrs {
+        for meta in serde_metas(attr) {
+            if let Some(v) = meta_str_value(&meta, "alias") {
+                aliases.push(v);
+            }
+        }
+    }
+    aliases
+}
+
+/// Parse a per-field `#[serde(rename = "X")]` (the simple form used across the
+/// agents). The `rename(serialize = .., deserialize = ..)` split form falls back
+/// to the raw ident — no capability struct uses it.
+fn serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
+    serde_string_arg(attrs, "rename")
+}
+
+/// Parse a container-level `#[serde(rename_all = "X")]`.
+fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
+    serde_string_arg(attrs, "rename_all")
+}
+
+/// Parse the comma-separated `Meta` items inside `#[serde(...)]`. Using the full
+/// `Meta` grammar (Path / NameValue / List) is robust to value-bearing keys in
+/// any order — unlike `parse_nested_meta`, which errors when a preceding
+/// `key = "value"` isn't consumed by the visitor.
+fn serde_metas(attr: &syn::Attribute) -> Vec<syn::Meta> {
+    if !attr.path().is_ident("serde") {
+        return Vec::new();
+    }
+    attr.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map(|p| p.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Extract a `key = "value"` string from a serde `Meta` item.
+fn meta_str_value(meta: &syn::Meta, key: &str) -> Option<String> {
+    if let syn::Meta::NameValue(nv) = meta
+        && nv.path.is_ident(key)
+        && let syn::Expr::Lit(el) = &nv.value
+        && let syn::Lit::Str(s) = &el.lit
+    {
+        return Some(s.value());
+    }
+    None
+}
+
+/// Extract a string-valued serde argument (`#[serde(<key> = "value")]`).
+fn serde_string_arg(attrs: &[syn::Attribute], key: &str) -> Option<String> {
+    for attr in attrs {
+        for meta in serde_metas(attr) {
+            if let Some(v) = meta_str_value(&meta, key) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Apply a serde `rename_all` rule to a snake_case field ident, matching
+/// serde_derive's field-name rules (`internals/case.rs` `apply_to_field`).
+fn apply_rename_rule(field: &str, rule: &str) -> String {
+    fn pascal(field: &str) -> String {
+        let mut out = String::new();
+        let mut capitalize = true;
+        for ch in field.chars() {
+            if ch == '_' {
+                capitalize = true;
+            } else if capitalize {
+                out.push(ch.to_ascii_uppercase());
+                capitalize = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+    match rule {
+        // serde treats field idents as already-lowercase, so these are identity.
+        "lowercase" | "snake_case" => field.to_string(),
+        "UPPERCASE" | "SCREAMING_SNAKE_CASE" => field.to_ascii_uppercase(),
+        "PascalCase" => pascal(field),
+        "camelCase" => {
+            let p = pascal(field);
+            let mut chars = p.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+                None => p,
+            }
+        }
+        "kebab-case" => field.replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => field.to_ascii_uppercase().replace('_', "-"),
+        // Unknown/unhandled rule: keep the ident rather than fabricate a wrong name.
+        _ => field.to_string(),
+    }
+}
+
 /// Analyze a type string and extract nested type information
 /// Returns (is_nullable, items_type, nested_type)
 fn analyze_type_for_nesting(type_str: &str) -> (bool, Option<String>, Option<String>) {
@@ -1107,10 +1268,26 @@ pub fn derive_capability_output(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Honor serde renames so output field metadata matches the wire name the
+    // capability actually serializes — otherwise downstream `steps.X.outputs.*`
+    // references resolve against a name the runtime never produces.
+    let container_rename_all = serde_rename_all(&input.attrs);
+
     let field_metas: Vec<_> = fields
         .iter()
         .map(|f| {
-            let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let name = f
+                .ident
+                .as_ref()
+                .map(|i| {
+                    capability_wire_name(
+                        &i.to_string(),
+                        &f.attrs,
+                        container_rename_all.as_deref(),
+                        false, // outputs use the serialized name; aliases don't apply
+                    )
+                })
+                .unwrap_or_default();
             let type_str = type_to_string(&f.ty);
 
             // Analyze the type for nested type information
@@ -1570,6 +1747,102 @@ mod tests {
     }
 
     // ========================================================================
+    // Tests for serde wire-name resolution (capability_wire_name & friends)
+    // ========================================================================
+
+    #[test]
+    fn rename_rule_camel_case() {
+        assert_eq!(apply_rename_rule("start_date", "camelCase"), "startDate");
+        assert_eq!(apply_rename_rule("exact_ms", "camelCase"), "exactMs");
+        assert_eq!(
+            apply_rename_rule("is_milliseconds", "camelCase"),
+            "isMilliseconds"
+        );
+        assert_eq!(apply_rename_rule("mime_type", "camelCase"), "mimeType");
+        // Single word is unchanged under camelCase.
+        assert_eq!(apply_rename_rule("content", "camelCase"), "content");
+    }
+
+    #[test]
+    fn rename_rule_other_cases() {
+        assert_eq!(apply_rename_rule("file_path", "kebab-case"), "file-path");
+        assert_eq!(
+            apply_rename_rule("file_path", "SCREAMING_SNAKE_CASE"),
+            "FILE_PATH"
+        );
+        assert_eq!(apply_rename_rule("file_path", "PascalCase"), "FilePath");
+        // snake_case / lowercase are identity for snake idents; unknown falls back.
+        assert_eq!(apply_rename_rule("file_path", "snake_case"), "file_path");
+        assert_eq!(apply_rename_rule("file_path", "lowercase"), "file_path");
+        assert_eq!(apply_rename_rule("file_path", "bogus"), "file_path");
+    }
+
+    #[test]
+    fn per_field_rename_wins_over_container_and_ident() {
+        let attrs: Vec<syn::Attribute> = vec![
+            parse_quote!(#[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]),
+        ];
+        // Per-field rename beats a conflicting container rule (output: no aliases).
+        assert_eq!(
+            capability_wire_name("mime_type", &attrs, Some("kebab-case"), false),
+            "mimeType"
+        );
+        assert_eq!(serde_rename(&attrs).as_deref(), Some("mimeType"));
+    }
+
+    #[test]
+    fn container_rename_all_applies_without_per_field() {
+        let no_attrs: Vec<syn::Attribute> = vec![];
+        assert_eq!(
+            capability_wire_name("start_date", &no_attrs, Some("camelCase"), true),
+            "startDate"
+        );
+        // No rename anywhere → raw ident.
+        assert_eq!(
+            capability_wire_name("start_date", &no_attrs, None, true),
+            "start_date"
+        );
+    }
+
+    #[test]
+    fn input_alias_matching_ident_keeps_snake_name() {
+        // object_model pattern: rename to camelCase but keep a snake alias so the
+        // snake name still deserializes. Inputs must keep advertising the snake
+        // ident (existing workflows map it); outputs use the serialized name.
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(
+            #[serde(default, rename = "scoreExpression", alias = "score_expression", skip_serializing_if = "Option::is_none")]
+        )];
+        assert_eq!(
+            capability_wire_name("score_expression", &attrs, None, true),
+            "score_expression"
+        );
+        assert_eq!(
+            capability_wire_name("score_expression", &attrs, None, false),
+            "scoreExpression"
+        );
+        assert_eq!(serde_aliases(&attrs), vec!["score_expression".to_string()]);
+    }
+
+    #[test]
+    fn input_rename_without_matching_alias_uses_wire_name() {
+        // datetime pattern: rename with no alias → the snake ident never
+        // deserialized, so advertise the renamed (wire) name even for inputs.
+        let attrs: Vec<syn::Attribute> =
+            vec![parse_quote!(#[serde(default, rename = "startDate")])];
+        assert_eq!(
+            capability_wire_name("start_date", &attrs, None, true),
+            "startDate"
+        );
+    }
+
+    #[test]
+    fn serde_rename_all_is_parsed() {
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[serde(rename_all = "camelCase")])];
+        assert_eq!(serde_rename_all(&attrs).as_deref(), Some("camelCase"));
+        let none: Vec<syn::Attribute> = vec![parse_quote!(#[serde(default)])];
+        assert_eq!(serde_rename_all(&none), None);
+    }
+
     // Tests for has_serde_default
     // ========================================================================
 
