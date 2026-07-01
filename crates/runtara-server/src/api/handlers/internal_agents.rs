@@ -79,6 +79,36 @@ pub async fn execute_agent_capability(
     run_agent(&tenant_id, &module, &capability_id, input).await
 }
 
+/// Extract the connection id an agent call should resolve credentials for.
+///
+/// Prefers the top-level `connection_id` (stamped by the workflow stdlib) and
+/// falls back to `_connection.connection_id`. Native-forward agents (sftp, and
+/// any future one) send the id nested under `_connection`: their typed input
+/// struct has no `connection_id` field, so the top-level copy is dropped when
+/// the component re-serializes before forwarding. The id is an opaque reference
+/// — never a credential — so accepting it from either location keeps host-side
+/// resolution working without ever putting parameters through the WASM sandbox.
+///
+/// Blank / whitespace-only ids are treated as absent so the fallback still fires.
+///
+/// Pure: no I/O, no global state — exercised directly by the unit tests below.
+fn connection_id_from_input(input: &Value) -> Option<String> {
+    fn non_empty(value: &Value) -> Option<String> {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    input.get("connection_id").and_then(non_empty).or_else(|| {
+        input
+            .get("_connection")
+            .and_then(|c| c.get("connection_id"))
+            .and_then(non_empty)
+    })
+}
+
 /// Shared agent execution logic: resolve connection, execute agent.
 async fn run_agent(
     tenant_id: &str,
@@ -86,27 +116,46 @@ async fn run_agent(
     capability_id: &str,
     mut input: Value,
 ) -> (StatusCode, Json<Value>) {
-    // Resolve connection_id → full _connection via connection service
-    if let Some(conn_id) = input
-        .get("connection_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-    {
+    // Credentials are resolved host-side from an opaque connection id and never
+    // travel through the WASM sandbox — that boundary is the whole point:
+    // workflows carry a reference, never secrets. Accept the id from either the
+    // top-level `connection_id` (stamped by the workflow stdlib) or the nested
+    // `_connection.connection_id` (what native-forward agents like sftp send,
+    // since their typed input struct drops the top-level field). On resolve we
+    // overwrite `_connection` wholesale with the authoritative host-resolved
+    // parameters, so anything the guest placed in `_connection.parameters` is
+    // discarded — a buggy or hostile component cannot influence credentials.
+    if let Some(conn_id) = connection_id_from_input(&input) {
         let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").unwrap_or_default();
 
-        if !connection_service_url.is_empty() {
-            match fetch_connection_async(&connection_service_url, tenant_id, &conn_id).await {
-                Ok(connection_data) => {
-                    if let Some(obj) = input.as_object_mut() {
-                        obj.insert("_connection".to_string(), connection_data);
-                    }
+        if connection_service_url.is_empty() {
+            // The guest handed us a connection id but the host has no service to
+            // resolve it against. Fail loudly instead of forwarding the empty
+            // placeholder parameters — the agent would otherwise reject them
+            // with a misleading "missing field host" style deserialization error
+            // that points at the connection rather than this misconfiguration.
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": false,
+                    "error": format!(
+                        "cannot resolve connection '{conn_id}': CONNECTION_SERVICE_URL not set"
+                    ),
+                })),
+            );
+        }
+
+        match fetch_connection_async(&connection_service_url, tenant_id, &conn_id).await {
+            Ok(connection_data) => {
+                if let Some(obj) = input.as_object_mut() {
+                    obj.insert("_connection".to_string(), connection_data);
                 }
-                Err(err) => {
-                    return (
-                        StatusCode::OK,
-                        Json(json!({ "success": false, "error": err })),
-                    );
-                }
+            }
+            Err(err) => {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "success": false, "error": err })),
+                );
             }
         }
     }
@@ -237,6 +286,70 @@ mod tests {
         let snap = snapshot(Some(r#"{"agents":[]}"#));
         assert!(gate_internal_agent(&snap, "http").is_err());
         assert!(gate_internal_agent(&snap, "csv").is_err());
+    }
+
+    #[test]
+    fn connection_id_prefers_top_level() {
+        let input = json!({
+            "path": "/",
+            "connection_id": "top-level-id",
+            "_connection": { "connection_id": "nested-id", "parameters": {} }
+        });
+        assert_eq!(
+            connection_id_from_input(&input).as_deref(),
+            Some("top-level-id")
+        );
+    }
+
+    #[test]
+    fn connection_id_falls_back_to_nested() {
+        // This is exactly what native-forward agents (sftp) send: the top-level
+        // `connection_id` was dropped when the component re-serialized its typed
+        // input struct, leaving only `_connection.connection_id`. Without the
+        // fallback the host skips resolution and forwards empty parameters,
+        // which the sftp agent rejects with "missing field `host`".
+        let input = json!({
+            "path": "/",
+            "_connection": {
+                "connection_id": "nested-id",
+                "integration_id": "",
+                "parameters": {}
+            }
+        });
+        assert_eq!(
+            connection_id_from_input(&input).as_deref(),
+            Some("nested-id")
+        );
+    }
+
+    #[test]
+    fn connection_id_blank_top_level_falls_back_to_nested() {
+        let input = json!({
+            "connection_id": "   ",
+            "_connection": { "connection_id": "nested-id" }
+        });
+        assert_eq!(
+            connection_id_from_input(&input).as_deref(),
+            Some("nested-id")
+        );
+    }
+
+    #[test]
+    fn connection_id_absent_when_neither_present() {
+        assert_eq!(connection_id_from_input(&json!({ "path": "/" })), None);
+        // Present but blank in both places → treated as absent (no resolution).
+        assert_eq!(
+            connection_id_from_input(&json!({
+                "connection_id": "",
+                "_connection": { "connection_id": "  " }
+            })),
+            None
+        );
+        // `_connection` without a connection_id at all.
+        assert_eq!(
+            connection_id_from_input(&json!({ "_connection": { "parameters": {} } })),
+            None
+        );
     }
 
     #[test]
