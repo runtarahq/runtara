@@ -67,6 +67,7 @@ pub enum EventType {
     WorkflowUpdated,
     WorkflowDeleted,
     WorkflowCompiled,
+    WorkflowVersionRegistered,
     // Execution
     ExecutionStarted,
     ExecutionCompleted,
@@ -97,6 +98,7 @@ impl EventType {
             EventType::WorkflowUpdated => "workflow.updated",
             EventType::WorkflowDeleted => "workflow.deleted",
             EventType::WorkflowCompiled => "workflow.compiled",
+            EventType::WorkflowVersionRegistered => "workflow.version_registered",
             EventType::ExecutionStarted => "execution.started",
             EventType::ExecutionCompleted => "execution.completed",
             EventType::ExecutionFailed => "execution.failed",
@@ -570,6 +572,10 @@ mod tests {
         assert_eq!(EventType::WorkflowUpdated.as_str(), "workflow.updated");
         assert_eq!(EventType::WorkflowDeleted.as_str(), "workflow.deleted");
         assert_eq!(EventType::WorkflowCompiled.as_str(), "workflow.compiled");
+        assert_eq!(
+            EventType::WorkflowVersionRegistered.as_str(),
+            "workflow.version_registered"
+        );
         assert_eq!(EventType::ExecutionStarted.as_str(), "execution.started");
         assert_eq!(
             EventType::ExecutionCompleted.as_str(),

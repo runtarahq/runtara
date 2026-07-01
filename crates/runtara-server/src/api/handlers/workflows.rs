@@ -172,6 +172,15 @@ pub async fn create_workflow_handler(
                     .resource(workflow_dto.id.as_str(), "workflow")
                     .source(source),
             );
+            // Creating a workflow also creates its first immutable version row — the same
+            // "a new workflow version was created" transition `update_workflow_handler` reports
+            // for every subsequent version.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowVersionRegistered, &ctx)
+                    .resource(workflow_dto.id.as_str(), "workflow")
+                    .properties(json!({ "version": workflow_dto.last_version_number }))
+                    .source(source),
+            );
             let response =
                 ApiResponse::success_with_message("Workflow created successfully", workflow_dto);
             (
@@ -312,6 +321,16 @@ pub async fn update_workflow_handler(
             events.emit(
                 ProductEvent::from_auth(EventType::WorkflowUpdated, &ctx)
                     .resource(&workflow_id, "workflow")
+                    .source(source),
+            );
+            // Distinct from `workflow.updated`: this handler always creates a new immutable
+            // version row (unlike `patch_version_graph_handler`, which mutates one in place and
+            // does not create a version), so this is the one place that genuinely reports
+            // "a new workflow version was created".
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowVersionRegistered, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .properties(json!({ "version": result.0 }))
                     .source(source),
             );
             emit_capability_used(&events, &ctx, source, &workflow_id, &capabilities);
