@@ -519,7 +519,8 @@ struct AppState {
     /// server-side view matches what the dispatcher actually loaded.
     agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     /// Non-blocking sink for product-analytics events. Handlers `emit` onto it; a
-    /// background drain batches the events into `product_events`.
+    /// background drain batches the events and ships them to Valkey for smo-management's
+    /// per-tenant consumer to persist into its `product_events` table.
     events: product_events::ProductEventSink,
 }
 
@@ -1208,35 +1209,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Product-events retention sweeper (45-day default). Server DB, no Valkey needed.
-    {
-        let cleanup_pool = pool.clone();
-        let cleanup_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move {
-            let cfg =
-                workers::product_events_cleanup_worker::ProductEventsCleanupWorkerConfig::from_env(
-                );
-            let worker = workers::product_events_cleanup_worker::ProductEventsCleanupWorker::new(
-                cleanup_pool,
-                cfg,
-                cleanup_shutdown,
-            );
-            worker.run().await;
-        });
-    }
-
     // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
     // signal exists. The channel + sink were built earlier (so the sink could be injected
-    // into the connections crate); the drain owns `product_event_rx` and batches into
-    // `product_events`.
-    {
-        let drain = product_events::ProductEventDrain::new(
-            pool.clone(),
-            product_event_rx,
-            product_events_config,
-            shutdown_signal.clone(),
-        );
-        tokio::spawn(drain.run());
+    // into the connections crate); the drain owns `product_event_rx` and ships batches to
+    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
+    // non-blocking, so the drain reuses the shared connection manager rather than needing a
+    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
+    match redis_manager.clone() {
+        Some(manager) => {
+            let drain = product_events::ProductEventDrain::new(
+                manager,
+                product_event_rx,
+                product_events_config,
+                shutdown_signal.clone(),
+            );
+            tokio::spawn(drain.run());
+        }
+        None => {
+            println!(
+                "⚠ Valkey not configured, skipping product events drain; \
+                 emitted events will fill the in-memory channel and then be dropped"
+            );
+        }
     }
 
     // Initialize Valkey-based workers (optional but recommended)

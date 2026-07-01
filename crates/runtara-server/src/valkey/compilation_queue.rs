@@ -617,6 +617,7 @@ mod tests {
     fn sample_product_event() -> crate::product_events::ProductEvent {
         use crate::product_events::{EventSource, EventType, ProductEvent};
         ProductEvent {
+            event_id: uuid::Uuid::new_v4(),
             occurred_at: chrono::Utc::now(),
             event_type: EventType::WorkflowCompiled,
             event_version: 1,

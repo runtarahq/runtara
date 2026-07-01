@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use uuid::Uuid;
 
 use crate::auth::{AuthContext, AuthMethod};
 use crate::shutdown::ShutdownSignal;
@@ -115,6 +116,11 @@ impl EventType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductEvent {
+    /// Generated here (not left to a DB default) because the event now crosses a process
+    /// boundary via an at-least-once Valkey stream before it's inserted: smo-management's
+    /// consumer dedupes retried deliveries with `ON CONFLICT (event_id) DO NOTHING`, which only
+    /// works if the id is stable across redeliveries.
+    pub event_id: Uuid,
     pub occurred_at: DateTime<Utc>, // stamped in ::new(), builder-overridable
     pub event_type: EventType,      // -> "workflow.created" etc. via as_str() at INSERT
     pub event_version: i16,         // default 1
@@ -133,6 +139,7 @@ pub struct ProductEvent {
 impl ProductEvent {
     pub fn new(event_type: EventType) -> Self {
         Self {
+            event_id: Uuid::new_v4(),
             occurred_at: Utc::now(),
             event_type,
             event_version: 1,
@@ -216,6 +223,32 @@ impl ProductEvent {
         self.source = Some(source);
         self
     }
+
+    /// Wire JSON for the Valkey stream payload. Deliberately NOT `derive(Serialize)`: that
+    /// derive serializes the enum fields by variant name (e.g. `"WorkflowCreated"`) for the
+    /// unrelated internal round-trip through the compilation queue (see
+    /// `valkey::compilation_queue::CompilationRequest::product_event`), whereas smo-management's
+    /// consumer inserts straight into `TEXT` columns and expects the dotted wire strings
+    /// (`"workflow.created"`) already used by `EventType::as_str()` elsewhere. This method is
+    /// the one place that builds that external, dotted-string wire format.
+    fn to_wire_json(&self) -> Value {
+        serde_json::json!({
+            "event_id": self.event_id,
+            "occurred_at": self.occurred_at,
+            "event_type": self.event_type.as_str(),
+            "event_version": self.event_version,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "actor_id": self.actor_id,
+            "actor_type": self.actor_type.map(ActorType::as_str),
+            "resource_id": self.resource_id,
+            "resource_type": self.resource_type,
+            "properties": self.properties,
+            "session_id": self.session_id,
+            "request_id": self.request_id,
+            "source": self.source.map(EventSource::as_str),
+        })
+    }
 }
 
 /// Default in-memory channel capacity — events buffered before `emit` drops on backpressure.
@@ -224,6 +257,18 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 const DEFAULT_FLUSH_ROWS: usize = 200;
 /// Default max time a partial batch waits before flushing.
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 2_000;
+/// Default approximate cap on the Valkey stream length (`XADD ... MAXLEN ~`). Bounds memory if
+/// smo-management's consumer falls behind or a tenant's Valkey is unreachable — oldest entries
+/// are trimmed first, so sustained backpressure silently drops old events rather than growing
+/// the stream without bound, consistent with this pipeline's existing drop-on-backpressure stance.
+const DEFAULT_STREAM_MAXLEN: usize = 200_000;
+
+/// Valkey stream key product events are `XADD`ed to. Fixed, not tenant-prefixed: this runs
+/// against runtara's local, single-tenant Valkey instance (like the compilation queue), and the
+/// Valkey instance itself is the tenant boundary — see smo-management's `valkey::ValkeyWriter`
+/// doc comment. smo-management's per-tenant consumer reads this same key from each tenant's
+/// Valkey.
+const STREAM_KEY: &str = "runtara:product_events:stream";
 
 /// Tunables for the product-events pipeline. Every field is an independent, optional env
 /// var; unset (or unparseable) means "use the default". Most tenants run entirely on
@@ -237,6 +282,8 @@ pub struct ProductEventConfig {
     pub flush_rows: Option<usize>,
     /// `RUNTARA_PRODUCT_EVENTS_FLUSH_INTERVAL_MS` — flush a partial batch after this long.
     pub flush_interval_ms: Option<u64>,
+    /// `RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN` — approximate cap on the Valkey stream length.
+    pub stream_maxlen: Option<usize>,
 }
 
 impl ProductEventConfig {
@@ -246,6 +293,7 @@ impl ProductEventConfig {
             channel_capacity: parse_env("RUNTARA_PRODUCT_EVENTS_CHANNEL_CAPACITY"),
             flush_rows: parse_env("RUNTARA_PRODUCT_EVENTS_FLUSH_ROWS"),
             flush_interval_ms: parse_env("RUNTARA_PRODUCT_EVENTS_FLUSH_INTERVAL_MS"),
+            stream_maxlen: parse_env("RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN"),
         }
     }
 
@@ -263,6 +311,11 @@ impl ProductEventConfig {
     pub fn flush_interval(&self) -> Duration {
         Duration::from_millis(self.flush_interval_ms.unwrap_or(DEFAULT_FLUSH_INTERVAL_MS))
     }
+
+    /// Effective approximate stream length cap.
+    pub fn stream_maxlen(&self) -> usize {
+        self.stream_maxlen.unwrap_or(DEFAULT_STREAM_MAXLEN)
+    }
 }
 
 /// Read and parse a single env var, returning `None` if unset or unparseable.
@@ -271,9 +324,13 @@ fn parse_env<T: std::str::FromStr>(key: &str) -> Option<T> {
 }
 
 /// Single background consumer of the product-event channel. Owns the `Receiver`, accumulates
-/// events into a batch, and writes each batch to Postgres in one multi-row INSERT.
+/// events into a batch, and ships each batch to Valkey as a pipelined `XADD` per event onto
+/// [`STREAM_KEY`]. smo-management runs a per-tenant consumer group against that stream and is
+/// the one that actually persists events — this drain no longer touches Postgres at all.
 pub struct ProductEventDrain {
-    pool: PgPool,
+    /// Shared, non-blocking connection manager. `XADD` is non-blocking, so (unlike the
+    /// consumer side) this can safely reuse the process-wide multiplexed manager.
+    manager: ConnectionManager,
     rx: mpsc::Receiver<ProductEvent>,
     config: ProductEventConfig,
     shutdown: ShutdownSignal,
@@ -281,13 +338,13 @@ pub struct ProductEventDrain {
 
 impl ProductEventDrain {
     pub fn new(
-        pool: PgPool,
+        manager: ConnectionManager,
         rx: mpsc::Receiver<ProductEvent>,
         config: ProductEventConfig,
         shutdown: ShutdownSignal,
     ) -> Self {
         Self {
-            pool,
+            manager,
             rx,
             config,
             shutdown,
@@ -343,40 +400,44 @@ impl ProductEventDrain {
         }
     }
 
-    /// Best-effort multi-row INSERT. `event_id`/`ingested_at` are left to DB defaults. On
-    /// error, log the dropped count and move on — never block or retry (a poisoned batch must
-    /// not wedge the drain).
+    /// Best-effort pipelined `XADD`, one entry per event, in a single round trip. A failed
+    /// serialization drops just that event (logged); a failed pipeline exec drops the whole
+    /// batch (logged) — never block or retry, a poisoned batch must not wedge the drain.
     async fn flush(&self, batch: &[ProductEvent]) {
         if batch.is_empty() {
             return;
         }
 
-        let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO product_events \
-             (occurred_at, event_type, event_version, tenant_id, user_id, actor_id, actor_type, \
-              resource_id, resource_type, properties, session_id, request_id, source) ",
-        );
-        qb.push_values(batch, |mut b, ev| {
-            b.push_bind(ev.occurred_at)
-                .push_bind(ev.event_type.as_str())
-                .push_bind(ev.event_version)
-                .push_bind(ev.tenant_id.as_str())
-                .push_bind(ev.user_id.as_deref())
-                .push_bind(ev.actor_id.as_deref())
-                .push_bind(ev.actor_type.map(|a| a.as_str()))
-                .push_bind(ev.resource_id.as_deref())
-                .push_bind(ev.resource_type.as_deref())
-                .push_bind(ev.properties.clone())
-                .push_bind(ev.session_id.as_deref())
-                .push_bind(ev.request_id.as_deref())
-                .push_bind(ev.source.map(|s| s.as_str()));
-        });
+        let maxlen = redis::streams::StreamMaxlen::Approx(self.config.stream_maxlen());
+        let mut pipe = redis::pipe();
+        let mut queued = 0usize;
+        for ev in batch {
+            match serde_json::to_string(&ev.to_wire_json()) {
+                Ok(payload) => {
+                    pipe.xadd_maxlen(STREAM_KEY, maxlen, "*", &[("data", payload.as_str())])
+                        .ignore();
+                    queued += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        event_type = ev.event_type.as_str(),
+                        "product event dropped: failed to serialize"
+                    );
+                }
+            }
+        }
 
-        if let Err(e) = qb.build().execute(&self.pool).await {
+        if queued == 0 {
+            return;
+        }
+
+        let mut conn = self.manager.clone();
+        if let Err(e) = pipe.query_async::<()>(&mut conn).await {
             tracing::warn!(
                 error = %e,
-                rows = batch.len(),
-                "product event batch insert failed; dropping batch"
+                rows = queued,
+                "product event batch XADD failed; dropping batch"
             );
         }
     }
@@ -482,6 +543,7 @@ mod tests {
     /// don't depend on the global config singleton (`new` reads `config::tenant_id()`).
     fn sample_event() -> ProductEvent {
         ProductEvent {
+            event_id: Uuid::new_v4(),
             occurred_at: Utc::now(),
             event_type: EventType::WorkflowCreated,
             event_version: 1,
@@ -628,6 +690,7 @@ mod tests {
             cfg.flush_interval(),
             Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS)
         );
+        assert_eq!(cfg.stream_maxlen(), DEFAULT_STREAM_MAXLEN);
     }
 
     #[test]
@@ -636,10 +699,34 @@ mod tests {
             channel_capacity: Some(5),
             flush_rows: Some(7),
             flush_interval_ms: Some(50),
+            stream_maxlen: Some(9),
         };
         assert_eq!(cfg.channel_capacity(), 5);
         assert_eq!(cfg.flush_rows(), 7);
         assert_eq!(cfg.flush_interval(), Duration::from_millis(50));
+        assert_eq!(cfg.stream_maxlen(), 9);
+    }
+
+    // ---- wire JSON (Valkey stream payload) uses dotted strings, not enum variant names ----
+
+    #[test]
+    fn to_wire_json_uses_dotted_strings_not_variant_names() {
+        let e = sample_event()
+            .user_actor("user-1", "jti-9", ActorType::ApiKey)
+            .source(EventSource::Api);
+        let wire = e.to_wire_json();
+        assert_eq!(wire["event_id"], serde_json::json!(e.event_id));
+        assert_eq!(wire["event_type"], "workflow.created");
+        assert_eq!(wire["actor_type"], "api_key");
+        assert_eq!(wire["source"], "api");
+    }
+
+    #[test]
+    fn to_wire_json_encodes_unset_optionals_as_null() {
+        let wire = sample_event().to_wire_json();
+        assert!(wire["actor_type"].is_null());
+        assert!(wire["source"].is_null());
+        assert!(wire["user_id"].is_null());
     }
 
     // ---- sink emit (non-blocking, drop-on-backpressure) ----
@@ -670,21 +757,83 @@ mod tests {
         sink.emit(sample_event()); // closed -> dropped, must not panic
     }
 
-    // ---- drain graceful shutdown (empty batch never touches the pool) ----
+    // ---- drain graceful shutdown (empty batch never touches Valkey) ----
 
     #[tokio::test]
-    async fn drain_exits_on_shutdown_without_touching_db() {
-        // Lazy pool never connects; an empty final flush returns before using it.
-        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    async fn drain_exits_on_shutdown_without_touching_valkey() {
+        // `ConnectionManager::new` connects eagerly (unlike `PgPool::connect_lazy`), so this
+        // needs a live Valkey purely to construct the drain — the empty final flush below never
+        // issues a command against it either way. Skips cleanly without VALKEY_HOST, mirroring
+        // `valkey_auth.rs` / `middleware::auth`'s `manager_or_skip!`.
+        let Some(cfg) = crate::valkey::ValkeyConfig::from_env() else {
+            eprintln!("Skipping test: VALKEY_HOST not set");
+            return;
+        };
+        let client = redis::Client::open(cfg.connection_url()).expect("open valkey client");
+        let manager = ConnectionManager::new(client)
+            .await
+            .expect("connect valkey");
+
         let (tx, rx) = mpsc::channel(8);
         let shutdown = ShutdownSignal::new();
         shutdown.trigger(); // request shutdown up front
 
-        let drain = ProductEventDrain::new(pool, rx, ProductEventConfig::default(), shutdown);
+        let drain = ProductEventDrain::new(manager, rx, ProductEventConfig::default(), shutdown);
 
         tokio::time::timeout(Duration::from_secs(1), drain.run())
             .await
             .expect("drain should exit promptly on shutdown");
         drop(tx);
+    }
+
+    // ---- flush actually XADDs the dotted wire JSON (live Valkey round trip) ----
+
+    #[tokio::test]
+    async fn flush_xadds_dotted_wire_json_to_stream() {
+        use redis::AsyncCommands;
+
+        let Some(cfg) = crate::valkey::ValkeyConfig::from_env() else {
+            eprintln!("Skipping test: VALKEY_HOST not set");
+            return;
+        };
+        let client = redis::Client::open(cfg.connection_url()).expect("open valkey client");
+        let manager = ConnectionManager::new(client)
+            .await
+            .expect("connect valkey");
+
+        // A unique marker (rather than a unique key) lets this test share the real,
+        // fixed-name production stream key without colliding with concurrent test runs.
+        let marker = Uuid::new_v4().to_string();
+        let mut ev = sample_event();
+        ev.properties = serde_json::json!({ "test_marker": marker });
+
+        let (_tx, rx) = mpsc::channel(8);
+        let drain = ProductEventDrain::new(
+            manager.clone(),
+            rx,
+            ProductEventConfig::default(),
+            ShutdownSignal::new(),
+        );
+        drain.flush(std::slice::from_ref(&ev)).await;
+
+        let mut conn = manager;
+        let reply: redis::streams::StreamRangeReply = conn
+            .xrevrange_count(STREAM_KEY, "+", "-", 50)
+            .await
+            .expect("xrevrange");
+        let found = reply.ids.into_iter().find(|entry| {
+            entry
+                .get::<String>("data")
+                .is_some_and(|data| data.contains(&marker))
+        });
+        let entry = found.expect("flushed event should appear in the stream");
+        let data: String = entry.get("data").expect("data field");
+        let parsed: Value = serde_json::from_str(&data).expect("data is JSON");
+        assert_eq!(parsed["event_type"], "workflow.created");
+        assert_eq!(parsed["event_id"], serde_json::json!(ev.event_id));
+        assert!(parsed["actor_type"].is_null());
+
+        // Don't leave test junk in the shared stream.
+        let _: () = conn.xdel(STREAM_KEY, &[&entry.id]).await.unwrap();
     }
 }
