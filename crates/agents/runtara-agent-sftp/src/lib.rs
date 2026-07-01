@@ -15,11 +15,11 @@
 //!   internal endpoint and unwraps the `{success, output|error}` envelope.
 //!
 //! Routing model differs from HTTP-style agents: there is no proxy /
-//! `X-Runtara-Connection-Id` hop. The host runs the capability in-process and
-//! resolves the connection itself (via `connection_id` in the body or the
-//! pre-injected `_connection` we send). We send the credentials inline via
-//! `_connection` so that no connection-service round-trip is needed when the
-//! workflow already has the parameters in hand.
+//! `X-Runtara-Connection-Id` hop. The host resolves the connection from the
+//! opaque `connection_id` we forward inside `_connection` and runs the
+//! capability in-process (see `internal_agents::run_agent`). Credentials never
+//! enter this sandbox: we forward only the id — never parameters — and the host
+//! overwrites `_connection` with the authoritative resolved values.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -530,12 +530,16 @@ impl Guest for Component {
         let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         // Inject the WIT `connection` arg into the input JSON under `_connection`
-        // so the macro-generated executor can deserialize it into the
-        // capability input struct's `_connection: Option<RawConnection>` field.
+        // so the macro-generated executor can deserialize it into the capability
+        // input struct's `_connection: Option<RawConnection>` field.
+        //
+        // Credentials never cross the wasm boundary: we forward ONLY the opaque
+        // `connection_id`. The host resolves the real parameters from it
+        // (`internal_agents::run_agent`) and overwrites `_connection` wholesale,
+        // so `c.parameters` is deliberately ignored — nothing secret flows
+        // through here, and there is no path to reintroduce one.
         if let Some(c) = connection.as_ref() {
             if let serde_json::Value::Object(ref mut obj) = value {
-                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
-                    .unwrap_or(serde_json::Value::Null);
                 let rate_limit_config = c
                     .rate_limit_config
                     .as_ref()
@@ -546,7 +550,7 @@ impl Guest for Component {
                         "connection_id": c.connection_id,
                         "integration_id": c.integration_id,
                         "connection_subtype": c.connection_subtype,
-                        "parameters": parameters,
+                        "parameters": serde_json::Value::Object(Default::default()),
                         "rate_limit_config": rate_limit_config,
                     }),
                 );
