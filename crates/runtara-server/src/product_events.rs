@@ -73,6 +73,7 @@ pub enum EventType {
     ExecutionCompleted,
     ExecutionFailed,
     ExecutionCancelled,
+    ExecutionTimeout,
     // Triggers
     TriggerCreated,
     TriggerFired,
@@ -107,6 +108,7 @@ impl EventType {
             EventType::ExecutionCompleted => "execution.completed",
             EventType::ExecutionFailed => "execution.failed",
             EventType::ExecutionCancelled => "execution.cancelled",
+            EventType::ExecutionTimeout => "execution.timeout",
             EventType::TriggerCreated => "trigger.created",
             EventType::TriggerFired => "trigger.fired",
             EventType::AgentCapabilityUsed => "agent.capability_used",
@@ -618,6 +620,7 @@ mod tests {
             EventType::ExecutionCancelled.as_str(),
             "execution.cancelled"
         );
+        assert_eq!(EventType::ExecutionTimeout.as_str(), "execution.timeout");
         assert_eq!(
             EventType::AgentCapabilityUsed.as_str(),
             "agent.capability_used"

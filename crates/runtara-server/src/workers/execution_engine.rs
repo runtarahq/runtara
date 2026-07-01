@@ -841,6 +841,9 @@ impl ExecutionEngine {
                     Ok(crate::runtime_client::TerminalOutcome::Cancelled(o)) => {
                         (EventType::ExecutionCancelled, o)
                     }
+                    Ok(crate::runtime_client::TerminalOutcome::TimedOut(o)) => {
+                        (EventType::ExecutionTimeout, o)
+                    }
                     Ok(crate::runtime_client::TerminalOutcome::GaveUp) => return,
                     Err(e) => {
                         warn!(

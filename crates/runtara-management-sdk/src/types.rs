@@ -117,6 +117,10 @@ pub enum TerminationReason {
 
 impl TerminationReason {
     /// Parse from string (protocol uses string representation).
+    ///
+    /// Named `from_str` (not the `FromStr` trait) predates this type's export from the crate
+    /// root; renaming is a separate cleanup from wiring `execution.timeout`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "completed" => Some(Self::Completed),

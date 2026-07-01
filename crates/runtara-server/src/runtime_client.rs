@@ -13,7 +13,7 @@ use serde_json::Value;
 // Re-export types from the SDK for use by other modules
 pub use runtara_management_sdk::{
     GetTenantMetricsOptions, InstanceInfo, InstanceStatus, InstanceSummary, ListInstancesResult,
-    MetricsBucket, MetricsGranularity, TenantMetricsResult,
+    MetricsBucket, MetricsGranularity, TenantMetricsResult, TerminationReason,
 };
 
 use thiserror::Error;
@@ -68,6 +68,11 @@ pub enum TerminalOutcome {
     Completed(ExecutionOutput),
     Failed(ExecutionOutput),
     Cancelled(ExecutionOutput),
+    /// The instance was killed for exceeding its configured execution timeout (or missed
+    /// heartbeats) — reported as `InstanceStatus::Failed` with `termination_reason` set to
+    /// `Timeout`/`HeartbeatTimeout`. Distinct from a generic `Failed` so callers can tell
+    /// "the platform cut this off" apart from "the workflow itself errored".
+    TimedOut(ExecutionOutput),
     /// `max_wait` elapsed before the instance reached a terminal state. The instance is left
     /// running — this is an *observation* timeout, not an execution timeout.
     GaveUp,
@@ -477,7 +482,7 @@ impl RuntimeClient {
                     }));
                 }
                 InstanceStatus::Failed => {
-                    return Ok(TerminalOutcome::Failed(ExecutionOutput {
+                    let output = ExecutionOutput {
                         success: false,
                         output: info.output,
                         error: info.error,
@@ -485,7 +490,13 @@ impl RuntimeClient {
                         duration_ms,
                         memory_peak_bytes: info.memory_peak_bytes,
                         cpu_usage_usec: info.cpu_usage_usec,
-                    }));
+                    };
+                    return Ok(match info.termination_reason {
+                        Some(TerminationReason::Timeout | TerminationReason::HeartbeatTimeout) => {
+                            TerminalOutcome::TimedOut(output)
+                        }
+                        _ => TerminalOutcome::Failed(output),
+                    });
                 }
                 InstanceStatus::Cancelled => {
                     return Ok(TerminalOutcome::Cancelled(ExecutionOutput {

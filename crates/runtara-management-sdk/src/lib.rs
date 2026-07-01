@@ -60,5 +60,5 @@ pub use types::{
     MetricsBucket, MetricsGranularity, RegisterImageOptions, RegisterImageResult,
     RegisterImageStreamOptions, RunnerType, ScopeInfo, SignalType, StartInstanceOptions,
     StartInstanceResult, StepSortOrder, StepStatus, StepSummary, StopInstanceOptions,
-    TenantMetricsResult, TestCapabilityOptions, TestCapabilityResult,
+    TenantMetricsResult, TerminationReason, TestCapabilityOptions, TestCapabilityResult,
 };
