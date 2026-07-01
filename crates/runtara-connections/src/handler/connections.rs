@@ -440,6 +440,8 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
                 enum_values: f
                     .enum_values
                     .map(|vs| vs.iter().map(|s| s.to_string()).collect()),
+                is_url: f.is_url,
+                is_required: f.is_required,
             })
             .collect(),
         default_rate_limit_config: get_default_rate_limit_config(meta.integration_id),

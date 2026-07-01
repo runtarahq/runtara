@@ -29,12 +29,16 @@ struct HttpApiKeyParams {
         default = "X-API-Key"
     )]
     header_name: String,
-    /// Optional base URL prefix
+    /// Base URL prefix. Required + https-validated: the proxy pins every
+    /// credentialed request to this host so the API key cannot be sent to an
+    /// attacker-chosen destination.
     #[serde(default)]
     #[field(
         display_name = "Base URL",
-        description = "Optional base URL prefix for all requests",
-        placeholder = "https://api.example.com"
+        description = "Base URL prefix for all requests (must be https)",
+        placeholder = "https://api.example.com",
+        is_url,
+        is_required
     )]
     base_url: Option<String>,
 }

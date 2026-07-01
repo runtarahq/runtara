@@ -16,7 +16,146 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use super::proxy_url::{self, ProxyReject};
+
+/// Rollout posture for the base-URL pin (`RUNTARA_PROXY_STRICT_BASE_URL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyStrictMode {
+    /// Reject a request whose URL cannot be pinned to the connection base
+    /// (default, fail-closed).
+    Enforce,
+    /// Forward with the legacy host-only rewrite but log `proxy.pin.violation`.
+    Warn,
+    /// Forward with the legacy host-only rewrite, no logging.
+    Off,
+}
+
+/// Read `RUNTARA_PROXY_STRICT_BASE_URL` once. Default = enforce (fail-closed).
+pub(crate) fn proxy_strict_mode() -> ProxyStrictMode {
+    static MODE: OnceLock<ProxyStrictMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("RUNTARA_PROXY_STRICT_BASE_URL")
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("warn") => ProxyStrictMode::Warn,
+            Some("off") => ProxyStrictMode::Off,
+            _ => ProxyStrictMode::Enforce,
+        }
+    })
+}
+
+/// Hosts allowed to use an `http://` (non-TLS) base URL
+/// (`RUNTARA_PROXY_ALLOW_HTTP_HOSTS`). Empty = https-only.
+pub(crate) fn proxy_allow_http_hosts() -> Vec<String> {
+    static HOSTS: OnceLock<Vec<String>> = OnceLock::new();
+    HOSTS
+        .get_or_init(|| {
+            std::env::var("RUNTARA_PROXY_ALLOW_HTTP_HOSTS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .clone()
+}
+
+/// The pre-WP1 host-only rewrite, kept for warn/off rollout modes so behavior
+/// is byte-for-byte identical to before enforcement. Does NOT enforce the base
+/// path. New deployments default to enforce and never reach this.
+fn apply_legacy_pin(
+    final_url: &str,
+    base: Option<&str>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    match base {
+        Some(base) => {
+            if final_url.starts_with('/') {
+                Ok(format!("{}{}", base.trim_end_matches('/'), final_url))
+            } else {
+                let mut out = final_url.to_string();
+                if let (Ok(mut parsed), Ok(base_parsed)) =
+                    (url::Url::parse(final_url), url::Url::parse(base))
+                {
+                    let _ = parsed.set_host(base_parsed.host_str());
+                    let _ = parsed.set_scheme(base_parsed.scheme());
+                    match base_parsed.port() {
+                        Some(port) => {
+                            let _ = parsed.set_port(Some(port));
+                        }
+                        None => {
+                            let _ = parsed.set_port(None);
+                        }
+                    }
+                    out = parsed.to_string();
+                }
+                Ok(out)
+            }
+        }
+        None if final_url.starts_with('/') => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Relative URL requires a connection with a base URL"})),
+        )),
+        None => Ok(final_url.to_string()),
+    }
+}
+
+/// Map a [`ProxyReject`] to the proxy's HTTP error contract.
+fn map_proxy_reject(reject: &ProxyReject, connection_id: &str) -> (StatusCode, Json<Value>) {
+    match reject {
+        ProxyReject::NoBaseUrl | ProxyReject::EmptyBaseUrl => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "CONNECTION_BASE_URL_REQUIRED",
+                "message": format!(
+                    "Connection '{connection_id}' has no base URL; the proxy refuses to forward \
+                     injected credentials to an unpinned host. Set an https base URL on the connection."
+                ),
+                "connection_id": connection_id,
+            })),
+        ),
+        ProxyReject::UnparseableBaseUrl(detail) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "CONNECTION_BASE_URL_INVALID",
+                "message": format!("Connection '{connection_id}' base URL is not a valid URL: {detail}"),
+                "connection_id": connection_id,
+            })),
+        ),
+        ProxyReject::NonHttpsBaseUrl(base) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "CONNECTION_BASE_URL_NOT_HTTPS",
+                "message": format!("Connection '{connection_id}' base URL must use https: {base}"),
+                "connection_id": connection_id,
+            })),
+        ),
+        ProxyReject::UnparseableAgentUrl(detail) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "INVALID_REQUEST_URL",
+                "message": format!("Request URL is not valid: {detail}"),
+            })),
+        ),
+        ProxyReject::PathEscape {
+            final_path,
+            base_path,
+        } => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "PATH_OUTSIDE_BASE",
+                "message": format!(
+                    "Request path '{final_path}' is outside the connection's base path '{base_path}'"
+                ),
+                "connection_id": connection_id,
+            })),
+        ),
+    }
+}
 
 // ============================================================================
 // State
@@ -148,32 +287,48 @@ pub async fn execute_proxy_request(
             None,
         );
 
-        // Resolve URL against connection base URL
-        if let Some(base) = resolved.base_url {
-            if final_url.starts_with('/') {
-                // Relative path -> prepend base URL
-                final_url = format!("{}{}", base.trim_end_matches('/'), final_url);
-            } else {
-                // Absolute URL -> replace host with connection's base URL for security
-                // (credentials should only be sent to the connection's domain)
-                if let (Ok(mut parsed), Ok(base_parsed)) =
-                    (url::Url::parse(&final_url), url::Url::parse(&base))
-                {
-                    let _ = parsed.set_host(base_parsed.host_str());
-                    let _ = parsed.set_scheme(base_parsed.scheme());
-                    if let Some(port) = base_parsed.port() {
-                        let _ = parsed.set_port(Some(port));
-                    } else {
-                        let _ = parsed.set_port(None);
-                    }
-                    final_url = parsed.to_string();
+        // ── Pin the request URL to the connection base URL (fail-closed) ─────
+        // A connection-scoped request must never forward the injected
+        // credential to a host the connection did not declare, nor escape its
+        // base path. `pin_url_to_base` (proxy_url.rs) is the single decision
+        // point. Path enforcement is relaxed where the path is the payload
+        // (object stores, MCP single endpoint, signed requests). Signed
+        // integrations always enforce — warn mode would sign+send a request
+        // bound to an unpinned URL.
+        let relax_path = integration_id == "mcp"
+            || resolved.aws_signing.is_some()
+            || resolved.azure_signing.is_some();
+        let effective_mode = if resolved.aws_signing.is_some() || resolved.azure_signing.is_some() {
+            ProxyStrictMode::Enforce
+        } else {
+            proxy_strict_mode()
+        };
+        let pin_opts = proxy_url::PinOptions {
+            enforce_path_prefix: !relax_path,
+            allow_http_base_hosts: proxy_allow_http_hosts(),
+        };
+        match proxy_url::pin_url_to_base(&final_url, resolved.base_url.as_deref(), true, &pin_opts)
+        {
+            Ok(pinned) => final_url = pinned,
+            Err(reject) => match effective_mode {
+                ProxyStrictMode::Enforce => {
+                    return Err(map_proxy_reject(&reject, connection_id));
                 }
-            }
-        } else if final_url.starts_with('/') {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Relative URL requires a connection with a base URL"})),
-            ));
+                ProxyStrictMode::Warn => {
+                    tracing::warn!(
+                        target: "proxy",
+                        connection_id = connection_id.as_str(),
+                        agent_url = %request.url,
+                        base_url = ?resolved.base_url,
+                        reject = ?reject,
+                        "proxy.pin.violation (warn mode — forwarding legacy-pinned; will be REJECTED under enforce)"
+                    );
+                    final_url = apply_legacy_pin(&final_url, resolved.base_url.as_deref())?;
+                }
+                ProxyStrictMode::Off => {
+                    final_url = apply_legacy_pin(&final_url, resolved.base_url.as_deref())?;
+                }
+            },
         }
 
         aws_signing = resolved.aws_signing;
@@ -542,7 +697,7 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
         for addr in addrs {
             let ip = addr.ip();
-            if ip.is_loopback() || is_private_ip(&ip) {
+            if proxy_url::is_private_ip(&ip) {
                 return Err((
                     StatusCode::FORBIDDEN,
                     Json(
@@ -574,6 +729,20 @@ fn allowed_private_hosts() -> &'static [String] {
         .as_slice()
 }
 
+/// Host-only variant of the SSRF allowlist check, used by the egress client's
+/// DNS resolver (which sees a bare host, no port). Matches a bare-host entry or
+/// the host part of any `host:port` entry. Dev/test escape hatch only.
+pub(crate) fn host_is_allowlisted_for_egress(host: &str) -> bool {
+    let allowed = allowed_private_hosts();
+    if allowed.is_empty() {
+        return false;
+    }
+    let h = host.to_ascii_lowercase();
+    allowed
+        .iter()
+        .any(|entry| entry == &h || entry.starts_with(&format!("{h}:")))
+}
+
 fn is_explicitly_allowed_host(url: &url::Url) -> bool {
     let allowed = allowed_private_hosts();
     if allowed.is_empty() {
@@ -592,24 +761,9 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
         .any(|entry| entry == &host || entry == &host_with_port)
 }
 
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()                       // 127.0.0.0/8
-                || v4.is_private()                  // 10/8, 172.16/12, 192.168/16
-                || v4.is_link_local()               // 169.254/16
-                || v4.is_broadcast()                // 255.255.255.255
-                || v4.is_unspecified()              // 0.0.0.0
-                || v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] <= 127 // CGNAT 100.64/10
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()                       // ::1
-                || v6.is_unspecified()              // ::
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 (unique local)
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
-        }
-    }
-}
+// `is_private_ip` now lives in `proxy_url` (hardened to decode IPv4-mapped /
+// IPv4-compatible IPv6) and is shared by the pre-flight check here and the
+// egress client's DNS resolver.
 
 #[cfg(test)]
 mod tests {

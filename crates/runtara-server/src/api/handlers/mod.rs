@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod object_model;
 pub mod oidc_discovery;
 pub mod operators;
+pub mod proxy_url;
 pub mod reports;
 pub mod sessions;
 pub mod specs;

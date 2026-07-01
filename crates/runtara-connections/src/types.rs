@@ -866,6 +866,14 @@ pub struct ConnectionFieldDto {
     /// (labels are derived client-side from the value).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+    /// Whether this field must be a valid absolute https URL (drives client-side
+    /// URL validation; the server enforces the same rule on create/update).
+    #[serde(default)]
+    pub is_url: bool,
+    /// Whether this field is required (present + non-empty), independent of
+    /// `is_optional`.
+    #[serde(default)]
+    pub is_required: bool,
 }
 
 /// OAuth2 configuration for a connection type (authorization code flow)

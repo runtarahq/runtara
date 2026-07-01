@@ -2029,7 +2029,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
     let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
         facade: connections_facade.clone(),
-        client: reqwest::Client::new(),
+        // Hardened egress client: no redirect following (F2) + a DNS resolver
+        // that rejects hosts resolving to private/internal addresses (F5).
+        client: crate::egress_client::build_proxy_client(),
     });
     let internal_proxy_routes = Router::new()
         .route(
@@ -2296,6 +2298,23 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Matches the valkey validation pattern above: print the error and exit with a
     // non-zero status so container orchestrators and systemd surface a clean failure.
     if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
+        eprintln!("❌ Configuration error: {msg}");
+        std::process::exit(1);
+    }
+
+    // Safety: the internal listener is UNAUTHENTICATED and injects connection
+    // credentials server-side, so it must stay on loopback unless a shared
+    // secret is configured to gate it. Refuse to boot a non-loopback internal
+    // bind that would expose credentialed egress + SSRF to any host that can
+    // send an X-Org-Id header (F6).
+    let internal_shared_secret = std::env::var("RUNTARA_INTERNAL_SHARED_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Err(msg) = crate::bind::enforce_internal_listener_safe(
+        &internal_host,
+        internal_shared_secret.is_some(),
+    ) {
         eprintln!("❌ Configuration error: {msg}");
         std::process::exit(1);
     }
