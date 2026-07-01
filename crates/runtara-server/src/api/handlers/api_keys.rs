@@ -103,6 +103,11 @@ pub async fn create_api_key(
                 snapshot.limits.max_api_keys,
                 "maxApiKeys",
             ) {
+                crate::product_events::emit_quota_exceeded(
+                    &events,
+                    ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                    &denial,
+                );
                 return (StatusCode::FORBIDDEN, Json(denial.json_body()));
             }
         }

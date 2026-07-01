@@ -72,6 +72,7 @@ pub enum EventType {
     ExecutionStarted,
     ExecutionCompleted,
     ExecutionFailed,
+    ExecutionCancelled,
     // Triggers
     TriggerCreated,
     TriggerFired,
@@ -85,6 +86,8 @@ pub enum EventType {
     ConnectionOauthCompleted,
     ConnectionOauthFailed,
     ConnectionTokenRefreshed,
+    // Billing-relevant (future-proofing)
+    QuotaExceeded,
 }
 
 impl EventType {
@@ -102,6 +105,7 @@ impl EventType {
             EventType::ExecutionStarted => "execution.started",
             EventType::ExecutionCompleted => "execution.completed",
             EventType::ExecutionFailed => "execution.failed",
+            EventType::ExecutionCancelled => "execution.cancelled",
             EventType::TriggerCreated => "trigger.created",
             EventType::TriggerFired => "trigger.fired",
             EventType::AgentCapabilityUsed => "agent.capability_used",
@@ -112,6 +116,7 @@ impl EventType {
             EventType::ConnectionOauthCompleted => "connection.oauth_completed",
             EventType::ConnectionOauthFailed => "connection.oauth_failed",
             EventType::ConnectionTokenRefreshed => "connection.token_refreshed",
+            EventType::QuotaExceeded => "quota.exceeded",
         }
     }
 }
@@ -537,6 +542,31 @@ impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge 
     }
 }
 
+/// Emit `quota.exceeded` iff `denial` is a numeric tier-limit breach
+/// (`EntitlementDenial::LimitExceeded`) — this is the one place that decides
+/// which denial *kinds* count as a quota. Feature-gate denials
+/// (`FeatureRequired`/`AgentNotEnabled`) are a toggle, not a quota (no
+/// "current usage" ever approaches them), so callers pass every denial
+/// through unconditionally and this silently no-ops for those.
+///
+/// `event` should already carry the caller's actor/tenant/source
+/// attribution (via `ProductEvent::from_auth` in an HTTP handler, or
+/// `ProductEvent::new(..).no_user_actor(..)` for an engine-internal gate like
+/// `maxConcurrentExecutions`) — this function only adds the quota-specific
+/// `properties` and emits.
+pub fn emit_quota_exceeded(
+    events: &ProductEventSink,
+    event: ProductEvent,
+    denial: &crate::entitlement_error::EntitlementDenial,
+) {
+    if let crate::entitlement_error::EntitlementDenial::LimitExceeded { limit, maximum } = denial {
+        events.emit(event.properties(serde_json::json!({
+            "quota_type": limit,
+            "maximum": maximum,
+        })));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +613,10 @@ mod tests {
         );
         assert_eq!(EventType::ExecutionFailed.as_str(), "execution.failed");
         assert_eq!(
+            EventType::ExecutionCancelled.as_str(),
+            "execution.cancelled"
+        );
+        assert_eq!(
             EventType::AgentCapabilityUsed.as_str(),
             "agent.capability_used"
         );
@@ -590,6 +624,7 @@ mod tests {
             EventType::AgentCapabilityTested.as_str(),
             "agent.capability_tested"
         );
+        assert_eq!(EventType::QuotaExceeded.as_str(), "quota.exceeded");
     }
 
     #[test]
@@ -672,6 +707,50 @@ mod tests {
     fn source_sets_source() {
         let e = sample_event().source(EventSource::Mcp);
         assert_eq!(e.source, Some(EventSource::Mcp));
+    }
+
+    // ---- emit_quota_exceeded: only fires for LimitExceeded ----
+
+    #[test]
+    fn emit_quota_exceeded_fires_for_limit_exceeded() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = ProductEventSink::new(tx);
+        let denial = crate::entitlement_error::EntitlementDenial::LimitExceeded {
+            limit: "maxWorkflows",
+            maximum: 5,
+        };
+        emit_quota_exceeded(&sink, sample_event(), &denial);
+        let emitted = rx.try_recv().expect("event emitted");
+        assert_eq!(emitted.event_type, EventType::WorkflowCreated); // sample_event()'s base type
+        assert_eq!(emitted.properties["quota_type"], "maxWorkflows");
+        assert_eq!(emitted.properties["maximum"], 5);
+    }
+
+    #[test]
+    fn emit_quota_exceeded_ignores_feature_required() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = ProductEventSink::new(tx);
+        let denial = crate::entitlement_error::EntitlementDenial::FeatureRequired(
+            crate::entitlements::FeatureKey::Reports,
+        );
+        emit_quota_exceeded(&sink, sample_event(), &denial);
+        assert!(
+            rx.try_recv().is_err(),
+            "a feature-gate denial must not emit quota.exceeded"
+        );
+    }
+
+    #[test]
+    fn emit_quota_exceeded_ignores_agent_not_enabled() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = ProductEventSink::new(tx);
+        let denial =
+            crate::entitlement_error::EntitlementDenial::AgentNotEnabled("openai".to_string());
+        emit_quota_exceeded(&sink, sample_event(), &denial);
+        assert!(
+            rx.try_recv().is_err(),
+            "an agent-allowlist denial must not emit quota.exceeded"
+        );
     }
 
     #[test]

@@ -509,7 +509,17 @@ impl ExecutionEngine {
         // the effective cap. See `check_concurrency_gate`.
         self.check_concurrency_gate(req.tenant_id)
             .await
-            .map_err(ExecutionError::EntitlementDenied)?;
+            .map_err(|denial| {
+                crate::product_events::emit_quota_exceeded(
+                    &self.events,
+                    ProductEvent::new(EventType::QuotaExceeded)
+                        .no_user_actor("execution_engine", ActorType::System)
+                        .resource(req.workflow_id, "workflow")
+                        .source(EventSource::Worker),
+                    &denial,
+                );
+                ExecutionError::EntitlementDenied(denial)
+            })?;
 
         // 8. Publish to stream
         trigger_stream
@@ -607,7 +617,17 @@ impl ExecutionEngine {
         // `execute_sync` call below returns). No bookkeeping to release.
         self.check_concurrency_gate(req.tenant_id)
             .await
-            .map_err(ExecutionError::EntitlementDenied)?;
+            .map_err(|denial| {
+                crate::product_events::emit_quota_exceeded(
+                    &self.events,
+                    ProductEvent::new(EventType::QuotaExceeded)
+                        .no_user_actor("execution_engine", ActorType::System)
+                        .resource(req.workflow_id, "workflow")
+                        .source(EventSource::Worker),
+                    &denial,
+                );
+                ExecutionError::EntitlementDenied(denial)
+            })?;
 
         // Product analytics: a synchronous execution is starting. Engine-layer — no user
         // context — so it's a no-user, `worker`-source event.
@@ -791,6 +811,65 @@ impl ExecutionEngine {
                         "trigger_type": event.trigger_type(),
                     })),
             );
+        }
+
+        // Product analytics: unlike the sync path, this call returns before the instance
+        // finishes, so the terminal event has to be observed in the background. Spawn a
+        // best-effort watcher — never blocks/fails `execute_detached` itself, and never
+        // cancels the instance (see `RuntimeClient::poll_until_terminal` doc comment).
+        if let (Ok(instance_id), Some(runtime_client)) = (&result, self.runtime_client.clone()) {
+            let events = self.events.clone();
+            let workflow_id = event.workflow_id.clone();
+            let version = event.version;
+            let instance_id = instance_id.clone();
+            let trigger_id = event.trigger_id().map(|s| s.to_string());
+            tokio::spawn(async move {
+                let outcome = runtime_client
+                    .poll_until_terminal(
+                        &instance_id,
+                        Duration::from_secs(2),
+                        Duration::from_secs(24 * 3600),
+                    )
+                    .await;
+                let (event_type, output) = match outcome {
+                    Ok(crate::runtime_client::TerminalOutcome::Completed(o)) => {
+                        (EventType::ExecutionCompleted, o)
+                    }
+                    Ok(crate::runtime_client::TerminalOutcome::Failed(o)) => {
+                        (EventType::ExecutionFailed, o)
+                    }
+                    Ok(crate::runtime_client::TerminalOutcome::Cancelled(o)) => {
+                        (EventType::ExecutionCancelled, o)
+                    }
+                    Ok(crate::runtime_client::TerminalOutcome::GaveUp) => return,
+                    Err(e) => {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "product events: failed to observe async execution outcome"
+                        );
+                        return;
+                    }
+                };
+                let actor = match trigger_id {
+                    Some(trigger_id) => {
+                        ProductEvent::new(event_type).no_user_actor(trigger_id, ActorType::Trigger)
+                    }
+                    None => ProductEvent::new(event_type)
+                        .no_user_actor("execution_engine", ActorType::System),
+                };
+                events.emit(
+                    actor
+                        .resource(&workflow_id, "workflow")
+                        .source(EventSource::Worker)
+                        .properties(serde_json::json!({
+                            "version": version,
+                            "duration_ms": output.duration_ms,
+                            "success": output.success,
+                            "error": output.error,
+                        })),
+                );
+            });
         }
 
         // Keep the workflow in starting_workflows for a grace period to prevent race conditions

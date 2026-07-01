@@ -188,7 +188,19 @@ pub async fn create_workflow_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(e) => map_service_error_to_response(e),
+        Err(e) => {
+            // `maxWorkflows` is the only entitlement gate `create_workflow` can hit — this
+            // filters to that (a feature-gate denial would no-op here, but there isn't one on
+            // this path today).
+            if let ServiceError::EntitlementDenied(ref denial) = e {
+                crate::product_events::emit_quota_exceeded(
+                    &events,
+                    ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                    denial,
+                );
+            }
+            map_service_error_to_response(e)
+        }
     }
 }
 
@@ -851,7 +863,17 @@ pub async fn clone_workflow_handler(
             });
             (StatusCode::OK, Json(response))
         }
-        Err(e) => map_service_error_to_response(e),
+        Err(e) => {
+            // `maxWorkflows` is the only entitlement gate `clone_workflow` can hit.
+            if let ServiceError::EntitlementDenied(ref denial) = e {
+                crate::product_events::emit_quota_exceeded(
+                    &events,
+                    ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                    denial,
+                );
+            }
+            map_service_error_to_response(e)
+        }
     }
 }
 

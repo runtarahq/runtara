@@ -1853,6 +1853,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
         connections: connections_facade.clone(),
+        events: product_event_sink.clone(),
     });
 
     let object_model_routes = Router::new()
@@ -1995,6 +1996,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
         connections: connections_facade.clone(),
+        events: product_event_sink.clone(),
     });
     let internal_object_model_routes = Router::new()
         .route(
