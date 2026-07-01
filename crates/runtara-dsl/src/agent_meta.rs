@@ -855,6 +855,15 @@ pub struct ConnectionFieldMeta {
     /// `"api_key"`); labels are derived client-side from the value
     /// (snake_case → Title Case) unless richer metadata is added later.
     pub enum_values: Option<&'static [&'static str]>,
+    /// Whether this field must be a syntactically valid absolute https URL when
+    /// present. Drives client-side URL validation and the server-side
+    /// connection base-URL check that pins credentialed egress to a declared
+    /// host. Distinct from `is_optional` (which is structurally derived).
+    pub is_url: bool,
+    /// Whether this field is *required* (must be present and non-empty),
+    /// independent of the structurally-derived `is_optional`. Used to make a
+    /// base URL mandatory for credential-bearing generic HTTP connection types.
+    pub is_required: bool,
 }
 
 /// OAuth2 configuration for connection types that use the authorization code flow.

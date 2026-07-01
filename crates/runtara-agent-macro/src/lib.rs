@@ -724,6 +724,14 @@ struct ConnectionFieldArgs {
     /// Example: `#[field(enum_values = "none,bearer,api_key")]`.
     #[darling(default)]
     enum_values: Option<String>,
+    /// Mark this field as an https URL. The value must be a syntactically valid
+    /// absolute https URL when present (validated client- and server-side).
+    #[darling(default)]
+    is_url: bool,
+    /// Mark this field as required (must be present and non-empty), independent
+    /// of the structurally-derived optional-ness. Used for a mandatory base URL.
+    #[darling(default)]
+    is_required: bool,
 }
 
 /// Container attributes for ConnectionParams derive
@@ -816,6 +824,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let placeholder_token = option_to_tokens(&f.placeholder);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
+            let is_url = f.is_url;
+            let is_required = f.is_required;
             let enum_values_token = match &f.enum_values {
                 Some(raw) => {
                     let values: Vec<String> = raw
@@ -844,6 +854,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     default_value: #default_token,
                     is_secret: #is_secret,
                     enum_values: #enum_values_token,
+                    is_url: #is_url,
+                    is_required: #is_required,
                 }
             }
         })

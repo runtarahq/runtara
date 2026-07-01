@@ -199,14 +199,35 @@ fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusC
 }
 
 fn build_absolute_url(base_url: &str, path: &str) -> Result<String, String> {
-    let cleaned_base = base_url.trim_end_matches('/');
+    // Reject caller-supplied absolute URLs: a presign request must stay on the
+    // connection's host. Previously an absolute `path` was returned verbatim,
+    // letting a caller presign against an arbitrary host with the connection's
+    // signing credentials.
     if path.starts_with("http://") || path.starts_with("https://") {
-        Ok(path.to_string())
-    } else if path.starts_with('/') {
-        Ok(format!("{}{}", cleaned_base, path))
-    } else {
-        Ok(format!("{}/{}", cleaned_base, path))
+        return Err("presign path must be relative to the connection base; \
+                    absolute URLs are not allowed"
+            .to_string());
     }
+    let cleaned_base = base_url.trim_end_matches('/');
+    let absolute = if path.starts_with('/') {
+        format!("{cleaned_base}{path}")
+    } else {
+        format!("{cleaned_base}/{path}")
+    };
+
+    // Enforce that the joined path stays under the connection base path.
+    let base_parsed = url::Url::parse(base_url).map_err(|e| format!("invalid base URL: {e}"))?;
+    let final_parsed =
+        url::Url::parse(&absolute).map_err(|e| format!("invalid resolved URL: {e}"))?;
+    if final_parsed.host_str() != base_parsed.host_str() {
+        return Err(
+            "presign path resolves to a different host than the connection base".to_string(),
+        );
+    }
+    if !crate::api::handlers::proxy_url::path_within_base(final_parsed.path(), base_parsed.path()) {
+        return Err("presign path is outside the connection base path".to_string());
+    }
+    Ok(absolute)
 }
 
 fn split_container_blob(path: &str) -> Result<(&str, &str), String> {
@@ -225,7 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_absolute_handles_path_and_absolute_inputs() {
+    fn build_absolute_joins_relative_paths() {
         assert_eq!(
             build_absolute_url("https://acct.blob.core.windows.net", "/c/b").unwrap(),
             "https://acct.blob.core.windows.net/c/b"
@@ -234,10 +255,25 @@ mod tests {
             build_absolute_url("https://acct.blob.core.windows.net/", "c/b").unwrap(),
             "https://acct.blob.core.windows.net/c/b"
         );
+        // Path-style base with an account prefix: child stays under it.
         assert_eq!(
-            build_absolute_url("https://x", "https://other/foo").unwrap(),
-            "https://other/foo"
+            build_absolute_url("http://127.0.0.1:10000/acct", "/container/blob").unwrap(),
+            "http://127.0.0.1:10000/acct/container/blob"
         );
+    }
+
+    #[test]
+    fn build_absolute_rejects_absolute_url_and_escapes() {
+        // Absolute caller URL must not pass through (the F1/F3 presign hole).
+        assert!(build_absolute_url("https://x", "https://other/foo").is_err());
+        assert!(build_absolute_url("https://x", "http://other/foo").is_err());
+        // Path that climbs above the connection base path is rejected. The
+        // path is appended under the base, so an escape needs enough `..` to
+        // leave it: base "/v2/tenantA" + "/../../tenantB/x" → "/tenantB/x".
+        assert!(
+            build_absolute_url("https://api.example.com/v2/tenantA", "/../../tenantB/x").is_err()
+        );
+        assert!(build_absolute_url("http://127.0.0.1:10000/acct", "/../other/blob").is_err());
     }
 
     #[test]

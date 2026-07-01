@@ -57,6 +57,89 @@ fn validate_rate_limit_config(cfg: &RateLimitConfigDto) -> Result<(), ServiceErr
     Ok(())
 }
 
+/// Validate connection parameters against the connection type's field schema.
+///
+/// For every field flagged `is_required` / `is_url`, enforce presence and https
+/// URL format. This is the authoritative creation-time gate — the HTTP API and
+/// MCP both flow through here — and pairs with the proxy's runtime base-URL pin:
+/// a credential-bearing generic HTTP connection cannot be persisted without a
+/// valid https base URL to pin its egress to. Unknown types (no meta) and types
+/// with no flagged fields (openai/stripe/etc., whose base URL is derived) are
+/// unaffected.
+fn validate_connection_parameters(
+    integration_id: &str,
+    params: Option<&serde_json::Value>,
+) -> Result<(), ServiceError> {
+    let Some(meta) = runtara_agents::registry::find_connection_type(integration_id) else {
+        return Ok(());
+    };
+    for field in meta.fields {
+        if !(field.is_required || field.is_url) {
+            continue;
+        }
+        let raw = params
+            .and_then(|p| p.get(field.name))
+            .and_then(|v| v.as_str());
+        let display = field.display_name.unwrap_or(field.name);
+        validate_url_field(display, raw, field.is_required, field.is_url)?;
+    }
+    Ok(())
+}
+
+/// Validate a single `is_url` / `is_required` field value.
+fn validate_url_field(
+    field_display: &str,
+    raw: Option<&str>,
+    is_required: bool,
+    is_url: bool,
+) -> Result<(), ServiceError> {
+    let trimmed = raw.map(str::trim).filter(|s| !s.is_empty());
+    let Some(value) = trimmed else {
+        if is_required {
+            return Err(ServiceError::ValidationError(format!(
+                "{field_display} is required and must be a non-empty https URL \
+                 (e.g. https://api.example.com)"
+            )));
+        }
+        return Ok(());
+    };
+    if !is_url {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| {
+        ServiceError::ValidationError(format!(
+            "{field_display} must be a valid absolute URL (got '{value}')"
+        ))
+    })?;
+    let host = parsed.host_str().filter(|h| !h.is_empty()).ok_or_else(|| {
+        ServiceError::ValidationError(format!("{field_display} must include a host"))
+    })?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if connection_http_allowed(host) => Ok(()),
+        _ => Err(ServiceError::ValidationError(format!(
+            "{field_display} must use https:// ({value})"
+        ))),
+    }
+}
+
+/// Hosts allowed to use an `http://` base URL (`RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`).
+/// Host-scoped so a single dev/socat sidecar can be allowed without disabling
+/// TLS enforcement globally. Empty = https-only (fail-closed default).
+fn connection_http_allowed(host: &str) -> bool {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = HOSTS.get_or_init(|| {
+        std::env::var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let h = host.to_ascii_lowercase();
+    list.iter().any(|entry| entry == &h)
+}
+
 pub struct ConnectionService {
     repository: Arc<ConnectionRepository>,
     compatibility: Arc<IntegrationCompatibility>,
@@ -178,6 +261,12 @@ impl ConnectionService {
             validate_rate_limit_config(cfg)?;
         }
 
+        // Validate connection parameters (e.g. a required https base URL) against
+        // the connection type schema — closes the F1 creation side.
+        if let Some(ref integration_id) = request.integration_id {
+            validate_connection_parameters(integration_id, request.connection_parameters.as_ref())?;
+        }
+
         let default_for = Self::normalize_default_for(
             request.default_for.clone(),
             request.is_default_file_storage,
@@ -291,7 +380,10 @@ impl ConnectionService {
             Self::normalize_default_for(Some(default_for), request.is_default_file_storage)
         });
 
-        let current_connection = if request.integration_id.is_some() || default_for.is_some() {
+        let current_connection = if request.integration_id.is_some()
+            || default_for.is_some()
+            || request.connection_parameters.is_some()
+        {
             Some(self.get_connection(id, tenant_id).await?)
         } else {
             None
@@ -306,6 +398,16 @@ impl ConnectionService {
                     .and_then(|connection| connection.integration_id.clone())
             })
             .unwrap_or_default();
+
+        // Validate submitted connection parameters against the type schema.
+        // Only when params are part of this PATCH, so unrelated edits (title,
+        // rate limit) to a legacy row aren't retroactively blocked.
+        if request.connection_parameters.is_some() {
+            validate_connection_parameters(
+                &integration_id,
+                request.connection_parameters.as_ref(),
+            )?;
+        }
 
         if let Some(ref default_for) = default_for {
             self.validate_default_for(&integration_id, default_for)?;
@@ -482,8 +584,112 @@ pub enum ServiceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceError, validate_rate_limit_config};
+    use super::{
+        ServiceError, validate_connection_parameters, validate_rate_limit_config,
+        validate_url_field,
+    };
     use crate::types::RateLimitConfigDto;
+    use serde_json::json;
+
+    // ── base-URL validation (F1 creation side) ───────────────────────────────
+
+    fn is_validation_err(r: Result<(), ServiceError>) -> bool {
+        matches!(r, Err(ServiceError::ValidationError(_)))
+    }
+
+    #[test]
+    fn url_field_requires_present_https() {
+        assert!(is_validation_err(validate_url_field(
+            "Base URL", None, true, true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("   "),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some(""),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("http://api.example.com"),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("ftp://x"),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("not a url"),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("/v2/foo"),
+            true,
+            true
+        )));
+        assert!(is_validation_err(validate_url_field(
+            "Base URL",
+            Some("https://"),
+            true,
+            true
+        )));
+        // Valid https passes.
+        assert!(
+            validate_url_field("Base URL", Some("https://api.example.com/v2"), true, true).is_ok()
+        );
+        // Optional + absent is fine; is_url only validates format when present.
+        assert!(validate_url_field("Base URL", None, false, true).is_ok());
+    }
+
+    #[test]
+    fn connection_params_enforce_http_type_base_url() {
+        // Real meta drives this: proves the schema flag is emitted for http_bearer.
+        assert!(is_validation_err(validate_connection_parameters(
+            "http_bearer",
+            Some(&json!({"token": "secret"}))
+        )));
+        assert!(
+            validate_connection_parameters(
+                "http_bearer",
+                Some(&json!({"token": "secret", "base_url": "https://api.example.com"}))
+            )
+            .is_ok()
+        );
+        // http_api_key too.
+        assert!(is_validation_err(validate_connection_parameters(
+            "http_api_key",
+            Some(&json!({"api_key": "k", "base_url": ""}))
+        )));
+        assert!(
+            validate_connection_parameters(
+                "http_api_key",
+                Some(&json!({"api_key": "k", "base_url": "https://api.example.com"}))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn connection_params_noop_for_unflagged_and_unknown_types() {
+        // Types with a derived base URL (not flagged) are unaffected even w/o base_url.
+        assert!(
+            validate_connection_parameters("openai_api_key", Some(&json!({"api_key": "sk-x"})))
+                .is_ok()
+        );
+        // Unknown integration_id → no meta → no-op.
+        assert!(validate_connection_parameters("totally_unknown", Some(&json!({}))).is_ok());
+    }
 
     fn valid() -> RateLimitConfigDto {
         RateLimitConfigDto {
