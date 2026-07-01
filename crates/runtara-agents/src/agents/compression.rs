@@ -49,7 +49,6 @@ impl ArchiveDataInput {
     display_name = "Archive File Entry",
     description = "A file to add to an archive with optional path"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ArchiveFileEntry {
     /// The file content (base64-encoded)
     #[field(
@@ -73,7 +72,6 @@ pub struct ArchiveFileEntry {
     display_name = "Create Archive Input",
     description = "Input for creating an archive from files"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct CreateArchiveInput {
     /// Files to add to the archive
     #[field(
@@ -119,7 +117,6 @@ fn default_compression_level() -> u8 {
     display_name = "Extract Archive Input",
     description = "Input for extracting all files from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractArchiveInput {
     /// The archive to extract (base64-encoded)
     #[field(display_name = "Archive", description = "The archive file to extract")]
@@ -140,7 +137,6 @@ pub struct ExtractArchiveInput {
     display_name = "Extract File Input",
     description = "Input for extracting a single file from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractFileInput {
     /// The archive containing the file (base64-encoded)
     #[field(
@@ -171,7 +167,6 @@ pub struct ExtractFileInput {
     display_name = "List Archive Input",
     description = "Input for listing archive contents"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ListArchiveInput {
     /// The archive to list (base64-encoded)
     #[field(
@@ -195,7 +190,6 @@ pub struct ListArchiveInput {
     display_name = "Extracted File",
     description = "A file extracted from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractedFile {
     /// The extracted file content
     #[field(
@@ -229,7 +223,6 @@ pub struct ExtractedFile {
     display_name = "Extract Archive Output",
     description = "Result of extracting all files from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractArchiveOutput {
     /// All extracted files
     #[field(display_name = "Files", description = "List of all extracted files")]
@@ -249,7 +242,6 @@ pub struct ExtractArchiveOutput {
     display_name = "Archive Entry Info",
     description = "Information about a file in an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ArchiveEntryInfo {
     /// Path within the archive
     #[field(
@@ -283,7 +275,6 @@ pub struct ArchiveEntryInfo {
     display_name = "List Archive Output",
     description = "Contents of an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ListArchiveOutput {
     /// List of entries in the archive
     #[field(

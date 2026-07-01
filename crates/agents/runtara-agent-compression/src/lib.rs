@@ -135,7 +135,6 @@ pub struct RawConnection {
     display_name = "File Data",
     description = "Binary file content with optional filename and MIME type, transported as base64."
 )]
-#[serde(rename_all = "camelCase")]
 pub struct FileData {
     #[field(display_name = "Content", description = "Base64-encoded file content")]
     pub content: String,
@@ -145,11 +144,14 @@ pub struct FileData {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
+    // Wire name is `mimeType` to match the host's shared `runtara_agents::types::FileData`
+    // (which renames this one field). Every other field is snake_case, matching the
+    // capability metadata the validator authors against.
     #[field(
         display_name = "MIME Type",
         description = "Optional content-type (e.g. \"application/zip\")"
     )]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
 }
 
@@ -178,7 +180,6 @@ pub enum ArchiveDataInput {
     display_name = "Archive File Entry",
     description = "A file to add to an archive with optional path"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ArchiveFileEntry {
     #[field(
         display_name = "File",
@@ -203,7 +204,6 @@ pub struct ArchiveFileEntry {
     display_name = "Create Archive Input",
     description = "Input for creating an archive from files"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct CreateArchiveInput {
     /// Connection data injected by the wasm Guest::invoke wrapper. Compression
     /// doesn't use a connection, but the field is kept for uniformity with
@@ -278,7 +278,6 @@ pub fn create_archive(input: CreateArchiveInput) -> Result<FileData, AgentError>
     display_name = "Extract Archive Input",
     description = "Input for extracting all files from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractArchiveInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,7 +299,6 @@ pub struct ExtractArchiveInput {
     display_name = "Extracted File",
     description = "A file extracted from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractedFile {
     #[field(
         display_name = "File",
@@ -329,7 +327,6 @@ pub struct ExtractedFile {
     display_name = "Extract Archive Output",
     description = "Result of extracting all files from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractArchiveOutput {
     #[field(display_name = "Files", description = "List of all extracted files")]
     pub files: Vec<ExtractedFile>,
@@ -365,7 +362,6 @@ pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutpu
     display_name = "Extract File Input",
     description = "Input for extracting a single file from an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ExtractFileInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,7 +412,6 @@ pub fn extract_file(input: ExtractFileInput) -> Result<FileData, AgentError> {
     display_name = "List Archive Input",
     description = "Input for listing archive contents"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ListArchiveInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,7 +436,6 @@ pub struct ListArchiveInput {
     display_name = "Archive Entry Info",
     description = "Information about a file in an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ArchiveEntryInfo {
     #[field(
         display_name = "Path",
@@ -470,7 +464,6 @@ pub struct ArchiveEntryInfo {
     display_name = "List Archive Output",
     description = "Contents of an archive"
 )]
-#[serde(rename_all = "camelCase")]
 pub struct ListArchiveOutput {
     #[field(
         display_name = "Entries",
@@ -542,20 +535,82 @@ fn forward_to_native(capability_id: &str, input_value: &Value) -> Result<Value, 
         })?;
 
     let status = response.status;
+    let body_text = String::from_utf8_lossy(&response.body).to_string();
     if !(200..300).contains(&status) {
-        let body_text = String::from_utf8_lossy(&response.body).to_string();
         return Err(AgentError::permanent(
             format!("NATIVE_AGENT_HTTP_{status}"),
             format!("native agent compression/{capability_id} returned {status}: {body_text}"),
         ));
     }
 
-    serde_json::from_slice::<Value>(&response.body).map_err(|e| {
+    parse_native_envelope(capability_id, &body_text)
+}
+
+/// Unwrap the `{ success, output | error }` envelope the internal native-agent
+/// endpoint wraps every response in (see `internal_agents::run_agent`).
+///
+/// On `success: true` we return the inner `output` payload — the caller then
+/// deserializes THAT into the typed output struct. Returning the whole envelope
+/// (the previous behaviour) made every capability fail with a misleading
+/// `missing field 'content'`, because the envelope has no `content` key — only
+/// `success` and `output`. The sibling sftp wrapper already unwraps identically.
+///
+/// On `success: false` the `error` field is a JSON-encoded `AgentError`; we
+/// parse it back so the workflow sees the real native error code (e.g.
+/// `ARCHIVE_FILE_NOT_FOUND`) and retry category instead of an opaque wrapper.
+///
+/// Pure (no I/O) so the envelope contract is unit-tested without a live host.
+fn parse_native_envelope(capability_id: &str, body_text: &str) -> Result<Value, AgentError> {
+    let envelope: Value = serde_json::from_str(body_text).map_err(|e| {
         AgentError::permanent(
             "COMPRESSION_OUTPUT_PARSE_ERROR",
-            format!("invalid JSON from native handler: {e}"),
+            format!(
+                "invalid JSON envelope from native compression/{capability_id}: {e}: {body_text}"
+            ),
         )
-    })
+    })?;
+
+    if envelope
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        Ok(envelope.get("output").cloned().unwrap_or(Value::Null))
+    } else {
+        Err(native_error_to_agent_error(envelope.get("error")))
+    }
+}
+
+/// Reconstruct an `AgentError` from the envelope's `error` field. The native
+/// side serializes a full `AgentError` to a JSON string, so we parse it to
+/// preserve `code`/`message`/`category`; anything unparseable falls back to a
+/// generic permanent error carrying the raw text.
+fn native_error_to_agent_error(error: Option<&Value>) -> AgentError {
+    let raw = match error {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => "unknown native agent error".to_string(),
+    };
+
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&raw) {
+        let code = map
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("COMPRESSION_NATIVE_AGENT_ERROR")
+            .to_string();
+        let message = map
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&raw)
+            .to_string();
+        if map.get("category").and_then(|v| v.as_str()) == Some("transient") {
+            AgentError::transient(code, message)
+        } else {
+            AgentError::permanent(code, message)
+        }
+    } else {
+        AgentError::permanent("COMPRESSION_NATIVE_AGENT_ERROR", raw)
+    }
 }
 
 fn deserialize_output<T: for<'de> Deserialize<'de>>(
@@ -777,3 +832,126 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+
+// ============================================================================
+// Tests (host-only; exercise the pure envelope + wire-contract logic)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- Bug #1: the native envelope must be unwrapped ---------------------
+
+    #[test]
+    fn success_envelope_unwraps_to_output() {
+        // The internal endpoint wraps output in `{ success, output }`. We must
+        // return the inner `output` so the caller can deserialize FileData —
+        // returning the whole envelope caused the reported `missing field
+        // 'content'` (the envelope has no `content`, only `success`/`output`).
+        let body = json!({
+            "success": true,
+            "output": { "content": "d29ybGQ=", "filename": "hello.txt", "mimeType": "text/plain" }
+        })
+        .to_string();
+
+        let output = parse_native_envelope("extract-file", &body).expect("envelope unwraps");
+        // The unwrapped output deserializes cleanly into the typed FileData.
+        let file: FileData = deserialize_output("extract-file", output).expect("deserializes");
+        assert_eq!(file.content, "d29ybGQ=");
+        assert_eq!(file.filename.as_deref(), Some("hello.txt"));
+        assert_eq!(file.mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn failure_envelope_preserves_native_error_code() {
+        // `error` is a JSON-encoded AgentError; the real code/category must
+        // survive so workflow onError branches can switch on it.
+        let inner = json!({
+            "code": "ARCHIVE_FILE_NOT_FOUND",
+            "message": "File 'x' not found in archive",
+            "category": "permanent",
+            "severity": "error"
+        })
+        .to_string();
+        let body = json!({ "success": false, "error": inner }).to_string();
+
+        let err = parse_native_envelope("extract-file", &body).expect_err("surfaces error");
+        assert_eq!(err.code, "ARCHIVE_FILE_NOT_FOUND");
+        assert_eq!(err.category, "permanent");
+        assert!(err.message.contains("not found"));
+    }
+
+    #[test]
+    fn malformed_envelope_is_a_parse_error_not_missing_content() {
+        let err = parse_native_envelope("extract-file", "not json").expect_err("parse fails");
+        assert_eq!(err.code, "COMPRESSION_OUTPUT_PARSE_ERROR");
+    }
+
+    #[test]
+    fn plain_string_error_falls_back_gracefully() {
+        let body = json!({ "success": false, "error": "boom" }).to_string();
+        let err = parse_native_envelope("list-archive", &body).expect_err("surfaces error");
+        assert_eq!(err.code, "COMPRESSION_NATIVE_AGENT_ERROR");
+        assert_eq!(err.message, "boom");
+    }
+
+    // ---- Bug #2: input field names are snake_case on the wire --------------
+
+    #[test]
+    fn extract_file_input_deserializes_snake_case_file_path() {
+        // The validator/metadata advertise `file_path`; the runtime must accept
+        // exactly that (previously `rename_all = camelCase` demanded `filePath`).
+        let input: ExtractFileInput = serde_json::from_value(json!({
+            "archive": "UEsDBAoAAAAAAA==",
+            "file_path": "data/report.csv"
+        }))
+        .expect("snake_case input deserializes");
+        assert_eq!(input.file_path, "data/report.csv");
+    }
+
+    #[test]
+    fn extract_file_input_rejects_camel_case_file_path() {
+        // Guard against re-introducing the camelCase wire contract.
+        let err = serde_json::from_value::<ExtractFileInput>(json!({
+            "archive": "UEsDBAoAAAAAAA==",
+            "filePath": "data/report.csv"
+        }))
+        .expect_err("camelCase must NOT satisfy the required field");
+        assert!(err.to_string().contains("file_path"));
+    }
+
+    #[test]
+    fn create_archive_input_uses_snake_case_multiword_fields() {
+        let input: CreateArchiveInput = serde_json::from_value(json!({
+            "files": [{ "file": "aGk=", "path": "a.txt" }],
+            "compression_level": 9,
+            "archive_name": "out.zip"
+        }))
+        .expect("snake_case multi-word fields deserialize");
+        assert_eq!(input.compression_level, 9);
+        assert_eq!(input.archive_name.as_deref(), Some("out.zip"));
+    }
+
+    // ---- FileData output stays wire-compatible with the host FileData ------
+
+    #[test]
+    fn file_data_serializes_mime_type_as_mimetype() {
+        let file = FileData {
+            content: "aGk=".into(),
+            filename: Some("a.txt".into()),
+            mime_type: Some("text/plain".into()),
+        };
+        let v = serde_json::to_value(&file).unwrap();
+        assert_eq!(
+            v.get("mimeType").and_then(|x| x.as_str()),
+            Some("text/plain")
+        );
+        assert!(
+            v.get("mime_type").is_none(),
+            "must not emit snake_case mime_type"
+        );
+        assert!(v.get("content").is_some());
+    }
+}
