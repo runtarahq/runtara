@@ -88,6 +88,7 @@ pub enum EventType {
     ConnectionTokenRefreshed,
     // Billing-relevant (future-proofing)
     QuotaExceeded,
+    PlanChanged,
 }
 
 impl EventType {
@@ -117,6 +118,7 @@ impl EventType {
             EventType::ConnectionOauthFailed => "connection.oauth_failed",
             EventType::ConnectionTokenRefreshed => "connection.token_refreshed",
             EventType::QuotaExceeded => "quota.exceeded",
+            EventType::PlanChanged => "plan.changed",
         }
     }
 }
@@ -625,6 +627,7 @@ mod tests {
             "agent.capability_tested"
         );
         assert_eq!(EventType::QuotaExceeded.as_str(), "quota.exceeded");
+        assert_eq!(EventType::PlanChanged.as_str(), "plan.changed");
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::mcp;
 use crate::metrics;
 use crate::middleware;
 use crate::observability;
+use crate::plan_check;
 use crate::product_events;
 use crate::runtime_client;
 use crate::types;
@@ -948,6 +949,17 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let (product_event_tx, product_event_rx) =
         tokio::sync::mpsc::channel(product_events_config.channel_capacity());
     let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
+    // Boot-time plan-change detection: `RUNTARA_PRICING_TIER` is frozen into `config::entitlements()`
+    // for the life of the process, so this is the only point a plan change (via restart with a
+    // different env var) can be observed. See `plan_check` module doc. Fast (one or two queries)
+    // and best-effort, so it runs inline rather than as a spawned task.
+    plan_check::check_and_record(
+        &pool,
+        &product_event_sink,
+        &config::entitlements().pricing_tier,
+    )
+    .await;
 
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
