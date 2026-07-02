@@ -390,6 +390,18 @@ impl Tier {
             Tier::Enterprise => TierBase::enterprise(),
         }
     }
+
+    /// Wire identifier — mirrors the `#[serde(rename_all = "lowercase")]` on this enum so the
+    /// two never drift. Used as the "plan" string persisted in `metadata` and reported in
+    /// `plan.changed` events.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Tier::Default => "default",
+            Tier::Starter => "starter",
+            Tier::Premium => "premium",
+            Tier::Enterprise => "enterprise",
+        }
+    }
 }
 /// The four feature flags a pricing tier must set. No `Option` — the compiler
 /// guarantees a tier definition is complete; a tier cannot leave a feature unset.

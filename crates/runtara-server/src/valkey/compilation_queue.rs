@@ -17,13 +17,23 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// A compilation request in the queue
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+//
+// Note: no `Eq`/`Hash`/`PartialEq` — `product_event` can carry a `ProductEvent` whose
+// `serde_json::Value` properties are neither. Dedup uses `unique_key()` (a string), not the
+// struct's identity, so these derives weren't needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompilationRequest {
     pub tenant_id: String,
     pub workflow_id: String,
     pub version: i32,
     #[serde(default)]
     pub force_recompile: bool,
+    /// Optional pre-built, attributed `workflow.compiled` event supplied by the enqueuer (which
+    /// has the caller/surface context). The worker fills in the outcome (`success`,
+    /// `occurred_at`) and emits it. `None` → the worker emits its own no-user, `Worker`-source
+    /// default. Either way the worker is the single emit point, so the event lands exactly once.
+    #[serde(default)]
+    pub product_event: Option<crate::product_events::ProductEvent>,
 }
 
 impl CompilationRequest {
@@ -33,6 +43,7 @@ impl CompilationRequest {
             workflow_id,
             version,
             force_recompile: false,
+            product_event: None,
         }
     }
 
@@ -47,7 +58,18 @@ impl CompilationRequest {
             workflow_id,
             version,
             force_recompile,
+            product_event: None,
         }
+    }
+
+    /// Attach a pre-built, attributed `workflow.compiled` event for the worker to emit on
+    /// completion. Builder-style.
+    pub fn with_product_event(
+        mut self,
+        product_event: Option<crate::product_events::ProductEvent>,
+    ) -> Self {
+        self.product_event = product_event;
+        self
     }
 
     /// Create a unique key for this request (used for deduplication)
@@ -69,6 +91,7 @@ impl CompilationRequest {
                 workflow_id: parts[1].to_string(),
                 version: parts[2].parse().ok()?,
                 force_recompile: false,
+                product_event: None,
             })
         } else {
             None
@@ -531,13 +554,14 @@ mod tests {
     }
 
     #[test]
-    fn test_compilation_request_equality() {
+    fn test_compilation_request_dedup_key() {
+        // Dedup keys off `unique_key()` (tenant:workflow:version), not struct identity.
         let req1 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 1);
         let req2 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 1);
         let req3 = CompilationRequest::new("t1".to_string(), "s1".to_string(), 2);
 
-        assert_eq!(req1, req2);
-        assert_ne!(req1, req3);
+        assert_eq!(req1.unique_key(), req2.unique_key());
+        assert_ne!(req1.unique_key(), req3.unique_key());
     }
 
     #[test]
@@ -559,5 +583,54 @@ mod tests {
         assert!(debug_str.contains("tenant_id"));
         assert!(debug_str.contains("workflow_id"));
         assert!(debug_str.contains("version"));
+    }
+
+    #[test]
+    fn legacy_payload_without_product_event_deserializes_to_none() {
+        // Old queue payloads (pre-SYN-436) lack `product_event`; `#[serde(default)]` must make
+        // them deserialize cleanly so in-flight messages survive a deploy.
+        let legacy = r#"{"tenant_id":"t","workflow_id":"w","version":3}"#;
+        let req = CompilationRequest::from_payload(legacy).expect("legacy payload parses");
+        assert_eq!(req.tenant_id, "t");
+        assert_eq!(req.workflow_id, "w");
+        assert_eq!(req.version, 3);
+        assert!(req.product_event.is_none());
+        assert!(!req.force_recompile);
+    }
+
+    #[test]
+    fn request_with_product_event_round_trips_through_payload() {
+        // A pre-built attributed event must survive the queue's JSON payload round-trip.
+        let req = CompilationRequest::new("t".to_string(), "w".to_string(), 1)
+            .with_product_event(Some(sample_product_event()));
+        let payload = req.payload().expect("serialize payload");
+        let back = CompilationRequest::from_payload(&payload).expect("parse payload");
+        let event = back.product_event.expect("product_event survived");
+        assert_eq!(
+            event.event_type,
+            crate::product_events::EventType::WorkflowCompiled
+        );
+        assert_eq!(event.resource_id.as_deref(), Some("w"));
+    }
+
+    /// A `ProductEvent` built without the global config (struct literal, not `::new`).
+    fn sample_product_event() -> crate::product_events::ProductEvent {
+        use crate::product_events::{EventSource, EventType, ProductEvent};
+        ProductEvent {
+            event_id: uuid::Uuid::new_v4(),
+            occurred_at: chrono::Utc::now(),
+            event_type: EventType::WorkflowCompiled,
+            event_version: 1,
+            tenant_id: "t".to_string(),
+            user_id: None,
+            actor_id: None,
+            actor_type: None,
+            resource_id: Some("w".to_string()),
+            resource_type: Some("workflow".to_string()),
+            properties: serde_json::json!({}),
+            session_id: None,
+            request_id: None,
+            source: Some(EventSource::Ui),
+        }
     }
 }

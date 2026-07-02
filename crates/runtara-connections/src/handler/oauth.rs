@@ -54,13 +54,22 @@ pub async fn authorize_handler(
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
 ) -> Result<Json<OAuthAuthorizeResponse>, (axum::http::StatusCode, Json<ErrorResponse>)> {
+    let events = state.connection_events.clone();
     let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
     match service.generate_authorization_url(&id, &tenant_id).await {
-        Ok(url) => Ok(Json(OAuthAuthorizeResponse {
-            success: true,
-            authorization_url: url,
-        })),
+        Ok(url) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::OAuthStarted {
+                    connection_id: id.clone(),
+                },
+            );
+            Ok(Json(OAuthAuthorizeResponse {
+                success: true,
+                authorization_url: url,
+            }))
+        }
         Err(OAuthError::ConnectionNotFound) => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -131,10 +140,19 @@ pub async fn callback_handler(
     Path(_tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Html<String> {
+    let events = state.connection_events.clone();
+
     // Handle provider errors
     if let Some(error) = params.error {
         let desc = params.error_description.unwrap_or_default();
-        return oauth_response_html(None, false, &format!("{}: {}", error, desc));
+        let reason = format!("{}: {}", error, desc);
+        crate::events::emit(
+            &events,
+            crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                reason: reason.clone(),
+            },
+        );
+        return oauth_response_html(None, false, &reason);
     }
 
     let oauth_state = match params.state {
@@ -150,16 +168,46 @@ pub async fn callback_handler(
     let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
     match service.handle_callback(&oauth_state, &code).await {
-        Ok(connection_id) => oauth_response_html(Some(&connection_id), true, ""),
-        Err(OAuthError::InvalidState) => oauth_response_html(
-            None,
-            false,
-            "Invalid or expired authorization. Please try again.",
-        ),
+        Ok(connection_id) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::OAuthCompleted {
+                    connection_id: connection_id.clone(),
+                },
+            );
+            oauth_response_html(Some(&connection_id), true, "")
+        }
+        Err(OAuthError::InvalidState) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                    reason: "invalid_state".to_string(),
+                },
+            );
+            oauth_response_html(
+                None,
+                false,
+                "Invalid or expired authorization. Please try again.",
+            )
+        }
         Err(OAuthError::TokenExchangeFailed(msg)) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                    reason: format!("token_exchange_failed: {}", msg),
+                },
+            );
             oauth_response_html(None, false, &format!("Token exchange failed: {}", msg))
         }
-        Err(e) => oauth_response_html(None, false, &e.to_string()),
+        Err(e) => {
+            crate::events::emit(
+                &events,
+                crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                    reason: e.to_string(),
+                },
+            );
+            oauth_response_html(None, false, &e.to_string())
+        }
     }
 }
 

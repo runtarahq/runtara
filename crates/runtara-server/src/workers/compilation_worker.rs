@@ -15,6 +15,7 @@ use crate::api::services::compilation::{
     CompilationService, direct_compilation_settings_from_config,
 };
 use crate::observability::metrics;
+use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
 use crate::valkey::compilation_queue::{CompilationQueue, CompilationRequest};
@@ -44,13 +45,14 @@ impl CompilationWorkerConfig {
 }
 
 /// Background worker that consumes compilation requests from the queue
-#[instrument(skip(pool, runtime_client, agent_catalog, config, shutdown))]
+#[instrument(skip(pool, runtime_client, agent_catalog, config, shutdown, events))]
 pub async fn run(
     pool: PgPool,
     runtime_client: Option<Arc<RuntimeClient>>,
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     config: CompilationWorkerConfig,
     shutdown: ShutdownSignal,
+    events: ProductEventSink,
 ) {
     let worker_id = format!("compilation-worker-{}", uuid::Uuid::new_v4());
 
@@ -177,6 +179,20 @@ pub async fn run(
                     // Record metrics
                     let duration = compile_start.elapsed().as_secs_f64();
                     let success = compile_result.is_ok();
+
+                    // Product analytics: the worker is the single emit point for
+                    // `workflow.compiled`. The enqueuer optionally supplied an attributed event
+                    // (caller + surface); otherwise we emit a no-user, Worker-source default.
+                    // Either way it lands exactly once, even if the requesting handler timed out.
+                    let mut event = request.product_event.clone().unwrap_or_else(|| {
+                        ProductEvent::new(EventType::WorkflowCompiled)
+                            .no_user_actor("compilation_worker", ActorType::System)
+                            .resource(&request.workflow_id, "workflow")
+                            .source(EventSource::Worker)
+                    });
+                    event.properties = serde_json::json!({ "success": success });
+                    event.occurred_at = chrono::Utc::now();
+                    events.emit(event);
 
                     if let Some(m) = metrics() {
                         let result_attrs = [
@@ -313,13 +329,55 @@ pub async fn enqueue_compilation(
     version: i32,
     force_recompile: bool,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
+    enqueue_compilation_inner(
+        redis_url,
+        tenant_id,
+        workflow_id,
+        version,
+        force_recompile,
+        None,
+    )
+    .await
+}
+
+/// Like [`enqueue_compilation`], but hands the worker a pre-built, attributed
+/// `workflow.compiled` event to emit on completion (the worker fills in `success` /
+/// `occurred_at`). Use from a handler that has the caller/surface context.
+pub async fn enqueue_compilation_with_event(
+    redis_url: &str,
+    tenant_id: &str,
+    workflow_id: &str,
+    version: i32,
+    force_recompile: bool,
+    product_event: ProductEvent,
+) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
+    enqueue_compilation_inner(
+        redis_url,
+        tenant_id,
+        workflow_id,
+        version,
+        force_recompile,
+        Some(product_event),
+    )
+    .await
+}
+
+async fn enqueue_compilation_inner(
+    redis_url: &str,
+    tenant_id: &str,
+    workflow_id: &str,
+    version: i32,
+    force_recompile: bool,
+    product_event: Option<ProductEvent>,
+) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
     let queue = open_shared_queue(redis_url).await?;
     let request = CompilationRequest::new_with_force(
         tenant_id.to_string(),
         workflow_id.to_string(),
         version,
         force_recompile,
-    );
+    )
+    .with_product_event(product_event);
     queue.enqueue(&request).await
 }
 

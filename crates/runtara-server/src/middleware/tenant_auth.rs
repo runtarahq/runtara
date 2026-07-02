@@ -5,8 +5,9 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, AuthMethod};
 use crate::authz::Role;
+use crate::product_events::EventSource;
 
 /// Middleware that bridges server auth context to `runtara_connections::TenantId`.
 ///
@@ -83,6 +84,38 @@ impl<S: Send + Sync> FromRequestParts<S> for CallerId {
     }
 }
 
+/// Axum extractor resolving the **surface** an authenticated request entered through, for
+/// product-analytics `source`. Prefers an explicit [`EventSource`] stamped in request
+/// extensions — the MCP in-process bridge (`mcp::tools::internal_api::build_request`) sets
+/// `EventSource::Mcp` there. Absent that (a real external HTTP request), it falls back to
+/// the caller's auth method as a proxy: an API key implies the programmatic API surface, a
+/// JWT (or non-OIDC mode) implies the web UI.
+///
+/// Infallible: a surface label must never fail a request, so it always resolves to *some*
+/// value (defaulting to the UI when no auth context is present at all).
+pub struct Source(pub EventSource);
+
+impl<S: Send + Sync> FromRequestParts<S> for Source {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // An explicit surface marker (e.g. MCP) always wins.
+        if let Some(source) = parts.extensions.get::<EventSource>().copied() {
+            return Ok(Source(source));
+        }
+        // Otherwise infer the surface from how the caller authenticated.
+        let source = match parts
+            .extensions
+            .get::<AuthContext>()
+            .map(|ctx| ctx.auth_method)
+        {
+            Some(AuthMethod::ApiKey) => EventSource::Api,
+            _ => EventSource::Ui,
+        };
+        Ok(Source(source))
+    }
+}
+
 /// Axum extractor yielding both the caller's user id and resolved [`Role`] — what handler-level
 /// `Own` ownership checks need (compare `created_by` against `user_id`, gated by `role`). Like
 /// [`OrgId`]/[`CallerId`] it reads `AuthContext` from request extensions, so the `authenticate`
@@ -113,5 +146,67 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
                     })),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    /// Build request `Parts` with the given extensions populated.
+    fn parts_with(f: impl FnOnce(&mut axum::http::Extensions)) -> Parts {
+        let mut req = Request::builder().body(()).unwrap();
+        f(req.extensions_mut());
+        req.into_parts().0
+    }
+
+    fn ctx(method: AuthMethod) -> AuthContext {
+        AuthContext::new("org".to_string(), "user".to_string(), method)
+    }
+
+    #[tokio::test]
+    async fn source_prefers_explicit_marker() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(EventSource::Mcp);
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Mcp);
+    }
+
+    #[tokio::test]
+    async fn source_marker_wins_over_auth_method() {
+        // An explicit surface marker beats the auth-method fallback.
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::ApiKey));
+            ext.insert(EventSource::Mcp);
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Mcp);
+    }
+
+    #[tokio::test]
+    async fn source_api_key_falls_back_to_api() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::ApiKey));
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Api);
+    }
+
+    #[tokio::test]
+    async fn source_jwt_falls_back_to_ui() {
+        let mut parts = parts_with(|ext| {
+            ext.insert(ctx(AuthMethod::Jwt));
+        });
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Ui);
+    }
+
+    #[tokio::test]
+    async fn source_defaults_to_ui_without_any_context() {
+        let mut parts = parts_with(|_| {});
+        let Source(s) = Source::from_request_parts(&mut parts, &()).await.unwrap();
+        assert_eq!(s, EventSource::Ui);
     }
 }

@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -37,6 +37,9 @@ use crate::api::dto::workflows::{
 use crate::api::handlers::common::{execution_error_response, execution_error_response_with};
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::workflows::{ServiceError, WorkflowService};
+use crate::auth::AuthContext;
+use crate::middleware::tenant_auth::Source;
+use crate::product_events::{EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
     ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
@@ -134,14 +137,17 @@ pub struct CompileWorkflowQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request, agent_catalog), fields(workflow_name = %request.name))]
+#[instrument(skip(pool, connections, request, agent_catalog, events, ctx, source), fields(workflow_name = %request.name))]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<CreateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
@@ -161,6 +167,20 @@ pub async fn create_workflow_handler(
         .await
     {
         Ok(workflow_dto) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCreated, &ctx)
+                    .resource(workflow_dto.id.as_str(), "workflow")
+                    .source(source),
+            );
+            // Creating a workflow also creates its first immutable version row — the same
+            // "a new workflow version was created" transition `update_workflow_handler` reports
+            // for every subsequent version.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowVersionRegistered, &ctx)
+                    .resource(workflow_dto.id.as_str(), "workflow")
+                    .properties(json!({ "version": workflow_dto.last_version_number }))
+                    .source(source),
+            );
             let response =
                 ApiResponse::success_with_message("Workflow created successfully", workflow_dto);
             (
@@ -168,7 +188,73 @@ pub async fn create_workflow_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(e) => map_service_error_to_response(e),
+        Err(e) => {
+            // `maxWorkflows` is the only entitlement gate `create_workflow` can hit — this
+            // filters to that (a feature-gate denial would no-op here, but there isn't one on
+            // this path today).
+            if let ServiceError::EntitlementDenied(ref denial) = e {
+                crate::product_events::emit_quota_exceeded(
+                    &events,
+                    ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                    denial,
+                );
+            }
+            map_service_error_to_response(e)
+        }
+    }
+}
+
+/// Walk a workflow's execution graph and collect the distinct `(agent_id, capability_id)`
+/// pairs it references, recursing into Split/While subgraphs and a WaitForSignal `onWait`
+/// branch. Best-effort: an unparseable graph yields no pairs (the save path itself owns
+/// validation, so this only runs to feed `agent.capability_used` analytics).
+fn collect_workflow_capabilities(execution_graph: &Value) -> Vec<(String, String)> {
+    fn walk(
+        graph: &runtara_dsl::ExecutionGraph,
+        out: &mut std::collections::BTreeSet<(String, String)>,
+    ) {
+        for step in graph.steps.values() {
+            match step {
+                runtara_dsl::Step::Agent(agent) => {
+                    out.insert((agent.agent_id.clone(), agent.capability_id.clone()));
+                }
+                runtara_dsl::Step::Split(split) => walk(&split.subgraph, out),
+                runtara_dsl::Step::While(while_step) => walk(&while_step.subgraph, out),
+                runtara_dsl::Step::WaitForSignal(wait) => {
+                    if let Some(on_wait) = &wait.on_wait {
+                        walk(on_wait, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let Ok(graph) = serde_json::from_value::<runtara_dsl::ExecutionGraph>(execution_graph.clone())
+    else {
+        return Vec::new();
+    };
+    let mut pairs = std::collections::BTreeSet::new();
+    walk(&graph, &mut pairs);
+    pairs.into_iter().collect()
+}
+
+/// Emit one `agent.capability_used` event per distinct capability referenced by a saved
+/// graph, attributed to the saving caller/surface and scoped to the workflow.
+fn emit_capability_used(
+    events: &ProductEventSink,
+    ctx: &AuthContext,
+    source: EventSource,
+    workflow_id: &str,
+    capabilities: &[(String, String)],
+) {
+    for (agent_id, capability_id) in capabilities {
+        events.emit(
+            ProductEvent::from_auth(EventType::AgentCapabilityUsed, ctx)
+                .resource(workflow_id, "workflow")
+                .properties(json!({ "agentId": agent_id, "capabilityId": capability_id }))
+                .source(source),
+        );
     }
 }
 
@@ -197,6 +283,9 @@ pub async fn update_workflow_handler(
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
@@ -225,6 +314,10 @@ pub async fn update_workflow_handler(
         agent_catalog.clone(),
     );
 
+    // Collect referenced capabilities before the graph is moved into the service, so a
+    // successful save can emit one `agent.capability_used` per distinct capability.
+    let capabilities = collect_workflow_capabilities(&request.execution_graph);
+
     // Delegate to service (name/description are now inside execution_graph)
     let (version_num, warnings) = match service
         .update_workflow(
@@ -236,7 +329,25 @@ pub async fn update_workflow_handler(
         )
         .await
     {
-        Ok(result) => result,
+        Ok(result) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowUpdated, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source),
+            );
+            // Distinct from `workflow.updated`: this handler always creates a new immutable
+            // version row (unlike `patch_version_graph_handler`, which mutates one in place and
+            // does not create a version), so this is the one place that genuinely reports
+            // "a new workflow version was created".
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowVersionRegistered, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .properties(json!({ "version": result.0 }))
+                    .source(source),
+            );
+            emit_capability_used(&events, &ctx, source, &workflow_id, &capabilities);
+            result
+        }
         Err(e) => return map_service_error_to_response(e),
     };
 
@@ -244,12 +355,19 @@ pub async fn update_workflow_handler(
     // The compilation worker will process this in the background
     let compilation_status = if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
         let redis_url = valkey_config.connection_url();
-        match crate::workers::compilation_worker::enqueue_compilation(
+        // This compile is a side effect of the update — hand the worker a pre-built event
+        // attributed to the updating caller/surface, so the resulting `workflow.compiled` is
+        // not an anonymous worker event.
+        let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source);
+        match crate::workers::compilation_worker::enqueue_compilation_with_event(
             &redis_url,
             &tenant_id,
             &workflow_id,
             version_num,
             false,
+            compiled_event,
         )
         .await
         {
@@ -332,6 +450,9 @@ pub async fn patch_version_graph_handler(
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path((workflow_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -355,6 +476,9 @@ pub async fn patch_version_graph_handler(
 
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
+    // Collect referenced capabilities before the graph is moved into the service.
+    let capabilities = collect_workflow_capabilities(&request.execution_graph);
+
     let warnings = match service
         .patch_version_graph(&tenant_id, &workflow_id, version, request.execution_graph)
         .await
@@ -362,6 +486,14 @@ pub async fn patch_version_graph_handler(
         Ok(warnings) => warnings,
         Err(e) => return map_service_error_to_response(e),
     };
+
+    events.emit(
+        ProductEvent::from_auth(EventType::WorkflowUpdated, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source)
+            .properties(json!({ "version": version })),
+    );
+    emit_capability_used(&events, &ctx, source, &workflow_id, &capabilities);
 
     let response = json!({
         "success": true,
@@ -620,13 +752,16 @@ pub async fn list_workflow_versions_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
@@ -653,6 +788,11 @@ pub async fn delete_workflow_handler(
     // Delegate to service
     match service.delete_workflow(&tenant_id, &workflow_id).await {
         Ok(rows_affected) => {
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowDeleted, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source),
+            );
             let response = json!({
                 "success": true,
                 "message": format!("Workflow '{}' marked as deleted ({} definitions deleted)", workflow_id, rows_affected),
@@ -682,13 +822,16 @@ pub async fn delete_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn clone_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-
+    State(events): State<ProductEventSink>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(workflow_id): Path<String>,
     Json(request): Json<CloneWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
@@ -702,6 +845,13 @@ pub async fn clone_workflow_handler(
         .await
     {
         Ok((new_workflow_id, versions_cloned)) => {
+            // A clone produces a brand-new workflow — record it as a creation, keyed on the
+            // *new* workflow id.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCreated, &ctx)
+                    .resource(&new_workflow_id, "workflow")
+                    .source(source),
+            );
             let response = json!({
                 "success": true,
                 "message": format!("Workflow '{}' cloned successfully", workflow_id),
@@ -713,7 +863,17 @@ pub async fn clone_workflow_handler(
             });
             (StatusCode::OK, Json(response))
         }
-        Err(e) => map_service_error_to_response(e),
+        Err(e) => {
+            // `maxWorkflows` is the only entitlement gate `clone_workflow` can hit.
+            if let ServiceError::EntitlementDenied(ref denial) = e {
+                crate::product_events::emit_quota_exceeded(
+                    &events,
+                    ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                    denial,
+                );
+            }
+            map_service_error_to_response(e)
+        }
     }
 }
 
@@ -737,13 +897,17 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client, _connections), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, runtime_client, _connections, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
+#[allow(clippy::too_many_arguments)]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
+    State(events): State<ProductEventSink>,
     Path((workflow_id, version)): Path<(String, String)>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Query(query): Query<CompileWorkflowQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Validate version is a positive integer
@@ -847,13 +1011,19 @@ pub async fn compile_workflow_handler(
             "Deferring cache decision to compilation service"
         );
 
-        // Enqueue the compilation request
-        match crate::workers::compilation_worker::enqueue_compilation(
+        // Enqueue with a pre-built event attributed to this caller and surface. The compilation
+        // worker emits it on completion, so `workflow.compiled` lands exactly once — even if the
+        // wait below times out.
+        let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+            .resource(&workflow_id, "workflow")
+            .source(source);
+        match crate::workers::compilation_worker::enqueue_compilation_with_event(
             &redis_url,
             &tenant_id,
             &workflow_id,
             version_num,
             force_recompile,
+            compiled_event,
         )
         .await
         {
@@ -906,6 +1076,8 @@ pub async fn compile_workflow_handler(
         // Query DB for the compilation result
         return match query_compilation_result(&pool, &tenant_id, &workflow_id, version_num).await {
             Ok(result) => {
+                // `workflow.compiled` is emitted by the compilation worker (see enqueue above),
+                // so this handler does not emit it.
                 if result.success {
                     let mut response = json!({
                         "success": true,
@@ -965,6 +1137,14 @@ pub async fn compile_workflow_handler(
         .await
     {
         Ok(result) => {
+            // Synchronous (no-queue) compile: the worker isn't involved, so this handler is the
+            // emit point for `workflow.compiled` on this path.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source)
+                    .properties(json!({ "success": true })),
+            );
             let mut response = json!({
                 "success": true,
                 "message": "Workflow compiled successfully",
@@ -993,6 +1173,14 @@ pub async fn compile_workflow_handler(
             (StatusCode::NOT_FOUND, Json(error_response))
         }
         Err(crate::api::services::compilation::ServiceError::CompilationError(msg)) => {
+            // The compile actually ran and failed (vs. NotFound/DatabaseError, which are
+            // pre-compile failures) — record it as a failed compile on the synchronous path.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source)
+                    .properties(json!({ "success": false })),
+            );
             let error_response = json!({
                 "success": false,
                 "error": "Compilation failed",
@@ -2619,5 +2807,83 @@ pub async fn rename_folder_handler(
             )
         }
         Err(e) => map_service_error_to_response(e),
+    }
+}
+
+#[cfg(test)]
+mod capability_walk_tests {
+    use super::collect_workflow_capabilities;
+    use serde_json::json;
+
+    #[test]
+    fn collects_distinct_pairs_including_nested_subgraphs() {
+        // One top-level Agent, plus an Agent nested inside a Split subgraph.
+        let graph = json!({
+            "entryPoint": "split1",
+            "steps": {
+                "split1": {
+                    "stepType": "Split",
+                    "id": "split1",
+                    "subgraph": {
+                        "entryPoint": "inner",
+                        "steps": {
+                            "inner": {
+                                "stepType": "Agent",
+                                "id": "inner",
+                                "agentId": "transform",
+                                "capabilityId": "group-by"
+                            }
+                        }
+                    }
+                },
+                "top": {
+                    "stepType": "Agent",
+                    "id": "top",
+                    "agentId": "http",
+                    "capabilityId": "request"
+                }
+            }
+        });
+
+        let pairs = collect_workflow_capabilities(&graph);
+        // BTreeSet ordering: sorted by (agent_id, capability_id).
+        assert_eq!(
+            pairs,
+            vec![
+                ("http".to_string(), "request".to_string()),
+                ("transform".to_string(), "group-by".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicates_repeated_capabilities() {
+        let graph = json!({
+            "entryPoint": "a",
+            "steps": {
+                "a": {"stepType": "Agent", "id": "a", "agentId": "http", "capabilityId": "request"},
+                "b": {"stepType": "Agent", "id": "b", "agentId": "http", "capabilityId": "request"}
+            }
+        });
+
+        let pairs = collect_workflow_capabilities(&graph);
+        assert_eq!(pairs, vec![("http".to_string(), "request".to_string())]);
+    }
+
+    #[test]
+    fn ignores_non_agent_steps() {
+        let graph = json!({
+            "entryPoint": "f",
+            "steps": {
+                "f": {"stepType": "Finish", "id": "f"}
+            }
+        });
+        assert!(collect_workflow_capabilities(&graph).is_empty());
+    }
+
+    #[test]
+    fn unparseable_graph_yields_no_pairs() {
+        // Missing required `steps`/`entryPoint` — best-effort returns empty, never panics.
+        assert!(collect_workflow_capabilities(&json!({"nonsense": true})).is_empty());
     }
 }

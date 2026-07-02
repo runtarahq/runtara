@@ -3,7 +3,7 @@
 //! Thin HTTP layer that extracts request data and delegates to SchemaService and InstanceService
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -14,6 +14,9 @@ use std::sync::Arc;
 use crate::api::dto::object_model::*;
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
+use crate::auth::AuthContext;
+use crate::middleware::tenant_auth::Source;
+use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
 // ============================================================================
 // Bulk size entitlement gate
@@ -37,12 +40,22 @@ use crate::api::services::object_model::{InstanceService, SchemaService, Service
 /// the only thing that can fire — and its current `-32602` shape is an
 /// acceptable fallback in that case because the overflow is infra, not
 /// entitlement.
-fn check_bulk_size_entitlement(requested: usize) -> Result<(), (StatusCode, Json<Value>)> {
+fn check_bulk_size_entitlement(
+    requested: usize,
+    events: &ProductEventSink,
+    ctx: &AuthContext,
+    source: crate::product_events::EventSource,
+) -> Result<(), (StatusCode, Json<Value>)> {
     let snapshot = crate::config::entitlements();
     match crate::middleware::entitlement::bulk_size_decision(snapshot, requested) {
         Ok(()) => Ok(()),
         Err(denial) => {
             denial.audit_log(snapshot.tenant_id.as_str());
+            crate::product_events::emit_quota_exceeded(
+                events,
+                ProductEvent::from_auth(EventType::QuotaExceeded, ctx).source(source),
+                &denial,
+            );
             Err((StatusCode::FORBIDDEN, Json(denial.json_body())))
         }
     }
@@ -79,6 +92,8 @@ pub struct ObjectModelState {
     pub pool: PgPool,
     /// Connections facade for resolving connection IDs
     pub connections: Arc<runtara_connections::ConnectionsFacade>,
+    /// Sink for product-analytics events (e.g. `quota.exceeded` on entitlement denial).
+    pub events: ProductEventSink,
 }
 
 // ============================================================================
@@ -176,6 +191,8 @@ pub struct ObjectModelState {
 pub async fn create_schema(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(state): State<Arc<ObjectModelState>>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<CreateSchemaResponse>), (StatusCode, Json<Value>)> {
@@ -197,6 +214,11 @@ pub async fn create_schema(
                     Some(cap),
                     "maxObjectSchemas",
                 ) {
+                    crate::product_events::emit_quota_exceeded(
+                        &state.events,
+                        ProductEvent::from_auth(EventType::QuotaExceeded, &ctx).source(source),
+                        &denial,
+                    );
                     return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
                 }
             }
@@ -606,11 +628,13 @@ pub async fn delete_instance(
 pub async fn bulk_delete_instances(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(state): State<Arc<ObjectModelState>>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(schema_id): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkDeleteRequest>,
 ) -> Result<(StatusCode, Json<BulkDeleteResponse>), (StatusCode, Json<Value>)> {
-    check_bulk_size_entitlement(request.instance_ids.len())?;
+    check_bulk_size_entitlement(request.instance_ids.len(), &state.events, &ctx, source)?;
 
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
@@ -685,11 +709,13 @@ pub async fn bulk_delete_instances(
 pub async fn bulk_create_instances(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(state): State<Arc<ObjectModelState>>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(schema_id): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkCreateRequest>,
 ) -> Result<(StatusCode, Json<BulkCreateResponse>), (StatusCode, Json<Value>)> {
-    check_bulk_size_entitlement(bulk_create_row_count(&request))?;
+    check_bulk_size_entitlement(bulk_create_row_count(&request), &state.events, &ctx, source)?;
 
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
@@ -776,6 +802,8 @@ pub async fn bulk_create_instances(
 pub async fn bulk_update_instances(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(state): State<Arc<ObjectModelState>>,
+    Extension(ctx): Extension<AuthContext>,
+    Source(source): Source,
     Path(schema_id): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkUpdateRequest>,
@@ -785,7 +813,7 @@ pub async fn bulk_update_instances(
     // arbitrary rows — there is no client-supplied count to gate, and the
     // store-side `bulk_request_limit` doesn't apply to that path either.
     if let BulkUpdateRequest::ByIds { updates } = &request {
-        check_bulk_size_entitlement(updates.len())?;
+        check_bulk_size_entitlement(updates.len(), &state.events, &ctx, source)?;
     }
 
     let service = InstanceService::new(state.manager.clone(), state.connections.clone());

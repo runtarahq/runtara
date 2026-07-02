@@ -300,6 +300,7 @@ impl ConnectionsFacade {
             integration_id,
             params,
             headers,
+            &self.state.connection_events,
         )
         .await
         .map_err(ConnectionsError::AuthResolution)

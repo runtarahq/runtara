@@ -44,6 +44,12 @@ pub struct ConnectionsConfig {
     /// [`runtara_dsl::agent_meta::AgentCatalog::integration_ids_for`];
     /// the connection service itself stays agent-agnostic.
     pub agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+
+    /// Optional sink for connection lifecycle analytics events. `None` disables them. The
+    /// host implements [`crate::events::ConnectionEventSink`] and injects it here; the crate
+    /// stays unaware of the host's product-events pipeline. See [`crate::events`].
+    #[allow(clippy::type_complexity)]
+    pub connection_events: crate::events::ConnectionEvents,
 }
 
 /// Runtime state shared across all handlers in the connections crate.
@@ -59,6 +65,7 @@ pub struct ConnectionsState {
     pub cipher: Arc<dyn CredentialCipher>,
     pub compatibility: Arc<IntegrationCompatibility>,
     pub agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    pub connection_events: crate::events::ConnectionEvents,
 }
 
 impl ConnectionsState {
@@ -71,6 +78,7 @@ impl ConnectionsState {
             cipher: config.cipher,
             compatibility: config.compatibility,
             agent_catalog: config.agent_catalog,
+            connection_events: config.connection_events,
         }
     }
 }
@@ -96,5 +104,11 @@ impl axum::extract::FromRef<ConnectionsState> for Arc<IntegrationCompatibility> 
 impl axum::extract::FromRef<ConnectionsState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
     fn from_ref(state: &ConnectionsState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         state.agent_catalog.clone()
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for crate::events::ConnectionEvents {
+    fn from_ref(state: &ConnectionsState) -> crate::events::ConnectionEvents {
+        state.connection_events.clone()
     }
 }

@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::observability::metrics;
+use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
 use crate::types::CancellationHandle;
@@ -79,7 +80,15 @@ impl Default for TriggerWorkerConfig {
 
 /// Background worker that consumes trigger events from Valkey streams
 /// and executes workflows using the ExecutionEngine.
-#[instrument(skip(pool, running_executions, runtime_client, valkey_config, shutdown))]
+#[instrument(skip(
+    pool,
+    running_executions,
+    runtime_client,
+    valkey_config,
+    shutdown,
+    event_sink
+))]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     pool: PgPool,
     running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
@@ -87,6 +96,7 @@ pub async fn run(
     valkey_config: ValkeyConfig,
     worker_config: TriggerWorkerConfig,
     shutdown: ShutdownSignal,
+    event_sink: ProductEventSink,
 ) {
     let worker_id = format!("trigger-worker-{}", Uuid::new_v4());
     let tenant_id = worker_config.tenant_id.clone();
@@ -140,6 +150,7 @@ pub async fn run(
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
+        event_sink.clone(),
     ));
 
     // Track the start ID for XAUTOCLAIM pagination
@@ -176,6 +187,7 @@ pub async fn run(
                         &running_executions,
                         worker_config.max_retries,
                         true, // is_retry
+                        &event_sink,
                     )
                     .await;
                 }
@@ -205,6 +217,7 @@ pub async fn run(
                         &running_executions,
                         worker_config.max_retries,
                         false, // is_retry
+                        &event_sink,
                     )
                     .await;
                 }
@@ -241,6 +254,7 @@ async fn recreate_consumer_group(consumer: &mut StreamConsumer, autoclaim_start_
 }
 
 /// Process a single event from the stream
+#[allow(clippy::too_many_arguments)]
 async fn process_event(
     consumer: &mut StreamConsumer,
     engine: &Arc<ExecutionEngine>,
@@ -249,6 +263,7 @@ async fn process_event(
     _running_executions: &Arc<DashMap<Uuid, CancellationHandle>>,
     max_retries: u64,
     is_retry: bool,
+    event_sink: &ProductEventSink,
 ) {
     // Parse TriggerEvent from the stream data
     let trigger_event = match parse_trigger_event(valkey_event) {
@@ -305,9 +320,30 @@ async fn process_event(
         }
     }
 
+    // Product analytics: emit `trigger.fired` once per firing, at its terminal outcome. Only
+    // real triggers (those with a trigger_id) count — manual/ad-hoc runs have none and are
+    // skipped, which is the "real-world usage vs test runs" distinction the event captures.
+    // Non-terminal RetryLater (will be retried) does not emit; the eventual terminal pass does.
+    let emit_fired = |outcome: &str| {
+        if let Some(trigger_id) = trigger_event.trigger_id() {
+            event_sink.emit(
+                ProductEvent::new(EventType::TriggerFired)
+                    .no_user_actor(trigger_id, ActorType::Trigger)
+                    .resource(trigger_id, "trigger")
+                    .source(EventSource::Worker)
+                    .properties(serde_json::json!({
+                        "trigger_type": trigger_event.trigger_type(),
+                        "outcome": outcome,
+                        "workflow_id": trigger_event.workflow_id,
+                    })),
+            );
+        }
+    };
+
     // Handle the result
     match process_result {
         ProcessResult::Success => {
+            emit_fired("success");
             // Acknowledge successful processing
             if let Err(e) = consumer.acknowledge_event(entry_id).await {
                 error!(
@@ -325,6 +361,7 @@ async fn process_event(
             }
         }
         ProcessResult::PermanentFailure(ref error_msg) => {
+            emit_fired("failed");
             // ACK to prevent infinite retry loops
             error!(
                 entry_id = %entry_id,
@@ -342,6 +379,7 @@ async fn process_event(
             let delivery_count = consumer.get_delivery_count(entry_id).await.unwrap_or(1); // Default to 1 if query fails
 
             if delivery_count >= max_retries {
+                emit_fired("failed");
                 // Exceeded max retries - give up and ACK to prevent infinite loop
                 error!(
                     entry_id = %entry_id,

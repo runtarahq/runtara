@@ -13,7 +13,7 @@ use serde_json::Value;
 // Re-export types from the SDK for use by other modules
 pub use runtara_management_sdk::{
     GetTenantMetricsOptions, InstanceInfo, InstanceStatus, InstanceSummary, ListInstancesResult,
-    MetricsBucket, MetricsGranularity, TenantMetricsResult,
+    MetricsBucket, MetricsGranularity, TenantMetricsResult, TerminationReason,
 };
 
 use thiserror::Error;
@@ -58,6 +58,24 @@ pub struct ExecutionOutput {
     pub memory_peak_bytes: Option<u64>,
     /// Total CPU time consumed (in microseconds)
     pub cpu_usage_usec: Option<u64>,
+}
+
+/// Terminal outcome of [`RuntimeClient::poll_until_terminal`]. Distinct from
+/// [`ExecutionOutput`] (which collapses `Cancelled` into `success: false`) because callers
+/// here need to tell "failed" and "cancelled" apart to emit the right product-analytics event.
+#[derive(Debug)]
+pub enum TerminalOutcome {
+    Completed(ExecutionOutput),
+    Failed(ExecutionOutput),
+    Cancelled(ExecutionOutput),
+    /// The instance was killed for exceeding its configured execution timeout (or missed
+    /// heartbeats) — reported as `InstanceStatus::Failed` with `termination_reason` set to
+    /// `Timeout`/`HeartbeatTimeout`. Distinct from a generic `Failed` so callers can tell
+    /// "the platform cut this off" apart from "the workflow itself errored".
+    TimedOut(ExecutionOutput),
+    /// `max_wait` elapsed before the instance reached a terminal state. The instance is left
+    /// running — this is an *observation* timeout, not an execution timeout.
+    GaveUp,
 }
 
 /// Configuration for the runtime client
@@ -425,6 +443,89 @@ impl RuntimeClient {
                 }
 
                 return Err(RuntimeError::Timeout);
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// Poll for a terminal instance status, purely to observe the outcome.
+    ///
+    /// Unlike [`wait_for_completion`](Self::wait_for_completion), this NEVER cancels the
+    /// instance when `max_wait` elapses — it just stops watching. Detached/async executions are
+    /// explicitly allowed to run long; a background analytics observer must not be the thing
+    /// that kills one just because it took a while.
+    pub async fn poll_until_terminal(
+        &self,
+        instance_id: &str,
+        poll_interval: std::time::Duration,
+        max_wait: std::time::Duration,
+    ) -> Result<TerminalOutcome, RuntimeError> {
+        let start = std::time::Instant::now();
+        loop {
+            let info = self.get_instance_info(instance_id).await?;
+            let duration_ms = info.started_at.and_then(|start| {
+                info.finished_at
+                    .map(|end| (end - start).num_milliseconds() as u64)
+            });
+
+            match info.status {
+                InstanceStatus::Completed => {
+                    return Ok(TerminalOutcome::Completed(ExecutionOutput {
+                        success: true,
+                        output: info.output,
+                        error: None,
+                        stderr: info.stderr,
+                        duration_ms,
+                        memory_peak_bytes: info.memory_peak_bytes,
+                        cpu_usage_usec: info.cpu_usage_usec,
+                    }));
+                }
+                InstanceStatus::Failed => {
+                    let output = ExecutionOutput {
+                        success: false,
+                        output: info.output,
+                        error: info.error,
+                        stderr: info.stderr,
+                        duration_ms,
+                        memory_peak_bytes: info.memory_peak_bytes,
+                        cpu_usage_usec: info.cpu_usage_usec,
+                    };
+                    return Ok(match info.termination_reason {
+                        Some(TerminationReason::Timeout | TerminationReason::HeartbeatTimeout) => {
+                            TerminalOutcome::TimedOut(output)
+                        }
+                        _ => TerminalOutcome::Failed(output),
+                    });
+                }
+                InstanceStatus::Cancelled => {
+                    return Ok(TerminalOutcome::Cancelled(ExecutionOutput {
+                        success: false,
+                        output: info.output,
+                        error: info
+                            .error
+                            .or_else(|| Some("Instance was cancelled".to_string())),
+                        stderr: info.stderr,
+                        duration_ms,
+                        memory_peak_bytes: info.memory_peak_bytes,
+                        cpu_usage_usec: info.cpu_usage_usec,
+                    }));
+                }
+                InstanceStatus::Pending | InstanceStatus::Running | InstanceStatus::Suspended => {
+                    // Still in progress, continue waiting
+                }
+                InstanceStatus::Unknown => {
+                    warn!(instance_id = %instance_id, "Instance status unknown, continuing to wait");
+                }
+            }
+
+            if start.elapsed() > max_wait {
+                warn!(
+                    instance_id = %instance_id,
+                    max_wait_secs = max_wait.as_secs(),
+                    "Gave up observing instance for product-analytics; instance left running"
+                );
+                return Ok(TerminalOutcome::GaveUp);
             }
 
             tokio::time::sleep(poll_interval).await;

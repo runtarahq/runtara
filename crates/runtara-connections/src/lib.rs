@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod error;
+pub mod events;
 pub mod facade;
 pub mod handler;
 pub mod integration_compatibility;
@@ -21,6 +22,7 @@ pub use crypto::{
     cipher_from_env,
 };
 pub use error::ConnectionsError;
+pub use events::{ConnectionEventSink, ConnectionEvents, ConnectionLifecycleEvent};
 pub use facade::ConnectionsFacade;
 pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};

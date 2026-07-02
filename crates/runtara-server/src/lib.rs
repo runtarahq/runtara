@@ -16,6 +16,8 @@ pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod observability;
+pub mod plan_check;
+pub mod product_events;
 pub mod runtime_client;
 pub mod server;
 pub mod shutdown;

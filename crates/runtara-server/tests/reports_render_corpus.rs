@@ -245,6 +245,7 @@ async fn render_report_snapshots() {
             agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
                 Vec::new(),
             )),
+            connection_events: None,
         },
     )));
     connections

@@ -23,6 +23,8 @@ use crate::mcp;
 use crate::metrics;
 use crate::middleware;
 use crate::observability;
+use crate::plan_check;
+use crate::product_events;
 use crate::runtime_client;
 use crate::types;
 use crate::valkey;
@@ -517,6 +519,10 @@ struct AppState {
     /// consume this instead of `runtara_agents::registry` so the
     /// server-side view matches what the dispatcher actually loaded.
     agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    /// Non-blocking sink for product-analytics events. Handlers `emit` onto it; a
+    /// background drain batches the events and ships them to Valkey for smo-management's
+    /// per-tenant consumer to persist into its `product_events` table.
+    events: product_events::ProductEventSink,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -544,6 +550,13 @@ impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
 impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
     fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         state.agent_catalog.clone()
+    }
+}
+
+// Implement FromRef to allow extracting the product-event sink from AppState.
+impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
+    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+        state.events.clone()
     }
 }
 
@@ -940,6 +953,25 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtara_connections::IntegrationCompatibility::from_catalog(&agent_catalog),
     );
 
+    // Product-analytics: build the channel + sink up front so it can be injected into the
+    // connections crate (constructed just below). The drain (single consumer) is spawned
+    // later, once the shutdown signal exists — it holds `product_event_rx`.
+    let product_events_config = product_events::ProductEventConfig::from_env();
+    let (product_event_tx, product_event_rx) =
+        tokio::sync::mpsc::channel(product_events_config.channel_capacity());
+    let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
+    // Boot-time plan-change detection: `RUNTARA_PRICING_TIER` is frozen into `config::entitlements()`
+    // for the life of the process, so this is the only point a plan change (via restart with a
+    // different env var) can be observed. See `plan_check` module doc. Fast (one or two queries)
+    // and best-effort, so it runs inline rather than as a spawned task.
+    plan_check::check_and_record(
+        &pool,
+        &product_event_sink,
+        &config::entitlements().pricing_tier,
+    )
+    .await;
+
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
     // back to NoOp (plaintext at rest) with a loud warning if missing. See
@@ -953,6 +985,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         cipher: runtara_connections::cipher_from_env(),
         compatibility: integration_compatibility.clone(),
         agent_catalog: agent_catalog.clone(),
+        // Connection lifecycle analytics → the product-events pipeline (dependency inversion;
+        // the crate calls this trait, we translate to `ProductEvent` and emit onto the sink).
+        connection_events: Some(Arc::new(product_events::ConnectionEventBridge::new(
+            product_event_sink.clone(),
+        ))),
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -1195,6 +1232,30 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
+    // signal exists. The channel + sink were built earlier (so the sink could be injected
+    // into the connections crate); the drain owns `product_event_rx` and ships batches to
+    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
+    // non-blocking, so the drain reuses the shared connection manager rather than needing a
+    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
+    match redis_manager.clone() {
+        Some(manager) => {
+            let drain = product_events::ProductEventDrain::new(
+                manager,
+                product_event_rx,
+                product_events_config,
+                shutdown_signal.clone(),
+            );
+            tokio::spawn(drain.run());
+        }
+        None => {
+            println!(
+                "⚠ Valkey not configured, skipping product events drain; \
+                 emitted events will fill the in-memory channel and then be dropped"
+            );
+        }
+    }
+
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
 
@@ -1225,6 +1286,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Compilation is handled by the compilation worker.
         let trigger_worker_tenant_id = tenant_id.clone();
         let trigger_shutdown = shutdown_signal.clone();
+        let trigger_events = product_event_sink.clone();
         tokio::spawn(async move {
             let worker_config = workers::trigger_worker::TriggerWorkerConfig {
                 tenant_id: trigger_worker_tenant_id,
@@ -1240,6 +1302,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 trigger_worker_config,
                 worker_config,
                 trigger_shutdown,
+                trigger_events,
             )
             .await;
         });
@@ -1252,6 +1315,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let compilation_runtime_client = runtime_client.clone();
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = component_dispatcher.as_ref().map(|d| d.catalog());
+        let compilation_events = product_event_sink.clone();
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
@@ -1263,6 +1327,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 compilation_agent_catalog,
                 worker_config,
                 compilation_shutdown,
+                compilation_events,
             )
             .await;
         });
@@ -1358,6 +1423,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtime_client.clone(),
         trigger_stream.clone(),
         Some(running_executions.clone()),
+        product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
 
@@ -1760,6 +1826,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
         })
         // Reject API-key-authenticated requests when the `api` feature is
         // off. Sits *between* auth (outermost) and the per-feature gates
@@ -1813,6 +1880,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
         connections: connections_facade.clone(),
+        events: product_event_sink.clone(),
     });
 
     let object_model_routes = Router::new()
@@ -1959,6 +2027,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
         connections: connections_facade.clone(),
+        events: product_event_sink.clone(),
     });
     let internal_object_model_routes = Router::new()
         .route(
@@ -2088,6 +2157,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             engine: execution_engine.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this
