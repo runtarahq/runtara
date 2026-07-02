@@ -120,24 +120,24 @@ reqwest = { version = "0.12", features = ["json"] }
 # OpenTelemetry integration
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.32", features = [
     "rt-tokio",
     "trace",
     "metrics",
     "logs",
 ] }
-opentelemetry-otlp = { version = "0.31", features = [
+opentelemetry-otlp = { version = "0.32", features = [
     "grpc-tonic",
     "trace",
     "metrics",
     "logs",
 ] }
-opentelemetry-semantic-conventions = { version = "0.31", features = [
+opentelemetry-semantic-conventions = { version = "0.32", features = [
     "semconv_experimental",
 ] }
-opentelemetry-appender-tracing = "0.31"
+opentelemetry-appender-tracing = "0.32"
 
 # Environment
 dotenvy = "0.15"

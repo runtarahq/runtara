@@ -51,7 +51,7 @@ thiserror = "2"
 
 # Logging / metrics
 tracing = "0.1"
-opentelemetry = { version = "0.31", features = ["metrics"] }
+opentelemetry = { version = "0.32", features = ["metrics"] }
 
 # Connection type metadata
 runtara-dsl = { path = "../runtara-dsl" }
