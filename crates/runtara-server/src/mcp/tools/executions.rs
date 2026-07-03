@@ -557,8 +557,8 @@ fn find_step_in_summaries<'a>(
         })
 }
 
-/// Resolve a `steps.<id>.<path>`, `data.<path>`, or `variables.<path>` reference
-/// against step summaries / execution input.
+/// Resolve a `steps.<id>.<path>`, `data.<path>`, `variables.<path>`, or
+/// `loop.<path>` reference against step summaries / execution input.
 ///
 /// This is the single source of truth for reference resolution in the MCP debug
 /// tools — `inspect_step`, `why_execution_failed`, and `trace_reference` all route
@@ -569,15 +569,35 @@ fn find_step_in_summaries<'a>(
 /// (`{ "outputs": <actual>, "stepId", "stepType", ... }`) — the runtime
 /// `steps.<id>` value — so the path after the step id (the leading `outputs`
 /// segment included) is walked against it directly.
+///
+/// `scope_id` is the scope of the step whose mapping is being resolved (only
+/// `loop.*` needs it, to recover the iteration index — see
+/// `loop_index_from_scope_id`).
 fn resolve_reference_value(
     ref_path: &str,
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
+    scope_id: Option<&str>,
 ) -> Option<serde_json::Value> {
     let parts: Vec<&str> = ref_path.splitn(3, '.').collect();
     match parts.first().copied() {
         Some("steps") if parts.len() >= 2 => {
             let source_step_id = parts[1];
+            if source_step_id == "__error" || source_step_id == "error" {
+                // `__error`/`error` aren't real steps — the runtime injects the
+                // captured onError envelope under this synthetic id when routing
+                // to a failure handler (see `error_steps` in
+                // runtara-workflow-stdlib). The MCP tools only see historical
+                // step summaries, not which specific failure triggered a given
+                // onError edge, so surface the first failed step's error as a
+                // best-effort match — the same "primary failure" step
+                // `why_execution_failed` already reports.
+                let envelope = find_error_envelope(summaries)?;
+                return match parts.get(2) {
+                    Some(field_path) => resolve_json_path(&envelope, field_path),
+                    None => Some(envelope),
+                };
+            }
             // A step summary's `outputs` field is the full step *envelope*
             // (`{ "outputs": <actual>, "stepId", "stepType", ... }`) — exactly the
             // runtime `steps.<id>` value. Resolve the remainder after the step id
@@ -604,14 +624,96 @@ fn resolve_reference_value(
                 .or_else(|| execution.pointer("/data/variables"))
                 .and_then(|variables| resolve_json_path(variables, &field))
         }
+        Some("loop") => {
+            // The iteration index is recoverable from the step's scope id (see
+            // `loop_index_from_scope_id`). `loop.outputs` is not: it only ever
+            // lived in the ephemeral per-iteration variables bag and was never
+            // persisted, so it's intentionally absent here rather than
+            // fabricated — the lookup below just returns `None` for it.
+            let loop_context = json!({ "index": loop_index_from_scope_id(scope_id?)? });
+            match parts.get(1..).filter(|p| !p.is_empty()) {
+                Some(field_parts) => resolve_json_path(&loop_context, &field_parts.join(".")),
+                None => Some(loop_context),
+            }
+        }
         _ => None,
     }
+}
+
+/// Recover the iteration index the runtime encoded into a Split/While scope id
+/// (`sc_<stepId>_<index>` at the top level, `<parentScope>_<stepId>_<index>`
+/// nested — see the Split/While iteration-variable builders in
+/// runtara-workflow-stdlib's `direct_json.rs`). The trailing `_`-delimited
+/// segment is always the numeric iteration index.
+fn loop_index_from_scope_id(scope_id: &str) -> Option<u64> {
+    scope_id.rsplit('_').next()?.parse().ok()
+}
+
+/// Locate the error envelope for a `steps.__error.*` / `steps.error.*`
+/// reference: the first step in the summaries with a non-null error, mirroring
+/// the "primary failure" convention `why_execution_failed` already uses
+/// (`failed_steps.first()`).
+fn find_error_envelope(summaries: &serde_json::Value) -> Option<serde_json::Value> {
+    summaries
+        .pointer("/data/steps")
+        .and_then(|s| s.as_array())
+        .and_then(|steps| steps.iter().find_map(step_error_envelope))
+}
+
+/// Recover the richest structured error envelope available for one step,
+/// rather than whatever `step_error` collapsed it to (that helper exists to
+/// answer "did this step fail", not to expose `.message`/`.category` fields).
+///
+/// The persisted shape genuinely varies by step type — confirmed against a
+/// live server rather than assumed: an `Error` step's structured fields land
+/// *flat* on `outputs` (`{_error, category, code, message, severity}`, no
+/// nested `error` key — see the `"Error"` arm of `debug_end_output` in
+/// runtara-workflow-stdlib), while an Agent failure's `outputs.error` is a raw
+/// string, often wrapping a JSON envelope after a `Step <id> failed: Agent
+/// <a>::<c>: ` prefix (`DirectJsonManifest::agent_error`). Recover both.
+fn step_error_envelope(step: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(outputs) = step.get("outputs")
+        && outputs.get("_error").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return match outputs.get("error") {
+            Some(serde_json::Value::Object(_)) => outputs.get("error").cloned(),
+            Some(serde_json::Value::String(text)) => Some(recover_error_envelope(text)),
+            // No nested `error` key (e.g. the Error step type): the structured
+            // fields already sit flat on `outputs` alongside `_error`.
+            _ => Some(outputs.clone()),
+        };
+    }
+
+    match step.get("error") {
+        Some(serde_json::Value::Object(_)) => step.get("error").cloned(),
+        Some(serde_json::Value::String(text)) => Some(recover_error_envelope(text)),
+        _ => None,
+    }
+}
+
+/// Recover a structured error envelope from a raw error string, mirroring the
+/// runtime's own recovery in `parse_error_envelope` (runtara-workflow-stdlib):
+/// try the whole string as JSON first, then a `{...}` embedded after a
+/// wrapping prefix. Falls back to wrapping the raw text as `{"message": ...}`
+/// so `.message` still resolves to *something* instead of nothing.
+fn recover_error_envelope(text: &str) -> serde_json::Value {
+    if let Ok(parsed @ serde_json::Value::Object(_)) = serde_json::from_str(text) {
+        return parsed;
+    }
+    if let Some(brace) = text.find('{')
+        && let Ok(parsed @ serde_json::Value::Object(_)) =
+            serde_json::from_str(text[brace..].trim())
+    {
+        return parsed;
+    }
+    json!({ "message": text })
 }
 
 fn resolve_nested_reference_envelopes(
     value: &serde_json::Value,
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
+    scope_id: Option<&str>,
     unresolved_refs: &mut Vec<String>,
 ) -> serde_json::Value {
     match value {
@@ -633,6 +735,7 @@ fn resolve_nested_reference_envelopes(
                                         arg,
                                         summaries,
                                         execution,
+                                        scope_id,
                                         unresolved_refs,
                                     )
                                 }
@@ -646,6 +749,7 @@ fn resolve_nested_reference_envelopes(
                                 child,
                                 summaries,
                                 execution,
+                                scope_id,
                                 unresolved_refs,
                             ),
                         );
@@ -675,6 +779,7 @@ fn resolve_nested_reference_envelopes(
                                         arg,
                                         summaries,
                                         execution,
+                                        scope_id,
                                         unresolved_refs,
                                     )
                                 }
@@ -688,6 +793,7 @@ fn resolve_nested_reference_envelopes(
                                 child,
                                 summaries,
                                 execution,
+                                scope_id,
                                 unresolved_refs,
                             ),
                         );
@@ -707,7 +813,7 @@ fn resolve_nested_reference_envelopes(
                     .get("value")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let resolved = resolve_reference_value(ref_path, summaries, execution)
+                let resolved = resolve_reference_value(ref_path, summaries, execution, scope_id)
                     .or_else(|| map.get("default").cloned());
                 if let Some(resolved) = resolved {
                     return json!({
@@ -716,6 +822,7 @@ fn resolve_nested_reference_envelopes(
                             &resolved,
                             summaries,
                             execution,
+                            scope_id,
                             unresolved_refs
                         ),
                     });
@@ -734,6 +841,7 @@ fn resolve_nested_reference_envelopes(
                                 child,
                                 summaries,
                                 execution,
+                                scope_id,
                                 unresolved_refs,
                             ),
                         )
@@ -745,7 +853,13 @@ fn resolve_nested_reference_envelopes(
             items
                 .iter()
                 .map(|item| {
-                    resolve_nested_reference_envelopes(item, summaries, execution, unresolved_refs)
+                    resolve_nested_reference_envelopes(
+                        item,
+                        summaries,
+                        execution,
+                        scope_id,
+                        unresolved_refs,
+                    )
                 })
                 .collect(),
         ),
@@ -761,6 +875,7 @@ fn resolve_composite_payload(
     payload: &serde_json::Value,
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
+    scope_id: Option<&str>,
     unresolved_refs: &mut Vec<String>,
 ) -> serde_json::Value {
     match payload {
@@ -769,7 +884,13 @@ fn resolve_composite_payload(
                 .map(|(key, child)| {
                     (
                         key.clone(),
-                        resolve_mapping_envelope(child, summaries, execution, unresolved_refs),
+                        resolve_mapping_envelope(
+                            child,
+                            summaries,
+                            execution,
+                            scope_id,
+                            unresolved_refs,
+                        ),
                     )
                 })
                 .collect(),
@@ -777,12 +898,20 @@ fn resolve_composite_payload(
         serde_json::Value::Array(items) => serde_json::Value::Array(
             items
                 .iter()
-                .map(|item| resolve_mapping_envelope(item, summaries, execution, unresolved_refs))
+                .map(|item| {
+                    resolve_mapping_envelope(item, summaries, execution, scope_id, unresolved_refs)
+                })
                 .collect(),
         ),
         // A composite payload should be an object/array, but degrade gracefully:
         // resolve any embedded reference envelopes rather than erroring.
-        other => resolve_nested_reference_envelopes(other, summaries, execution, unresolved_refs),
+        other => resolve_nested_reference_envelopes(
+            other,
+            summaries,
+            execution,
+            scope_id,
+            unresolved_refs,
+        ),
     }
 }
 
@@ -794,6 +923,7 @@ fn resolve_mapping_envelope(
     envelope: &serde_json::Value,
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
+    scope_id: Option<&str>,
     unresolved_refs: &mut Vec<String>,
 ) -> serde_json::Value {
     match envelope.get("valueType").and_then(|v| v.as_str()) {
@@ -802,13 +932,14 @@ fn resolve_mapping_envelope(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            match resolve_reference_value(path, summaries, execution)
+            match resolve_reference_value(path, summaries, execution, scope_id)
                 .or_else(|| envelope.get("default").cloned())
             {
                 Some(resolved) => resolve_nested_reference_envelopes(
                     &resolved,
                     summaries,
                     execution,
+                    scope_id,
                     unresolved_refs,
                 ),
                 None => {
@@ -824,21 +955,33 @@ fn resolve_mapping_envelope(
                 .get("value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            resolve_nested_reference_envelopes(&inner, summaries, execution, unresolved_refs)
+            resolve_nested_reference_envelopes(
+                &inner,
+                summaries,
+                execution,
+                scope_id,
+                unresolved_refs,
+            )
         }
         Some("composite") => {
             let inner = envelope
                 .get("value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            resolve_composite_payload(&inner, summaries, execution, unresolved_refs)
+            resolve_composite_payload(&inner, summaries, execution, scope_id, unresolved_refs)
         }
         Some("template") => json!({
             "__runtimeTemplate": envelope.get("value").cloned().unwrap_or(serde_json::Value::Null),
         }),
         // Condition-like (`op`+`arguments`) or unknown shapes: best-effort
         // resolve any embedded references in place.
-        _ => resolve_nested_reference_envelopes(envelope, summaries, execution, unresolved_refs),
+        _ => resolve_nested_reference_envelopes(
+            envelope,
+            summaries,
+            execution,
+            scope_id,
+            unresolved_refs,
+        ),
     }
 }
 
@@ -925,11 +1068,14 @@ fn step_error(step: &serde_json::Value) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Helper: resolve inputMapping references against step summaries.
+/// Helper: resolve inputMapping references against step summaries. `scope_id`
+/// is the scope of the step this input mapping belongs to (needed to resolve
+/// `loop.*` references — see `resolve_reference_value`).
 fn resolve_input_mappings(
     input_mapping: &serde_json::Value,
     summaries: &serde_json::Value,
     execution: &serde_json::Value,
+    scope_id: Option<&str>,
 ) -> serde_json::Value {
     let Some(mapping_obj) = input_mapping.as_object() else {
         return json!({});
@@ -958,7 +1104,17 @@ fn resolve_input_mappings(
                         Some("steps") if parts.len() >= 2 => {
                             let source_step_id = parts[1];
 
-                            if let Some(source) = find_step_in_summaries(summaries, source_step_id)
+                            if source_step_id == "__error" || source_step_id == "error" {
+                                // Not a real step — see the matching special-case
+                                // in resolve_reference_value for why `__error`
+                                // never shows up in find_step_in_summaries.
+                                entry["source"] = json!("error_context");
+                                entry["resolvedValue"] = resolve_reference_value(
+                                    ref_path, summaries, execution, scope_id,
+                                )
+                                .unwrap_or(json!(null));
+                            } else if let Some(source) =
+                                find_step_in_summaries(summaries, source_step_id)
                             {
                                 entry["sourceStep"] = json!(source_step_id);
                                 entry["sourceStatus"] =
@@ -969,9 +1125,10 @@ fn resolve_input_mappings(
                                 // resolve_reference_value). Only surface a value once
                                 // the source step actually has an output to resolve.
                                 if source.get("outputs").is_some() {
-                                    entry["resolvedValue"] =
-                                        resolve_reference_value(ref_path, summaries, execution)
-                                            .unwrap_or(json!(null));
+                                    entry["resolvedValue"] = resolve_reference_value(
+                                        ref_path, summaries, execution, scope_id,
+                                    )
+                                    .unwrap_or(json!(null));
                                 }
                             } else {
                                 entry["sourceStep"] = json!(source_step_id);
@@ -992,6 +1149,19 @@ fn resolve_input_mappings(
                         Some("variables") if parts.len() >= 2 => {
                             entry["source"] = json!("variable");
                             entry["variableName"] = json!(parts[1]);
+                            // Route through the shared resolver, same as the
+                            // steps/data arms above — this used to be dropped,
+                            // silently reporting resolvedValue:null even though
+                            // the runtime resolves workflow variables fine.
+                            entry["resolvedValue"] =
+                                resolve_reference_value(ref_path, summaries, execution, scope_id)
+                                    .unwrap_or(json!(null));
+                        }
+                        Some("loop") => {
+                            entry["source"] = json!("loop");
+                            entry["resolvedValue"] =
+                                resolve_reference_value(ref_path, summaries, execution, scope_id)
+                                    .unwrap_or(json!(null));
                         }
                         _ => {}
                     }
@@ -1003,6 +1173,7 @@ fn resolve_input_mappings(
                     &value,
                     summaries,
                     execution,
+                    scope_id,
                     &mut unresolved_refs,
                 );
                 entry["resolvedValue"] = resolved_value;
@@ -1017,8 +1188,13 @@ fn resolve_input_mappings(
                 // Materialize each so the author sees the final JSON the composite
                 // sends to the agent (SYN-450).
                 let mut unresolved_refs = Vec::new();
-                let resolved_value =
-                    resolve_composite_payload(&value, summaries, execution, &mut unresolved_refs);
+                let resolved_value = resolve_composite_payload(
+                    &value,
+                    summaries,
+                    execution,
+                    scope_id,
+                    &mut unresolved_refs,
+                );
                 entry["resolvedValue"] = resolved_value;
                 if !unresolved_refs.is_empty() {
                     entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
@@ -1037,6 +1213,7 @@ fn resolve_input_mappings(
                     mapping_value,
                     summaries,
                     execution,
+                    scope_id,
                     &mut unresolved_refs,
                 );
                 entry["resolvedValue"] = resolved_value;
@@ -1103,7 +1280,8 @@ pub async fn inspect_step(
         .cloned()
         .unwrap_or(json!({}));
 
-    let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution);
+    let scope_id = target.get("scopeId").and_then(|v| v.as_str());
+    let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution, scope_id);
 
     let response = json!({
         "step": {
@@ -1152,6 +1330,31 @@ pub async fn trace_reference(
             let summaries =
                 fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
 
+            if step_id == "__error" || step_id == "error" {
+                // Not a real step — the runtime injects the captured onError
+                // envelope under this synthetic id (see `error_steps` in
+                // runtara-workflow-stdlib). Resolve it via the shared resolver's
+                // "first failed step" fallback instead of requiring a literal
+                // step named `__error` to exist in the summaries.
+                let resolved = resolve_reference_value(
+                    &params.reference,
+                    &summaries,
+                    &serde_json::Value::Null,
+                    None,
+                )
+                .unwrap_or(json!(null));
+
+                return json_result(json!({
+                    "reference": params.reference,
+                    "resolved": !resolved.is_null(),
+                    "value": resolved,
+                    "source": {
+                        "type": "error_context",
+                        "stepId": step_id,
+                    }
+                }));
+            }
+
             let step = find_step_in_summaries(&summaries, step_id).ok_or_else(|| {
                 rmcp::ErrorData::internal_error(
                     format!(
@@ -1166,9 +1369,13 @@ pub async fn trace_reference(
             // mirrors the runtime); `fullOutputs` still exposes the raw step
             // envelope for context.
             let outputs = step.get("outputs").cloned().unwrap_or(json!(null));
-            let resolved =
-                resolve_reference_value(&params.reference, &summaries, &serde_json::Value::Null)
-                    .unwrap_or(json!(null));
+            let resolved = resolve_reference_value(
+                &params.reference,
+                &summaries,
+                &serde_json::Value::Null,
+                None,
+            )
+            .unwrap_or(json!(null));
 
             json_result(json!({
                 "reference": params.reference,
@@ -1179,6 +1386,31 @@ pub async fn trace_reference(
                     "stepId": step_id,
                     "stepStatus": step.get("status"),
                     "fullOutputs": outputs,
+                }
+            }))
+        }
+        "loop" => {
+            // `trace_reference` has no step_id param, so there's no scope to
+            // resolve `loop.index` against here — this only stops the hard
+            // "Unknown reference root" rejection; the resolver-level fix (and
+            // its test coverage) is what actually proves loop.* resolves given
+            // a scope id, via inspect_step / resolve_reference_value directly.
+            let summaries =
+                fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
+            let resolved = resolve_reference_value(
+                &params.reference,
+                &summaries,
+                &serde_json::Value::Null,
+                None,
+            )
+            .unwrap_or(json!(null));
+
+            json_result(json!({
+                "reference": params.reference,
+                "resolved": !resolved.is_null(),
+                "value": resolved,
+                "source": {
+                    "type": "loop_context",
                 }
             }))
         }
@@ -1335,7 +1567,9 @@ pub async fn why_execution_failed(
             .cloned()
             .unwrap_or(json!({}));
 
-        let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution);
+        let scope_id = first_failed.get("scopeId").and_then(|v| v.as_str());
+        let resolved_inputs =
+            resolve_input_mappings(&input_mapping, &summaries, &execution, scope_id);
 
         json!({
             "stepId": first_failed.get("stepId"),
@@ -1557,7 +1791,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
 
         assert_eq!(
             resolved["condition"]["resolvedValue"],
@@ -1596,7 +1830,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
         let entry = &resolved["value"];
 
         assert_eq!(
@@ -1628,7 +1862,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
         let entry = &resolved["value"];
 
         assert_eq!(entry["resolvedValue"]["ok"], json!("Ada"));
@@ -1653,7 +1887,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
 
         assert_eq!(
             resolved["condition"]["resolvedValue"]["arguments"][0],
@@ -1689,7 +1923,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
 
         assert_eq!(
             resolved["score_expression"]["resolvedValue"]["expression"]["arguments"],
@@ -1733,7 +1967,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries, &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries, &execution(), None);
 
         assert_eq!(
             resolved["customer_id"]["resolvedValue"],
@@ -1747,18 +1981,41 @@ mod tests {
     fn reference_resolves_bare_step_and_outputs_envelope() {
         // `steps.<id>` resolves to the runtime envelope and `steps.<id>.outputs` to
         // the actual output — matching what the workflow runtime exposes.
-        let resolved_bare = resolve_reference_value("steps.build", &summaries(), &execution());
+        let resolved_bare =
+            resolve_reference_value("steps.build", &summaries(), &execution(), None);
         assert_eq!(
             resolved_bare.and_then(|v| v.get("stepType").cloned()),
             Some(json!("Agent"))
         );
 
         let resolved_outputs =
-            resolve_reference_value("steps.build.outputs", &summaries(), &execution());
+            resolve_reference_value("steps.build.outputs", &summaries(), &execution(), None);
         assert_eq!(
             resolved_outputs,
             Some(json!({ "status": "active", "nested": { "name": "from-step" } }))
         );
+    }
+
+    /// A summaries fixture with one additional failed step, for `steps.__error.*`
+    /// coverage — the runtime injects the captured envelope from whichever step
+    /// failed, so tests need at least one failed step present.
+    fn summaries_with_failed_step() -> serde_json::Value {
+        let mut summaries = summaries();
+        summaries["data"]["steps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "stepId": "notify",
+                "status": "failed",
+                "error": {
+                    "message": "Delivery failed",
+                    "code": "SMTP_TIMEOUT",
+                    "category": "transient",
+                    "severity": "error",
+                    "stepId": "notify"
+                }
+            }));
+        summaries
     }
 
     #[test]
@@ -1768,28 +2025,212 @@ mod tests {
         // resolve_reference_value. If a future change touches one resolver and not
         // the other, this fails instead of silently returning null like the
         // original bug.
-        let summaries = summaries();
+        let summaries = summaries_with_failed_step();
         let execution = execution();
-        for path in [
-            "steps.build.outputs.nested.name",
-            "steps.build.outputs.status",
-            "steps.build.outputs",
-            "steps.embed.outputs.embeddings.0",
-            "steps.missing.outputs.x",
+        for (path, scope_id) in [
+            ("steps.build.outputs.nested.name", None),
+            ("steps.build.outputs.status", None),
+            ("steps.build.outputs", None),
+            ("steps.embed.outputs.embeddings.0", None),
+            ("steps.missing.outputs.x", None),
+            ("steps.__error.message", None),
+            ("variables.limit", None),
+            ("loop.index", Some("sc_whileStep_3")),
         ] {
             let mapping = json!({ "field": { "valueType": "reference", "value": path } });
-            let resolved = resolve_input_mappings(&mapping, &summaries, &execution);
+            let resolved = resolve_input_mappings(&mapping, &summaries, &execution, scope_id);
             let via_input_mapping = resolved["field"]
                 .get("resolvedValue")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let via_shared =
-                resolve_reference_value(path, &summaries, &execution).unwrap_or(json!(null));
+            let via_shared = resolve_reference_value(path, &summaries, &execution, scope_id)
+                .unwrap_or(json!(null));
             assert_eq!(
                 via_input_mapping, via_shared,
                 "resolve_input_mappings diverged from resolve_reference_value for {path}"
             );
         }
+    }
+
+    #[test]
+    fn loop_index_resolves_from_scope_id() {
+        // SYN-467: `loop.index` is recoverable from the step's scope id even
+        // though it's never persisted as its own field — the runtime always
+        // encodes it as the trailing `_`-delimited segment.
+        assert_eq!(
+            resolve_reference_value("loop.index", &summaries(), &execution(), Some("sc_while_3")),
+            Some(json!(3))
+        );
+        assert_eq!(
+            resolve_reference_value(
+                "loop.index",
+                &summaries(),
+                &execution(),
+                Some("parentScope_while_2")
+            ),
+            Some(json!(2))
+        );
+        assert_eq!(
+            resolve_reference_value("loop", &summaries(), &execution(), Some("sc_while_0")),
+            Some(json!({ "index": 0 }))
+        );
+    }
+
+    #[test]
+    fn loop_outputs_is_not_reconstructable_from_persisted_state() {
+        // SYN-467: unlike `loop.index`, the accumulated `loop.outputs` value only
+        // ever lived in the ephemeral per-iteration variables bag and was never
+        // persisted anywhere retrievable — this must stay `None` rather than
+        // silently fabricate a value.
+        assert_eq!(
+            resolve_reference_value(
+                "loop.outputs",
+                &summaries(),
+                &execution(),
+                Some("sc_while_3")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn loop_reference_without_scope_is_unresolved() {
+        // No step context (e.g. trace_reference has no step_id param) means no
+        // scope to resolve the iteration index against.
+        assert_eq!(
+            resolve_reference_value("loop.index", &summaries(), &execution(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn steps_dunder_error_resolves_to_first_failed_steps_envelope() {
+        // SYN-467: `steps.__error.*` (and its `steps.error.*` alias) aren't a real
+        // step — the runtime injects the onError envelope under this synthetic
+        // id. The MCP tools only see historical summaries, so this resolves to
+        // the first failed step's error, mirroring why_execution_failed's
+        // "primary failure" convention.
+        let summaries = summaries_with_failed_step();
+        assert_eq!(
+            resolve_reference_value("steps.__error.message", &summaries, &execution(), None),
+            Some(json!("Delivery failed"))
+        );
+        assert_eq!(
+            resolve_reference_value("steps.error.category", &summaries, &execution(), None),
+            Some(json!("transient"))
+        );
+    }
+
+    #[test]
+    fn steps_dunder_error_resolves_flat_error_step_outputs() {
+        // SYN-467: verified against a live server — an `Error`-step-type failure
+        // has no nested `outputs.error` object at all; the structured fields
+        // (`category`/`code`/`message`/`severity`) sit flat on `outputs`
+        // alongside `_error`, and the top-level `error` field collapses to the
+        // generic "Step output reported _error=true" string. Must still recover
+        // the real fields from `outputs` directly.
+        let summaries = json!({
+            "data": {
+                "steps": [{
+                    "stepId": "boom",
+                    "stepType": "Error",
+                    "status": "failed",
+                    "error": "Step output reported _error=true",
+                    "outputs": {
+                        "_error": true,
+                        "category": "transient",
+                        "code": "SMTP_TIMEOUT",
+                        "message": "Delivery failed",
+                        "severity": "error"
+                    }
+                }]
+            }
+        });
+
+        assert_eq!(
+            resolve_reference_value("steps.__error.message", &summaries, &execution(), None),
+            Some(json!("Delivery failed"))
+        );
+        assert_eq!(
+            resolve_reference_value("steps.__error.code", &summaries, &execution(), None),
+            Some(json!("SMTP_TIMEOUT"))
+        );
+    }
+
+    #[test]
+    fn steps_dunder_error_recovers_wrapped_agent_failure_string() {
+        // SYN-467: verified against a live server — an Agent capability failure
+        // persists `outputs.error` (and the top-level `error` field) as a raw
+        // string wrapping a JSON envelope after a `Step <id> failed: Agent
+        // <a>::<c>: ` prefix, not a JSON object. Must recover the embedded JSON
+        // rather than treating the whole string as unresolvable.
+        let summaries = json!({
+            "data": {
+                "steps": [{
+                    "stepId": "call",
+                    "stepType": "Agent",
+                    "status": "failed",
+                    "error": "Step call failed: Agent http::http-request: {\"attributes\":{\"url\":\"http://127.0.0.1:1/\"},\"category\":\"transient\",\"code\":\"NETWORK_ERROR\",\"message\":\"request to http://127.0.0.1:1/ failed: Transport error: HTTP error: ErrorCode::ConnectionRefused\",\"retryable\":true,\"severity\":\"warning\"}",
+                    "outputs": {
+                        "_error": true,
+                        "error": "Step call failed: Agent http::http-request: {\"attributes\":{\"url\":\"http://127.0.0.1:1/\"},\"category\":\"transient\",\"code\":\"NETWORK_ERROR\",\"message\":\"request to http://127.0.0.1:1/ failed: Transport error: HTTP error: ErrorCode::ConnectionRefused\",\"retryable\":true,\"severity\":\"warning\"}"
+                    }
+                }]
+            }
+        });
+
+        assert_eq!(
+            resolve_reference_value("steps.__error.category", &summaries, &execution(), None),
+            Some(json!("transient"))
+        );
+        assert_eq!(
+            resolve_reference_value("steps.__error.code", &summaries, &execution(), None),
+            Some(json!("NETWORK_ERROR"))
+        );
+        assert_eq!(
+            resolve_reference_value("steps.__error.message", &summaries, &execution(), None),
+            Some(json!(
+                "request to http://127.0.0.1:1/ failed: Transport error: HTTP error: ErrorCode::ConnectionRefused"
+            ))
+        );
+    }
+
+    #[test]
+    fn error_envelope_recovery_falls_back_to_wrapping_unparseable_text() {
+        // SYN-467: a raw error string with no embedded JSON at all (e.g. the
+        // generic "_error" fallback text) still yields a `.message` instead of
+        // resolving to nothing.
+        let summaries = json!({
+            "data": {
+                "steps": [{
+                    "stepId": "weird",
+                    "status": "failed",
+                    "error": "totally unstructured failure text"
+                }]
+            }
+        });
+
+        assert_eq!(
+            resolve_reference_value("steps.__error.message", &summaries, &execution(), None),
+            Some(json!("totally unstructured failure text"))
+        );
+    }
+
+    #[test]
+    fn variables_reference_now_sets_resolved_value() {
+        // SYN-467: this arm used to only set `source`/`variableName` metadata and
+        // never called the resolver, so inspect_step always reported
+        // resolvedValue:null for variable-mapped inputs even though the runtime
+        // resolves workflow variables fine.
+        let input_mapping = json!({
+            "limit": { "valueType": "reference", "value": "variables.limit" }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
+
+        assert_eq!(resolved["limit"]["resolvedValue"], json!(10));
+        assert_eq!(resolved["limit"]["source"], json!("variable"));
+        assert_eq!(resolved["limit"]["variableName"], json!("limit"));
     }
 
     #[test]
@@ -1801,7 +2242,7 @@ mod tests {
             }
         });
 
-        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
 
         assert_eq!(
             resolved["message"]["resolutionNote"],
