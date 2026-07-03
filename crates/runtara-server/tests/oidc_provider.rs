@@ -93,12 +93,21 @@ async fn build_provider_with_jti(
     tenant_id: &str,
     require_jti: bool,
 ) -> OidcProvider {
+    build_provider_with_audience(idp, tenant_id, None, require_jti).await
+}
+
+async fn build_provider_with_audience(
+    idp: &TestIdp,
+    tenant_id: &str,
+    audience: Option<&str>,
+    require_jti: bool,
+) -> OidcProvider {
     let jwks_cache = JwksCache::new(idp.jwks_uri()).await;
     OidcProvider::new(
         JwtConfig {
             jwks_uri: idp.jwks_uri(),
             issuer: idp.issuer.clone(),
-            audience: None,
+            audience: audience.map(str::to_string),
             require_jti,
         },
         jwks_cache,
@@ -265,6 +274,136 @@ async fn accepts_token_with_jti_when_required() {
 
     let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
+}
+
+// ── Audience matrix (SYN-523: MCP JWT audience posture) ─────────────────
+
+const MCP_AUDIENCE: &str = "https://mcp.syncmyorders.com/mcp";
+
+#[tokio::test]
+async fn accepts_token_with_matching_audience() {
+    // Audience configured (OAUTH2_MCP_AUDIENCE posture) + token carrying the
+    // matching `aud` → an AuthContext is produced.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_audience(&idp, "org_123", Some(MCP_AUDIENCE), false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "aud": MCP_AUDIENCE,
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+    assert_eq!(ctx.user_id, "user-1");
+}
+
+#[tokio::test]
+async fn rejects_token_with_wrong_audience() {
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_audience(&idp, "org_123", Some(MCP_AUDIENCE), false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "aud": "https://some-other-api.example.com",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider.authenticate(&bearer(&token)).await {
+        Err(AuthError::InvalidToken) => {}
+        other => panic!("expected InvalidToken for wrong audience, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn accepts_token_without_aud_claim_even_when_audience_configured() {
+    // Documents today's actual behavior (not an endorsement): jsonwebtoken
+    // only compares `aud` when the claim is present — a token *omitting*
+    // `aud` entirely passes even with an audience configured. Only a
+    // present-but-wrong `aud` is rejected (see rejects_token_with_wrong_audience).
+    // If this test starts failing, audience enforcement was tightened —
+    // update the SYN-523 posture docs accordingly.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_audience(&idp, "org_123", Some(MCP_AUDIENCE), false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+}
+
+#[tokio::test]
+async fn accepts_token_with_any_audience_when_unconfigured() {
+    // Documents today's lax default: with no audience configured
+    // (OAUTH2_MCP_AUDIENCE unset), any valid token from the issuer is
+    // accepted regardless of its `aud`. The startup warn in
+    // `oidc_from_env` exists precisely because of this posture.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_with_audience(&idp, "org_123", None, false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "aud": "https://an-audience-nobody-asked-for.example.com",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+}
+
+// ── Native (top-level, non-namespaced) org_id claim + audience ──────────
+
+#[tokio::test]
+async fn accepts_native_org_id_claim_with_audience() {
+    // Auth0 Organizations emits `org_id` as a top-level, non-namespaced
+    // claim ("org_abc..."). It must authenticate with audience validation on.
+    let idp = TestIdp::start().await;
+    let provider =
+        build_provider_with_audience(&idp, "org_abc12345XYZ", Some(MCP_AUDIENCE), false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_abc12345XYZ",
+        "aud": MCP_AUDIENCE,
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_abc12345XYZ");
+}
+
+#[tokio::test]
+async fn rejects_native_org_id_mismatch_with_audience() {
+    // Right audience, wrong org → TenantMismatch (audience alone must not
+    // grant cross-tenant access).
+    let idp = TestIdp::start().await;
+    let provider =
+        build_provider_with_audience(&idp, "org_expected", Some(MCP_AUDIENCE), false).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_intruder",
+        "aud": MCP_AUDIENCE,
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider.authenticate(&bearer(&token)).await {
+        Err(AuthError::TenantMismatch(id)) => assert_eq!(id, "org_intruder"),
+        other => panic!("expected TenantMismatch, got {other:?}"),
+    }
 }
 
 #[tokio::test]

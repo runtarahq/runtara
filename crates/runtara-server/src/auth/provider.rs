@@ -213,3 +213,38 @@ impl AuthProviders {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env::{ENV_MUTEX, EnvGuard};
+
+    #[tokio::test]
+    async fn oidc_from_env_panics_when_strict_audience_flag_set_without_audience() {
+        // SYN-523 strict mode: RUNTARA_MCP_REQUIRE_AUDIENCE=1 with no
+        // OAUTH2_MCP_AUDIENCE must fail fast at startup. The panic fires
+        // before the JWKS fetch, so dummy URIs never see the network.
+        let _lock = ENV_MUTEX.lock().await;
+        let mut guard = EnvGuard::new();
+        guard.set("OAUTH2_JWKS_URI", "http://127.0.0.1:1/jwks.json");
+        guard.set("OAUTH2_ISSUER", "http://127.0.0.1:1/");
+        guard.set("RUNTARA_MCP_REQUIRE_AUDIENCE", "1");
+        guard.remove("OAUTH2_MCP_AUDIENCE");
+
+        let err = match tokio::spawn(AuthProviders::oidc_from_env("org_test".to_string())).await {
+            Err(join_err) => join_err,
+            Ok(_) => panic!("oidc_from_env must panic in strict mode"),
+        };
+        assert!(err.is_panic(), "expected a panic, got {err:?}");
+        let payload = err.into_panic();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .expect("panic payload is a string");
+        assert!(
+            msg.contains("OAUTH2_MCP_AUDIENCE"),
+            "panic message must name the missing var, got: {msg}"
+        );
+    }
+}
