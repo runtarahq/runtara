@@ -316,7 +316,21 @@ async fn process_event(
     let duration = process_start.elapsed().as_secs_f64();
     if let Some(m) = metrics() {
         m.trigger_events_total.add(1, &attributes);
-        m.trigger_processing_duration.record(duration, &attributes);
+        // Duration is a histogram: tenant_id/workflow_id would multiply its
+        // buckets per workflow and tenant, exploding series count. Keep only
+        // low-cardinality labels; per-workflow timing belongs in traces.
+        let status = match &process_result {
+            ProcessResult::Success => "success",
+            ProcessResult::PermanentFailure(_) => "permanent_failure",
+            ProcessResult::RetryLater(_) => "retry_later",
+        };
+        m.trigger_processing_duration.record(
+            duration,
+            &[
+                KeyValue::new("trigger_type", trigger_event.trigger_type().to_string()),
+                KeyValue::new("status", status),
+            ],
+        );
         match &process_result {
             ProcessResult::PermanentFailure(_) => {
                 m.trigger_events_failed.add(1, &attributes);
