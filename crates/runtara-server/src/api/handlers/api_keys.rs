@@ -65,6 +65,37 @@ fn sha256_hex(input: &str) -> String {
     hex::encode(sha2::Sha256::digest(input.as_bytes()))
 }
 
+/// `true` when an org id is safe to embed in a structured API key
+/// (`rt_<org_id>_<random>`, SYN-524). Auth0-style ids (`org_xxx`) and any
+/// `[A-Za-z0-9_-]+` id qualify; anything else (exotic OSS tenant ids) keeps
+/// the legacy `rt_<random>` format so the key stays a single opaque token.
+fn org_id_embeddable(org_id: &str) -> bool {
+    !org_id.is_empty()
+        && org_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Recover the embedded org id from a structured API key (SYN-524).
+///
+/// New-format keys are `rt_<org_id>_<random>` where `<random>` is strictly
+/// alphanumeric (`[A-Za-z0-9]`, no underscores) — so even though org ids
+/// themselves contain underscores (`org_xxx`), the org segment is exactly
+/// recoverable via strip-prefix + `rsplit_once('_')`. Legacy keys
+/// (`rt_<hex>`) contain no `_` after the prefix and yield `None`.
+///
+/// This is the reference implementation for edge-side routing (the shared
+/// MCP hostname resolves a key to its tenant without a DB hit). Validation
+/// does NOT use it — keys are still matched by full-string sha256 hash.
+pub fn parse_org_segment(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("rt_")?;
+    let (org, random) = rest.rsplit_once('_')?;
+    if org.is_empty() || random.is_empty() || !random.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(org)
+}
+
 /// Create a new API key for the authenticated tenant.
 /// The plaintext key is returned ONCE in the response — store it securely.
 #[utoipa::path(
@@ -129,10 +160,30 @@ pub async fn create_api_key(
     let created_by = issuing_user_id.clone();
     let jti = Uuid::new_v4().to_string();
 
+    // Structured key format (SYN-524): embed the tenant org id so the edge
+    // can route a key to its tenant without a DB hit. The random segment is
+    // hex — strictly alphanumeric, no underscores — keeping the org segment
+    // recoverable via `parse_org_segment` and entropy at 24 bytes (192 bits),
+    // same as the legacy format. Validation is untouched: full-string sha256
+    // lookup, and `rt_` still prefixes every key.
     let random_bytes: [u8; 24] = rand::random();
     let random_hex = hex::encode(random_bytes);
-    let plaintext_key = format!("rt_{}", random_hex);
-    let key_prefix = &plaintext_key[..12];
+    let plaintext_key = if org_id_embeddable(&tenant_id) {
+        format!("rt_{tenant_id}_{random_hex}")
+    } else {
+        // Exotic org id (can't round-trip through the structured format):
+        // keep the legacy opaque shape.
+        format!("rt_{random_hex}")
+    };
+    // Display prefix (VARCHAR(12) column). For structured keys the first 12
+    // chars would be `rt_` + org id — identical for every key of the tenant —
+    // so show the start of the random segment instead, which is what actually
+    // disambiguates keys in a list. Legacy-format keys keep the old behavior.
+    let key_prefix = if parse_org_segment(&plaintext_key).is_some() {
+        format!("rt_{}", &random_hex[..9])
+    } else {
+        plaintext_key[..12].to_string()
+    };
     let key_hash = sha256_hex(&plaintext_key);
 
     match sqlx::query_as::<_, ApiKey>(
@@ -319,4 +370,85 @@ pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<A
     .await
     .map_err(|e| format!("Database error: {e}"))?
     .ok_or_else(|| "Invalid or expired API key".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_org_segment: reference implementation for edge routing ────
+
+    #[test]
+    fn new_format_recovers_org_id() {
+        assert_eq!(
+            parse_org_segment("rt_org_abc123XYZ_9f8e7d6c5b4a39281706f5e4d3c2b1a0"),
+            Some("org_abc123XYZ")
+        );
+    }
+
+    #[test]
+    fn org_id_with_underscores_round_trips() {
+        // Org ids contain underscores (`org_xxx`, or even multiple). Because
+        // the random segment is strictly alphanumeric, rsplit_once('_')
+        // always cuts at the org/random boundary.
+        let org = "org_multi_part_id";
+        let key = format!("rt_{org}_{}", "a".repeat(48));
+        assert_eq!(parse_org_segment(&key), Some(org));
+    }
+
+    #[test]
+    fn legacy_format_yields_none() {
+        // Legacy keys are rt_ + 48 hex chars: no '_' after the prefix.
+        let key = format!("rt_{}", "0123456789abcdef".repeat(3));
+        assert_eq!(parse_org_segment(&key), None);
+    }
+
+    #[test]
+    fn non_rt_prefixes_yield_none() {
+        assert_eq!(parse_org_segment("smo_org_abc_random123"), None);
+        assert_eq!(parse_org_segment("Bearer whatever"), None);
+        assert_eq!(parse_org_segment(""), None);
+    }
+
+    #[test]
+    fn degenerate_shapes_yield_none() {
+        // Empty org / empty random / non-alphanumeric random must not parse.
+        assert_eq!(parse_org_segment("rt__random123"), None);
+        assert_eq!(parse_org_segment("rt_org_abc_"), None);
+        // Random segment containing a non-alphanumeric char: the whole tail
+        // fails the charset check.
+        assert_eq!(parse_org_segment("rt_org_abc_rand-om"), None);
+    }
+
+    #[test]
+    fn generated_shape_round_trips_end_to_end() {
+        // Mirror of the generation logic in create_api_key.
+        let tenant_id = "org_pDq7kM2xL9aBcDeF";
+        assert!(org_id_embeddable(tenant_id));
+        let random_bytes: [u8; 24] = rand::random();
+        let random_hex = hex::encode(random_bytes);
+        let key = format!("rt_{tenant_id}_{random_hex}");
+
+        assert_eq!(parse_org_segment(&key), Some(tenant_id));
+        // Middleware routing still recognizes it as an rt_ key.
+        assert!(key.starts_with("rt_"));
+    }
+
+    // ── org_id_embeddable: legacy fallback for exotic tenant ids ────────
+
+    #[test]
+    fn exotic_org_ids_are_not_embedded() {
+        assert!(!org_id_embeddable(""));
+        assert!(!org_id_embeddable("org id with spaces"));
+        assert!(!org_id_embeddable("org/slash"));
+        assert!(!org_id_embeddable("org.dot"));
+        assert!(!org_id_embeddable("orgé"));
+    }
+
+    #[test]
+    fn typical_org_ids_are_embedded() {
+        assert!(org_id_embeddable("org_pDq7kM2xL9aBcDeF"));
+        assert!(org_id_embeddable("local"));
+        assert!(org_id_embeddable("tenant-42"));
+    }
 }
