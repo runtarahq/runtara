@@ -24,6 +24,12 @@ pub struct JwtConfig {
     /// Auth0 Action emits `jti`, flipped on once every token carries it. Driven by
     /// `RUNTARA_AUTH_REQUIRE_JTI`. See `docs/security/user-management-contracts.md`.
     pub require_jti: bool,
+    /// When true, a JWT that *omits* the `aud` claim is rejected (in addition to the
+    /// default present-but-must-match behavior). Only set on the MCP provider when the
+    /// strict flag `RUNTARA_MCP_REQUIRE_AUDIENCE` is on — which already guarantees
+    /// `audience` is `Some`. Off (default) everywhere else, including the whole API path,
+    /// so a missing `aud` keeps today's lax pass-through. See SYN-522.
+    pub require_audience_present: bool,
 }
 
 /// Authentication context inserted into request extensions after successful auth.

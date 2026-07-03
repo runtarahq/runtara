@@ -93,6 +93,14 @@ pub fn validate_token(
 
     if let Some(ref audience) = config.audience {
         validation.set_audience(&[audience]);
+        // By default jsonwebtoken only compares `aud` when the claim is present, so a
+        // token omitting `aud` entirely still passes. Under the strict MCP posture we
+        // additionally require the claim to be PRESENT, closing that fail-open. Only the
+        // MCP provider sets this when RUNTARA_MCP_REQUIRE_AUDIENCE is on; the API path
+        // never does, so its behavior is byte-identical to before. See SYN-522.
+        if config.require_audience_present {
+            validation.required_spec_claims.insert("aud".to_string());
+        }
     } else {
         validation.validate_aud = false;
     }

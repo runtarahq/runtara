@@ -102,6 +102,16 @@ async fn build_provider_with_audience(
     audience: Option<&str>,
     require_jti: bool,
 ) -> OidcProvider {
+    build_provider_full(idp, tenant_id, audience, require_jti, false).await
+}
+
+async fn build_provider_full(
+    idp: &TestIdp,
+    tenant_id: &str,
+    audience: Option<&str>,
+    require_jti: bool,
+    require_audience_present: bool,
+) -> OidcProvider {
     let jwks_cache = JwksCache::new(idp.jwks_uri()).await;
     OidcProvider::new(
         JwtConfig {
@@ -109,6 +119,7 @@ async fn build_provider_with_audience(
             issuer: idp.issuer.clone(),
             audience: audience.map(str::to_string),
             require_jti,
+            require_audience_present,
         },
         jwks_cache,
         tenant_id.to_string(),
@@ -339,6 +350,49 @@ async fn accepts_token_without_aud_claim_even_when_audience_configured() {
 
     let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
+}
+
+#[tokio::test]
+async fn rejects_token_without_aud_claim_under_strict_audience() {
+    // SYN-522 strict posture: RUNTARA_MCP_REQUIRE_AUDIENCE on (which guarantees an
+    // audience is configured) makes the `aud` claim mandatory. A token that omits `aud`
+    // entirely — accepted under the lax default, see
+    // accepts_token_without_aud_claim_even_when_audience_configured — is now rejected,
+    // closing the fail-open.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_full(&idp, "org_123", Some(MCP_AUDIENCE), false, true).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider.authenticate(&bearer(&token)).await {
+        Err(AuthError::InvalidToken) => {}
+        other => panic!("expected InvalidToken for missing aud under strict mode, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn accepts_token_with_correct_aud_under_strict_audience() {
+    // The strict flag only adds a presence requirement; a token carrying the correct
+    // `aud` still authenticates.
+    let idp = TestIdp::start().await;
+    let provider = build_provider_full(&idp, "org_123", Some(MCP_AUDIENCE), false, true).await;
+
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "aud": MCP_AUDIENCE,
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+    assert_eq!(ctx.user_id, "user-1");
 }
 
 #[tokio::test]

@@ -165,6 +165,9 @@ impl AuthProviders {
                 issuer: issuer.clone(),
                 audience: api_audience,
                 require_jti,
+                // The API path never requires `aud` to be present; SYN-522 strict mode
+                // is MCP-only. Keep this byte-identical to pre-SYN-522 behavior.
+                require_audience_present: false,
             },
             jwks_cache.clone(),
             tenant_id.clone(),
@@ -176,6 +179,10 @@ impl AuthProviders {
                 issuer,
                 audience: mcp_audience,
                 require_jti,
+                // Strict MCP posture (SYN-522): when RUNTARA_MCP_REQUIRE_AUDIENCE is on
+                // (which already forced OAUTH2_MCP_AUDIENCE to be Some above), reject a
+                // token that omits `aud`. Default off keeps today's lax pass-through.
+                require_audience_present: require_mcp_audience,
             },
             jwks_cache,
             tenant_id,
