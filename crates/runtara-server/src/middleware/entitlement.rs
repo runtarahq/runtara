@@ -1149,4 +1149,85 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    // ── MCP transport "mcp requires api" invariant (SYN-523) ────────────
+    //
+    // Mirror of the layer stack on `mcp_router` in server.rs: the MCP
+    // transport is a *fallback_service*, layered (inner→outer) with
+    // `require_mcp`, `require_api`, `api_key_auth_guard`, auth. These tests
+    // rebuild that stack with the pure decision functions and pin that
+    // `mcp=true, api=false` is unreachable for EVERY auth method — JWT
+    // callers hit `require_api`, ApiKey callers hit the bypass guard — and
+    // that the default all-features-on snapshot is unaffected.
+
+    fn mcp_stack_app(snapshot: EntitlementSnapshot, method: AuthMethod) -> Router {
+        // `.layer()` (not `.route_layer()`) on a fallback, exactly like the
+        // real mcp_router — route_layer would skip fallback services.
+        Router::new()
+            .fallback(post(|| async { dummy_handler() }))
+            .layer(from_fn(make_test_gate(snapshot.clone(), FeatureKey::Mcp)))
+            .layer(from_fn(make_test_gate(snapshot.clone(), FeatureKey::Api)))
+            .layer(from_fn(make_test_api_key_guard(snapshot)))
+            .layer(from_fn(inject_auth_context(ctx_with(method))))
+    }
+
+    async fn mcp_post(app: Router) -> Response {
+        let req = Request::post("/mcp").body(Body::empty()).unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn mcp_without_api_denies_jwt_callers_with_feature_api() {
+        // Before SYN-523 this was the asymmetric hole: JWT MCP clients
+        // passed while ApiKey clients were rejected. Now the `require_api`
+        // layer denies JWT callers too, with feature=api.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"mcp":true,"api":false}}"#));
+        let resp = mcp_post(mcp_stack_app(snapshot, AuthMethod::Jwt)).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(body["feature"], "api");
+    }
+
+    #[tokio::test]
+    async fn mcp_without_api_denies_api_key_callers_unchanged() {
+        // ApiKey callers were already rejected by `api_key_auth_guard`;
+        // adding `require_api` must not change the observable outcome.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"mcp":true,"api":false}}"#));
+        let resp = mcp_post(mcp_stack_app(snapshot, AuthMethod::ApiKey)).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(body["feature"], "api");
+    }
+
+    #[tokio::test]
+    async fn mcp_default_snapshot_unaffected_by_require_api_layer() {
+        // Dark-launch control: default snapshot (all features on) must sail
+        // through the extended stack for both auth methods.
+        for method in [AuthMethod::Jwt, AuthMethod::ApiKey] {
+            let snapshot = snapshot_with(None, None);
+            let resp = mcp_post(mcp_stack_app(snapshot, method)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024)
+                .await
+                .expect("read body");
+            assert_eq!(&bytes[..], b"ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_disabled_still_denies_with_feature_mcp() {
+        // api on, mcp off → the inner `require_mcp` gate is the one that
+        // fires, so the denial names feature=mcp, not api.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"mcp":false,"api":true}}"#));
+        let resp = mcp_post(mcp_stack_app(snapshot, AuthMethod::Jwt)).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
+        assert_eq!(body["feature"], "mcp");
+    }
 }

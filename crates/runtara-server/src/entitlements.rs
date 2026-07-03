@@ -225,13 +225,12 @@ impl EntitlementSnapshot {
 
     /// Pure predicate: `true` when `mcp` is enabled but `api` is disabled.
     ///
-    /// This combination is *valid* (boot succeeds) but behaves surprisingly:
-    /// the hosted MCP transport at `/mcp/*` is only reachable via API-key
-    /// auth, and the API-key bypass guard (`api_key_auth_guard`) rejects
-    /// every API-key-authenticated request when `api` is off — *before* the
-    /// `mcp` transport gate ever runs. So a tenant reading "mcp: true,
-    /// api: false" expects MCP to work, but every hosted MCP client gets
-    /// `ENTITLEMENT_REQUIRED`. See SYN-433 Finding 5.
+    /// `mcp=true, api=false` is an invalid combination: MCP requires the
+    /// `api` feature; the MCP transport is unreachable for every auth
+    /// method. Boot still succeeds, but the `require_api` layer on the MCP
+    /// router (plus `api_key_auth_guard` for API-key callers) rejects every
+    /// request with 403 `ENTITLEMENT_REQUIRED(feature=api)` before the `mcp`
+    /// gate is ever consulted. See SYN-433 Finding 5 and SYN-523.
     ///
     /// Pulled out as a pure function so the detection is unit-testable
     /// against constructed snapshots without spinning up `tracing`.
@@ -253,12 +252,11 @@ impl EntitlementSnapshot {
                 tenant_id = %self.tenant_id,
                 feature_mcp = true,
                 feature_api = false,
-                "Entitlement combination mcp=true, api=false: hosted \
-                 MCP-over-HTTP requires API-key auth, which the api gate \
-                 blocks. MCP appears enabled in the snapshot but every \
-                 request from an API-key MCP client will fail with \
-                 ENTITLEMENT_REQUIRED. Either enable `api`, or treat `mcp` \
-                 as effectively disabled for hosted clients."
+                "mcp=true, api=false is an invalid combination: MCP requires \
+                 the api feature; the MCP transport is unreachable for every \
+                 auth method. Every MCP request fails with \
+                 ENTITLEMENT_REQUIRED(feature=api). Either enable `api`, or \
+                 disable `mcp` to make the snapshot honest."
             );
         }
     }

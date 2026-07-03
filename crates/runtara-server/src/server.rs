@@ -2273,6 +2273,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // .route_layer()) for the same reason as auth above: the MCP transport
     // is a fallback_service that route_layer would skip.
     .layer(from_fn(crate::middleware::entitlement::require_mcp))
+    // Entitlement invariant: MCP requires the `api` feature (SYN-523).
+    // Without this gate, `mcp=true, api=false` behaved asymmetrically —
+    // API-key MCP clients were rejected by `api_key_auth_guard` below while
+    // JWT MCP clients sailed through. Gating the transport on `api` makes
+    // the invariant uniform for every auth method. Uses .layer() (not
+    // .route_layer()) for the same fallback_service reason as `require_mcp`.
+    .layer(from_fn(crate::middleware::entitlement::require_api))
     // Reject API-key-authenticated MCP requests when `api` is off. Between
     // `mcp` gate (inner) and auth (outer); same shape as on tenant and
     // object-model routes.
