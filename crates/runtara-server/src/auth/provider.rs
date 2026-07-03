@@ -129,6 +129,32 @@ impl AuthProviders {
         let require_jti = std::env::var("RUNTARA_AUTH_REQUIRE_JTI")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        // Opt-in strict MCP audience enforcement (SYN-523). Default OFF so existing
+        // deployments keep today's lax behavior: audience validation is simply skipped
+        // when OAUTH2_MCP_AUDIENCE is unset. When the flag is set, an unset audience is
+        // a fatal misconfiguration — fail fast like the JWKS/issuer expect()s above.
+        let require_mcp_audience = std::env::var("RUNTARA_MCP_REQUIRE_AUDIENCE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if mcp_audience.is_none() {
+            if require_mcp_audience {
+                panic!(
+                    "RUNTARA_MCP_REQUIRE_AUDIENCE is enabled but OAUTH2_MCP_AUDIENCE is not set. \
+                     Set OAUTH2_MCP_AUDIENCE to the MCP resource audience (the token `aud` MCP \
+                     clients request), or unset RUNTARA_MCP_REQUIRE_AUDIENCE to keep lax mode."
+                );
+            }
+            tracing::warn!(
+                "OAUTH2_MCP_AUDIENCE unset — MCP JWT audience validation disabled; \
+                 any valid token from this issuer is accepted on /mcp"
+            );
+        }
+        if api_audience.is_none() {
+            tracing::warn!(
+                "OAUTH2_AUDIENCE unset — API JWT audience validation disabled; \
+                 any valid token from this issuer is accepted on the API"
+            );
+        }
 
         let jwks_cache = crate::auth::jwks::JwksCache::new(jwks_uri.clone()).await;
         crate::auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
