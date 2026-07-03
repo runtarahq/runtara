@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use runtara_agents::registry::get_agents;
+use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_dsl::{AiAgentStep, Step, Workflow};
 
 use super::reference_validation::{IssueCategory, ValidationIssue};
@@ -69,12 +69,14 @@ fn extract_from_graph(graph: &runtara_dsl::ExecutionGraph, connection_ids: &mut 
 pub fn validate_connections(
     workflow: &Workflow,
     existing_connections: &HashSet<String>,
+    catalog: &AgentCatalog,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     validate_graph_connections(
         &workflow.execution_graph,
         existing_connections,
         &[],
+        catalog,
         &mut issues,
         None,
     );
@@ -87,6 +89,7 @@ pub fn validate_connections(
 pub fn validate_connections_with_candidates(
     workflow: &Workflow,
     tenant_connections: &[ConnectionRef],
+    catalog: &AgentCatalog,
 ) -> Vec<ValidationIssue> {
     let existing: HashSet<String> = tenant_connections.iter().map(|c| c.id.clone()).collect();
     let mut issues = Vec::new();
@@ -94,31 +97,31 @@ pub fn validate_connections_with_candidates(
         &workflow.execution_graph,
         &existing,
         tenant_connections,
+        catalog,
         &mut issues,
         None,
     );
     issues
 }
 
-/// Look up an agent's accepted integration ids from static metadata.
-fn integration_ids_for_agent(agent_id: &str) -> Vec<String> {
-    get_agents()
-        .into_iter()
-        .find(|a| a.id == agent_id)
-        .map(|a| a.integration_ids)
-        .unwrap_or_default()
-}
-
-fn agent_requires_connection(agent_id: &str) -> bool {
+/// Whether `agent_id` requires a connection, per the runtime agent catalog
+/// (`ComponentDispatcherService::catalog()`) — the same source of truth the
+/// dynamic workflow validator and `GET /api/runtime/agents` use.
+///
+/// This used to consult the statically-compiled
+/// `runtara_agents::registry::get_agents()`, which only lists agents with
+/// compiled-in capability registrations. Every integration that now runs as
+/// a WASM component (shopify, hubspot, stripe, slack, …) was absent from
+/// that list, so this check silently passed steps with no connection
+/// configured at all instead of flagging them.
+fn agent_requires_connection(catalog: &AgentCatalog, agent_id: &str) -> bool {
     if agent_id.eq_ignore_ascii_case("http") {
         return false;
     }
 
-    get_agents()
-        .into_iter()
-        .find(|agent| agent.id.eq_ignore_ascii_case(agent_id))
-        .map(|agent| agent.supports_connections)
-        .unwrap_or(false)
+    catalog
+        .agent(agent_id)
+        .is_some_and(|agent| agent.supports_connections)
 }
 
 /// Render up to 5 candidate connections as a human-readable list.
@@ -145,13 +148,14 @@ fn validate_graph_connections(
     graph: &runtara_dsl::ExecutionGraph,
     existing_connections: &HashSet<String>,
     tenant_connections: &[ConnectionRef],
+    catalog: &AgentCatalog,
     issues: &mut Vec<ValidationIssue>,
     parent_context: Option<&str>,
 ) {
     for step in graph.steps.values() {
         match step {
             Step::Agent(agent_step) => {
-                if agent_requires_connection(&agent_step.agent_id)
+                if agent_requires_connection(catalog, &agent_step.agent_id)
                     && agent_step
                         .connection_id
                         .as_ref()
@@ -176,7 +180,7 @@ fn validate_graph_connections(
                     && !conn_id.is_empty()
                     && !existing_connections.contains(conn_id)
                 {
-                    let agent_int_ids = integration_ids_for_agent(&agent_step.agent_id);
+                    let agent_int_ids = catalog.integration_ids_for(&agent_step.agent_id);
                     let candidates: Vec<&ConnectionRef> = tenant_connections
                         .iter()
                         .filter(|c| match &c.integration_id {
@@ -244,6 +248,7 @@ fn validate_graph_connections(
                     &split_step.subgraph,
                     existing_connections,
                     tenant_connections,
+                    catalog,
                     issues,
                     Some(&context),
                 );
@@ -258,6 +263,7 @@ fn validate_graph_connections(
                     &while_step.subgraph,
                     existing_connections,
                     tenant_connections,
+                    catalog,
                     issues,
                     Some(&context),
                 );
@@ -380,7 +386,23 @@ fn validate_ai_agent_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_dsl::agent_meta::AgentInfo;
     use serde_json::json;
+
+    /// Build a single-agent catalog for tests that need the connection
+    /// guard to recognize an agent the way the WASM component dispatcher
+    /// would — this stands in for a `runtara_agent_<id>.meta.json` sidecar.
+    fn agent_catalog(id: &str, integration_ids: &[&str]) -> AgentCatalog {
+        AgentCatalog::from_agents(vec![AgentInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            has_side_effects: true,
+            supports_connections: true,
+            integration_ids: integration_ids.iter().map(|s| s.to_string()).collect(),
+            capabilities: Vec::new(),
+        }])
+    }
 
     #[test]
     fn test_extract_connection_ids() {
@@ -442,11 +464,50 @@ mod tests {
         .unwrap();
 
         let existing: HashSet<String> = HashSet::new();
-        let issues = validate_connections(&workflow, &existing);
+        let issues = validate_connections(&workflow, &existing, &AgentCatalog::new());
 
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("nonexistent-connection"));
         assert!(issues[0].message.contains("not found"));
+    }
+
+    /// Regression test for the connection guard being blind to agents that
+    /// only exist in the dynamic catalog (i.e. every non-`http`/`sftp`
+    /// integration after native-agent deletion). Before threading the
+    /// catalog through, `agent_requires_connection` always fell back to
+    /// `false` for `shopify` because it wasn't in the compiled-in registry,
+    /// so a connection-less Shopify step saved clean and only failed later
+    /// at runtime with an opaque credential error.
+    #[test]
+    fn test_connectionless_shopify_step_is_flagged() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products"
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            },
+            "variables": []
+        }))
+        .unwrap();
+
+        let existing: HashSet<String> = HashSet::new();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+
+        assert_eq!(
+            issues.len(),
+            1,
+            "expected a missing-connection issue, got {issues:?}"
+        );
+        assert!(issues[0].message.contains("requires a connection"));
+        assert!(issues[0].message.contains("shopify"));
     }
 
     #[test]
@@ -472,17 +533,16 @@ mod tests {
         let mut existing: HashSet<String> = HashSet::new();
         existing.insert("my-connection".to_string());
 
-        let issues = validate_connections(&workflow, &existing);
+        let issues = validate_connections(&workflow, &existing, &AgentCatalog::new());
         assert!(issues.is_empty());
     }
 
-    // NOTE: these exercise the candidate-suggestion mechanism with `sftp`, a
-    // surviving native agent that still carries static `integration_ids`
-    // (["sftp"], supports_connections=true). They previously used `shopify`,
-    // which was deleted in "agents: delete legacy native integration agents" —
-    // shopify now runs as a WASM component and is not in the static agent
-    // registry the validator reads. Suggestions for component agents are a
-    // known gap tracked separately; the mechanism itself is unchanged.
+    // Exercises the candidate-suggestion mechanism with `shopify` — a
+    // component agent with no compiled-in registry entry, which is exactly
+    // the case the static `get_agents()` lookup used to be blind to. Now
+    // that the guard reads the runtime catalog instead, suggestions work for
+    // component agents the same way they always did for statically-compiled
+    // ones.
     #[test]
     fn test_candidate_suggestions_on_missing_connection() {
         let workflow: Workflow = serde_json::from_value(json!({
@@ -491,8 +551,8 @@ mod tests {
                     "step1": {
                         "stepType": "Agent",
                         "id": "step1",
-                        "agentId": "sftp",
-                        "capabilityId": "sftp_list_files",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
                         "connectionId": "wrong-id"
                     }
                 },
@@ -503,13 +563,13 @@ mod tests {
         }))
         .unwrap();
 
-        // Tenant has an sftp connection (matching integration_id) and a
-        // postgres one (which should NOT be suggested for an sftp step).
+        // Tenant has a shopify connection (matching integration_id) and a
+        // postgres one (which should NOT be suggested for a shopify step).
         let tenant = vec![
             ConnectionRef {
-                id: "conn-sftp".to_string(),
-                integration_id: Some("sftp".to_string()),
-                title: "My SFTP Server".to_string(),
+                id: "conn-shopify".to_string(),
+                integration_id: Some("shopify".to_string()),
+                title: "My Shopify Store".to_string(),
             },
             ConnectionRef {
                 id: "conn-db".to_string(),
@@ -518,16 +578,17 @@ mod tests {
             },
         ];
 
-        let issues = validate_connections_with_candidates(&workflow, &tenant);
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &catalog);
         assert_eq!(issues.len(), 1, "expected one missing-connection issue");
         let msg = &issues[0].message;
         assert!(msg.contains("'wrong-id'"), "{msg}");
         assert!(
-            msg.contains("My SFTP Server"),
-            "should suggest the sftp connection: {msg}"
+            msg.contains("My Shopify Store"),
+            "should suggest the shopify connection: {msg}"
         );
         assert!(
-            msg.contains("conn-sftp"),
+            msg.contains("conn-shopify"),
             "should include the candidate id: {msg}"
         );
         assert!(
@@ -544,8 +605,8 @@ mod tests {
                     "step1": {
                         "stepType": "Agent",
                         "id": "step1",
-                        "agentId": "sftp",
-                        "capabilityId": "sftp_list_files",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
                         "connectionId": "wrong-id"
                     }
                 },
@@ -564,11 +625,12 @@ mod tests {
             title: "Object Model DB".to_string(),
         }];
 
-        let issues = validate_connections_with_candidates(&workflow, &tenant);
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &catalog);
         assert_eq!(issues.len(), 1);
         let msg = &issues[0].message;
         assert!(
-            msg.contains("sftp"),
+            msg.contains("shopify"),
             "should hint at accepted integration ids: {msg}"
         );
         assert!(msg.contains("none configured"), "{msg}");
@@ -606,7 +668,7 @@ mod tests {
             title: "OpenAI".to_string(),
         }];
 
-        let issues = validate_connections_with_candidates(&workflow, &tenant);
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
         assert!(issues.is_empty(), "expected no issues, got {issues:?}");
     }
 
@@ -619,7 +681,7 @@ mod tests {
             title: "AWS".to_string(),
         }];
 
-        let issues = validate_connections_with_candidates(&workflow, &tenant);
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
         assert_eq!(issues.len(), 1);
         let issue = &issues[0];
         assert_eq!(issue.step_id, "ai");
@@ -658,7 +720,7 @@ mod tests {
             },
         ];
 
-        let issues = validate_connections_with_candidates(&workflow, &tenant);
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
         assert_eq!(issues.len(), 1);
         let msg = &issues[0].message;
         assert!(msg.contains("wrong-id"), "{msg}");

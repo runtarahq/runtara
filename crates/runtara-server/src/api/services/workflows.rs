@@ -562,6 +562,7 @@ impl WorkflowService {
                 crate::api::utils::connection_validation::validate_connections_with_candidates(
                     &workflow,
                     &tenant_refs,
+                    &self.agent_catalog,
                 );
 
             let conn_errors: Vec<String> = connection_issues
@@ -1015,6 +1016,7 @@ impl WorkflowService {
                 crate::api::utils::connection_validation::validate_connections_with_candidates(
                     &workflow,
                     &tenant_refs,
+                    &self.agent_catalog,
                 );
 
             // Convert connection issues to the same format
