@@ -137,7 +137,29 @@ impl ValkeyConfig {
             .unwrap_or_else(|_| "runtara-workers".to_string());
 
         let trigger_stream_prefix = std::env::var("VALKEY_TRIGGER_STREAM_PREFIX")
-            .unwrap_or_else(|_| "runtara:triggers".to_string());
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| {
+                // The prefix is interpolated into a Redis SCAN MATCH glob pattern
+                // by the cleanup task (`{prefix}:*`), so it must not contain glob
+                // metacharacters — otherwise a misconfigured prefix could make
+                // cleanup match (and trim) keys belonging to an unrelated stream
+                // family sharing this Valkey instance.
+                if p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
+                {
+                    Some(p)
+                } else {
+                    tracing::warn!(
+                        configured_prefix = %p,
+                        "VALKEY_TRIGGER_STREAM_PREFIX contains characters unsafe for a Redis \
+                         glob pattern (only alphanumeric, ':', '_', '-' allowed); ignoring and \
+                         using the default"
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| "runtara:triggers".to_string());
 
         let trigger_consumer_group = std::env::var("VALKEY_TRIGGER_CONSUMER_GROUP")
             .unwrap_or_else(|_| "runtara-trigger-workers".to_string());

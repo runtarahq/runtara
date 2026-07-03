@@ -1262,31 +1262,24 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the shared connection manager built above (no second TCP).
     let valkey_conn = redis_manager.clone();
 
-    // Create trigger stream publisher backed by the shared manager. The prefix
-    // must match the trigger worker's, so publishes land where a worker reads.
-    let trigger_stream_prefix = valkey_config
-        .as_ref()
-        .map(|c| c.trigger_stream_prefix.clone())
-        .unwrap_or_else(|| "runtara:triggers".to_string());
-    let trigger_stream_maxlen = valkey_config
-        .as_ref()
-        .map(|c| c.trigger_stream_maxlen)
-        .unwrap_or(valkey::DEFAULT_TRIGGER_STREAM_MAXLEN);
+    // Create trigger stream publisher backed by the shared manager. Handing it
+    // the whole ValkeyConfig (rather than copying out individual fields) keeps
+    // its stream-key format and maxlen in lock-step with whatever the trigger
+    // worker and cleanup task use, with no per-field threading to keep in sync.
+    // `redis_manager` and `valkey_config` are both derived from the same
+    // deterministic `ValkeyConfig::from_env()`, so they agree on Some/None.
     let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
-        redis_manager.clone().map(|m| {
-            tracing::info!(
-                trigger_stream_prefix = %trigger_stream_prefix,
-                trigger_stream_maxlen = trigger_stream_maxlen,
-                "Trigger stream publisher initialized"
-            );
-            Arc::new(
-                api::repositories::trigger_stream::TriggerStreamPublisher::new(
-                    m,
-                    trigger_stream_prefix.clone(),
-                    trigger_stream_maxlen,
-                ),
-            )
-        });
+        valkey_config
+            .clone()
+            .zip(redis_manager.clone())
+            .map(|(config, m)| {
+                tracing::info!(
+                    trigger_stream_prefix = %config.trigger_stream_prefix,
+                    trigger_stream_maxlen = config.trigger_stream_maxlen,
+                    "Trigger stream publisher initialized"
+                );
+                Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m, config))
+            });
 
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
@@ -1355,11 +1348,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Start cron scheduler
         let cron_pool = pool.clone();
         let cron_trigger_stream = redis_manager.clone().map(|m| {
-            api::repositories::trigger_stream::TriggerStreamPublisher::new(
-                m,
-                config.trigger_stream_prefix.clone(),
-                config.trigger_stream_maxlen,
-            )
+            api::repositories::trigger_stream::TriggerStreamPublisher::new(m, config.clone())
         });
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
@@ -1384,10 +1373,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Start cleanup task for Redis streams
         tokio::spawn(async move {
             let redis_url = cleanup_config.connection_url();
-            let cleanup_trigger_prefix = cleanup_config.trigger_stream_prefix.clone();
             match redis::Client::open(redis_url.as_str()) {
                 Ok(redis_client) => {
-                    valkey::cleanup::start_cleanup_task(redis_client, cleanup_trigger_prefix).await;
+                    valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
                 }
                 Err(e) => {
                     eprintln!("Failed to create Redis client for cleanup task: {}", e);

@@ -156,14 +156,12 @@ pub async fn run(
                 // already exists, so the worker always hands the request off.
                 {
                     let compile_start = Instant::now();
-                    let attributes = [
-                        KeyValue::new("tenant_id", request.tenant_id.clone()),
-                        KeyValue::new("workflow_id", request.workflow_id.clone()),
-                    ];
 
-                    // Track active compilations
+                    // Track active compilations. No labels: like the duration
+                    // histogram below, a per-(tenant, workflow) gauge would grow
+                    // one series per combination without bound.
                     if let Some(m) = metrics() {
-                        m.compilations_active.add(1, &attributes);
+                        m.compilations_active.add(1, &[]);
                     }
 
                     // Perform compilation (target determined by RUNTARA_COMPILE_TARGET env var)
@@ -206,7 +204,7 @@ pub async fn run(
                         // its buckets don't multiply per workflow and tenant.
                         m.compilation_duration
                             .record(duration, &[KeyValue::new("status", status)]);
-                        m.compilations_active.add(-1, &attributes);
+                        m.compilations_active.add(-1, &[]);
                     }
 
                     match compile_result {

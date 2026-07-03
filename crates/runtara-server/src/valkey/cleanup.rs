@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use super::ValkeyConfig;
+
 // Note: Using eprintln! and println! instead of tracing since this module
 // may be used in contexts where tracing is not initialized
 
@@ -16,7 +18,7 @@ const CLEANUP_INTERVAL_HOURS: u64 = 6;
 /// streams are XACK'd on consume, which only clears the pending-entries list —
 /// the entries themselves stay until trimmed, so they need age-based cleanup too
 /// (the publish-time `MAXLEN` cap is the other half of the bound).
-pub async fn start_cleanup_task(redis_client: redis::Client, trigger_stream_prefix: String) {
+pub async fn start_cleanup_task(redis_client: redis::Client, config: ValkeyConfig) {
     let cleanup_interval = Duration::from_secs(CLEANUP_INTERVAL_HOURS * 60 * 60);
 
     println!(
@@ -30,7 +32,7 @@ pub async fn start_cleanup_task(redis_client: redis::Client, trigger_stream_pref
 
         println!("Running cleanup task for Redis streams");
 
-        match cleanup_old_messages(&redis_client, &trigger_stream_prefix).await {
+        match cleanup_old_messages(&redis_client, &config.trigger_stream_prefix).await {
             Ok(stats) => {
                 println!(
                     "Cleanup completed - processed {} streams, trimmed approximately {} messages",
