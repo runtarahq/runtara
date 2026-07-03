@@ -156,14 +156,12 @@ pub async fn run(
                 // already exists, so the worker always hands the request off.
                 {
                     let compile_start = Instant::now();
-                    let attributes = [
-                        KeyValue::new("tenant_id", request.tenant_id.clone()),
-                        KeyValue::new("workflow_id", request.workflow_id.clone()),
-                    ];
 
-                    // Track active compilations
+                    // Track active compilations. No labels: like the duration
+                    // histogram below, a per-(tenant, workflow) gauge would grow
+                    // one series per combination without bound.
                     if let Some(m) = metrics() {
-                        m.compilations_active.add(1, &attributes);
+                        m.compilations_active.add(1, &[]);
                     }
 
                     // Perform compilation (target determined by RUNTARA_COMPILE_TARGET env var)
@@ -195,14 +193,18 @@ pub async fn run(
                     events.emit(event);
 
                     if let Some(m) = metrics() {
+                        let status = if success { "success" } else { "failed" };
                         let result_attrs = [
                             KeyValue::new("tenant_id", request.tenant_id.clone()),
                             KeyValue::new("workflow_id", request.workflow_id.clone()),
-                            KeyValue::new("status", if success { "success" } else { "failed" }),
+                            KeyValue::new("status", status),
                         ];
                         m.compilations_total.add(1, &result_attrs);
-                        m.compilation_duration.record(duration, &attributes);
-                        m.compilations_active.add(-1, &attributes);
+                        // Duration is a histogram: drop tenant_id/workflow_id so
+                        // its buckets don't multiply per workflow and tenant.
+                        m.compilation_duration
+                            .record(duration, &[KeyValue::new("status", status)]);
+                        m.compilations_active.add(-1, &[]);
                     }
 
                     match compile_result {

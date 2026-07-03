@@ -106,7 +106,15 @@ pub struct ValkeyConfig {
     pub trigger_stream_prefix: String,
     /// Consumer group for trigger workers (default: "runtara-trigger-workers")
     pub trigger_consumer_group: String,
+    /// Approximate max length for trigger streams. XACK only clears the PEL, so
+    /// without a cap every published event accumulates forever and slowly OOMs
+    /// Valkey. Publishes use `XADD ... MAXLEN ~ N` to bound each stream.
+    pub trigger_stream_maxlen: usize,
 }
+
+/// Default approximate cap on trigger stream length. Generous so a consumer
+/// backlog isn't trimmed under normal operation, while still bounding growth.
+pub const DEFAULT_TRIGGER_STREAM_MAXLEN: usize = 100_000;
 
 impl ValkeyConfig {
     /// Load Valkey configuration from environment variables
@@ -129,10 +137,38 @@ impl ValkeyConfig {
             .unwrap_or_else(|_| "runtara-workers".to_string());
 
         let trigger_stream_prefix = std::env::var("VALKEY_TRIGGER_STREAM_PREFIX")
-            .unwrap_or_else(|_| "runtara:triggers".to_string());
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| {
+                // The prefix is interpolated into a Redis SCAN MATCH glob pattern
+                // by the cleanup task (`{prefix}:*`), so it must not contain glob
+                // metacharacters — otherwise a misconfigured prefix could make
+                // cleanup match (and trim) keys belonging to an unrelated stream
+                // family sharing this Valkey instance.
+                if p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
+                {
+                    Some(p)
+                } else {
+                    tracing::warn!(
+                        configured_prefix = %p,
+                        "VALKEY_TRIGGER_STREAM_PREFIX contains characters unsafe for a Redis \
+                         glob pattern (only alphanumeric, ':', '_', '-' allowed); ignoring and \
+                         using the default"
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| "runtara:triggers".to_string());
 
         let trigger_consumer_group = std::env::var("VALKEY_TRIGGER_CONSUMER_GROUP")
             .unwrap_or_else(|_| "runtara-trigger-workers".to_string());
+
+        let trigger_stream_maxlen = std::env::var("VALKEY_TRIGGER_STREAM_MAXLEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_TRIGGER_STREAM_MAXLEN);
 
         Some(ValkeyConfig {
             host,
@@ -143,6 +179,7 @@ impl ValkeyConfig {
             consumer_group,
             trigger_stream_prefix,
             trigger_consumer_group,
+            trigger_stream_maxlen,
         })
     }
 

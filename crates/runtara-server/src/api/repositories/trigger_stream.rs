@@ -1,24 +1,35 @@
 //! Trigger Stream Publisher
 //!
 //! Publishes trigger events to Redis/Valkey streams for async workflow execution.
-//! Stream naming: runtara:triggers:{tenant_id}
+//! Stream naming: {trigger_stream_prefix}:{tenant_id}, where the prefix is the
+//! same `VALKEY_TRIGGER_STREAM_PREFIX`-derived value the trigger worker consumes
+//! from — so publisher and consumer always agree on the key.
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use crate::api::dto::trigger_event::TriggerEvent;
+use crate::valkey::ValkeyConfig;
 
 /// Publisher for trigger events to Redis streams
 pub struct TriggerStreamPublisher {
     /// Shared Redis connection manager (built once at startup; cloned per
     /// publish to reuse the existing connection pool).
     manager: ConnectionManager,
+    /// Shared Valkey configuration. Holding the whole config (rather than
+    /// copying out individual fields like prefix/maxlen) means the stream key
+    /// is always built via `ValkeyConfig::trigger_stream_key` — the same
+    /// method the trigger worker uses to compute its consuming key — and any
+    /// future config field the publisher needs doesn't require a constructor
+    /// signature change.
+    config: ValkeyConfig,
 }
 
 impl TriggerStreamPublisher {
-    /// Create a new publisher from a shared connection manager.
-    pub fn new(manager: ConnectionManager) -> Self {
-        Self { manager }
+    /// Create a new publisher from a shared connection manager and the
+    /// process's Valkey configuration.
+    pub fn new(manager: ConnectionManager, config: ValkeyConfig) -> Self {
+        Self { manager, config }
     }
 
     /// Publish a trigger event to the tenant's trigger stream
@@ -36,14 +47,24 @@ impl TriggerStreamPublisher {
         // Reuse the shared connection manager — no new TCP per call.
         let mut redis_conn = self.manager.clone();
 
-        // Construct Redis stream key
-        let stream_key = format!("runtara:triggers:{}", tenant_id);
+        // Construct Redis stream key from the configured prefix.
+        let stream_key = self.stream_key(tenant_id);
 
-        // Add to Redis stream using XADD with auto-generated ID
-        // Store event_type for filtering and full event data as JSON
+        // Add to Redis stream using XADD with auto-generated ID, bounding the
+        // stream to an approximate max length so it can't grow without limit.
+        // Store event_type for filtering and full event data as JSON.
+        //
+        // Residual risk: MAXLEN trimming is approximate and can remove entries
+        // that are still in the trigger consumer group's PEL (claimed-but-unacked,
+        // or never-yet-read) if the consumer falls behind by more than
+        // `trigger_stream_maxlen` events. `StreamConsumer::claim_pending_events`
+        // (valkey/stream.rs) logs a warning when XAUTOCLAIM reports such entries,
+        // so a sustained backlog is observable rather than silently dropping
+        // trigger events with no signal.
         let stream_id: String = redis_conn
-            .xadd(
+            .xadd_maxlen(
                 &stream_key,
+                redis::streams::StreamMaxlen::Approx(self.config.trigger_stream_maxlen),
                 "*", // Auto-generate ID
                 &[
                     ("event_type", "trigger"),
@@ -68,9 +89,11 @@ impl TriggerStreamPublisher {
         Ok(stream_id)
     }
 
-    /// Get the stream key for a tenant
-    pub fn stream_key(tenant_id: &str) -> String {
-        format!("runtara:triggers:{}", tenant_id)
+    /// Get the stream key for a tenant. Delegates to `ValkeyConfig::trigger_stream_key`
+    /// — the same method the trigger worker uses to compute its consuming key —
+    /// so there is exactly one implementation of the key format.
+    pub fn stream_key(&self, tenant_id: &str) -> String {
+        self.config.trigger_stream_key(tenant_id)
     }
 }
 
@@ -109,11 +132,33 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn test_config(prefix: &str) -> ValkeyConfig {
+        ValkeyConfig {
+            host: "localhost".to_string(),
+            port: 6379,
+            user: None,
+            password: None,
+            stream_name: "runtara-events".to_string(),
+            consumer_group: "runtara-workers".to_string(),
+            trigger_stream_prefix: prefix.to_string(),
+            trigger_consumer_group: "runtara-trigger-workers".to_string(),
+            trigger_stream_maxlen: crate::valkey::DEFAULT_TRIGGER_STREAM_MAXLEN,
+        }
+    }
+
     #[test]
-    fn test_stream_key() {
+    fn test_stream_key_uses_configured_prefix() {
+        // The publisher's stream_key delegates to ValkeyConfig::trigger_stream_key
+        // — the same key the trigger worker computes to consume from — so there
+        // is exactly one implementation of the key format to keep in sync.
         assert_eq!(
-            TriggerStreamPublisher::stream_key("tenant-123"),
+            test_config("runtara:triggers").trigger_stream_key("tenant-123"),
             "runtara:triggers:tenant-123"
+        );
+        // A custom prefix (e.g. for multi-server isolation) is honored.
+        assert_eq!(
+            test_config("srvA:triggers").trigger_stream_key("tenant-123"),
+            "srvA:triggers:tenant-123"
         );
     }
 

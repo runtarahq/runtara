@@ -136,7 +136,28 @@ impl StreamConsumer {
             .query_async(&mut self.connection)
             .await?;
 
-        parse_xautoclaim_response(result)
+        let (events, next_start_id, deleted_ids) = parse_xautoclaim_response(result)?;
+
+        // Entries XAUTOCLAIM reports as "deleted" were in this consumer group's
+        // PEL (claimed but never acknowledged) and are now gone from the stream
+        // — most likely trimmed by the publisher's `XADD ... MAXLEN ~ N` cap
+        // while still pending. That means the event was never delivered to a
+        // handler and is unrecoverable. Surface it instead of discarding it
+        // silently, so a sustained backlog shows up in logs/alerts rather than
+        // just as workflows that never fired.
+        if !deleted_ids.is_empty() {
+            tracing::warn!(
+                stream_name = %self.stream_name,
+                consumer_group = %self.consumer_group,
+                deleted_count = deleted_ids.len(),
+                deleted_ids = ?deleted_ids,
+                "XAUTOCLAIM reports pending entries deleted from the stream before \
+                 acknowledgement (likely trimmed by MAXLEN under backlog) — these \
+                 trigger events are permanently lost"
+            );
+        }
+
+        Ok((events, next_start_id))
     }
 
     /// Get the delivery count for a specific entry using XPENDING
@@ -256,11 +277,16 @@ fn parse_fields(field_values: &[Value]) -> HashMap<String, String> {
     fields
 }
 
-/// Parse XAUTOCLAIM response into events and next cursor
+/// (claimed events, next pagination cursor, ids deleted from the stream while
+/// still pending — see the warning `claim_pending_events` logs for these).
+type XautoclaimResult = (Vec<(String, ValkeyEvent)>, String, Vec<String>);
+
+/// Parse XAUTOCLAIM response into events, next cursor, and deleted-entry ids.
 /// XAUTOCLAIM returns: [next-start-id, [[entry_id, [field, value, ...]], ...], [deleted-ids]]
-fn parse_xautoclaim_response(value: Value) -> RedisResult<(Vec<(String, ValkeyEvent)>, String)> {
+fn parse_xautoclaim_response(value: Value) -> RedisResult<XautoclaimResult> {
     let mut events = Vec::new();
     let mut next_start_id = "0-0".to_string();
+    let mut deleted_ids = Vec::new();
 
     match value {
         Value::Array(parts) if parts.len() >= 2 => {
@@ -294,8 +320,17 @@ fn parse_xautoclaim_response(value: Value) -> RedisResult<(Vec<(String, ValkeyEv
                 }
             }
 
-            // Third element (if present): deleted IDs - we ignore these
-            // They represent messages that were in PEL but deleted from the stream
+            // Third element (if present): ids deleted from the stream while still
+            // in this consumer's PEL (see the warning logged by the caller).
+            if parts.len() >= 3
+                && let Value::Array(ids) = &parts[2]
+            {
+                for id in ids {
+                    if let Value::BulkString(bytes) = id {
+                        deleted_ids.push(String::from_utf8_lossy(bytes).to_string());
+                    }
+                }
+            }
         }
         Value::Nil => {
             // No pending events
@@ -305,7 +340,7 @@ fn parse_xautoclaim_response(value: Value) -> RedisResult<(Vec<(String, ValkeyEv
         }
     }
 
-    Ok((events, next_start_id))
+    Ok((events, next_start_id, deleted_ids))
 }
 
 #[cfg(test)]
@@ -335,7 +370,7 @@ mod tests {
             Value::Array(vec![]),
         ]);
 
-        let (events, next_id) = parse_xautoclaim_response(response).unwrap();
+        let (events, next_id, _deleted_ids) = parse_xautoclaim_response(response).unwrap();
 
         assert_eq!(next_id, "1234567890123-1");
         assert_eq!(events.len(), 1);
@@ -351,6 +386,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_xautoclaim_response_surfaces_deleted_ids() {
+        // Entries reported as "deleted" were in the PEL but are gone from the
+        // stream (e.g. trimmed by MAXLEN before being acknowledged) — the
+        // caller must be able to see these to log/alert on data loss.
+        let response = Value::Array(vec![
+            Value::BulkString(b"1234567890123-1".to_vec()),
+            Value::Array(vec![]), // no claimed entries this call
+            Value::Array(vec![
+                Value::BulkString(b"1111111111111-0".to_vec()),
+                Value::BulkString(b"2222222222222-0".to_vec()),
+            ]),
+        ]);
+
+        let (events, next_id, deleted_ids) = parse_xautoclaim_response(response).unwrap();
+
+        assert_eq!(next_id, "1234567890123-1");
+        assert!(events.is_empty());
+        assert_eq!(
+            deleted_ids,
+            vec!["1111111111111-0".to_string(), "2222222222222-0".to_string()]
+        );
+    }
+
+    #[test]
     fn test_parse_xautoclaim_response_empty() {
         // XAUTOCLAIM with no pending events returns next-id with empty entries
         let response = Value::Array(vec![
@@ -359,7 +418,7 @@ mod tests {
             Value::Array(vec![]),
         ]);
 
-        let (events, next_id) = parse_xautoclaim_response(response).unwrap();
+        let (events, next_id, _deleted_ids) = parse_xautoclaim_response(response).unwrap();
 
         assert_eq!(next_id, "0-0");
         assert!(events.is_empty());
@@ -370,7 +429,7 @@ mod tests {
         // XAUTOCLAIM can return Nil when no pending events
         let response = Value::Nil;
 
-        let (events, next_id) = parse_xautoclaim_response(response).unwrap();
+        let (events, next_id, _deleted_ids) = parse_xautoclaim_response(response).unwrap();
 
         assert_eq!(next_id, "0-0");
         assert!(events.is_empty());
@@ -407,7 +466,7 @@ mod tests {
             Value::Array(vec![]),
         ]);
 
-        let (events, next_id) = parse_xautoclaim_response(response).unwrap();
+        let (events, next_id, _deleted_ids) = parse_xautoclaim_response(response).unwrap();
 
         assert_eq!(next_id, "1234567890123-5");
         assert_eq!(events.len(), 3);
