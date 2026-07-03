@@ -80,10 +80,24 @@ impl OidcDiscoveryCache {
 /// GET /.well-known/oauth-protected-resource
 ///
 /// Returns OAuth 2.0 Protected Resource Metadata (RFC 9728) for MCP clients.
-/// Requires `MCP_RESOURCE_URI` and `OAUTH2_ISSUER` env vars to be set.
-pub async fn oauth_protected_resource_handler() -> impl IntoResponse {
-    let resource_uri = std::env::var("MCP_RESOURCE_URI").expect("MCP_RESOURCE_URI must be set");
-    let issuer_uri = std::env::var("OAUTH2_ISSUER").expect("OAUTH2_ISSUER must be set");
+/// Requires `MCP_RESOURCE_URI` and `OAUTH2_ISSUER` env vars to be set; when
+/// either is missing the metadata simply doesn't exist for this deployment,
+/// so respond 404 instead of panicking the worker (SYN-523).
+pub async fn oauth_protected_resource_handler() -> axum::response::Response {
+    let Ok(resource_uri) = std::env::var("MCP_RESOURCE_URI") else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "OAuth protected resource metadata is not configured (MCP_RESOURCE_URI unset)"})),
+        )
+            .into_response();
+    };
+    let Ok(issuer_uri) = std::env::var("OAUTH2_ISSUER") else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "OAuth protected resource metadata is not configured (OAUTH2_ISSUER unset)"})),
+        )
+            .into_response();
+    };
 
     let body = json!({
         "resource": resource_uri,
@@ -96,6 +110,7 @@ pub async fn oauth_protected_resource_handler() -> impl IntoResponse {
         [(header::CACHE_CONTROL, "public, max-age=3600")],
         Json(body),
     )
+        .into_response()
 }
 
 /// GET /.well-known/openid-configuration
@@ -120,5 +135,54 @@ pub async fn openid_configuration_handler(
             Json(json!({"error": "Failed to fetch authorization server metadata"})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env::{ENV_MUTEX, EnvGuard};
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&bytes).expect("parse JSON body")
+    }
+
+    #[tokio::test]
+    async fn protected_resource_returns_404_when_env_unset() {
+        // Regression guard for SYN-523: with MCP_RESOURCE_URI / OAUTH2_ISSUER
+        // unset the handler must answer 404 — not panic the worker task.
+        let _lock = ENV_MUTEX.lock().await;
+        let mut guard = EnvGuard::new();
+        guard.remove("MCP_RESOURCE_URI");
+        guard.remove("OAUTH2_ISSUER");
+
+        let resp = oauth_protected_resource_handler().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp).await;
+        assert!(body["error"].as_str().unwrap().contains("MCP_RESOURCE_URI"));
+
+        // Partial config (resource set, issuer missing) is still 404.
+        guard.set("MCP_RESOURCE_URI", "https://mcp.example.com/mcp");
+        let resp = oauth_protected_resource_handler().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp).await;
+        assert!(body["error"].as_str().unwrap().contains("OAUTH2_ISSUER"));
+    }
+
+    #[tokio::test]
+    async fn protected_resource_returns_metadata_when_configured() {
+        let _lock = ENV_MUTEX.lock().await;
+        let mut guard = EnvGuard::new();
+        guard.set("MCP_RESOURCE_URI", "https://mcp.example.com/mcp");
+        guard.set("OAUTH2_ISSUER", "https://idp.example.com/");
+
+        let resp = oauth_protected_resource_handler().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["resource"], "https://mcp.example.com/mcp");
+        assert_eq!(body["authorization_servers"][0], "https://idp.example.com/");
     }
 }

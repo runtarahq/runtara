@@ -22,6 +22,8 @@ pub mod runtime_client;
 pub mod server;
 pub mod shutdown;
 pub mod step_events;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod types;
 pub mod valkey;
 pub mod workers;
