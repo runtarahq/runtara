@@ -618,13 +618,21 @@ struct HealthResponse {
     status: String,
     version: String,
     commit: String,
+    /// Whether `connection_parameters` are actually encrypted at rest, or
+    /// running on the plaintext `NoOpCipher` fallback. `false` here is
+    /// expected in local/dev; an operator dashboard alerting on this in a
+    /// production environment is the readiness surface this was missing —
+    /// `is_encryption_enabled()` was previously only checked internally by
+    /// the `/reencrypt` maintenance endpoint.
+    encryption_enabled: bool,
 }
 
-async fn health_handler() -> Json<HealthResponse> {
+async fn health_handler(encryption_enabled: bool) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("BUILD_VERSION").to_string(),
         commit: env!("BUILD_COMMIT").to_string(),
+        encryption_enabled,
     })
 }
 
@@ -972,17 +980,31 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
 
-    // Construct connections crate config and facade.
-    // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
-    // back to NoOp (plaintext at rest) with a loud warning if missing. See
+    // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls back to
+    // NoOp (plaintext at rest) with a loud warning if missing, unless
+    // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
+    // case a missing/invalid key hard-fails startup instead of silently degrading. See
     // runtara_connections::crypto::cipher_from_env for details.
+    let cipher = match runtara_connections::cipher_from_env() {
+        Ok(cipher) => cipher,
+        Err(e) => {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
+    };
+    // Fixed for the process lifetime — captured here for the `/health` readiness
+    // response rather than threading connections-crate state through the public
+    // router just for this one field.
+    let encryption_enabled = cipher.is_encrypting();
+
+    // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
         redis_manager: redis_manager.clone(),
         public_base_url: std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         http_client: reqwest::Client::new(),
-        cipher: runtara_connections::cipher_from_env(),
+        cipher,
         compatibility: integration_compatibility.clone(),
         agent_catalog: agent_catalog.clone(),
         // Connection lifecycle analytics → the product-events pipeline (dependency inversion;
@@ -2020,7 +2042,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Create router for public/global endpoints (no tenant auth required)
     let public_routes = Router::new()
-        .route("/health", get(health_handler))
+        .route(
+            "/health",
+            get(move || async move { health_handler(encryption_enabled).await }),
+        )
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
@@ -2620,5 +2645,27 @@ async fn run_server_migrations(pool: &PgPool) {
         Err(e) => {
             eprintln!("⚠ Failed to initialize server migrator: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod health_handler_tests {
+    use super::*;
+
+    /// The readiness gap this closes: `is_encryption_enabled()` existed but was
+    /// only ever checked internally by the `/reencrypt` maintenance endpoint, so
+    /// there was no way to observe encryption status from outside the process.
+    /// This exercises `health_handler` directly rather than through the full
+    /// router — it's a plain function, so no need for the `Router` +
+    /// `tower::ServiceExt::oneshot` machinery the auth/entitlement middleware
+    /// tests use for testing actual route composition.
+    #[tokio::test]
+    async fn reports_the_encryption_state_it_was_given() {
+        let Json(resp) = health_handler(true).await;
+        assert_eq!(resp.status, "healthy");
+        assert!(resp.encryption_enabled);
+
+        let Json(resp) = health_handler(false).await;
+        assert!(!resp.encryption_enabled);
     }
 }
