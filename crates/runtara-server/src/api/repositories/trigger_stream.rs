@@ -1,7 +1,9 @@
 //! Trigger Stream Publisher
 //!
 //! Publishes trigger events to Redis/Valkey streams for async workflow execution.
-//! Stream naming: runtara:triggers:{tenant_id}
+//! Stream naming: {trigger_stream_prefix}:{tenant_id}, where the prefix is the
+//! same `VALKEY_TRIGGER_STREAM_PREFIX`-derived value the trigger worker consumes
+//! from — so publisher and consumer always agree on the key.
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
@@ -13,12 +15,24 @@ pub struct TriggerStreamPublisher {
     /// Shared Redis connection manager (built once at startup; cloned per
     /// publish to reuse the existing connection pool).
     manager: ConnectionManager,
+    /// Stream key prefix (must match the trigger worker's configured prefix, so
+    /// the server publishes where a worker actually reads).
+    trigger_stream_prefix: String,
 }
 
 impl TriggerStreamPublisher {
-    /// Create a new publisher from a shared connection manager.
-    pub fn new(manager: ConnectionManager) -> Self {
-        Self { manager }
+    /// Create a new publisher from a shared connection manager and the trigger
+    /// stream prefix (from `ValkeyConfig::trigger_stream_prefix`).
+    pub fn new(manager: ConnectionManager, trigger_stream_prefix: String) -> Self {
+        Self {
+            manager,
+            trigger_stream_prefix,
+        }
+    }
+
+    /// The configured stream key prefix.
+    pub fn stream_prefix(&self) -> &str {
+        &self.trigger_stream_prefix
     }
 
     /// Publish a trigger event to the tenant's trigger stream
@@ -36,8 +50,8 @@ impl TriggerStreamPublisher {
         // Reuse the shared connection manager — no new TCP per call.
         let mut redis_conn = self.manager.clone();
 
-        // Construct Redis stream key
-        let stream_key = format!("runtara:triggers:{}", tenant_id);
+        // Construct Redis stream key from the configured prefix.
+        let stream_key = self.stream_key(tenant_id);
 
         // Add to Redis stream using XADD with auto-generated ID
         // Store event_type for filtering and full event data as JSON
@@ -68,9 +82,14 @@ impl TriggerStreamPublisher {
         Ok(stream_id)
     }
 
-    /// Get the stream key for a tenant
-    pub fn stream_key(tenant_id: &str) -> String {
-        format!("runtara:triggers:{}", tenant_id)
+    /// Get the stream key for a tenant, using this publisher's configured prefix.
+    pub fn stream_key(&self, tenant_id: &str) -> String {
+        Self::build_stream_key(&self.trigger_stream_prefix, tenant_id)
+    }
+
+    /// Build a trigger stream key from a prefix and tenant id.
+    fn build_stream_key(prefix: &str, tenant_id: &str) -> String {
+        format!("{}:{}", prefix, tenant_id)
     }
 }
 
@@ -110,10 +129,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_stream_key() {
+    fn test_build_stream_key() {
         assert_eq!(
-            TriggerStreamPublisher::stream_key("tenant-123"),
+            TriggerStreamPublisher::build_stream_key("runtara:triggers", "tenant-123"),
             "runtara:triggers:tenant-123"
+        );
+        // A custom prefix (e.g. for multi-server isolation) is honored.
+        assert_eq!(
+            TriggerStreamPublisher::build_stream_key("srvA:triggers", "tenant-123"),
+            "srvA:triggers:tenant-123"
         );
     }
 

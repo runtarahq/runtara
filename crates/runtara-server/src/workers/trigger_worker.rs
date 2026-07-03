@@ -120,6 +120,14 @@ pub async fn run(
     let connection = client.get_connection();
     let stream_key = valkey_config.trigger_stream_key(&tenant_id);
 
+    info!(
+        worker_id = %worker_id,
+        tenant_id = %tenant_id,
+        stream_key = %stream_key,
+        consumer_group = %valkey_config.trigger_consumer_group,
+        "Trigger worker consuming from stream"
+    );
+
     let mut consumer = StreamConsumer::new(
         connection,
         stream_key.clone(),

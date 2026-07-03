@@ -1262,11 +1262,25 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the shared connection manager built above (no second TCP).
     let valkey_conn = redis_manager.clone();
 
-    // Create trigger stream publisher backed by the shared manager.
+    // Create trigger stream publisher backed by the shared manager. The prefix
+    // must match the trigger worker's, so publishes land where a worker reads.
+    let trigger_stream_prefix = valkey_config
+        .as_ref()
+        .map(|c| c.trigger_stream_prefix.clone())
+        .unwrap_or_else(|| "runtara:triggers".to_string());
     let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
-        redis_manager
-            .clone()
-            .map(|m| Arc::new(api::repositories::trigger_stream::TriggerStreamPublisher::new(m)));
+        redis_manager.clone().map(|m| {
+            tracing::info!(
+                trigger_stream_prefix = %trigger_stream_prefix,
+                "Trigger stream publisher initialized"
+            );
+            Arc::new(
+                api::repositories::trigger_stream::TriggerStreamPublisher::new(
+                    m,
+                    trigger_stream_prefix.clone(),
+                ),
+            )
+        });
 
     if let Some(ref config) = valkey_config {
         println!("Valkey configuration detected, starting workers...");
@@ -1334,9 +1348,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
         // Start cron scheduler
         let cron_pool = pool.clone();
-        let cron_trigger_stream = redis_manager
-            .clone()
-            .map(api::repositories::trigger_stream::TriggerStreamPublisher::new);
+        let cron_trigger_stream = redis_manager.clone().map(|m| {
+            api::repositories::trigger_stream::TriggerStreamPublisher::new(
+                m,
+                config.trigger_stream_prefix.clone(),
+            )
+        });
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
