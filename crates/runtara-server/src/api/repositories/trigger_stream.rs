@@ -18,15 +18,24 @@ pub struct TriggerStreamPublisher {
     /// Stream key prefix (must match the trigger worker's configured prefix, so
     /// the server publishes where a worker actually reads).
     trigger_stream_prefix: String,
+    /// Approximate cap on stream length applied at publish time (`MAXLEN ~ N`),
+    /// so consumed-but-unacked-trimmed events don't accumulate without bound.
+    trigger_stream_maxlen: usize,
 }
 
 impl TriggerStreamPublisher {
-    /// Create a new publisher from a shared connection manager and the trigger
-    /// stream prefix (from `ValkeyConfig::trigger_stream_prefix`).
-    pub fn new(manager: ConnectionManager, trigger_stream_prefix: String) -> Self {
+    /// Create a new publisher from a shared connection manager, the trigger
+    /// stream prefix, and the approximate stream length cap (from
+    /// `ValkeyConfig`).
+    pub fn new(
+        manager: ConnectionManager,
+        trigger_stream_prefix: String,
+        trigger_stream_maxlen: usize,
+    ) -> Self {
         Self {
             manager,
             trigger_stream_prefix,
+            trigger_stream_maxlen,
         }
     }
 
@@ -53,11 +62,13 @@ impl TriggerStreamPublisher {
         // Construct Redis stream key from the configured prefix.
         let stream_key = self.stream_key(tenant_id);
 
-        // Add to Redis stream using XADD with auto-generated ID
-        // Store event_type for filtering and full event data as JSON
+        // Add to Redis stream using XADD with auto-generated ID, bounding the
+        // stream to an approximate max length so it can't grow without limit.
+        // Store event_type for filtering and full event data as JSON.
         let stream_id: String = redis_conn
-            .xadd(
+            .xadd_maxlen(
                 &stream_key,
+                redis::streams::StreamMaxlen::Approx(self.trigger_stream_maxlen),
                 "*", // Auto-generate ID
                 &[
                     ("event_type", "trigger"),

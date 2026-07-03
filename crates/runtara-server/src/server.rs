@@ -1268,16 +1268,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|c| c.trigger_stream_prefix.clone())
         .unwrap_or_else(|| "runtara:triggers".to_string());
+    let trigger_stream_maxlen = valkey_config
+        .as_ref()
+        .map(|c| c.trigger_stream_maxlen)
+        .unwrap_or(valkey::DEFAULT_TRIGGER_STREAM_MAXLEN);
     let trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> =
         redis_manager.clone().map(|m| {
             tracing::info!(
                 trigger_stream_prefix = %trigger_stream_prefix,
+                trigger_stream_maxlen = trigger_stream_maxlen,
                 "Trigger stream publisher initialized"
             );
             Arc::new(
                 api::repositories::trigger_stream::TriggerStreamPublisher::new(
                     m,
                     trigger_stream_prefix.clone(),
+                    trigger_stream_maxlen,
                 ),
             )
         });
@@ -1352,6 +1358,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             api::repositories::trigger_stream::TriggerStreamPublisher::new(
                 m,
                 config.trigger_stream_prefix.clone(),
+                config.trigger_stream_maxlen,
             )
         });
         let cron_tenant_id = tenant_id.clone();
@@ -1377,9 +1384,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Start cleanup task for Redis streams
         tokio::spawn(async move {
             let redis_url = cleanup_config.connection_url();
+            let cleanup_trigger_prefix = cleanup_config.trigger_stream_prefix.clone();
             match redis::Client::open(redis_url.as_str()) {
                 Ok(redis_client) => {
-                    valkey::cleanup::start_cleanup_task(redis_client).await;
+                    valkey::cleanup::start_cleanup_task(redis_client, cleanup_trigger_prefix).await;
                 }
                 Err(e) => {
                     eprintln!("Failed to create Redis client for cleanup task: {}", e);

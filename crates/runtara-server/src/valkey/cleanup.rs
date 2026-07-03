@@ -11,9 +11,12 @@ const CLEANUP_INTERVAL_HOURS: u64 = 6;
 
 /// Run periodic cleanup of old messages from Redis streams
 ///
-/// This task runs every 6 hours and trims messages older than 48 hours
-/// from all `runtara:events:*` streams.
-pub async fn start_cleanup_task(redis_client: redis::Client) {
+/// This task runs every 6 hours and trims messages older than 48 hours from all
+/// `runtara:events:*` streams and all trigger streams (`{prefix}:*`). Trigger
+/// streams are XACK'd on consume, which only clears the pending-entries list —
+/// the entries themselves stay until trimmed, so they need age-based cleanup too
+/// (the publish-time `MAXLEN` cap is the other half of the bound).
+pub async fn start_cleanup_task(redis_client: redis::Client, trigger_stream_prefix: String) {
     let cleanup_interval = Duration::from_secs(CLEANUP_INTERVAL_HOURS * 60 * 60);
 
     println!(
@@ -27,7 +30,7 @@ pub async fn start_cleanup_task(redis_client: redis::Client) {
 
         println!("Running cleanup task for Redis streams");
 
-        match cleanup_old_messages(&redis_client).await {
+        match cleanup_old_messages(&redis_client, &trigger_stream_prefix).await {
             Ok(stats) => {
                 println!(
                     "Cleanup completed - processed {} streams, trimmed approximately {} messages",
@@ -47,8 +50,11 @@ struct CleanupStats {
     messages_trimmed: usize,
 }
 
-/// Clean up old messages from all event streams
-async fn cleanup_old_messages(redis_client: &redis::Client) -> Result<CleanupStats, String> {
+/// Clean up old messages from all event and trigger streams
+async fn cleanup_old_messages(
+    redis_client: &redis::Client,
+    trigger_stream_prefix: &str,
+) -> Result<CleanupStats, String> {
     // Get Redis connection
     let mut conn = redis_client
         .get_multiplexed_async_connection()
@@ -64,10 +70,11 @@ async fn cleanup_old_messages(redis_client: &redis::Client) -> Result<CleanupSta
         cutoff_timestamp_ms, cutoff_stream_id
     );
 
-    // Scan for all event streams matching pattern runtara:events:*
-    let stream_keys = scan_event_streams(&mut conn).await?;
+    // Scan for legacy event streams and per-tenant trigger streams.
+    let mut stream_keys = scan_streams(&mut conn, "runtara:events:*").await?;
+    stream_keys.extend(scan_streams(&mut conn, &format!("{}:*", trigger_stream_prefix)).await?);
 
-    println!("Found {} event streams to process", stream_keys.len());
+    println!("Found {} streams to process", stream_keys.len());
 
     let mut total_trimmed = 0;
     let mut streams_processed = 0;
@@ -105,12 +112,11 @@ fn calculate_cutoff_timestamp() -> i64 {
     cutoff.timestamp_millis()
 }
 
-/// Scan Redis for all event stream keys matching the pattern runtara:events:*
-async fn scan_event_streams(
+/// Scan Redis for all stream keys matching the given pattern.
+async fn scan_streams(
     conn: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
 ) -> Result<Vec<String>, String> {
-    let pattern = "runtara:events:*";
-
     // Use SCAN to iterate through keys matching the pattern
     let mut cursor = 0;
     let mut all_keys = Vec::new();
