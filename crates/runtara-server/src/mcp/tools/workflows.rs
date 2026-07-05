@@ -582,6 +582,67 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     }
                 },
                 "executionPlan": []
+            },
+            "rawSqlRebuildDerived": {
+                "note": "Canonical derived-table rebuild for a CRON trigger: one object-model:execute-sql step with an advisory-locked, atomic full-replace statement. The lock CTE serializes overlapping runs (the platform does not); the single statement makes replay idempotent (execute-sql runs AT LEAST ONCE across drain/restart). Never split into TRUNCATE then INSERT — a failure or replay between the steps strands an empty table. CRITICAL ordering rule: data-modifying CTEs execute unordered unless referenced — the DELETE must end with RETURNING 1 and the INSERT's WHERE must reference it ((SELECT count(*) FROM del) >= 0), or the primary-key check races the delete and fails with 23505 duplicate key on every non-empty rebuild.",
+                "name": "Rebuild derived stock velocity",
+                "entryPoint": "rebuild_derived",
+                "steps": {
+                    "rebuild_derived": {
+                        "id": "rebuild_derived",
+                        "stepType": "Agent",
+                        "name": "Rebuild derived table",
+                        "agentId": "object-model",
+                        "capabilityId": "execute-sql",
+                        "connectionId": "tenant-db-connection-id",
+                        "inputMapping": {
+                            "sql": {
+                                "valueType": "immediate",
+                                "value": "WITH lock AS (SELECT pg_advisory_xact_lock(hashtext('rebuild:sku_velocity'))), del AS (DELETE FROM sku_velocity WHERE (SELECT true FROM lock) RETURNING 1) INSERT INTO sku_velocity (sku, in_stock, last_stocked) SELECT sku, SUM(qty) FILTER (WHERE qty > 0), MAX(snapshot_date) FILTER (WHERE qty > 0) FROM stock_snapshot WHERE snapshot_date >= $1 AND (SELECT count(*) FROM del) >= 0 GROUP BY sku"
+                            },
+                            "params": {
+                                "valueType": "immediate",
+                                "value": [{"type": "timestamp", "value": "2026-06-27T00:00:00Z"}]
+                            }
+                        }
+                    },
+                    "finish": {
+                        "id": "finish",
+                        "stepType": "Finish",
+                        "inputMapping": {
+                            "rows_rebuilt": {"valueType": "reference", "value": "steps.rebuild_derived.outputs.rows_affected"}
+                        }
+                    }
+                },
+                "executionPlan": [{"fromStep": "rebuild_derived", "toStep": "finish"}]
+            },
+            "rawSqlPagedReadStep": {
+                "note": "object-model:query-sql errors (never truncates) past the server row cap. For reads that may exceed it, page with LIMIT/OFFSET params — mix immediate and reference items freely; wrap in a While subgraph (loop.index, _previousOutputs) to walk pages, or keyset-paginate on an indexed column.",
+                "step": {
+                    "id": "fetch_page",
+                    "stepType": "Agent",
+                    "name": "Fetch one page",
+                    "agentId": "object-model",
+                    "capabilityId": "query-sql",
+                    "connectionId": "tenant-db-connection-id",
+                    "inputMapping": {
+                        "sql": {"valueType": "immediate", "value": "SELECT sku, qty FROM stock_snapshot ORDER BY sku LIMIT $1 OFFSET $2"},
+                        "params": {
+                            "valueType": "composite",
+                            "value": [
+                                {"valueType": "immediate", "value": {"type": "integer", "value": 500}},
+                                {
+                                    "valueType": "composite",
+                                    "value": {
+                                        "type": {"valueType": "immediate", "value": "integer"},
+                                        "value": {"valueType": "reference", "value": "data.offset"}
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "outputs": "steps.fetch_page.outputs.rows / .row_count — loop until row_count < limit"
             }
         },
         "workflowToolHints": [

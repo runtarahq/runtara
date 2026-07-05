@@ -4069,3 +4069,335 @@ async fn test_aggregate_stddev_samp_with_condition() {
 
     cleanup_test(&store, &prefix).await;
 }
+
+// ==================== Guarded Raw SQL Tests ====================
+
+fn test_guardrails() -> runtara_object_store::SqlGuardrails {
+    runtara_object_store::SqlGuardrails {
+        statement_timeout_ms: 60_000,
+        max_rows: 10_000,
+        max_response_bytes: 64 * 1024 * 1024,
+    }
+}
+
+async fn create_raw_sql_table(store: &ObjectStore, prefix: &str) -> String {
+    let table = format!("{}_raw", prefix);
+    sqlx::query(&format!(
+        "CREATE TABLE \"{}\" (id BIGINT PRIMARY KEY, label TEXT, qty BIGINT)",
+        table
+    ))
+    .execute(store.pool())
+    .await
+    .expect("create raw sql test table");
+    table
+}
+
+async fn drop_raw_sql_table(store: &ObjectStore, table: &str) {
+    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS \"{}\" CASCADE", table))
+        .execute(store.pool())
+        .await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_rejects_writes_via_read_only_txn() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    let table = create_raw_sql_table(&store, &prefix).await;
+
+    // A write spelled as a query must be rejected by Postgres itself
+    // (SQLSTATE 25006), not by keyword parsing.
+    let err = store
+        .query_guarded(
+            &format!("UPDATE \"{}\" SET qty = 0 RETURNING id", table),
+            &[],
+            None,
+            test_guardrails(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("read-only transaction"),
+        "expected read-only violation, got: {err}"
+    );
+
+    drop_raw_sql_table(&store, &table).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_statement_timeout_fires() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let guardrails = runtara_object_store::SqlGuardrails {
+        statement_timeout_ms: 200,
+        ..test_guardrails()
+    };
+    let err = store
+        .query_guarded("SELECT pg_sleep(5)", &[], None, guardrails)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("statement timeout"),
+        "expected statement timeout, got: {err}"
+    );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_row_cap_errors_never_truncates() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let guardrails = runtara_object_store::SqlGuardrails {
+        max_rows: 5,
+        ..test_guardrails()
+    };
+    let err = store
+        .query_guarded("SELECT generate_series(1, 10) AS n", &[], None, guardrails)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exceeded 5 rows"),
+        "expected row-cap error, got: {err}"
+    );
+
+    // At the cap exactly → succeeds.
+    let rows = store
+        .query_guarded("SELECT generate_series(1, 5) AS n", &[], None, guardrails)
+        .await
+        .expect("query at row cap");
+    assert_eq!(rows.rows.len(), 5);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_byte_cap_bounds_fat_rows() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    // A row cap alone does not bound memory: one row, many bytes.
+    let guardrails = runtara_object_store::SqlGuardrails {
+        max_response_bytes: 1024,
+        ..test_guardrails()
+    };
+    let err = store
+        .query_guarded("SELECT repeat('x', 100000) AS fat", &[], None, guardrails)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exceeded 1024 bytes"),
+        "expected byte-cap error, got: {err}"
+    );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_execute_guarded_rejects_multi_statement_at_protocol() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    let table = create_raw_sql_table(&store, &prefix).await;
+
+    // The extended protocol prepares exactly one statement per call — this
+    // guarantee is structural, never a string splitter. Pin it.
+    let err = store
+        .execute_guarded(
+            &format!("DELETE FROM \"{t}\"; DROP TABLE \"{t}\"", t = table),
+            &[],
+            60_000,
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot insert multiple commands") || msg.contains("syntax error"),
+        "expected protocol rejection, got: {msg}"
+    );
+
+    // And the table must still exist (the DROP never ran).
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = $1)")
+            .bind(&table)
+            .fetch_one(store.pool())
+            .await
+            .expect("check table exists");
+    assert!(exists, "multi-statement input must not execute anything");
+
+    drop_raw_sql_table(&store, &table).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_execute_guarded_rows_affected_for_dml_and_truncate() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    let table = create_raw_sql_table(&store, &prefix).await;
+
+    let inserted = store
+        .execute_guarded(
+            &format!(
+                "INSERT INTO \"{}\" (id, label, qty) SELECT n, 'row', n FROM generate_series(1, 3) AS n",
+                table
+            ),
+            &[],
+            60_000,
+        )
+        .await
+        .expect("insert");
+    assert_eq!(inserted.rows_affected, 3);
+
+    let updated = store
+        .execute_guarded(
+            &format!("UPDATE \"{}\" SET qty = qty + $1", table),
+            &[runtara_object_store::SqlParam {
+                column_type: ColumnType::Integer,
+                value: serde_json::json!(10),
+            }],
+            60_000,
+        )
+        .await
+        .expect("update");
+    assert_eq!(updated.rows_affected, 3);
+
+    // TRUNCATE reports 0 rows affected — documented, not surprising.
+    let truncated = store
+        .execute_guarded(&format!("TRUNCATE TABLE \"{}\"", table), &[], 60_000)
+        .await
+        .expect("truncate");
+    assert_eq!(truncated.rows_affected, 0);
+
+    let rows = store
+        .query_guarded(
+            &format!("SELECT id FROM \"{}\"", table),
+            &[],
+            None,
+            test_guardrails(),
+        )
+        .await
+        .expect("count after truncate");
+    assert!(rows.rows.is_empty());
+
+    drop_raw_sql_table(&store, &table).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_typed_params_roundtrip() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let params = vec![
+        runtara_object_store::SqlParam {
+            column_type: ColumnType::String,
+            value: serde_json::json!("hello"),
+        },
+        runtara_object_store::SqlParam {
+            column_type: ColumnType::Integer,
+            value: serde_json::json!(42),
+        },
+        runtara_object_store::SqlParam {
+            column_type: ColumnType::Boolean,
+            value: serde_json::json!(true),
+        },
+        runtara_object_store::SqlParam {
+            column_type: ColumnType::Timestamp,
+            value: serde_json::json!("2026-07-03T00:00:00Z"),
+        },
+        runtara_object_store::SqlParam {
+            column_type: ColumnType::Json,
+            value: serde_json::json!({"k": "v"}),
+        },
+    ];
+    let schema = vec![
+        runtara_object_store::SqlResultColumn {
+            name: "s".into(),
+            column_type: ColumnType::String,
+            nullable: false,
+        },
+        runtara_object_store::SqlResultColumn {
+            name: "i".into(),
+            column_type: ColumnType::Integer,
+            nullable: false,
+        },
+        runtara_object_store::SqlResultColumn {
+            name: "b".into(),
+            column_type: ColumnType::Boolean,
+            nullable: false,
+        },
+        runtara_object_store::SqlResultColumn {
+            name: "ts".into(),
+            column_type: ColumnType::Timestamp,
+            nullable: false,
+        },
+        runtara_object_store::SqlResultColumn {
+            name: "j".into(),
+            column_type: ColumnType::Json,
+            nullable: false,
+        },
+    ];
+
+    let rows = store
+        .query_guarded(
+            "SELECT $1::text AS s, $2::bigint AS i, $3::boolean AS b, $4::timestamptz AS ts, $5::jsonb AS j",
+            &params,
+            Some(&schema),
+            test_guardrails(),
+        )
+        .await
+        .expect("typed roundtrip");
+    assert_eq!(rows.rows.len(), 1);
+    let row = &rows.rows[0];
+    assert_eq!(row["s"], serde_json::json!("hello"));
+    assert_eq!(row["i"], serde_json::json!(42));
+    assert_eq!(row["b"], serde_json::json!(true));
+    assert_eq!(row["j"], serde_json::json!({"k": "v"}));
+    assert!(
+        row["ts"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-07-03T00:00:00"),
+        "timestamp roundtrip: {:?}",
+        row["ts"]
+    );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_query_guarded_raw_unsupported_type_points_at_result_schema() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    // Raw decoding rejects PG arrays — the error must point the author at
+    // result_schema (the typed escape hatch the workflow capability exposes).
+    let err = store
+        .query_guarded("SELECT ARRAY[1, 2, 3] AS arr", &[], None, test_guardrails())
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unsupported raw SQL type") && msg.contains("result_schema"),
+        "expected raw-decode guidance, got: {msg}"
+    );
+
+    cleanup_test(&store, &prefix).await;
+}

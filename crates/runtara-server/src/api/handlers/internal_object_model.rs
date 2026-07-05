@@ -16,9 +16,10 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::object_model::ObjectModelState;
+use super::object_model::{ObjectModelState, raw_sql_error_response};
 use crate::api::dto::object_model::{
-    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression, condition_to_store,
+    CreateSchemaRequest, FilterRequest, OrderByEntry, ScoreExpression, SqlExecuteResponse,
+    SqlParam, SqlQueryResponse, SqlResultColumn, condition_to_store,
 };
 use crate::api::services::object_model::{InstanceService, SchemaService, ServiceError};
 
@@ -1184,6 +1185,190 @@ pub async fn create_schema(
 }
 
 // ============================================================================
+// Raw SQL (workflow surface)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct InternalSqlQueryRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<SqlParam>,
+    /// When present, rows are decoded against this schema (typed path); when
+    /// absent, rows are decoded raw. The typed escape hatch exists because
+    /// raw decoding rejects PG arrays/bytea/custom enum columns.
+    #[serde(rename = "resultSchema", alias = "result_schema", default)]
+    pub result_schema: Option<Vec<SqlResultColumn>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalSqlExecuteRequest {
+    #[serde(rename = "connectionId", alias = "connection_id", default)]
+    pub connection_id: Option<String>,
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<SqlParam>,
+}
+
+/// One structured audit line per workflow raw-SQL request, at target
+/// `runtara::raw_sql_audit`. Full SQL text only at debug — literals may carry
+/// tenant data, so info gets a hash plus a 256-char prefix.
+#[allow(clippy::too_many_arguments)]
+fn raw_sql_audit(
+    capability: &str,
+    tenant_id: &str,
+    connection_id: Option<&str>,
+    sql: &str,
+    param_count: usize,
+    duration_ms: u64,
+    outcome: &str,
+    rows: i64,
+) {
+    use sha2::{Digest, Sha256};
+    let sql_sha256 = format!("{:x}", Sha256::digest(sql.as_bytes()));
+    let sql_prefix: String = sql.chars().take(256).collect();
+    tracing::info!(
+        target: "runtara::raw_sql_audit",
+        capability,
+        tenant_id,
+        connection_id = connection_id.unwrap_or(""),
+        sql_sha256 = %sql_sha256,
+        sql_prefix = %sql_prefix,
+        param_count,
+        duration_ms,
+        outcome,
+        rows,
+        "workflow raw SQL"
+    );
+    tracing::debug!(target: "runtara::raw_sql_audit", sql_full = %sql, "workflow raw SQL full text");
+}
+
+/// POST /api/internal/object-model/sql/query — guarded raw SQL query.
+///
+/// Deliberate exception to the sibling 200-envelope pattern: SQL failures are
+/// status-coded via `raw_sql_error_response` so the agent's `check_status`
+/// classifies them permanent/transient without envelope parsing (see
+/// docs/entitlements.md).
+pub async fn query_sql(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalSqlQueryRequest>,
+) -> Result<(StatusCode, Json<SqlQueryResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let param_count = request.params.len();
+    let started = std::time::Instant::now();
+
+    let result = service
+        .query_sql_workflow(
+            &tenant_id,
+            &request.sql,
+            request.params,
+            request.result_schema,
+            request.connection_id.as_deref(),
+        )
+        .await;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(rows) => {
+            let row_count = rows.len();
+            raw_sql_audit(
+                "query-sql",
+                &tenant_id,
+                request.connection_id.as_deref(),
+                &request.sql,
+                param_count,
+                duration_ms,
+                "ok",
+                row_count as i64,
+            );
+            Ok((
+                StatusCode::OK,
+                Json(SqlQueryResponse {
+                    success: true,
+                    rows,
+                    row_count,
+                }),
+            ))
+        }
+        Err(error) => {
+            raw_sql_audit(
+                "query-sql",
+                &tenant_id,
+                request.connection_id.as_deref(),
+                &request.sql,
+                param_count,
+                duration_ms,
+                "error",
+                -1,
+            );
+            Err(raw_sql_error_response(error))
+        }
+    }
+}
+
+/// POST /api/internal/object-model/sql/execute — guarded raw SQL command.
+///
+/// Same status-coded exception as `query_sql` above.
+pub async fn execute_sql(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalSqlExecuteRequest>,
+) -> Result<(StatusCode, Json<SqlExecuteResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+    let param_count = request.params.len();
+    let started = std::time::Instant::now();
+
+    let result = service
+        .execute_sql_workflow(
+            &tenant_id,
+            &request.sql,
+            request.params,
+            request.connection_id.as_deref(),
+        )
+        .await;
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(rows_affected) => {
+            raw_sql_audit(
+                "execute-sql",
+                &tenant_id,
+                request.connection_id.as_deref(),
+                &request.sql,
+                param_count,
+                duration_ms,
+                "ok",
+                rows_affected as i64,
+            );
+            Ok((
+                StatusCode::OK,
+                Json(SqlExecuteResponse {
+                    success: true,
+                    rows_affected,
+                }),
+            ))
+        }
+        Err(error) => {
+            raw_sql_audit(
+                "execute-sql",
+                &tenant_id,
+                request.connection_id.as_deref(),
+                &request.sql,
+                param_count,
+                duration_ms,
+                "error",
+                -1,
+            );
+            Err(raw_sql_error_response(error))
+        }
+    }
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -1282,6 +1467,110 @@ mod tests {
             OrderByTarget::Alias { name } => assert_eq!(name, "distance"),
             other => panic!("expected alias order target, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sql_query_request_dispatches_typed_vs_raw_on_result_schema() {
+        // resultSchema absent → raw decoding path (None).
+        let raw: InternalSqlQueryRequest = serde_json::from_value(json!({
+            "sql": "SELECT 1 AS one",
+            "params": [],
+            "connectionId": "conn-1"
+        }))
+        .unwrap();
+        assert!(raw.result_schema.is_none());
+        assert_eq!(raw.connection_id.as_deref(), Some("conn-1"));
+
+        // resultSchema present (camelCase and snake_case alias) → typed path.
+        for key in ["resultSchema", "result_schema"] {
+            let typed: InternalSqlQueryRequest = serde_json::from_value(json!({
+                "sql": "SELECT id FROM t WHERE id = $1",
+                "params": [{"type": "integer", "value": 42}],
+                key: [{"name": "id", "type": "integer", "nullable": false}]
+            }))
+            .unwrap();
+            let schema = typed.result_schema.expect(key);
+            assert_eq!(schema.len(), 1);
+            assert_eq!(schema[0].name, "id");
+            assert_eq!(typed.params.len(), 1);
+        }
+    }
+
+    #[test]
+    fn sql_execute_request_defaults_params_and_connection() {
+        let request: InternalSqlExecuteRequest = serde_json::from_value(json!({
+            "sql": "TRUNCATE TABLE derived"
+        }))
+        .unwrap();
+        assert!(request.params.is_empty());
+        assert!(request.connection_id.is_none());
+    }
+
+    #[test]
+    fn raw_sql_audit_emits_on_ok_and_error_outcomes() {
+        // The audit line is a stated security mechanism — pin that it actually
+        // fires, carries the target, and never logs full SQL at info.
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish();
+
+        let secret_sql = format!("SELECT * FROM t WHERE token = 'sekret'{}", "x".repeat(300));
+        tracing::subscriber::with_default(subscriber, || {
+            raw_sql_audit(
+                "query-sql",
+                "tenant-1",
+                Some("conn-1"),
+                &secret_sql,
+                1,
+                12,
+                "ok",
+                3,
+            );
+            raw_sql_audit(
+                "execute-sql",
+                "tenant-1",
+                None,
+                "TRUNCATE TABLE derived",
+                0,
+                5,
+                "error",
+                -1,
+            );
+        });
+
+        let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("runtara::raw_sql_audit"), "{output}");
+        assert!(output.contains("outcome=\"ok\""), "{output}");
+        assert!(output.contains("outcome=\"error\""), "{output}");
+        assert!(output.contains("capability=\"query-sql\""), "{output}");
+        assert!(output.contains("capability=\"execute-sql\""), "{output}");
+        // Info carries hash + 256-char prefix, never the tail of the SQL.
+        assert!(output.contains("sql_sha256"), "{output}");
+        assert!(!output.contains(&secret_sql), "full SQL leaked at info");
     }
 
     #[test]

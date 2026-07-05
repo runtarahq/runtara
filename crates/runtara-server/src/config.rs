@@ -38,6 +38,10 @@ pub struct Config {
     pub object_model_soft_delete: bool,
     /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
     pub object_model_bulk_request_limit: usize,
+    /// Guard rails for workflow-facing raw SQL (query-sql / execute-sql
+    /// capabilities on the internal API). The runtime/MCP SQL routes are
+    /// unguarded for now — retrofit is tracked separately.
+    pub raw_sql_guardrails: runtara_object_store::SqlGuardrails,
     /// Connection-pool tuning for per-connection object-model PostgreSQL pools
     /// (the cross-cloud path to customer databases) and the default pool.
     pub object_model_pool: runtara_object_store::PoolConfig,
@@ -164,6 +168,22 @@ impl Config {
         let object_model_pool_cache_ttl_secs: u64 =
             parse_u64_or("OBJECT_MODEL_POOL_CACHE_TTL_SECS", 900)?;
 
+        // Workflow raw-SQL guard rails. Zero/invalid values fail boot
+        // (parse_positive_u64_or) — a knob is never "unset means unbounded".
+        let instance_timeout_ms =
+            parse_positive_u64_or("EXECUTION_TIMEOUT_SECS", 300)?.saturating_mul(1000);
+        let raw_sql_guardrails = runtara_object_store::SqlGuardrails {
+            statement_timeout_ms: clamp_statement_timeout_ms(
+                parse_positive_u64_or("RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS", 60_000)?,
+                instance_timeout_ms,
+            ),
+            max_rows: parse_positive_u64_or("RUNTARA_RAW_SQL_MAX_ROWS", 10_000)?,
+            max_response_bytes: parse_positive_u64_or(
+                "RUNTARA_RAW_SQL_MAX_RESPONSE_BYTES",
+                64 * 1024 * 1024,
+            )?,
+        };
+
         let internal_port: u16 = std::env::var("INTERNAL_PORT")
             .unwrap_or_else(|_| "7002".to_string())
             .parse()
@@ -254,6 +274,7 @@ impl Config {
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
+            raw_sql_guardrails,
             object_model_pool,
             object_model_pool_cache_max,
             object_model_pool_cache_ttl_secs,
@@ -380,6 +401,23 @@ fn parse_usize_or(name: &'static str, default: usize) -> Result<usize, ConfigErr
             .parse()
             .map_err(|_| ConfigError::Invalid(name, "must be a non-negative integer")),
         Err(_) => Ok(default),
+    }
+}
+
+/// Clamp the raw-SQL statement timeout strictly below the whole-instance
+/// execution timeout: a statement that outlives the instance would keep
+/// running on Postgres after the workflow is already SIGKILLed.
+fn clamp_statement_timeout_ms(configured_ms: u64, instance_timeout_ms: u64) -> u64 {
+    if configured_ms >= instance_timeout_ms {
+        let clamped = instance_timeout_ms.saturating_sub(1).max(1);
+        tracing::warn!(
+            configured_ms,
+            clamped_ms = clamped,
+            "RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS clamped below the instance execution timeout"
+        );
+        clamped
+    } else {
+        configured_ms
     }
 }
 
@@ -555,6 +593,11 @@ pub fn object_model_soft_delete() -> bool {
     get().object_model_soft_delete
 }
 
+/// Guard rails for workflow-facing raw SQL (query-sql / execute-sql).
+pub fn raw_sql_guardrails() -> runtara_object_store::SqlGuardrails {
+    get().raw_sql_guardrails
+}
+
 /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
 pub fn object_model_bulk_request_limit() -> usize {
     crate::middleware::entitlement::effective_limit(
@@ -625,6 +668,39 @@ mod tests {
         }
         assert_eq!(parse_bool_or(name, true).ok(), Some(true));
         assert_eq!(parse_bool_or(name, false).ok(), Some(false));
+    }
+
+    #[test]
+    fn statement_timeout_passes_through_below_instance_timeout() {
+        assert_eq!(clamp_statement_timeout_ms(60_000, 300_000), 60_000);
+    }
+
+    #[test]
+    fn statement_timeout_clamps_at_or_above_instance_timeout() {
+        assert_eq!(clamp_statement_timeout_ms(300_000, 300_000), 299_999);
+        assert_eq!(clamp_statement_timeout_ms(900_000, 300_000), 299_999);
+        // Degenerate instance timeout never clamps to zero.
+        assert_eq!(clamp_statement_timeout_ms(5, 1), 1);
+    }
+
+    #[test]
+    fn raw_sql_knobs_reject_zero_and_garbage() {
+        // parse_positive_u64_or is the parser for all three knobs: zero and
+        // non-numeric values must fail boot, never mean "unbounded".
+        let name = "RUNTARA_TEST_RAW_SQL_KNOB_UNIQUE_7";
+        // SAFETY: only this test references this var.
+        unsafe {
+            std::env::set_var(name, "0");
+        }
+        assert!(parse_positive_u64_or(name, 10).is_err());
+        unsafe {
+            std::env::set_var(name, "ten");
+        }
+        assert!(parse_positive_u64_or(name, 10).is_err());
+        unsafe {
+            std::env::remove_var(name);
+        }
+        assert_eq!(parse_positive_u64_or(name, 10).unwrap(), 10);
     }
 
     #[test]

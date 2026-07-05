@@ -131,7 +131,8 @@ export const getInputComponentType = (
   if (
     field.name.includes('template') ||
     field.name.includes('text') ||
-    field.name.includes('prompt')
+    field.name.includes('prompt') ||
+    field.name === 'sql'
   ) {
     return 'textarea';
   }

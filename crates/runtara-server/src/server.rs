@@ -2116,6 +2116,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/object-model/schemas",
             post(api::handlers::internal_object_model::create_schema),
         )
+        // Workflow raw SQL (query-sql / execute-sql capabilities). Guarded
+        // server-side (READ ONLY txn on query, statement timeout, row/byte
+        // caps); registered here so they inherit the body limit, state, and
+        // the `database` entitlement gate below like every sibling route.
+        .route(
+            "/api/internal/object-model/sql/query",
+            post(api::handlers::internal_object_model::query_sql),
+        )
+        .route(
+            "/api/internal/object-model/sql/execute",
+            post(api::handlers::internal_object_model::execute_sql),
+        )
         // Body limit raised to 64 MB: WASM workflows write multi-MB Object
         // Model column values (file blobs, bulk imports) as base64/JSON that
         // exceed Axum's default 2 MB limit. Without this layer the `Json`

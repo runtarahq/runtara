@@ -109,7 +109,7 @@ pub use instance::{
     CreateInstanceRequest, FilterRequest, Instance, OrderByEntry, OrderByTarget, ScoreExpression,
     SimpleFilter, UpdateInstanceRequest, ValidationMode,
 };
-pub use query::{SqlExecuteResult, SqlParam, SqlResultColumn, SqlRows};
+pub use query::{SqlExecuteResult, SqlGuardrails, SqlParam, SqlResultColumn, SqlRows};
 pub use schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 pub use store::ObjectStore;
 pub use types::{

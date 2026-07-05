@@ -154,7 +154,8 @@ export function MappingValueInput({
       lowerFieldName.includes('prompt') ||
       lowerFieldName.includes('body') ||
       lowerFieldName.includes('content') ||
-      lowerFieldName.includes('message')
+      lowerFieldName.includes('message') ||
+      lowerFieldName === 'sql'
     ) {
       return true;
     }

@@ -4,6 +4,7 @@
 //! (`$1`, `$2`, ...) rather than implementing a separate named-parameter layer.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use futures_util::TryStreamExt;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, Executor, Row, TypeInfo};
@@ -40,6 +41,21 @@ pub struct SqlRows {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SqlExecuteResult {
     pub rows_affected: u64,
+}
+
+/// Guard rails for workflow-facing raw SQL. The unguarded `query`/`query_raw`/
+/// `execute` helpers stay as-is for the runtime/MCP surface; workflow steps
+/// must go through the guarded variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqlGuardrails {
+    /// Applied as `SET LOCAL statement_timeout` inside the transaction.
+    pub statement_timeout_ms: u64,
+    /// Query aborts (with an error, never truncation) past this many rows.
+    pub max_rows: u64,
+    /// Query aborts once the serialized size of decoded rows passes this —
+    /// a row cap alone does not bound memory (one fat jsonb/bytea cell can
+    /// be hundreds of MB).
+    pub max_response_bytes: u64,
 }
 
 fn default_nullable() -> bool {
@@ -121,6 +137,107 @@ impl ObjectStore {
         }
 
         let result = self.pool().execute(query).await?;
+        Ok(SqlExecuteResult {
+            rows_affected: result.rows_affected(),
+        })
+    }
+
+    /// Run one read statement inside a `READ ONLY` transaction with a local
+    /// statement timeout, streaming rows and aborting past the row/byte caps.
+    ///
+    /// `READ ONLY` is DB-level enforcement: Postgres rejects any write or DDL
+    /// spelled as a query with SQLSTATE 25006, which is strictly stronger than
+    /// SQL keyword parsing. Rows are decoded and size-checked as they stream,
+    /// so an oversized result is never fully materialized. `result_schema =
+    /// None` decodes raw (like `query_raw`); `Some` decodes typed (like
+    /// `query`).
+    pub async fn query_guarded(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+        result_schema: Option<&[SqlResultColumn]>,
+        guardrails: SqlGuardrails,
+    ) -> Result<SqlRows> {
+        validate_sql(sql)?;
+        if let Some(schema) = result_schema {
+            validate_result_schema(schema)?;
+        }
+
+        let mut tx = self.pool().begin().await?;
+        // Both SET statements interpolate only a u64 — no user input.
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "SET LOCAL statement_timeout = {}",
+            guardrails.statement_timeout_ms
+        ))
+        .execute(&mut *tx)
+        .await?;
+
+        let mut query = sqlx::query(sql);
+        for (index, param) in params.iter().enumerate() {
+            query = bind_param(query, param, index)?;
+        }
+
+        let mut rows = Vec::new();
+        let mut bytes: u64 = 0;
+        {
+            let mut stream = query.fetch(&mut *tx);
+            while let Some(row) = stream.try_next().await? {
+                if rows.len() as u64 >= guardrails.max_rows {
+                    return Err(ObjectStoreError::validation(format!(
+                        "query result exceeded {} rows; add LIMIT/OFFSET or aggregate before returning",
+                        guardrails.max_rows
+                    )));
+                }
+                let decoded = match result_schema {
+                    Some(schema) => row_to_typed_json(&row, schema)?,
+                    None => row_to_raw_json(&row)?,
+                };
+                bytes += serde_json::to_vec(&decoded)?.len() as u64;
+                if bytes > guardrails.max_response_bytes {
+                    return Err(ObjectStoreError::validation(format!(
+                        "query result exceeded {} bytes; select fewer or narrower columns",
+                        guardrails.max_response_bytes
+                    )));
+                }
+                rows.push(decoded);
+            }
+        }
+        // Read-only transaction: rollback and commit are equivalent, rollback
+        // releases the snapshot promptly.
+        tx.rollback().await?;
+
+        Ok(SqlRows { rows })
+    }
+
+    /// Run one write statement inside a transaction with a local statement
+    /// timeout. Returns rows affected (0 for DDL/TRUNCATE). The transaction
+    /// exists to scope `SET LOCAL`; single-statement semantics are unchanged —
+    /// the extended protocol prepares exactly one statement per call.
+    pub async fn execute_guarded(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+        statement_timeout_ms: u64,
+    ) -> Result<SqlExecuteResult> {
+        validate_sql(sql)?;
+
+        let mut tx = self.pool().begin().await?;
+        sqlx::query(&format!(
+            "SET LOCAL statement_timeout = {statement_timeout_ms}"
+        ))
+        .execute(&mut *tx)
+        .await?;
+
+        let mut query = sqlx::query(sql);
+        for (index, param) in params.iter().enumerate() {
+            query = bind_param(query, param, index)?;
+        }
+
+        let result = query.execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(SqlExecuteResult {
             rows_affected: result.rows_affected(),
         })

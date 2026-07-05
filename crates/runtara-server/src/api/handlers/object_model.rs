@@ -1646,7 +1646,11 @@ pub async fn execute_sql(
     }
 }
 
-fn raw_sql_error_response(error: ServiceError) -> (StatusCode, Json<Value>) {
+/// Status-coded error mapping for the raw-SQL routes (shared with the
+/// internal workflow-facing SQL handlers, which deliberately deviate from
+/// the internal 200-envelope pattern so agent-side `check_status` sees
+/// real status codes).
+pub(crate) fn raw_sql_error_response(error: ServiceError) -> (StatusCode, Json<Value>) {
     match error {
         ServiceError::ValidationError(msg) => (
             StatusCode::BAD_REQUEST,

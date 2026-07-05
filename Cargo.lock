@@ -4759,6 +4759,7 @@ name = "runtara-object-store"
 version = "8.1.6"
 dependencies = [
  "chrono",
+ "futures-util",
  "pgvector",
  "regex",
  "rust_decimal",

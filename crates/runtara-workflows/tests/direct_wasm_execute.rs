@@ -362,6 +362,9 @@ struct CapturedRun {
     checkpoints: Vec<CheckpointRequest>,
     /// LLM-proxy request envelopes the workflow sent (one per model call).
     llm_requests: Vec<Value>,
+    /// Raw-SQL request paths the workflow sent (one per attempt — retries
+    /// included), in order.
+    sql_requests: Vec<String>,
     status_success: bool,
     stderr: String,
     /// Peak guest linear memory observed by the embedded executor's limiter, when
@@ -387,6 +390,12 @@ struct ServerState {
     llm_responses: Mutex<Vec<Value>>,
     /// Proxy request envelopes received on POST /llm-proxy, in order.
     llm_requests: Mutex<Vec<Value>>,
+    /// Scripted `(status, body)` responses for the object-model raw-SQL
+    /// routes, served front-to-back. Empty script → generic success, so
+    /// unrelated tests are unaffected.
+    sql_responses: Mutex<Vec<(u16, Value)>>,
+    /// Paths of raw-SQL requests received, in order — retry counting.
+    sql_requests: Mutex<Vec<String>>,
 }
 
 fn e2e_enabled() -> bool {
@@ -629,6 +638,28 @@ fn route(
             );
         }
         return (200, responses.remove(0));
+    }
+
+    // Raw-SQL stub for the object-model query-sql / execute-sql capabilities:
+    // record the request (retry-count assertions), then pop the next scripted
+    // (status, body). An empty script answers success.
+    if method == "POST" && path.contains("/object-model/sql/") {
+        server_state
+            .sql_requests
+            .lock()
+            .expect("sql_requests lock")
+            .push(path.to_string());
+        let mut responses = server_state
+            .sql_responses
+            .lock()
+            .expect("sql_responses lock");
+        if responses.is_empty() {
+            return (
+                200,
+                serde_json::json!({"success": true, "rows": [], "rowCount": 0, "rowsAffected": 1}),
+            );
+        }
+        return responses.remove(0);
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -1014,6 +1045,34 @@ fn run_direct_workflow_capture_full(
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
 ) -> CapturedRun {
+    run_direct_workflow_capture_full_sql(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        extra_env,
+        Vec::new(),
+    )
+}
+
+/// `run_direct_workflow_capture_full` plus a scripted `(status, body)` queue
+/// for the object-model raw-SQL routes — retry-semantics tests count attempts
+/// via `CapturedRun::sql_requests`.
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_full_sql(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
+    sql_script: Vec<(u16, Value)>,
+) -> CapturedRun {
     let first = run_direct_workflow_capture_attempt(
         components_dir,
         workflow_id,
@@ -1023,6 +1082,7 @@ fn run_direct_workflow_capture_full(
         preloaded_checkpoints.clone(),
         llm_script.clone(),
         extra_env.clone(),
+        sql_script.clone(),
     );
     // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
     // TCP listeners) a run occasionally dies before reaching the mock runtime
@@ -1049,6 +1109,7 @@ fn run_direct_workflow_capture_full(
         preloaded_checkpoints,
         llm_script,
         extra_env,
+        sql_script,
     )
 }
 
@@ -1062,6 +1123,7 @@ fn run_direct_workflow_capture_attempt(
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
+    sql_script: Vec<(u16, Value)>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -1090,6 +1152,8 @@ fn run_direct_workflow_capture_attempt(
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
         llm_responses: Mutex::new(llm_script),
         llm_requests: Mutex::new(Vec::new()),
+        sql_responses: Mutex::new(sql_script),
+        sql_requests: Mutex::new(Vec::new()),
     });
     let server_state_for_assertions = server_state.clone();
     let server_handle =
@@ -1144,6 +1208,11 @@ fn run_direct_workflow_capture_attempt(
         .lock()
         .expect("llm_requests lock")
         .clone();
+    let sql_requests = server_state_for_assertions
+        .sql_requests
+        .lock()
+        .expect("sql_requests lock")
+        .clone();
     CapturedRun {
         output_json,
         error_json,
@@ -1151,6 +1220,7 @@ fn run_direct_workflow_capture_attempt(
         sleeps,
         checkpoints,
         llm_requests,
+        sql_requests,
         status_success,
         stderr,
         memory_peak_bytes,
@@ -4031,6 +4101,11 @@ fn run_direct_workflow_embedded(
         .lock()
         .expect("llm_requests lock")
         .clone();
+    let sql_requests = server_state_for_assertions
+        .sql_requests
+        .lock()
+        .expect("sql_requests lock")
+        .clone();
     let stderr = match &result.exit {
         runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
         _ => String::new(),
@@ -4042,6 +4117,7 @@ fn run_direct_workflow_embedded(
         sleeps,
         checkpoints,
         llm_requests,
+        sql_requests,
         status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
         stderr,
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -4630,4 +4706,182 @@ fn while_growing_accumulator_stays_bounded() {
         "While exhausted guest memory mid-loop (accumulator not GC'd): {}",
         captured.stderr,
     );
+}
+
+// ============================================================================
+// Raw SQL retry semantics (query-sql / execute-sql)
+// ============================================================================
+
+/// One-step graph driving an object-model SQL capability at the scripted mock.
+/// `retry_delay` is 1ms so exhausting retries doesn't slow the suite.
+fn raw_sql_step_graph(capability_id: &str, max_retries: u32) -> String {
+    serde_json::json!({
+        "name": "raw-sql-retry",
+        "entryPoint": "sqlstep",
+        "executionPlan": [{"fromStep": "sqlstep", "toStep": "finish"}],
+        "steps": {
+            "sqlstep": {
+                "id": "sqlstep", "stepType": "Agent", "name": "SQL",
+                "agentId": "object-model", "capabilityId": capability_id,
+                "connectionId": "conn-1",
+                "maxRetries": max_retries, "retryDelay": 1,
+                "inputMapping": {
+                    "sql": {"valueType": "immediate", "value": "SELECT 1 AS one"}
+                }
+            },
+            "finish": {
+                "id": "finish", "stepType": "Finish",
+                "inputMapping": {
+                    "rows_affected": {"valueType": "reference", "value": "steps.sqlstep.outputs.rows_affected"}
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+fn sql_error_body(msg: &str) -> Value {
+    serde_json::json!({"success": false, "error": msg})
+}
+
+#[test]
+fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // A 5xx on a write means the statement outcome on the tenant DB is
+    // unknown — the agent downgrades check_status's transient classification
+    // to permanent and the runtime must NOT retry. The scripted success is
+    // never consumed; exactly one request reaches the mock.
+    let captured = run_direct_workflow_capture_full_sql(
+        &components_dir,
+        "execute-sql-5xx-permanent",
+        &raw_sql_step_graph("execute-sql", 3),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![
+            (500, sql_error_body("upstream boom")),
+            (200, serde_json::json!({"success": true, "rowsAffected": 1})),
+        ],
+    );
+
+    assert!(
+        !captured.status_success,
+        "execute-sql must fail on 5xx, not retry into the scripted success; output: {:?}",
+        captured.output_json
+    );
+    assert_eq!(
+        captured.sql_requests.len(),
+        1,
+        "execute-sql must never auto-retry a server error (double-apply risk): {:?}",
+        captured.sql_requests
+    );
+    let error = captured
+        .error_json
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| captured.stderr.clone());
+    assert!(
+        error.contains("OBJECT_MODEL_UPSTREAM_ERROR"),
+        "failure should carry the upstream error code: {error}"
+    );
+}
+
+#[test]
+fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Reads run in a READ ONLY transaction server-side, so retrying a 5xx is
+    // safe — stock transient classification stands and the runtime retries
+    // into the scripted success.
+    let captured = run_direct_workflow_capture_full_sql(
+        &components_dir,
+        "query-sql-5xx-retries",
+        &raw_sql_step_graph("query-sql", 2),
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![
+            (500, sql_error_body("transient boom")),
+            (
+                200,
+                serde_json::json!({"success": true, "rows": [{"one": 1}], "rowCount": 1}),
+            ),
+        ],
+    );
+
+    assert!(
+        captured.status_success,
+        "query-sql should retry the 5xx and succeed; stderr: {}; error: {:?}",
+        captured.stderr, captured.error_json
+    );
+    assert_eq!(
+        captured.sql_requests.len(),
+        2,
+        "expected exactly one retry (500 then 200): {:?}",
+        captured.sql_requests
+    );
+}
+
+#[test]
+fn direct_wasm_sql_transport_failure_classification() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Point the object-model URL at a port nothing listens on: transport
+    // failure on every attempt. query-sql reclassifies transport errors to
+    // transient (retries, then exhausts); execute-sql keeps them permanent
+    // (the statement may have committed).
+    let closed_port = {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = probe.local_addr().expect("local_addr").port();
+        drop(probe);
+        port
+    };
+    let refused_env = vec![(
+        "RUNTARA_OBJECT_MODEL_URL".to_string(),
+        format!("http://127.0.0.1:{closed_port}/object-model"),
+    )];
+
+    for (capability, expected_category) in
+        [("query-sql", "transient"), ("execute-sql", "permanent")]
+    {
+        let captured = run_direct_workflow_capture_full_sql(
+            &components_dir,
+            &format!("{capability}-transport-refused"),
+            &raw_sql_step_graph(capability, 1),
+            br#"{}"#,
+            false,
+            Vec::new(),
+            Vec::new(),
+            refused_env.clone(),
+            Vec::new(),
+        );
+
+        assert!(
+            !captured.status_success,
+            "{capability}: refused connection must fail the step"
+        );
+        let error = captured
+            .error_json
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| captured.stderr.clone());
+        assert!(
+            error.contains("OBJECT_MODEL_HTTP_ERROR"),
+            "{capability}: expected transport error code, got: {error}"
+        );
+        assert!(
+            error.contains(&format!("\\\"category\\\":\\\"{expected_category}\\\""))
+                || error.contains(&format!("\"category\":\"{expected_category}\"")),
+            "{capability}: expected category {expected_category}, got: {error}"
+        );
+    }
 }

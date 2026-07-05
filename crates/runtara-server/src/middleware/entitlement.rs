@@ -999,6 +999,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn database_gate_short_circuits_internal_sql_path() {
+        // The workflow raw-SQL routes live in the same internal router group
+        // and must inherit the same gate: `database` disabled → 403
+        // ENTITLEMENT_REQUIRED before the handler (and any SQL) runs.
+        let snapshot = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
+        let gate = make_test_gate(snapshot, FeatureKey::Database);
+
+        let app = Router::new()
+            .route(
+                "/api/internal/object-model/sql/query",
+                post(|| async { dummy_handler() }),
+            )
+            .route(
+                "/api/internal/object-model/sql/execute",
+                post(|| async { dummy_handler() }),
+            )
+            .route_layer(from_fn(gate));
+
+        for path in [
+            "/api/internal/object-model/sql/query",
+            "/api/internal/object-model/sql/execute",
+        ] {
+            let request = Request::post(path).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(request).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = body_json(resp).await;
+            assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED, "{path}");
+            assert_eq!(body["feature"], "database", "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn database_gate_lets_request_through_when_enabled() {
         // Control case: same wiring, same path, but the feature is on. The
         // request must reach the handler — proving the gate is the only

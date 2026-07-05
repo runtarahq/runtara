@@ -1550,6 +1550,278 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
 }
 
 // ============================================================================
+// Capability: query_sql / execute_sql (raw SQL)
+// ============================================================================
+
+/// Retry reclassification for `query-sql`: transport failures
+/// (`OBJECT_MODEL_HTTP_ERROR`, hard-coded permanent in `http_post`) become
+/// transient — the server runs the query in a READ ONLY transaction, so a
+/// retry is provably safe, and a server restart mid-read must not permanently
+/// fail a nightly rebuild. Status-code classification (5xx/429 transient)
+/// stays as `check_status` produced it.
+fn query_sql_reclassify(mut err: AgentError) -> AgentError {
+    if err.code == "OBJECT_MODEL_HTTP_ERROR" {
+        err.category = "transient";
+        err.severity = "warning";
+    }
+    err
+}
+
+/// Retry reclassification for `execute-sql`: server 5xx
+/// (`OBJECT_MODEL_UPSTREAM_ERROR`, transient from `check_status`) becomes
+/// permanent — the statement outcome on the tenant DB is unknown, and
+/// auto-retrying a write is the double-apply case. 429 stays transient (the
+/// request was rejected before reaching Postgres). Transport failures are
+/// already permanent from `http_post`; for a write that default is the
+/// correct one — kept deliberately.
+fn execute_sql_reclassify(mut err: AgentError) -> AgentError {
+    let is_429 = err.attributes.get("status_code").and_then(|v| v.as_str()) == Some("429");
+    if err.code == "OBJECT_MODEL_UPSTREAM_ERROR" && !is_429 {
+        err.category = "permanent";
+        err.severity = "error";
+    }
+    err
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Query SQL Input")]
+pub struct QuerySqlInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "SQL",
+        description = "One read statement with Postgres positional placeholders ($1..$n). Runs \
+                       in a READ ONLY transaction — any write or DDL is rejected by Postgres. \
+                       The result is capped server-side (rows and bytes) and errors rather than \
+                       truncates: include LIMIT/OFFSET or aggregate. The full JSON result must \
+                       fit workflow memory and is persisted into the step checkpoint when the \
+                       step is durable.",
+        example = "SELECT sku, SUM(qty) FILTER (WHERE qty > 0) AS in_stock FROM stock WHERE snapshot_date >= $1 GROUP BY sku"
+    )]
+    pub sql: String,
+
+    #[field(
+        display_name = "Parameters",
+        description = "Typed positional parameters bound in array order ($1 = first). Item \
+                       shape: {\"type\":\"string|integer|decimal|boolean|timestamp|json|enum|vector\",\
+                       \"value\":...} (decimal also takes precision/scale, enum takes values, \
+                       vector takes dimension). A JSON null value binds SQL NULL.",
+        example = r#"[{"type":"timestamp","value":"2026-06-27T00:00:00Z"},{"type":"integer","value":7}]"#
+    )]
+    #[serde(default)]
+    pub params: Vec<Value>,
+
+    #[field(
+        display_name = "Result Schema",
+        description = "Optional typed decoding schema: [{name, type, nullable?}]. Omit for \
+                       generic decoding of common column types; required for columns generic \
+                       decoding rejects (arrays, bytea, custom enums).",
+        example = r#"[{"name":"sku","type":"string","nullable":false},{"name":"in_stock","type":"integer"}]"#
+    )]
+    #[serde(rename = "resultSchema", alias = "result_schema", default)]
+    pub result_schema: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Query SQL Output",
+    description = "Result rows decoded to JSON objects (column name → value) plus the row count."
+)]
+pub struct QuerySqlOutput {
+    #[field(display_name = "Success", description = "Whether the query succeeded")]
+    pub success: bool,
+
+    #[field(
+        display_name = "Rows",
+        description = "Result rows as JSON objects keyed by column name"
+    )]
+    pub rows: Vec<Value>,
+
+    #[field(display_name = "Row Count", description = "Number of rows returned")]
+    pub row_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the query failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Query SQL",
+    description = "Run one read-only SQL statement against the tenant object-model database — \
+                   full Postgres SELECT power (FILTER aggregates, window functions, CROSS JOIN \
+                   (VALUES ...), array_agg subscripts). Read-only is enforced by the database \
+                   (READ ONLY transaction), bounded by a statement timeout and row/byte caps \
+                   that error rather than truncate. For results that may exceed the cap, page \
+                   with LIMIT/OFFSET params in a While loop. Bypasses per-schema authorization \
+                   and soft-delete filtering — rows are raw table rows.",
+    side_effects = false,
+    errors(
+        permanent(
+            "OBJECT_MODEL_REQUEST_FAILED",
+            "SQL failed deterministically: syntax, unknown table/column, read-only violation, statement timeout, or row/byte cap"
+        ),
+        transient(
+            "OBJECT_MODEL_UPSTREAM_ERROR",
+            "Object-model API 5xx/429 — retried automatically (reads are safe to retry)"
+        ),
+        transient(
+            "OBJECT_MODEL_HTTP_ERROR",
+            "Transport failure reaching the object-model API — retried automatically"
+        ),
+        permanent(
+            "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
+            "Request body exceeds the internal API size limit"
+        )
+    )
+)]
+pub fn query_sql(input: QuerySqlInput) -> Result<QuerySqlOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+
+    let mut body = json!({
+        "sql": input.sql,
+        "params": input.params,
+    });
+    if let Some(schema) = &input.result_schema {
+        body["resultSchema"] = json!(schema);
+    }
+
+    let resp = http_post("/sql/query", body, &connection_id).map_err(query_sql_reclassify)?;
+
+    let rows = resp
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(QuerySqlOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        row_count: resp["rowCount"].as_i64().unwrap_or(rows.len() as i64),
+        rows,
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Execute SQL Input")]
+pub struct ExecuteSqlInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "SQL",
+        description = "Exactly ONE statement (prepared-statement protocol — multi-statement \
+                       strings fail) with Postgres positional placeholders ($1..$n): \
+                       INSERT/UPDATE/DELETE, TRUNCATE, INSERT...SELECT...GROUP BY, or DDL if \
+                       the connection role has the privilege. EXECUTES AT LEAST ONCE: server \
+                       errors are never auto-retried, but a crash between the database commit \
+                       and the checkpoint save replays the step — write idempotent SQL \
+                       (ON CONFLICT, WHERE guards) or use the atomic full-replace pattern. \
+                       Full-replace ordering rule: data-modifying CTEs run unordered unless \
+                       referenced — end the DELETE with RETURNING 1 and reference it from \
+                       the INSERT's WHERE ((SELECT count(*) FROM del) >= 0), or the \
+                       primary-key check races the delete and fails with 23505 on every \
+                       non-empty rebuild. If runs can overlap (manual + scheduled), \
+                       serialize with pg_advisory_xact_lock inside the statement. TRUNCATE \
+                       requires the TRUNCATE privilege and DDL requires ownership (privilege \
+                       errors are permanent). Statements that cannot run in a transaction \
+                       (CREATE INDEX CONCURRENTLY, VACUUM) are unsupported.",
+        example = "WITH del AS (DELETE FROM sku_velocity RETURNING 1) INSERT INTO sku_velocity SELECT sku, SUM(qty) FROM stock WHERE (SELECT count(*) FROM del) >= 0 GROUP BY sku"
+    )]
+    pub sql: String,
+
+    #[field(
+        display_name = "Parameters",
+        description = "Typed positional parameters bound in array order ($1 = first). Item \
+                       shape: {\"type\":\"string|integer|decimal|boolean|timestamp|json|enum|vector\",\
+                       \"value\":...}. A JSON null value binds SQL NULL.",
+        example = r#"[{"type":"string","value":"2026-07-03"}]"#
+    )]
+    #[serde(default)]
+    pub params: Vec<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Execute SQL Output",
+    description = "Rows affected by the statement (0 for DDL and TRUNCATE)."
+)]
+pub struct ExecuteSqlOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the statement succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Rows Affected",
+        description = "Rows affected by the statement. 0 for DDL/TRUNCATE — that is Postgres \
+                       semantics, not a failure."
+    )]
+    pub rows_affected: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the statement failed"
+    )]
+    pub error: Option<String>,
+}
+
+#[capability(
+    module = "object_model",
+    display_name = "Execute SQL",
+    description = "Run one SQL write statement against the tenant object-model database with a \
+                   server-side statement timeout. The workhorse for derived-table rebuilds: \
+                   computed-expression UPDATEs, TRUNCATE, INSERT...SELECT...GROUP BY write-back. \
+                   Never auto-retries server errors (statement outcome unknown — retrying a \
+                   write is the double-apply case). Bypasses per-schema authorization, \
+                   validation, and soft-delete — use the row-shaped capabilities when their \
+                   safety net fits.",
+    side_effects = true,
+    errors(
+        permanent(
+            "OBJECT_MODEL_REQUEST_FAILED",
+            "SQL failed deterministically: syntax, constraint violation, insufficient privilege, or statement timeout"
+        ),
+        permanent(
+            "OBJECT_MODEL_UPSTREAM_ERROR",
+            "Object-model API 5xx — never auto-retried for writes; 429 stays retryable (rejected before reaching the database)"
+        ),
+        permanent(
+            "OBJECT_MODEL_HTTP_ERROR",
+            "Transport failure — never auto-retried for writes (the statement may have committed)"
+        ),
+        permanent(
+            "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
+            "Request body exceeds the internal API size limit"
+        )
+    )
+)]
+pub fn execute_sql(input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, AgentError> {
+    let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
+
+    let resp = http_post(
+        "/sql/execute",
+        json!({
+            "sql": input.sql,
+            "params": input.params,
+        }),
+        &connection_id,
+    )
+    .map_err(execute_sql_reclassify)?;
+
+    Ok(ExecuteSqlOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        rows_affected: resp["rowsAffected"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
+// ============================================================================
 // Capability: load_memory / save_memory
 // ============================================================================
 
@@ -1883,6 +2155,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         &__CAPABILITY_META_BULK_UPDATE_INSTANCES,
         &__CAPABILITY_META_BULK_DELETE_INSTANCES,
         &__CAPABILITY_META_QUERY_AGGREGATE,
+        &__CAPABILITY_META_QUERY_SQL,
+        &__CAPABILITY_META_EXECUTE_SQL,
         &__CAPABILITY_META_LOAD_MEMORY,
         &__CAPABILITY_META_SAVE_MEMORY,
     ];
@@ -1916,6 +2190,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__INPUT_META_BulkDeleteInstancesInput,
         ),
         ("QueryAggregateInput", &__INPUT_META_QueryAggregateInput),
+        ("QuerySqlInput", &__INPUT_META_QuerySqlInput),
+        ("ExecuteSqlInput", &__INPUT_META_ExecuteSqlInput),
         ("LoadMemoryInput", &__INPUT_META_LoadMemoryInput),
         ("SaveMemoryInput", &__INPUT_META_SaveMemoryInput),
     ]
@@ -1951,6 +2227,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__OUTPUT_META_BulkDeleteInstancesOutput,
         ),
         ("QueryAggregateOutput", &__OUTPUT_META_QueryAggregateOutput),
+        ("QuerySqlOutput", &__OUTPUT_META_QuerySqlOutput),
+        ("ExecuteSqlOutput", &__OUTPUT_META_ExecuteSqlOutput),
         ("LoadMemoryOutput", &__OUTPUT_META_LoadMemoryOutput),
         ("SaveMemoryOutput", &__OUTPUT_META_SaveMemoryOutput),
     ]
@@ -2038,6 +2316,8 @@ impl Guest for Component {
             "bulk-update-instances" => __executor_bulk_update_instances(value),
             "bulk-delete-instances" => __executor_bulk_delete_instances(value),
             "query-aggregate" => __executor_query_aggregate(value),
+            "query-sql" => __executor_query_sql(value),
+            "execute-sql" => __executor_execute_sql(value),
             "load-memory" => __executor_load_memory(value),
             "save-memory" => __executor_save_memory(value),
             other => {
@@ -2223,6 +2503,101 @@ mod tests {
             .expect("404 must be an error");
         assert_eq!(other.code, "OBJECT_MODEL_REQUEST_FAILED");
         assert_eq!(other.category, "permanent");
+    }
+
+    #[test]
+    fn query_sql_transport_errors_become_transient() {
+        // A network blip or server restart mid-read must not permanently fail
+        // a nightly rebuild: the READ ONLY transaction makes retry safe.
+        let err = query_sql_reclassify(AgentError::permanent(
+            "OBJECT_MODEL_HTTP_ERROR",
+            "connection reset",
+        ));
+        assert_eq!(err.category, "transient");
+
+        // Other codes pass through untouched.
+        let err = query_sql_reclassify(AgentError::permanent(
+            "OBJECT_MODEL_REQUEST_FAILED",
+            "syntax error",
+        ));
+        assert_eq!(err.category, "permanent");
+    }
+
+    #[test]
+    fn execute_sql_server_errors_become_permanent_except_429() {
+        // 5xx on a write: statement outcome unknown — never auto-retry.
+        let err = execute_sql_reclassify(
+            AgentError::transient("OBJECT_MODEL_UPSTREAM_ERROR", "HTTP 503")
+                .with_attr("status_code", "503"),
+        );
+        assert_eq!(err.category, "permanent");
+
+        // 429 was rejected before reaching Postgres — safe to retry.
+        let err = execute_sql_reclassify(
+            AgentError::transient("OBJECT_MODEL_UPSTREAM_ERROR", "HTTP 429")
+                .with_attr("status_code", "429"),
+        );
+        assert_eq!(err.category, "transient");
+
+        // Transport failure on a write stays permanent — the statement may
+        // have committed. This is deliberate, not http_post's accident.
+        let err = execute_sql_reclassify(AgentError::permanent(
+            "OBJECT_MODEL_HTTP_ERROR",
+            "connection reset",
+        ));
+        assert_eq!(err.category, "permanent");
+    }
+
+    #[test]
+    fn sql_capability_metadata_pins_wire_shapes() {
+        // params is a Vec<Value> passthrough (aggregates precedent) and
+        // resultSchema keeps its camelCase wire name — refs inside items must
+        // keep resolving and MCP-authored payloads must keep deserializing.
+        let params = __INPUT_META_QuerySqlInput
+            .fields
+            .iter()
+            .find(|field| field.name == "params")
+            .expect("params metadata");
+        assert!(params.type_name.contains("Vec"), "{}", params.type_name);
+
+        let schema_field = __INPUT_META_QuerySqlInput
+            .fields
+            .iter()
+            .find(|field| field.name == "result_schema")
+            .expect("result_schema advertised in metadata");
+        assert!(schema_field.is_optional, "resultSchema must stay optional");
+
+        // Outputs are snake idents per crate convention: workflow refs read
+        // steps.X.outputs.rows_affected / row_count.
+        assert!(
+            __OUTPUT_META_ExecuteSqlOutput
+                .fields
+                .iter()
+                .any(|field| field.name == "rows_affected")
+        );
+        assert!(
+            __OUTPUT_META_QuerySqlOutput
+                .fields
+                .iter()
+                .any(|field| field.name == "row_count")
+        );
+    }
+
+    #[test]
+    fn sql_inputs_accept_both_result_schema_spellings() {
+        for key in ["resultSchema", "result_schema"] {
+            let input: QuerySqlInput = serde_json::from_value(json!({
+                "sql": "SELECT 1 AS one",
+                key: [{"name": "one", "type": "integer"}]
+            }))
+            .unwrap();
+            assert!(input.result_schema.is_some(), "{key}");
+        }
+
+        // Both params and resultSchema default when absent.
+        let input: QuerySqlInput = serde_json::from_value(json!({"sql": "SELECT 1"})).unwrap();
+        assert!(input.params.is_empty());
+        assert!(input.result_schema.is_none());
     }
 
     #[test]

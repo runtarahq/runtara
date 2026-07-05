@@ -1740,6 +1740,181 @@
         "rateLimited": false
       },
       {
+        "id": "query-sql",
+        "name": "query_sql",
+        "displayName": "Query SQL",
+        "description": "Run one read-only SQL statement against the tenant object-model database — full Postgres SELECT power (FILTER aggregates, window functions, CROSS JOIN (VALUES ...), array_agg subscripts). Read-only is enforced by the database (READ ONLY transaction), bounded by a statement timeout and row/byte caps that error rather than truncate. For results that may exceed the cap, page with LIMIT/OFFSET params in a While loop. Bypasses per-schema authorization and soft-delete filtering — rows are raw table rows.",
+        "inputType": "QuerySqlInput",
+        "inputs": [
+          {
+            "name": "sql",
+            "displayName": "SQL",
+            "description": "One read statement with Postgres positional placeholders ($1..$n). Runs in a READ ONLY transaction — any write or DDL is rejected by Postgres. The result is capped server-side (rows and bytes) and errors rather than truncates: include LIMIT/OFFSET or aggregate. The full JSON result must fit workflow memory and is persisted into the step checkpoint when the step is durable.",
+            "type": "string",
+            "required": true,
+            "example": "SELECT sku, SUM(qty) FILTER (WHERE qty > 0) AS in_stock FROM stock WHERE snapshot_date >= $1 GROUP BY sku"
+          },
+          {
+            "name": "params",
+            "displayName": "Parameters",
+            "description": "Typed positional parameters bound in array order ($1 = first). Item shape: {\"type\":\"string|integer|decimal|boolean|timestamp|json|enum|vector\",\"value\":...} (decimal also takes precision/scale, enum takes values, vector takes dimension). A JSON null value binds SQL NULL.",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[{\"type\":\"timestamp\",\"value\":\"2026-06-27T00:00:00Z\"},{\"type\":\"integer\",\"value\":7}]"
+          },
+          {
+            "name": "result_schema",
+            "displayName": "Result Schema",
+            "description": "Optional typed decoding schema: [{name, type, nullable?}]. Omit for generic decoding of common column types; required for columns generic decoding rejects (arrays, bytea, custom enums).",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[{\"name\":\"sku\",\"type\":\"string\",\"nullable\":false},{\"name\":\"in_stock\",\"type\":\"integer\"}]"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Query SQL Output",
+          "description": "Result rows decoded to JSON objects (column name → value) plus the row count.",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the query succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "rows",
+              "displayName": "Rows",
+              "description": "Result rows as JSON objects keyed by column name",
+              "type": "array"
+            },
+            {
+              "name": "row_count",
+              "displayName": "Row Count",
+              "description": "Number of rows returned",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the query failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": false,
+        "isIdempotent": true,
+        "rateLimited": false,
+        "knownErrors": [
+          {
+            "code": "OBJECT_MODEL_REQUEST_FAILED",
+            "description": "SQL failed deterministically: syntax, unknown table/column, read-only violation, statement timeout, or row/byte cap",
+            "kind": "permanent"
+          },
+          {
+            "code": "OBJECT_MODEL_UPSTREAM_ERROR",
+            "description": "Object-model API 5xx/429 — retried automatically (reads are safe to retry)",
+            "kind": "transient"
+          },
+          {
+            "code": "OBJECT_MODEL_HTTP_ERROR",
+            "description": "Transport failure reaching the object-model API — retried automatically",
+            "kind": "transient"
+          },
+          {
+            "code": "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
+            "description": "Request body exceeds the internal API size limit",
+            "kind": "permanent"
+          }
+        ]
+      },
+      {
+        "id": "execute-sql",
+        "name": "execute_sql",
+        "displayName": "Execute SQL",
+        "description": "Run one SQL write statement against the tenant object-model database with a server-side statement timeout. The workhorse for derived-table rebuilds: computed-expression UPDATEs, TRUNCATE, INSERT...SELECT...GROUP BY write-back. Never auto-retries server errors (statement outcome unknown — retrying a write is the double-apply case). Bypasses per-schema authorization, validation, and soft-delete — use the row-shaped capabilities when their safety net fits.",
+        "inputType": "ExecuteSqlInput",
+        "inputs": [
+          {
+            "name": "sql",
+            "displayName": "SQL",
+            "description": "Exactly ONE statement (prepared-statement protocol — multi-statement strings fail) with Postgres positional placeholders ($1..$n): INSERT/UPDATE/DELETE, TRUNCATE, INSERT...SELECT...GROUP BY, or DDL if the connection role has the privilege. EXECUTES AT LEAST ONCE: server errors are never auto-retried, but a crash between the database commit and the checkpoint save replays the step — write idempotent SQL (ON CONFLICT, WHERE guards) or use the atomic full-replace pattern. Full-replace ordering rule: data-modifying CTEs run unordered unless referenced — end the DELETE with RETURNING 1 and reference it from the INSERT's WHERE ((SELECT count(*) FROM del) >= 0), or the primary-key check races the delete and fails with 23505 on every non-empty rebuild. If runs can overlap (manual + scheduled), serialize with pg_advisory_xact_lock inside the statement. TRUNCATE requires the TRUNCATE privilege and DDL requires ownership (privilege errors are permanent). Statements that cannot run in a transaction (CREATE INDEX CONCURRENTLY, VACUUM) are unsupported.",
+            "type": "string",
+            "required": true,
+            "example": "WITH del AS (DELETE FROM sku_velocity RETURNING 1) INSERT INTO sku_velocity SELECT sku, SUM(qty) FROM stock WHERE (SELECT count(*) FROM del) >= 0 GROUP BY sku"
+          },
+          {
+            "name": "params",
+            "displayName": "Parameters",
+            "description": "Typed positional parameters bound in array order ($1 = first). Item shape: {\"type\":\"string|integer|decimal|boolean|timestamp|json|enum|vector\",\"value\":...}. A JSON null value binds SQL NULL.",
+            "type": "array",
+            "items": {
+              "type": "any"
+            },
+            "required": false,
+            "example": "[{\"type\":\"string\",\"value\":\"2026-07-03\"}]"
+          }
+        ],
+        "output": {
+          "type": "string",
+          "displayName": "Execute SQL Output",
+          "description": "Rows affected by the statement (0 for DDL and TRUNCATE).",
+          "fields": [
+            {
+              "name": "success",
+              "displayName": "Success",
+              "description": "Whether the statement succeeded",
+              "type": "boolean"
+            },
+            {
+              "name": "rows_affected",
+              "displayName": "Rows Affected",
+              "description": "Rows affected by the statement. 0 for DDL/TRUNCATE — that is Postgres semantics, not a failure.",
+              "type": "integer"
+            },
+            {
+              "name": "error",
+              "displayName": "Error",
+              "description": "Error message if the statement failed",
+              "type": "string",
+              "nullable": true
+            }
+          ]
+        },
+        "hasSideEffects": true,
+        "isIdempotent": false,
+        "rateLimited": false,
+        "knownErrors": [
+          {
+            "code": "OBJECT_MODEL_REQUEST_FAILED",
+            "description": "SQL failed deterministically: syntax, constraint violation, insufficient privilege, or statement timeout",
+            "kind": "permanent"
+          },
+          {
+            "code": "OBJECT_MODEL_UPSTREAM_ERROR",
+            "description": "Object-model API 5xx — never auto-retried for writes; 429 stays retryable (rejected before reaching the database)",
+            "kind": "permanent"
+          },
+          {
+            "code": "OBJECT_MODEL_HTTP_ERROR",
+            "description": "Transport failure — never auto-retried for writes (the statement may have committed)",
+            "kind": "permanent"
+          },
+          {
+            "code": "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
+            "description": "Request body exceeds the internal API size limit",
+            "kind": "permanent"
+          }
+        ]
+      },
+      {
         "id": "load-memory",
         "name": "load_memory",
         "displayName": "Load Memory",

@@ -737,6 +737,61 @@ impl InstanceService {
         Ok(result.rows_affected)
     }
 
+    /// Workflow-facing guarded SQL query (internal API surface). Runs inside
+    /// a READ ONLY transaction with a statement timeout and row/byte caps —
+    /// unlike the runtime/MCP `query_sql`/`query_sql_raw` paths above, which
+    /// stay unguarded for now. `result_schema = None` decodes rows raw.
+    pub async fn query_sql_workflow(
+        &self,
+        tenant_id: &str,
+        sql: &str,
+        params: Vec<SqlParam>,
+        result_schema: Option<Vec<SqlResultColumn>>,
+        connection_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            params.into_iter().map(Into::into).collect();
+        let result_schema: Option<Vec<runtara_object_store::SqlResultColumn>> =
+            result_schema.map(|schema| schema.into_iter().map(Into::into).collect());
+
+        let rows = store
+            .query_guarded(
+                sql,
+                &params,
+                result_schema.as_deref(),
+                crate::config::raw_sql_guardrails(),
+            )
+            .await
+            .map_err(map_workflow_sql_error)?;
+
+        Ok(sql_rows_to_values(rows))
+    }
+
+    /// Workflow-facing guarded SQL command: transaction + statement timeout.
+    pub async fn execute_sql_workflow(
+        &self,
+        tenant_id: &str,
+        sql: &str,
+        params: Vec<SqlParam>,
+        connection_id: Option<&str>,
+    ) -> Result<u64, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+        let params: Vec<runtara_object_store::SqlParam> =
+            params.into_iter().map(Into::into).collect();
+
+        let result = store
+            .execute_guarded(
+                sql,
+                &params,
+                crate::config::raw_sql_guardrails().statement_timeout_ms,
+            )
+            .await
+            .map_err(map_workflow_sql_error)?;
+
+        Ok(result.rows_affected)
+    }
+
     /// Get a single instance by ID
     pub async fn get_instance_by_id(
         &self,
@@ -982,6 +1037,35 @@ fn map_raw_sql_error(error: runtara_object_store::ObjectStoreError) -> ServiceEr
         runtara_object_store::ObjectStoreError::Conflict(msg) => ServiceError::Conflict(msg),
         other => ServiceError::DatabaseError(other.to_string()),
     }
+}
+
+/// SQLSTATE classes that are deterministic user-SQL failures — the same
+/// statement fails the same way on retry. The workflow surface maps them to
+/// 400 (permanent step error); everything else stays 500, which query-sql
+/// treats as retryable (deadlocks, serialization, connection loss).
+///
+/// Classes: 0A feature-not-supported, 22 data exception, 23 integrity
+/// constraint, 25 invalid transaction state (incl. 25006 read-only
+/// violation), 26 invalid statement name, 2B dependent objects, 3D/3F
+/// invalid catalog/schema, 42 syntax or access rule (incl. 42501 privilege
+/// denied). 57014 is the statement timeout — retrying a timed-out statement
+/// just times out again, and retrying a timed-out *write* is the double-apply
+/// case.
+fn sqlstate_is_deterministic(code: &str) -> bool {
+    const CLASSES: &[&str] = &["0A", "22", "23", "25", "26", "2B", "3D", "3F", "42"];
+    code == "57014" || CLASSES.iter().any(|class| code.starts_with(class))
+}
+
+/// Error mapping for the workflow-facing guarded SQL paths only — the
+/// runtime/MCP SQL routes keep `map_raw_sql_error` unchanged.
+fn map_workflow_sql_error(error: runtara_object_store::ObjectStoreError) -> ServiceError {
+    if let runtara_object_store::ObjectStoreError::Sql(sqlx::Error::Database(db)) = &error
+        && let Some(code) = db.code()
+        && sqlstate_is_deterministic(&code)
+    {
+        return ServiceError::ValidationError(format!("SQL failed (SQLSTATE {code}): {db}"));
+    }
+    map_raw_sql_error(error)
 }
 
 /// Normalize the two supported bulk-create shapes (object form vs columnar
@@ -1360,5 +1444,32 @@ mod normalize_tests {
         )
         .unwrap_err();
         assert!(matches!(err, ServiceError::ValidationError(_)));
+    }
+
+    #[test]
+    fn deterministic_sqlstates_map_to_permanent() {
+        // Deterministic user-SQL failures → 400 → permanent step error.
+        for code in [
+            "42601", // syntax error
+            "42501", // insufficient privilege (TRUNCATE/DDL on a scoped role)
+            "42P01", // undefined table
+            "23505", // unique violation
+            "22P02", // invalid text representation
+            "25006", // read-only transaction violation (query-sql writes)
+            "57014", // statement timeout
+            "0A000", // feature not supported
+        ] {
+            assert!(sqlstate_is_deterministic(code), "{code}");
+        }
+        // Retry-worthy failures stay 500 (query-sql retries them).
+        for code in [
+            "40001", // serialization failure
+            "40P01", // deadlock detected
+            "53300", // too many connections
+            "08006", // connection failure
+            "57P01", // admin shutdown (server restarting)
+        ] {
+            assert!(!sqlstate_is_deterministic(code), "{code}");
+        }
     }
 }

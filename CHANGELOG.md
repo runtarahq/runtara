@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two new `object-model` agent capabilities give workflows raw SQL against the
+  tenant object-model database: `query-sql` (reads, DB-enforced `READ ONLY`
+  transaction, optional `result_schema` for typed decoding of columns generic
+  decoding rejects) and `execute-sql` (one write statement per call — DML,
+  `TRUNCATE`, `INSERT...SELECT`, DDL if the connection role permits). Both use
+  typed positional params (`$1..$n`), wire-compatible with the MCP
+  `query_sql`/`execute_sql` tools, and run server-side guard rails: a
+  statement timeout (`RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS`, default 60 s) and
+  streaming row/byte caps on reads (`RUNTARA_RAW_SQL_MAX_ROWS` /
+  `RUNTARA_RAW_SQL_MAX_RESPONSE_BYTES`) that error rather than truncate.
+  `execute-sql` never auto-retries server errors (at-least-once semantics —
+  write idempotent SQL); `query-sql` retries transient failures including
+  transport blips. **Note for operators:** there is no dedicated feature flag —
+  the capabilities are live for every `database`-entitled tenant on upgrade
+  (the same tenants can already run identical SQL via MCP `execute_sql`). Raw
+  SQL bypasses per-schema authorization and soft-delete; scope the Postgres
+  connection role accordingly. Each request emits an audit line at target
+  `runtara::raw_sql_audit`.
 - New `runtara-agent-encoding` crate: a single, WASM-safe character-encoding
   vocabulary shared by the text, csv, and xml agents. It wraps `encoding_rs`
   (the WHATWG label/alias table and decoder) and `chardetng` (statistical

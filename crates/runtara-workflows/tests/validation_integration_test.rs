@@ -352,6 +352,100 @@ fn test_multiple_errors_in_single_workflow() {
 // Data and Variable Reference Error Tests
 // ============================================================================
 
+fn raw_sql_graph(step_json: serde_json::Value) -> ExecutionGraph {
+    serde_json::from_value(serde_json::json!({
+        "name": "Raw SQL validation probe",
+        "entryPoint": "run_sql",
+        "steps": {
+            "run_sql": step_json,
+            "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}
+        },
+        "executionPlan": [{"fromStep": "run_sql", "toStep": "finish"}]
+    }))
+    .expect("raw sql probe graph should parse")
+}
+
+#[test]
+fn test_execute_sql_missing_sql_is_required_input_error() {
+    // The catalog snapshot advertises `sql` as required on both SQL
+    // capabilities — a step without it must fail validation (E022), not
+    // compile into a step that 400s at runtime.
+    let graph = raw_sql_graph(serde_json::json!({
+        "stepType": "Agent",
+        "id": "run_sql",
+        "agentId": "object-model",
+        "capabilityId": "execute-sql",
+        "connectionId": "tenant-db",
+        "inputMapping": {
+            "params": {"valueType": "immediate", "value": []}
+        }
+    }));
+    let result = validate_workflow(&graph, &test_catalog());
+
+    let error = result
+        .errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::MissingRequiredInput { .. }))
+        .expect("should have E022 MissingRequiredInput for missing `sql`");
+    let display = format!("{}", error);
+    assert!(display.contains("[E022]"), "{display}");
+    assert!(display.contains("sql"), "{display}");
+}
+
+#[test]
+fn test_query_sql_without_connection_is_e026() {
+    // Both SQL capabilities hard-require a connection like every object-model
+    // sibling — the author must name the target database.
+    let graph = raw_sql_graph(serde_json::json!({
+        "stepType": "Agent",
+        "id": "run_sql",
+        "agentId": "object-model",
+        "capabilityId": "query-sql",
+        "inputMapping": {
+            "sql": {"valueType": "immediate", "value": "SELECT 1 AS one"}
+        }
+    }));
+    let result = validate_workflow(&graph, &test_catalog());
+
+    let error = result
+        .errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::AgentMissingConnection { .. }))
+        .expect("should have E026 AgentMissingConnection");
+    let display = format!("{}", error);
+    assert!(display.contains("[E026]"), "{display}");
+}
+
+#[test]
+fn test_query_sql_step_with_connection_and_sql_validates() {
+    // Control case: a well-formed query-sql step passes agent validation
+    // (params/result_schema stay optional).
+    let graph = raw_sql_graph(serde_json::json!({
+        "stepType": "Agent",
+        "id": "run_sql",
+        "agentId": "object-model",
+        "capabilityId": "query-sql",
+        "connectionId": "tenant-db",
+        "inputMapping": {
+            "sql": {"valueType": "immediate", "value": "SELECT sku FROM stock WHERE qty > $1"},
+            "params": {"valueType": "immediate", "value": [{"type": "integer", "value": 0}]}
+        }
+    }));
+    let result = validate_workflow(&graph, &test_catalog());
+
+    assert!(
+        !result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::MissingRequiredInput { .. }
+                | ValidationError::AgentMissingConnection { .. }
+                | ValidationError::UnknownAgent { .. }
+                | ValidationError::UnknownCapability { .. }
+        )),
+        "well-formed query-sql step must pass agent validation: {:?}",
+        result.errors
+    );
+}
+
 #[test]
 fn test_error_undefined_data_reference() {
     let graph = load_workflow("error_undefined_data_reference.json");

@@ -268,6 +268,18 @@ Callers MUST discriminate on `code`, not on HTTP status, for this route. The aud
 
 This exception applies *only* to `/api/internal/agents/{module}/{capability_id}`. REST routes under `/api/runtime/`, MCP tools, and all other internal routes (including `/api/internal/object-model/*`) follow the 403 contract above.
 
+### Exception: `/api/internal/object-model/sql/{query,execute}` are status-coded
+
+The workflow raw-SQL routes (backing the `object-model:query-sql` / `object-model:execute-sql` capabilities) deliberately deviate from the sibling internal object-model handlers' 200-envelope pattern in the *other* direction: SQL failures return real HTTP status codes (Validation → 400, NotFound → 404, Conflict → 409, DatabaseError → 500) via the same `raw_sql_error_response` mapper the runtime SQL routes use. Rationale: the object-model WASM agent's `check_status` classifies status codes into permanent/transient step errors (400 → permanent, 5xx → retryable-for-reads) with zero envelope-parsing agent code; a 200-envelope would make every SQL failure look like a "successful" step invisible to `onError`. Entitlement denials on these routes are unaffected — the `require_database` route layer still emits the standard 403 before the handler runs.
+
+Operational notes for these two routes:
+
+- **Gating:** inherited `database` gate only (owner decision 2026-07-03: no dedicated feature flag). Any database-entitled tenant process can run workflow raw SQL.
+- **Guard rails (server-side):** query runs in a `READ ONLY` transaction (writes rejected by Postgres, SQLSTATE 25006); both routes run under `SET LOCAL statement_timeout` (`RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS`, default 60 000, clamped below the instance execution timeout); query results stream against a row cap (`RUNTARA_RAW_SQL_MAX_ROWS`, default 10 000) and byte cap (`RUNTARA_RAW_SQL_MAX_RESPONSE_BYTES`, default 64 MB) that error rather than truncate. Zero/invalid knob values fail boot.
+- **Warning:** raw SQL bypasses per-schema authorization, property validation, and soft-delete filtering. It sees raw table rows on the connection's database. The remaining boundary is the per-tenant process + per-tenant DB + the Postgres connection role — provision a least-privilege role for SQL connections (DML + TRUNCATE on derived tables only) if DDL should be impossible. `TRUNCATE` needs the TRUNCATE privilege; DDL needs ownership (denials surface as permanent 400s, SQLSTATE 42501).
+- **Audit:** one structured `tracing::info!` line per request at target `runtara::raw_sql_audit` (tenant, connection, capability, sql sha256 + 256-char prefix, params count, duration, outcome, rows). Full SQL text only at `debug`. Process-log-only; a durable audit table is future work.
+- **Internal-surface exposure:** like every internal route these are authenticated only by `X-Org-Id` and protected by the loopback bind enforcement (`enforce_internal_listener_safe`); they are in scope for the open "internal bind" hardening follow-up (F6, connection-proxy plan).
+
 ## Backend Enforcement Points
 
 ### Middleware Helpers
@@ -319,7 +331,7 @@ Because the process is per-tenant and the entitlement snapshot is per-process, e
 
 Apply:
 
-- `/api/internal/object-model/*` → `database`.
+- `/api/internal/object-model/*` → `database`. This includes the workflow raw-SQL routes `/api/internal/object-model/sql/{query,execute}` (see the status-code exception section above) — `database` therefore also gates the `object-model:query-sql` / `object-model:execute-sql` workflow capabilities.
 - `/api/internal/agents/{module}/{capability}` → `enabled_agents` membership for `module`. Reject with `AGENT_NOT_ENABLED`.
 - `/api/internal/proxy` → not gated in first pass (Connections deferred).
 
