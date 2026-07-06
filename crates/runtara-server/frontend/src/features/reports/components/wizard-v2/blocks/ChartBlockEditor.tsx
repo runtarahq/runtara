@@ -75,6 +75,11 @@ export function ChartBlockEditor({
   const sizeFieldOptions = aggregateAliases;
   // Color-by partitions points into clouds → categorical dimensions.
   const groupByOptions = categoricalFieldOptions;
+  // Point label / tooltip fields can be any output column (dimension or measure).
+  const tooltipFieldOptions = [
+    ...categoricalFieldOptions,
+    ...aggregateAliases.filter((f) => !categoricalFieldOptions.includes(f)),
+  ];
 
   const updateSeries = (next: ReportChartSeries[]) =>
     onChange({ ...block, chart: { ...chart, series: next } });
@@ -244,6 +249,7 @@ export function ChartBlockEditor({
       </div>
 
       {isScatter ? (
+        <div className="grid gap-3">
         <div className="grid grid-cols-2 gap-3">
           <div className="grid gap-1.5">
             <Label className="text-xs">Bubble size (optional)</Label>
@@ -315,6 +321,120 @@ export function ChartBlockEditor({
               </SelectContent>
             </Select>
           </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-1.5">
+            <Label className="text-xs">Size legend label (optional)</Label>
+            <Input
+              className="h-9"
+              placeholder={chart.sizeField ?? 'e.g. Order count'}
+              value={chart.sizeLabel ?? ''}
+              disabled={!chart.sizeField}
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  chart: {
+                    ...chart,
+                    sizeLabel: event.target.value || undefined,
+                  },
+                })
+              }
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label className="text-xs">Label points by (optional)</Label>
+            <Select
+              value={chart.labelField ?? NONE_VALUE}
+              onValueChange={(value) =>
+                onChange({
+                  ...block,
+                  chart: {
+                    ...chart,
+                    labelField: value === NONE_VALUE ? undefined : value,
+                  },
+                })
+              }
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NONE_VALUE}>None</SelectItem>
+                {chart.labelField &&
+                !categoricalFieldOptions.includes(chart.labelField) ? (
+                  <SelectItem disabled value={chart.labelField}>
+                    {chart.labelField}
+                  </SelectItem>
+                ) : null}
+                {categoricalFieldOptions.map((field) => (
+                  <SelectItem key={field} value={field}>
+                    {field}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        {chart.groupBy ? (
+          <div className="grid gap-1.5">
+            <Label className="text-xs">Color legend title (optional)</Label>
+            <Input
+              className="h-9"
+              placeholder={chart.groupBy}
+              value={chart.groupByLabel ?? ''}
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  chart: {
+                    ...chart,
+                    groupByLabel: event.target.value || undefined,
+                  },
+                })
+              }
+            />
+          </div>
+        ) : null}
+
+        <div className="grid gap-1.5">
+          <Label className="text-xs">Tooltip fields (optional)</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {tooltipFieldOptions.length === 0 ? (
+              <span className="text-xs text-muted-foreground">
+                No fields available
+              </span>
+            ) : (
+              tooltipFieldOptions.map((field) => {
+                const selected = (chart.tooltipFields ?? []).includes(field);
+                return (
+                  <Button
+                    key={field}
+                    type="button"
+                    size="sm"
+                    variant={selected ? 'default' : 'outline'}
+                    className="h-7"
+                    onClick={() => {
+                      const current = chart.tooltipFields ?? [];
+                      const next = selected
+                        ? current.filter((f) => f !== field)
+                        : [...current, field];
+                      onChange({
+                        ...block,
+                        chart: {
+                          ...chart,
+                          tooltipFields: next.length ? next : undefined,
+                        },
+                      });
+                    }}
+                  >
+                    {field}
+                  </Button>
+                );
+              })
+            )}
+          </div>
+        </div>
         </div>
       ) : null}
     </div>

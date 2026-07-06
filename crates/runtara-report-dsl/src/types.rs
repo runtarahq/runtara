@@ -1416,6 +1416,35 @@ pub struct ReportChartConfig {
     /// Ignored by every other chart kind.
     #[serde(default, rename = "groupBy", skip_serializing_if = "Option::is_none")]
     pub group_by: Option<String>,
+    /// Scatter-only: human label for the bubble-size axis/legend, mirroring
+    /// `series[].label`. When absent the raw `size_field` alias is shown.
+    #[serde(default, rename = "sizeLabel", skip_serializing_if = "Option::is_none")]
+    pub size_label: Option<String>,
+    /// Scatter-only: dimension field whose value names each point (shown as
+    /// the tooltip title), so a reader can tell which category/vendor a dot is
+    /// independent of `group_by` coloring. Free of the numeric x/y/size axes.
+    #[serde(
+        default,
+        rename = "labelField",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub label_field: Option<String>,
+    /// Scatter-only: extra source columns to surface as rows in a point's
+    /// hover tooltip (dimension values or measures). Empty by default.
+    #[serde(
+        default,
+        rename = "tooltipFields",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tooltip_fields: Vec<String>,
+    /// Scatter-only: human label titling the `group_by` color legend. The
+    /// individual series names remain the field's distinct values.
+    #[serde(
+        default,
+        rename = "groupByLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group_by_label: Option<String>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1986,13 +2015,28 @@ mod chart_config_tests {
             }],
             size_field: Some("order_count".into()),
             group_by: Some("region".into()),
+            size_label: Some("Orders".into()),
+            label_field: Some("vendor".into()),
+            tooltip_fields: vec!["sku".into(), "margin".into()],
+            group_by_label: Some("Region".into()),
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert_eq!(json["sizeField"], "order_count");
         assert_eq!(json["groupBy"], "region");
+        assert_eq!(json["sizeLabel"], "Orders");
+        assert_eq!(json["labelField"], "vendor");
+        assert_eq!(json["tooltipFields"], serde_json::json!(["sku", "margin"]));
+        assert_eq!(json["groupByLabel"], "Region");
         let back: ReportChartConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.size_field.as_deref(), Some("order_count"));
         assert_eq!(back.group_by.as_deref(), Some("region"));
+        assert_eq!(back.size_label.as_deref(), Some("Orders"));
+        assert_eq!(back.label_field.as_deref(), Some("vendor"));
+        assert_eq!(
+            back.tooltip_fields,
+            vec!["sku".to_string(), "margin".to_string()]
+        );
+        assert_eq!(back.group_by_label.as_deref(), Some("Region"));
     }
 
     #[test]
@@ -2008,9 +2052,17 @@ mod chart_config_tests {
             }],
             size_field: None,
             group_by: None,
+            size_label: None,
+            label_field: None,
+            tooltip_fields: Vec::new(),
+            group_by_label: None,
         };
         let json = serde_json::to_value(&cfg).unwrap();
         assert!(json.get("sizeField").is_none());
         assert!(json.get("groupBy").is_none());
+        assert!(json.get("sizeLabel").is_none());
+        assert!(json.get("labelField").is_none());
+        assert!(json.get("tooltipFields").is_none());
+        assert!(json.get("groupByLabel").is_none());
     }
 }

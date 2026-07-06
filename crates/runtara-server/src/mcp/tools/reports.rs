@@ -707,7 +707,12 @@ fn report_authoring_schema() -> Value {
                 },
                 "optional": {
                     "chart.sizeField": "Scatter only: numeric output field driving bubble radius. Omit for a plain (non-bubble) scatter.",
-                    "chart.groupBy": "Scatter only: output field whose distinct values partition points into separately-colored clouds."
+                    "chart.sizeLabel": "Scatter only: human label for the bubble-size legend/axis. When omitted the raw sizeField alias is shown — set this so aggregate aliases don't leak into the UI.",
+                    "chart.groupBy": "Scatter only: output field whose distinct values partition points into separately-colored clouds.",
+                    "chart.groupByLabel": "Scatter only: human title for the groupBy color legend. The individual series names remain the field's distinct values.",
+                    "chart.labelField": "Scatter only: dimension output field whose value names each point (shown as the hover tooltip title), so a reader can tell which category/vendor a dot is — independent of groupBy coloring. Must be an output field.",
+                    "chart.tooltipFields": "Scatter only: array of extra output fields (dimensions or measures) to list in each point's hover tooltip. Each must be an output field.",
+                    "chart.orderBy_hint": "Scatter with source.limit but no source.orderBy returns an arbitrary slice of points — set source.orderBy so the sampled points are deterministic and meaningful."
                 }
             },
             "metric": {
@@ -844,6 +849,8 @@ fn report_authoring_schema() -> Value {
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
             "Do not put layout structure inside markdown.content. Use definition.layout with block + grid layout nodes.",
             "Do not omit layout node ids. edit_report addresses layout nodes by id for add/replace/patch/move/remove ops.",
+            "Do not put parentNodeId/beforeId/afterId/index/col/row (or viewId, on add/move) at the edit-op top level — they live under the nested `target` object (or `position` for block add/move). The field is `beforeId`, not `beforeNodeId`. See the `editOps` section for per-op shapes.",
+            "edit_report layout ops address the child node id, not the item-wrapper id ({ id, child }). Pass the child node's id to add/replace/patch/move/remove ops.",
             "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
             "Do not hardcode lookup editor option lists when the values live in another Object Model. Use editor.kind='lookup' and editor.lookup instead.",
             "Do not call workflow signals 'pendingInput' in report definitions. Use the generic actions abstraction: type='actions' and source.entity='actions'.",
@@ -1125,7 +1132,44 @@ fn report_authoring_schema() -> Value {
     .expect("report authoring schema JSON must be valid");
     result["workflowRuntimeGuidance"] = workflow_runtime_authoring_schema();
     result["systemSourceGuidance"] = system_authoring_schema();
+    result["editOps"] = edit_ops_authoring_schema();
     result
+}
+
+/// Per-variant field shapes for `edit_report`'s `ops` batch. The tool
+/// description lists only the op *kinds*; this enumerates each variant's
+/// required/optional fields and — crucially — the nested `target` / `position`
+/// placement of positional/parent/view fields, since sending those at the op
+/// top level was silently dropped before the strictness pass landed.
+fn edit_ops_authoring_schema() -> Value {
+    json!({
+        "purpose": "Shapes for edit_report ops[]. Each op is { kind, ... }. Positional/parent/view fields live under a nested `target` (layout add/move) or `position` (block add/move) object — NOT at the op top level.",
+        "fieldPlacement": [
+            "Layout add_layout_node/move_layout_node: parentNodeId, index, beforeId, afterId, col, row, viewId all go under `target`.",
+            "Block add_block/move_block: index, beforeId, afterId go under `position`.",
+            "Layout replace_layout_node/patch_layout_node/remove_layout_node take `viewId` at the op top level (they carry no `target`).",
+            "The field is `beforeId`/`afterId` (not beforeNodeId/afterNodeId). index/beforeId/afterId are mutually exclusive; anchors match the CHILD node id, not the item-wrapper id.",
+            "viewId selects the layout tree: omit for the report root layout (definition.layout), or set to a definition.views[].id to edit that view's layout."
+        ],
+        "ops": {
+            "add_block": { "required": ["kind", "block"], "optional": ["position{index|beforeId|afterId}"] },
+            "replace_block": { "required": ["kind", "blockId", "block"], "note": "block.id must equal blockId" },
+            "patch_block": { "required": ["kind", "blockId", "patch"], "note": "RFC 7386 merge patch; cannot change id" },
+            "move_block": { "required": ["kind", "blockId"], "optional": ["position{index|beforeId|afterId}"] },
+            "remove_block": { "required": ["kind", "blockId"] },
+            "add_layout_node": { "required": ["kind", "node"], "optional": ["target{parentNodeId,index|beforeId|afterId,col,row,viewId}"] },
+            "replace_layout_node": { "required": ["kind", "nodeId", "node"], "optional": ["viewId"], "note": "node id must equal nodeId" },
+            "patch_layout_node": { "required": ["kind", "nodeId", "patch"], "optional": ["viewId"] },
+            "move_layout_node": { "required": ["kind", "nodeId"], "optional": ["target{parentNodeId,index|beforeId|afterId,col,row,viewId}"], "note": "moves within one tree; cross-tree (root<->view) moves are unsupported — use remove + add" },
+            "remove_layout_node": { "required": ["kind", "nodeId"], "optional": ["viewId"] }
+        },
+        "example": {
+            "ops": [
+                { "kind": "add_layout_node", "node": { "type": "block", "id": "chart_node", "blockId": "chart" }, "target": { "parentNodeId": "detail_root", "beforeId": "summary_node", "viewId": "detail" } },
+                { "kind": "patch_block", "blockId": "chart", "patch": { "title": "Updated" } }
+            ]
+        }
+    })
 }
 
 fn workflow_runtime_authoring_schema() -> Value {

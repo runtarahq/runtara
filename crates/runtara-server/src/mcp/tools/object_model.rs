@@ -190,7 +190,7 @@ fn sql_params_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 fn sql_result_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "array",
-        "description": "Expected result columns for typed SQL reads. Each item names a selected SQL column and its Object Model type.",
+        "description": "Required array of column defs for typed SQL reads — each item is {name, type}, where type is one of string|integer|decimal|boolean|timestamp|json|enum|tsvector|vector. For untyped/generic rows without a schema, use query_sql_raw instead. Example: [{\"name\":\"email\",\"type\":\"string\"},{\"name\":\"total\",\"type\":\"decimal\"}].",
         "items": {
             "type": "object",
             "required": ["name", "type"],
@@ -201,7 +201,7 @@ fn sql_result_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
                 },
                 "type": {
                     "type": "string",
-                    "enum": ["string", "integer", "decimal", "boolean", "timestamp", "json", "enum", "vector"],
+                    "enum": ["string", "integer", "decimal", "boolean", "timestamp", "json", "enum", "tsvector", "vector"],
                     "description": "Expected Object Model column type for decoding this result column."
                 },
                 "nullable": {
@@ -596,9 +596,15 @@ pub struct QuerySqlParams {
     #[schemars(schema_with = "sql_params_schema")]
     #[serde(default)]
     pub params: Vec<serde_json::Value>,
+    // Kept deliberately tolerant: the advertised JSON schema (via
+    // `sql_result_schema`) still says "array of {name,type}", but the Rust
+    // type is a bare `Value` with `#[serde(default)]` so a missing or
+    // wrong-typed value is *captured* rather than aborting deserialization
+    // with an opaque serde error. `normalize_result_schema` then validates
+    // it and returns a tailored, example-bearing message.
     #[schemars(schema_with = "sql_result_schema")]
-    #[serde(rename = "resultSchema", alias = "result_schema")]
-    pub result_schema: Vec<serde_json::Value>,
+    #[serde(rename = "resultSchema", alias = "result_schema", default)]
+    pub result_schema: serde_json::Value,
     #[schemars(
         description = "Optional connection ID for database selection. Omit to use the default object-model database."
     )]
@@ -1070,12 +1076,94 @@ pub async fn query_aggregate(
     json_result_with_guidance(result, guidance)
 }
 
-fn build_query_sql_body(params: &QuerySqlParams) -> serde_json::Value {
+fn build_query_sql_body(
+    params: &QuerySqlParams,
+    result_schema: &[serde_json::Value],
+) -> serde_json::Value {
     serde_json::json!({
         "sql": params.sql.clone(),
         "params": params.params.clone(),
-        "resultSchema": params.result_schema.clone(),
+        "resultSchema": result_schema,
     })
+}
+
+/// The one accepted `type` values for a `resultSchema` column, kept in sync
+/// with the advertised JSON schema (`sql_result_schema`) and the object-model
+/// store's `validate_result_schema`. Surfaced in the tailored error so callers
+/// see the valid set inline instead of hitting a late 422.
+const RESULT_SCHEMA_COLUMN_TYPES: &str =
+    "string|integer|decimal|boolean|timestamp|json|enum|tsvector|vector";
+
+const RESULT_SCHEMA_EXAMPLE: &str =
+    "[{\"name\":\"email\",\"type\":\"string\"},{\"name\":\"total\",\"type\":\"decimal\"}]";
+
+/// Validate the tolerant `resultSchema` value into the concrete array the
+/// HTTP endpoint expects, emitting `invalid_params` errors that name the
+/// required shape, give an example, and point at `query_sql_raw` for
+/// schema-less reads. This replaces serde's opaque "missing field" /
+/// "invalid type … expected a sequence" aborts for `query_sql`.
+fn normalize_result_schema(
+    tool_name: &str,
+    raw: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, rmcp::ErrorData> {
+    let base = format!(
+        "{tool_name}: resultSchema is required — an array of column defs, each {{name, type}} with type one of {RESULT_SCHEMA_COLUMN_TYPES}. Example: {RESULT_SCHEMA_EXAMPLE}. For untyped/generic rows without a schema, use query_sql_raw instead."
+    );
+    let invalid =
+        |detail: String| rmcp::ErrorData::invalid_params(format!("{detail} {base}"), None);
+
+    if raw.is_null() {
+        return Err(invalid("resultSchema was not provided.".to_string()));
+    }
+    let arr = raw.as_array().ok_or_else(|| {
+        invalid(format!(
+            "resultSchema must be a JSON array, not a {}.",
+            json_type_name(raw)
+        ))
+    })?;
+    if arr.is_empty() {
+        return Err(invalid(
+            "resultSchema must contain at least one column.".to_string(),
+        ));
+    }
+    for (index, item) in arr.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            return Err(invalid(format!(
+                "resultSchema[{index}] must be an object, not a {}.",
+                json_type_name(item)
+            )));
+        };
+        let has_name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_name {
+            return Err(invalid(format!(
+                "resultSchema[{index}] is missing a non-empty string 'name'."
+            )));
+        }
+        let has_type = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_type {
+            return Err(invalid(format!(
+                "resultSchema[{index}] is missing a string 'type'."
+            )));
+        }
+    }
+    Ok(arr.clone())
+}
+
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "map",
+    }
 }
 
 fn build_query_sql_raw_body(params: &QuerySqlRawParams) -> serde_json::Value {
@@ -1101,7 +1189,8 @@ pub async fn query_sql(
         "/api/runtime/object-model/sql/query",
         params.connection_id.as_deref(),
     )?;
-    let body = build_query_sql_body(&params);
+    let result_schema = normalize_result_schema("query_sql", &params.result_schema)?;
+    let body = build_query_sql_body(&params, &result_schema);
     ensure_request_payload_reasonable("query_sql", &body)?;
     let result =
         with_payload_too_large_guidance(api_post(server, &path, Some(body)).await, "query_sql")?;
@@ -1124,7 +1213,8 @@ pub async fn query_sql_one(
         "/api/runtime/object-model/sql/query-one",
         params.connection_id.as_deref(),
     )?;
-    let body = build_query_sql_body(&params);
+    let result_schema = normalize_result_schema("query_sql_one", &params.result_schema)?;
+    let body = build_query_sql_body(&params, &result_schema);
     ensure_request_payload_reasonable("query_sql_one", &body)?;
     let result = with_payload_too_large_guidance(
         api_post(server, &path, Some(body)).await,
@@ -1466,18 +1556,75 @@ mod tests {
         let params = QuerySqlParams {
             sql: "SELECT $1 AS label".to_string(),
             params: vec![json!({"type": "string", "value": "alpha"})],
-            result_schema: vec![json!({"name": "label", "type": "string"})],
+            result_schema: json!([{"name": "label", "type": "string"}]),
             connection_id: Some("conn-1".to_string()),
         };
+        let normalized = normalize_result_schema("query_sql", &params.result_schema).unwrap();
 
         assert_eq!(
-            build_query_sql_body(&params),
+            build_query_sql_body(&params, &normalized),
             json!({
                 "sql": "SELECT $1 AS label",
                 "params": [{"type": "string", "value": "alpha"}],
                 "resultSchema": [{"name": "label", "type": "string"}]
             })
         );
+    }
+
+    #[test]
+    fn normalize_result_schema_accepts_valid_array() {
+        let raw = json!([{"name": "email", "type": "string"}, {"name": "n", "type": "integer"}]);
+        let out = normalize_result_schema("query_sql", &raw).unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn normalize_result_schema_rejects_missing_with_guidance() {
+        // A missing resultSchema now deserializes to Value::Null (serde default)
+        // and is caught here with a tailored message, not serde's bare
+        // "missing field `resultSchema`".
+        let err = normalize_result_schema("query_sql", &json!(null)).unwrap_err();
+        let msg = err.message.to_string();
+        assert!(msg.contains("was not provided"), "msg: {msg}");
+        assert!(msg.contains("query_sql_raw"), "msg: {msg}");
+        assert!(msg.contains("string|integer|decimal"), "msg: {msg}");
+    }
+
+    #[test]
+    fn normalize_result_schema_rejects_map_and_string_shapes() {
+        let map_err = normalize_result_schema("query_sql", &json!({"one": "number"})).unwrap_err();
+        assert!(
+            map_err.message.contains("must be a JSON array, not a map"),
+            "map: {}",
+            map_err.message
+        );
+        let str_err = normalize_result_schema("query_sql", &json!("one:number")).unwrap_err();
+        assert!(
+            str_err
+                .message
+                .contains("must be a JSON array, not a string"),
+            "string: {}",
+            str_err.message
+        );
+    }
+
+    #[test]
+    fn normalize_result_schema_rejects_empty_and_malformed_items() {
+        let empty = normalize_result_schema("query_sql", &json!([])).unwrap_err();
+        assert!(empty.message.contains("at least one column"));
+        let no_name =
+            normalize_result_schema("query_sql", &json!([{"type": "string"}])).unwrap_err();
+        assert!(no_name.message.contains("resultSchema[0]") && no_name.message.contains("'name'"));
+        let no_type = normalize_result_schema("query_sql", &json!([{"name": "x"}])).unwrap_err();
+        assert!(no_type.message.contains("resultSchema[0]") && no_type.message.contains("'type'"));
+    }
+
+    #[test]
+    fn query_sql_params_missing_result_schema_deserializes_to_null() {
+        // Proves the tolerance: omitting resultSchema no longer fails serde;
+        // it becomes Null and is caught by normalize_result_schema instead.
+        let p: QuerySqlParams = serde_json::from_value(json!({"sql": "SELECT 1"})).unwrap();
+        assert!(p.result_schema.is_null());
     }
 
     /// SYN-447 recovery: a client that stringifies the `condition` / `order_by`

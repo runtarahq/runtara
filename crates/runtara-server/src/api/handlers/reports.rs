@@ -428,13 +428,47 @@ pub async fn edit_report(
     State(manager): State<Arc<ObjectStoreManager>>,
     State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(report_id): Path<String>,
-    Json(request): Json<EditReportRequest>,
+    Json(raw): Json<Value>,
 ) -> Result<(StatusCode, Json<EditReportResponse>), (StatusCode, Json<Value>)> {
+    // Take the raw ops array and run the strict pre-parse BEFORE serde
+    // deserializes into the typed `ReportEditOp` enum. The enum is internally
+    // tagged and cannot carry `#[serde(deny_unknown_fields)]`, so without this
+    // pass a misplaced/misspelled top-level field (e.g. `parentNodeId` or
+    // `beforeNodeId` that belongs under `target`) would be silently dropped and
+    // the op would no-op or land in the wrong place with a 200. The request
+    // body schema stays typed via `request_body = EditReportRequest`.
+    let bad_request = |message: String, code: Option<&str>| {
+        let mut body = json!({ "success": false, "message": message });
+        if let Some(code) = code {
+            body["code"] = Value::String(code.to_string());
+        }
+        (StatusCode::BAD_REQUEST, Json(body))
+    };
+    let raw_ops = match raw.get("ops") {
+        Some(Value::Array(ops)) => ops.clone(),
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => {
+            return Err(bad_request(
+                "`ops` must be an array of edit operations".to_string(),
+                None,
+            ));
+        }
+    };
+    if let Err(err) = runtara_report_dsl::edit_ops::validate_edit_ops_json(&raw_ops) {
+        return Err(bad_request(err.message, Some(err.code)));
+    }
+    let mut ops = Vec::with_capacity(raw_ops.len());
+    for (index, raw_op) in raw_ops.into_iter().enumerate() {
+        match serde_json::from_value::<runtara_report_dsl::edit_ops::ReportEditOp>(raw_op) {
+            Ok(op) => ops.push(op),
+            Err(err) => {
+                return Err(bad_request(format!("op {index}: {err}"), None));
+            }
+        }
+    }
+
     let service = ReportService::new(pool, manager, connections);
-    match service
-        .edit_report(&tenant_id, &report_id, &request.ops)
-        .await
-    {
+    match service.edit_report(&tenant_id, &report_id, &ops).await {
         Ok(report) => Ok((
             StatusCode::OK,
             Json(EditReportResponse {

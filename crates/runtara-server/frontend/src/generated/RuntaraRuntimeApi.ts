@@ -675,6 +675,17 @@ export interface ApiKey {
   /** @format uuid */
   id: string;
   is_revoked: boolean;
+  /**
+   * Auth0 `sub` of the user who owns the key. The key acts as this user: it inherits their
+   * current role from the tenant Valkey at validation time, and only they may read/revoke it.
+   * Required — every key has an owner (enforced by the NOT NULL column).
+   */
+  issuing_user_id: string;
+  /**
+   * Token identity — the `token:revoked:{jti}` revocation-denylist key. `None` for
+   * legacy rows.
+   */
+  jti?: string | null;
   key_prefix: string;
   last_used_at?: string | null;
   name: string;
@@ -1180,6 +1191,17 @@ export type ColumnDefinition = ColumnType & {
   unique?: boolean;
 };
 
+/**
+ * An explicit column rename applied before the column diff, so the change
+ * emits `RENAME COLUMN` (preserving data) instead of drop + add.
+ */
+export interface ColumnRename {
+  /** Current column name. */
+  from: string;
+  /** New column name (must be present in the new `columns` list). */
+  to: string;
+}
+
 /** Column type definition with validation and SQL mapping */
 export type ColumnType =
   | {
@@ -1457,8 +1479,18 @@ export interface ConnectionFieldDto {
   enumValues?: string[] | null;
   /** Whether this field is optional */
   isOptional: boolean;
+  /**
+   * Whether this field is required (present + non-empty), independent of
+   * `is_optional`.
+   */
+  isRequired?: boolean;
   /** Whether this is a secret field (password, API key, etc.) */
   isSecret: boolean;
+  /**
+   * Whether this field must be a valid absolute https URL (drives client-side
+   * URL validation; the server enforces the same rule on create/update).
+   */
+  isUrl?: boolean;
   /** Field name (used in JSON) */
   name: string;
   /** Placeholder text for the input */
@@ -2168,6 +2200,13 @@ export interface FilterRequest {
   /** Optional ORDER BY entries. When set, supersedes `sortBy` / `sortOrder`. */
   orderBy?: OrderByEntry[] | null;
   /**
+   * Optional column projection. When set, only these schema columns are
+   * selected (system `id`/`createdAt`/`updatedAt` are always included;
+   * generated columns are always excluded). Omit to select every column.
+   * Lets callers skip large unused columns (e.g. base64 file uploads).
+   */
+  projection?: string[] | null;
+  /**
    * Optional computed score column. Adds `<expression> AS <alias>` to
    * the SELECT and surfaces under `instance.computed[alias]`.
    */
@@ -2504,6 +2543,13 @@ export interface LayoutTarget {
   parentNodeId?: string | null;
   /** @format int64 */
   row?: number | null;
+  /**
+   * Selects which layout tree the op targets. `None` (the default) is the
+   * report's root layout (`definition.layout`); `Some(view_id)` targets
+   * that `definition.views[].layout` tree. `parent_node_id` / positional
+   * anchors then resolve *within* the selected tree.
+   */
+  viewId?: string | null;
 }
 
 /** Response for listing all agents */
@@ -3315,13 +3361,34 @@ export interface ReportChartConfig {
    * Ignored by every other chart kind.
    */
   groupBy?: string | null;
+  /**
+   * Scatter-only: human label titling the `group_by` color legend. The
+   * individual series names remain the field's distinct values.
+   */
+  groupByLabel?: string | null;
   kind: ReportChartKind;
+  /**
+   * Scatter-only: dimension field whose value names each point (shown as
+   * the tooltip title), so a reader can tell which category/vendor a dot is
+   * independent of `group_by` coloring. Free of the numeric x/y/size axes.
+   */
+  labelField?: string | null;
   series?: ReportChartSeries[];
   /**
    * Scatter-only: numeric field driving bubble radius (Recharts `ZAxis`).
    * Ignored by every other chart kind. Absent for non-bubble scatters.
    */
   sizeField?: string | null;
+  /**
+   * Scatter-only: human label for the bubble-size axis/legend, mirroring
+   * `series[].label`. When absent the raw `size_field` alias is shown.
+   */
+  sizeLabel?: string | null;
+  /**
+   * Scatter-only: extra source columns to surface as rows in a point's
+   * hover tooltip (dimension values or measures). Empty by default.
+   */
+  tooltipFields?: string[];
   x: string;
 }
 
@@ -3518,11 +3585,14 @@ export type ReportEditOp =
        */
       node: ReportLayoutNode;
       nodeId: string;
+      /** Layout tree selector; `None` = report root, `Some(id)` = that view. */
+      viewId?: string | null;
     }
   | {
       kind: "patch_layout_node";
       nodeId: string;
       patch: any;
+      viewId?: string | null;
     }
   | {
       kind: "move_layout_node";
@@ -3550,6 +3620,7 @@ export type ReportEditOp =
   | {
       kind: "remove_layout_node";
       nodeId: string;
+      viewId?: string | null;
     };
 
 /**
@@ -4946,20 +5017,22 @@ export interface UpdateReportRequest {
   tags?: string[];
 }
 
-export interface ColumnRename {
-  from: string;
-  to: string;
-}
-
 export interface UpdateSchemaRequest {
+  /**
+   * Acknowledge that this update may drop columns and lose their data.
+   * Defaults to `false`: an update that would drop a column is rejected
+   * unless the drop is declared as a rename or this is set to `true`.
+   */
+  allow_destructive?: boolean | null;
+  /**
+   * Explicit column renames; preserves data across a name change instead of
+   * dropping the old column and adding an empty new one.
+   */
+  column_renames?: ColumnRename[] | null;
   columns?: ColumnDefinition[] | null;
   description?: string | null;
   indexes?: IndexDefinition[] | null;
   name?: string | null;
-  /** Explicit column renames; preserves data across a name change. */
-  column_renames?: ColumnRename[] | null;
-  /** Acknowledge that the update may drop columns and lose their data. */
-  allow_destructive?: boolean | null;
 }
 
 export interface UpdateSchemaResponse {
@@ -5308,6 +5381,12 @@ export interface WorkflowDto {
 
 export interface WorkflowInstanceDto {
   created: string;
+  /**
+   * Instance-level failure reason. Carries the host-side crash reason (e.g. a
+   * guest trap such as "guest memory limit exceeded") for runs that died without
+   * the SDK reporting a terminal status, so the failure is not silent in the API.
+   */
+  error?: string | null;
   /** @format double */
   executionDurationSeconds?: number | null;
   /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
@@ -7494,11 +7573,11 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description Authorization: gated by `workflow:folder_rename` (see `permission_for`), which is Owner/Admin only. This is a tenant-wide bulk op — it rewrites the `path` of every workflow under the prefix, other members' included — so it is deliberately kept off the Member-`Allow` `workflow:update` permission. The route gate is the whole control; no per-resource ownership check applies (the op spans many resources with different owners by design).
      *
      * @tags workflow-controller
      * @name RenameFolderHandler
-     * @summary Rename a folder (updates all workflows with matching path prefix)
+     * @summary Rename a folder (updates all workflows with matching path prefix).
      * @request PUT:/api/runtime/workflows/folders/rename
      */
     renameFolderHandler: (
@@ -7767,11 +7846,11 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description Authorization: gated by `workflow:update` (see `permission_for`). For Member that is tenant-wide `Allow` (collaborative editing — workflows are versioned), so no per-resource ownership check is needed here; move is consistently permitted for anyone who may update. If `workflow:update` is ever narrowed back to `Own` for Member, this handler must extract the caller and call `require_ownership` (as `update`/`delete` do) — otherwise it fails open.
      *
      * @tags workflow-controller
      * @name MoveWorkflowHandler
-     * @summary Move a workflow to a different folder
+     * @summary Move a workflow to a different folder.
      * @request PUT:/api/runtime/workflows/{id}/move
      */
     moveWorkflowHandler: (
