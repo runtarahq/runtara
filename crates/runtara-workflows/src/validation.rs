@@ -2215,13 +2215,22 @@ fn finish_output_source_is_missing(value: &MappingValue) -> bool {
     }
 }
 
-/// Variables the runtime injects into a Split iteration scope (see
-/// `runtara_workflow_stdlib::direct_json`), referenceable as `variables.<name>`
-/// inside a Split subgraph.
-const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop", "_loop_indices"];
+/// Variables the runtime unconditionally injects into a Split iteration scope
+/// (see `split_iteration_variables` in `runtara_workflow_stdlib::direct_json`),
+/// referenceable as `variables.<name>` inside a Split subgraph. Does **not**
+/// include `_loop`: Split never sets it itself — `split_iteration_variables`
+/// only clones whatever the *enclosing* scope already had, so `_loop` is only
+/// present when a Split is nested inside a While. Callers must add `_loop`
+/// conditionally (only if the enclosing scope already has it) rather than
+/// folding it into this unconditional list.
+const SPLIT_SCOPE_VARIABLES: &[&str] = &["_index", "_item", "_loop_indices"];
 
-/// Variables the runtime injects into a While iteration scope, referenceable as
-/// `variables.<name>` inside a While subgraph.
+/// Variables the runtime unconditionally injects into a While iteration scope
+/// (see `while_iteration_variables` in `runtara_workflow_stdlib::direct_json`),
+/// referenceable as `variables.<name>` inside a While subgraph. Does **not**
+/// include `_item`: While never sets it itself — like Split above, `_item` is
+/// only present when a While is nested inside a Split and inherits it from the
+/// enclosing scope. Callers must add `_item` conditionally.
 const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", "_loop_indices"];
 
 /// Variables the runtime injects into a WaitForSignal `onWait` scope (see
@@ -2284,13 +2293,23 @@ fn validate_references_with_inherited(
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
                 injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
+                // Split never sets `_loop` itself — it's only present here if
+                // this Split is nested inside a While and inherits it.
+                if variable_names.contains("_loop") {
+                    injected_vars.insert("_loop".to_string());
+                }
                 validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                let mut injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
+                // While never sets `_item` itself — it's only present here if
+                // this While is nested inside a Split and inherits it.
+                if variable_names.contains("_item") {
+                    injected_vars.insert("_item".to_string());
+                }
                 validate_references_with_inherited(&while_step.subgraph, &injected_vars, result);
             }
             _ => {}
@@ -4888,6 +4907,11 @@ fn validate_data_and_variable_references_with_context(
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
                 injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
+                // Split never sets `_loop` itself — it's only present here if
+                // this Split is nested inside a While and inherits it.
+                if all_variables.contains("_loop") {
+                    injected_vars.insert("_loop".to_string());
+                }
                 validate_data_and_variable_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
@@ -4899,10 +4923,15 @@ fn validate_data_and_variable_references_with_context(
                 // While subgraphs:
                 // 1. Have implicit data access (data.* refers to iteration item)
                 // 2. No config.variables, but the runtime injects per-iteration vars
-                let injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
+                let mut injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
+                // While never sets `_item` itself — it's only present here if
+                // this While is nested inside a Split and inherits it.
+                if all_variables.contains("_item") {
+                    injected_vars.insert("_item".to_string());
+                }
                 validate_data_and_variable_references_with_context(
                     &while_step.subgraph,
                     &injected_vars,
@@ -7724,6 +7753,175 @@ mod tests {
                     if step_id == "process" && root == "item"
             )),
             "expected ReferenceRootOutOfScope for 'item.x' inside a While (not Split) subgraph, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_loop_root_inside_standalone_split_subgraph_is_rejected() {
+        // Split never sets `_loop` itself (see `split_iteration_variables` in
+        // the direct-json runtime) — only a Split nested inside a While
+        // inherits it. A standalone Split must not grant `loop` scope.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2,3]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "process",
+                    "executionPlan": [
+                      {"fromStep":"process","toStep":"sub_finish"}
+                    ],
+                    "steps": {
+                      "process": {"id":"process","stepType":"Agent","agentId":"utils",
+                        "capabilityId":"get-current-iso-datetime",
+                        "inputMapping":{"value":{"valueType":"reference","value":"loop.index"}}},
+                      "sub_finish": {"id":"sub_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ReferenceRootOutOfScope { step_id, root, .. }
+                    if step_id == "process" && root == "loop"
+            )),
+            "expected ReferenceRootOutOfScope for 'loop.index' inside a standalone (not While) Split subgraph, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_loop_root_inside_split_nested_in_while_is_allowed() {
+        // A Split nested inside a While's subgraph inherits `_loop` from the
+        // enclosing scope (`split_iteration_variables` clones the outer
+        // `variables` map, which already has `_loop` set by the While) — so
+        // `loop.*` must be allowed here, unlike the standalone-Split case.
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [
+                {"fromStep":"loop","toStep":"finish"}
+              ],
+              "steps": {
+                "loop": {"id":"loop","stepType":"While","condition":{
+                    "type":"operation","op":"EQ","arguments":[
+                      {"valueType":"immediate","value":1},
+                      {"valueType":"immediate","value":2}
+                    ]},
+                  "config": {"maxIterations": 2},
+                  "subgraph": {
+                    "entryPoint": "split",
+                    "executionPlan": [
+                      {"fromStep":"split","toStep":"sub_finish"}
+                    ],
+                    "steps": {
+                      "split": {"id":"split","stepType":"Split","config":{
+                          "value": {"valueType":"immediate","value":[1,2,3]}
+                        },
+                        "subgraph": {
+                          "entryPoint": "process",
+                          "executionPlan": [
+                            {"fromStep":"process","toStep":"inner_finish"}
+                          ],
+                          "steps": {
+                            "process": {"id":"process","stepType":"Agent","agentId":"utils",
+                              "capabilityId":"get-current-iso-datetime",
+                              "inputMapping":{"value":{"valueType":"reference","value":"loop.index"}}},
+                            "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                          }
+                        }},
+                      "sub_finish": {"id":"sub_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ReferenceRootOutOfScope { .. }
+                    | ValidationError::UnknownReferenceRoot { .. }
+            )),
+            "loop.index inside a Split nested in a While should be allowed (inherited `_loop`), got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_item_root_inside_while_nested_in_split_is_allowed() {
+        // Symmetric to the Split-in-While case above: a While nested inside a
+        // Split's subgraph inherits `_item` from the enclosing scope
+        // (`while_iteration_variables` clones the outer `variables` map, which
+        // already has `_item` set by the Split) — so `item.*` must be allowed
+        // here, unlike the standalone-While case
+        // (`test_item_root_inside_while_subgraph_is_rejected`).
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "split",
+              "executionPlan": [
+                {"fromStep":"split","toStep":"finish"}
+              ],
+              "steps": {
+                "split": {"id":"split","stepType":"Split","config":{
+                    "value": {"valueType":"immediate","value":[1,2,3]}
+                  },
+                  "subgraph": {
+                    "entryPoint": "loop",
+                    "executionPlan": [
+                      {"fromStep":"loop","toStep":"sub_finish"}
+                    ],
+                    "steps": {
+                      "loop": {"id":"loop","stepType":"While","condition":{
+                          "type":"operation","op":"EQ","arguments":[
+                            {"valueType":"immediate","value":1},
+                            {"valueType":"immediate","value":2}
+                          ]},
+                        "config": {"maxIterations": 2},
+                        "subgraph": {
+                          "entryPoint": "process",
+                          "executionPlan": [
+                            {"fromStep":"process","toStep":"inner_finish"}
+                          ],
+                          "steps": {
+                            "process": {"id":"process","stepType":"Agent","agentId":"utils",
+                              "capabilityId":"get-current-iso-datetime",
+                              "inputMapping":{"value":{"valueType":"reference","value":"item.x"}}},
+                            "inner_finish": {"id":"inner_finish","stepType":"Finish"}
+                          }
+                        }},
+                      "sub_finish": {"id":"sub_finish","stepType":"Finish"}
+                    }
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ReferenceRootOutOfScope { .. }
+                    | ValidationError::UnknownReferenceRoot { .. }
+            )),
+            "item.x inside a While nested in a Split should be allowed (inherited `_item`), got: {:?}",
             result.errors
         );
     }
