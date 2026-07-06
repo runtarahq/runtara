@@ -268,7 +268,13 @@ pub async fn execute_proxy_request(
             .unwrap_or(json!({}));
 
         let resolved = facade
-            .resolve_connection_auth(connection_id, integration_id, &params, &mut final_headers)
+            .resolve_connection_auth(
+                connection_id,
+                tenant_id,
+                integration_id,
+                &params,
+                &mut final_headers,
+            )
             .await
             .map_err(|e| {
                 (

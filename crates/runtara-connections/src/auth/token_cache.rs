@@ -362,6 +362,15 @@ fn cache_token(cache_key: &str, token: CachedAccessToken) {
     token_cache().insert(cache_key.to_string(), token);
 }
 
+/// Drop the cached access token for an OAuth refresh-token connection so the next
+/// resolution re-refreshes from the persisted connection state. Used on the
+/// fail-closed path when a rotated token could not be persisted. The key must
+/// match how `describe_oauth_refresh_auth` builds it.
+pub(crate) fn invalidate_oauth_refresh_cache(connection_id: &str, integration_id: &str) {
+    let key = build_token_cache_key(&["oauth_refresh", connection_id, integration_id]);
+    token_cache().remove(&key);
+}
+
 // ── Single-flight refresh lock ───────────────────────────────────────────────
 // One async mutex per cache key so a rotating provider can't self-invalidate by
 // refreshing concurrently with the same one-time-use refresh token. Bounded by
