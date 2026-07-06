@@ -1,0 +1,31 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "price_vs_volume": {
+      "error": {
+        "blockId": "price_vs_volume",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Price vs volume by region",
+      "type": "chart"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "price_vs_volume",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_12_chart_scatter_object_model"
+  },
+  "resolvedFilters": {},
+  "success": true
+}

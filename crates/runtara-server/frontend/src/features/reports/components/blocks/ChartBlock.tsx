@@ -11,9 +11,12 @@ import {
   Pie,
   PieChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
+  ZAxis,
 } from 'recharts';
 import { ReportBlockDefinition, ReportBlockResult } from '../../types';
 
@@ -35,6 +38,13 @@ const SURFACE_COLOR = 'hsl(var(--card))';
 const BORDER_COLOR = 'hsl(var(--border))';
 const TEXT_COLOR = 'hsl(var(--foreground))';
 const MUTED_TEXT_COLOR = 'hsl(var(--muted-foreground))';
+
+// Recharts scatter axes read the point's coordinates from fixed dataKeys.
+// We project each series' Y (and optional bubble Z) onto these synthetic keys
+// so a single XAxis/YAxis/ZAxis pair drives every cloud, regardless of whether
+// the clouds come from `groupBy` partitions or from multiple Y series.
+const SCATTER_Y_KEY = '__scatterY';
+const SCATTER_Z_KEY = '__scatterZ';
 
 type ChartData = {
   columns?: string[];
@@ -113,6 +123,81 @@ export function ChartBlock({
               ))}
             </Pie>
           </PieChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  if (chart.kind === 'scatter') {
+    const yField = series[0].field;
+    const yLabel = series[0].label ?? yField;
+    const sizeField = chart.sizeField ?? undefined;
+    const clouds = buildScatterClouds(chartRows, chart.x, series, {
+      groupBy: chart.groupBy ?? undefined,
+      sizeField,
+    });
+    return (
+      <div
+        className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+          onPointClick ? 'cursor-pointer' : ''
+        }`}
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <ScatterChart margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
+            <CartesianGrid
+              stroke={GRID_COLOR}
+              strokeDasharray="3 5"
+              strokeOpacity={0.55}
+            />
+            <XAxis
+              type="number"
+              dataKey={chart.x}
+              name={chart.x}
+              domain={['auto', 'auto']}
+              tickFormatter={compactNumber}
+              axisLine={false}
+              tickLine={false}
+              tickMargin={10}
+              tick={{ fill: AXIS_COLOR, fontSize: 12 }}
+            />
+            <YAxis
+              type="number"
+              dataKey={SCATTER_Y_KEY}
+              name={yLabel}
+              domain={['auto', 'auto']}
+              width={52}
+              tickFormatter={compactNumber}
+              axisLine={false}
+              tickLine={false}
+              tickMargin={10}
+              tick={{ fill: AXIS_COLOR, fontSize: 12 }}
+            />
+            {sizeField ? (
+              <ZAxis
+                type="number"
+                dataKey={SCATTER_Z_KEY}
+                name={sizeField}
+                range={[60, 400]}
+              />
+            ) : null}
+            <Tooltip
+              cursor={{ strokeDasharray: '3 3' }}
+              content={<ChartTooltip />}
+            />
+            <Legend
+              iconType="circle"
+              wrapperStyle={{ color: MUTED_TEXT_COLOR, fontSize: 12 }}
+            />
+            {clouds.map((cloud, index) => (
+              <Scatter
+                key={cloud.name}
+                data={cloud.points}
+                name={cloud.name}
+                fill={COLORS[index % COLORS.length]}
+                onClick={handleChartClick}
+              />
+            ))}
+          </ScatterChart>
         </ResponsiveContainer>
       </div>
     );
@@ -356,6 +441,83 @@ function getChartSeries(
 
 function gradientId(blockId: string, field: string): string {
   return `report-chart-${blockId}-${field}`.replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+
+type ScatterCloud = { name: string; points: Record<string, unknown>[] };
+
+/**
+ * Build one Recharts `<Scatter>` dataset per cloud. When `groupBy` is set the
+ * points are partitioned by that field's distinct values (Y is always the first
+ * series). Otherwise each configured Y series becomes its own cloud — so a
+ * single-series scatter is one cloud and a multi-series scatter is N. Every
+ * point's Y (and optional bubble Z) is projected onto the shared synthetic keys
+ * the axes read, and coerced to a number so string-typed aggregates still plot.
+ */
+function buildScatterClouds(
+  rows: Record<string, unknown>[],
+  xField: string,
+  series: Array<{ field: string; label?: string | null }>,
+  opts: { groupBy?: string; sizeField?: string }
+): ScatterCloud[] {
+  const project = (
+    row: Record<string, unknown>,
+    yField: string
+  ): Record<string, unknown> => ({
+    ...row,
+    [xField]: toChartNumber(row[xField]),
+    [SCATTER_Y_KEY]: toChartNumber(row[yField]),
+    ...(opts.sizeField
+      ? { [SCATTER_Z_KEY]: toChartNumber(row[opts.sizeField]) }
+      : {}),
+  });
+
+  if (opts.groupBy) {
+    const groupField = opts.groupBy;
+    const yField = series[0].field;
+    const order: string[] = [];
+    const byGroup = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const key = String(row[groupField] ?? '—');
+      let bucket = byGroup.get(key);
+      if (!bucket) {
+        bucket = [];
+        byGroup.set(key, bucket);
+        order.push(key);
+      }
+      bucket.push(project(row, yField));
+    }
+    return order.map((name) => ({
+      name,
+      points: byGroup.get(name) ?? [],
+    }));
+  }
+
+  return series.map((s) => ({
+    name: s.label ?? s.field,
+    points: rows.map((row) => project(row, s.field)),
+  }));
+}
+
+function toChartNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat(undefined, {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
+// Keeps numeric scatter axis ticks legible when values span orders of
+// magnitude (e.g. 18,240,000 → "18.2M") so wide labels don't clip the plot.
+function compactNumber(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? COMPACT_NUMBER_FORMAT.format(value)
+    : String(value ?? '');
 }
 
 function formatTooltipValue(value: unknown): string {

@@ -701,9 +701,13 @@ fn report_authoring_schema() -> Value {
                 "type": "chart",
                 "configKey": "chart",
                 "required": {
-                    "chart.kind": "line | bar | area | pie | donut",
-                    "chart.x": "Output field for the x/name axis, usually a source.groupBy field.",
-                    "chart.series": "Array of output value fields, usually aggregate aliases."
+                    "chart.kind": "line | bar | area | pie | donut | scatter",
+                    "chart.x": "Output field for the x/name axis, usually a source.groupBy field. For kind='scatter' this is the NUMERIC x field (an aggregate alias or numeric dimension), not a category.",
+                    "chart.series": "Array of output value fields, usually aggregate aliases. For kind='scatter', series[0].field is the numeric Y field; additional series render as extra point clouds."
+                },
+                "optional": {
+                    "chart.sizeField": "Scatter only: numeric output field driving bubble radius. Omit for a plain (non-bubble) scatter.",
+                    "chart.groupBy": "Scatter only: output field whose distinct values partition points into separately-colored clouds."
                 }
             },
             "metric": {

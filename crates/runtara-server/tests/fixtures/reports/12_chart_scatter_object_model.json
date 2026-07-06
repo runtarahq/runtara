@@ -1,0 +1,44 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_price_vs_volume", "type": "block", "blockId": "price_vs_volume" }
+      }
+    ]
+  },
+  "filters": [],
+  "blocks": [
+    {
+      "id": "price_vs_volume",
+      "type": "chart",
+      "title": "Price vs volume by region",
+      "source": {
+        "schema": "Order",
+        "mode": "aggregate",
+        "groupBy": ["region"],
+        "aggregates": [
+          { "alias": "avg_price", "op": "avg", "field": "unit_price" },
+          { "alias": "total_units", "op": "sum", "field": "quantity" },
+          { "alias": "order_count", "op": "count" }
+        ],
+        "orderBy": [
+          { "field": "region", "direction": "asc" }
+        ],
+        "limit": 500
+      },
+      "chart": {
+        "kind": "scatter",
+        "x": "avg_price",
+        "series": [
+          { "field": "total_units", "label": "Units" }
+        ],
+        "sizeField": "order_count",
+        "groupBy": "region"
+      }
+    }
+  ]
+}

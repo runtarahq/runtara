@@ -2467,6 +2467,11 @@ impl ReportService {
                 )));
             }
         }
+        validate_chart_optional_fields(
+            chart,
+            |field| nested_output_fields.contains(field),
+            &format!("Block '{}' chart table column '{}'", block.id, column.field),
+        )?;
 
         Ok(())
     }
@@ -6620,6 +6625,34 @@ fn dataset_filterable_fields(dataset: &ReportDatasetDefinition) -> HashSet<Strin
     fields
 }
 
+/// Validate the optional scatter-only chart fields (`sizeField`, `groupBy`)
+/// against whatever field set is available at the call site. `chart.x` and each
+/// `series[].field` are validated separately by every caller (they exist for
+/// all kinds); this covers only the two fields that are absent on non-scatter
+/// kinds, so it is a no-op unless the author populated them. `context` is a
+/// human prefix such as `Block 'x'` or `Block 'x' chart table column 'y'`.
+fn validate_chart_optional_fields(
+    chart: &ReportChartConfig,
+    field_exists: impl Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if let Some(size_field) = &chart.size_field
+        && !field_exists(size_field)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} references unknown chart sizeField '{size_field}'"
+        )));
+    }
+    if let Some(group_by) = &chart.group_by
+        && !field_exists(group_by)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} references unknown chart groupBy '{group_by}'"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_dataset_block_output(
     block: &ReportBlockDefinition,
     source: &ReportSource,
@@ -6669,6 +6702,11 @@ fn validate_dataset_block_output(
                 )));
             }
         }
+        validate_chart_optional_fields(
+            chart,
+            |field| output_fields.contains(field),
+            &format!("Block '{}' dataset chart", block.id),
+        )?;
     }
 
     if let Some(metric) = &block.metric

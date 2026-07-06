@@ -1624,7 +1624,10 @@ function InlineTableChart({
   const chart = column.chart;
   const series = getInlineChartSeries(column, columns);
 
-  if (!chart || rows.length === 0 || series.length === 0) {
+  // Scatter is a full-block visualization; a bubble cloud in a ~44px sparkline
+  // cell is unreadable, so render nothing rather than silently falling through
+  // to the line-chart default branch below.
+  if (!chart || rows.length === 0 || series.length === 0 || chart.kind === 'scatter') {
     return <EmptyCellPlaceholder />;
   }
 

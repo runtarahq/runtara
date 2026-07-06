@@ -1407,6 +1407,15 @@ pub struct ReportChartConfig {
     pub x: String,
     #[serde(default)]
     pub series: Vec<ReportChartSeries>,
+    /// Scatter-only: numeric field driving bubble radius (Recharts `ZAxis`).
+    /// Ignored by every other chart kind. Absent for non-bubble scatters.
+    #[serde(default, rename = "sizeField", skip_serializing_if = "Option::is_none")]
+    pub size_field: Option<String>,
+    /// Scatter-only: field whose distinct values partition points into
+    /// separately-colored clouds (one Recharts `Scatter` series per value).
+    /// Ignored by every other chart kind.
+    #[serde(default, rename = "groupBy", skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1419,6 +1428,10 @@ pub enum ReportChartKind {
     Area,
     Pie,
     Donut,
+    /// Numeric-X / numeric-Y point cloud. `x` is the numeric X field,
+    /// `series[0].field` is the Y field; optional `size_field` (bubble
+    /// radius) and `group_by` (per-value coloring) refine it.
+    Scatter,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1945,3 +1958,59 @@ pub struct DeleteReportResponse {
 // per-op REST + MCP shims. All block edits now flow through
 // `runtara_report_dsl::edit_ops::ReportEditOp` via the canonical
 // `POST /api/runtime/reports/{id}/edit` endpoint.
+
+#[cfg(test)]
+mod chart_config_tests {
+    use super::*;
+
+    #[test]
+    fn scatter_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ReportChartKind::Scatter).unwrap(),
+            "\"scatter\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ReportChartKind>("\"scatter\"").unwrap(),
+            ReportChartKind::Scatter
+        );
+    }
+
+    #[test]
+    fn scatter_optional_fields_round_trip_camel_case() {
+        let cfg = ReportChartConfig {
+            kind: ReportChartKind::Scatter,
+            x: "avg_price".into(),
+            series: vec![ReportChartSeries {
+                field: "total_units".into(),
+                label: Some("Units".into()),
+            }],
+            size_field: Some("order_count".into()),
+            group_by: Some("region".into()),
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["sizeField"], "order_count");
+        assert_eq!(json["groupBy"], "region");
+        let back: ReportChartConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.size_field.as_deref(), Some("order_count"));
+        assert_eq!(back.group_by.as_deref(), Some("region"));
+    }
+
+    #[test]
+    fn omitted_scatter_fields_are_not_serialized() {
+        // Backward-compat: an existing bar chart must round-trip byte-identically
+        // with no new keys leaking into the wire form.
+        let cfg = ReportChartConfig {
+            kind: ReportChartKind::Bar,
+            x: "day".into(),
+            series: vec![ReportChartSeries {
+                field: "count".into(),
+                label: None,
+            }],
+            size_field: None,
+            group_by: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("sizeField").is_none());
+        assert!(json.get("groupBy").is_none());
+    }
+}

@@ -168,7 +168,13 @@ export type ReportDatasetFieldType =
   | "datetime"
   | "json";
 
-export type ReportChartKind = "line" | "bar" | "area" | "pie" | "donut";
+export type ReportChartKind =
+  | "line"
+  | "bar"
+  | "area"
+  | "pie"
+  | "donut"
+  | "scatter";
 
 export type ReportCardFieldKind =
   | "value"
@@ -3303,8 +3309,19 @@ export interface ReportCardGroup {
 }
 
 export interface ReportChartConfig {
+  /**
+   * Scatter-only: field whose distinct values partition points into
+   * separately-colored clouds (one Recharts `Scatter` series per value).
+   * Ignored by every other chart kind.
+   */
+  groupBy?: string | null;
   kind: ReportChartKind;
   series?: ReportChartSeries[];
+  /**
+   * Scatter-only: numeric field driving bubble radius (Recharts `ZAxis`).
+   * Ignored by every other chart kind. Absent for non-bubble scatters.
+   */
+  sizeField?: string | null;
   x: string;
 }
 
