@@ -41,24 +41,41 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
 
 /// Translate a non-success in-process response into `rmcp::ErrorData`.
 ///
-/// When the response looks like an entitlement denial — 403 plus a stable
-/// application-level `code` string in the body — surface the body verbatim
-/// in `data` so MCP clients see the same shape they'd get from a tool-level
-/// [`crate::mcp::entitlement`] gate. Otherwise fall back to the flat
+/// When a 4xx (client-error) response body carries either a stable
+/// application-level `code` string or a `validationErrors` array — the two
+/// structured-error shapes this API emits (entitlement denials and workflow
+/// validation failures, respectively) — surface the body verbatim in `data`
+/// so MCP clients see the same E0xx codes, `step_id`/`field_name` context,
+/// and stable codes a human caller would. `400` maps to `INVALID_PARAMS`
+/// (the request/parameters were malformed); other structured 4xx (401, 403,
+/// 404, 409, ...) map to `INVALID_REQUEST`. Anything else — 5xx, or 4xx
+/// bodies with neither shape — falls back to the flat
 /// "API error (status): message" shape this layer has always emitted.
 fn translate_api_error_response(
     status: axum::http::StatusCode,
     body: serde_json::Value,
 ) -> rmcp::ErrorData {
     let has_stable_code = body.get("code").and_then(|v| v.as_str()).is_some();
-    if status == axum::http::StatusCode::FORBIDDEN && has_stable_code {
+    let has_validation_errors = body
+        .get("validationErrors")
+        .map(|v| v.is_array())
+        .unwrap_or(false);
+
+    if status.is_client_error() && (has_stable_code || has_validation_errors) {
+        let error_code = if status == axum::http::StatusCode::BAD_REQUEST {
+            rmcp::model::ErrorCode::INVALID_PARAMS
+        } else {
+            rmcp::model::ErrorCode::INVALID_REQUEST
+        };
         let message = body
             .get("message")
+            .or(body.get("error"))
             .and_then(|v| v.as_str())
             .unwrap_or("Entitlement denied")
             .to_string();
-        return rmcp::ErrorData::new(rmcp::model::ErrorCode::INVALID_REQUEST, message, Some(body));
+        return rmcp::ErrorData::new(error_code, message, Some(body));
     }
+
     let msg = body
         .get("message")
         .or(body.get("error"))
@@ -600,6 +617,58 @@ mod tests {
         let err = translate_api_error_response(StatusCode::FORBIDDEN, body);
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
         assert_eq!(err.message.as_ref(), "Entitlement denied");
+    }
+
+    #[test]
+    fn translate_preserves_validation_errors_array_on_400_without_stable_code() {
+        // Body shape mirrors ServiceError::WorkflowValidationError's response
+        // (api/handlers/workflows.rs, map_service_error_to_response) and the
+        // wire shape of WorkflowValidationErrorResponse/ValidationErrorDto
+        // (api/dto/workflows.rs): camelCase `validationErrors`, no top-level
+        // `code` — only each array element carries its own E0xx `code`.
+        let body = json!({
+            "success": false,
+            "message": "Workflow validation failed",
+            "validationErrors": [
+                {
+                    "code": "E023",
+                    "message": "Step 'notify' references unknown step 'send_emial'",
+                    "stepId": "notify",
+                    "fieldName": "target_step_id",
+                    "relatedStepIds": ["send_emial"]
+                }
+            ]
+        });
+        let err = translate_api_error_response(StatusCode::BAD_REQUEST, body.clone());
+
+        // 400 is specifically a parameter/body validation failure -> INVALID_PARAMS.
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(err.message.as_ref(), "Workflow validation failed");
+        let data = err.data.expect("data populated");
+        assert_eq!(data["validationErrors"][0]["code"], json!("E023"));
+        assert_eq!(data["validationErrors"][0]["stepId"], json!("notify"));
+        assert_eq!(
+            data["validationErrors"][0]["fieldName"],
+            json!("target_step_id")
+        );
+    }
+
+    #[test]
+    fn translate_falls_back_for_generic_4xx_without_code_or_validation_errors() {
+        // A 404/409 body with only a plain `message` (no `code`, no
+        // `validationErrors`) has nothing structured to preserve, so it
+        // should keep collapsing to the legacy flat "API error" string —
+        // locks in that this case does not regress after broadening the
+        // structured-4xx branch.
+        let body = json!({
+            "success": false,
+            "message": "Workflow not found"
+        });
+        let err = translate_api_error_response(StatusCode::NOT_FOUND, body);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(err.message.contains("API error (404"));
+        assert!(err.message.contains("Workflow not found"));
+        assert!(err.data.is_none());
     }
 
     #[test]
