@@ -174,6 +174,10 @@ export function ReportBlockHost({
     () => buildExplorePath(reportId, block.id, filters),
     [block.id, filters, reportId]
   );
+  // Metric cards render their own label inside the card, so the block-host
+  // heading would just duplicate it. Group-level headings belong to the
+  // grid layout node, not per-metric.
+  const showBlockTitle = Boolean(block.title) && block.type !== 'metric';
 
   const result = needsBlockFetch
     ? (fetchedResult ?? initialResult)
@@ -276,9 +280,9 @@ export function ReportBlockHost({
 
   return (
     <div ref={rootRef} className={className}>
-      {(block.title || block.dataset) && (
+      {(showBlockTitle || block.dataset) && (
         <div className="mb-2 flex items-center justify-between gap-3">
-          {block.title ? (
+          {showBlockTitle ? (
             <h2 className="text-base font-semibold text-foreground">
               {block.title}
             </h2>
