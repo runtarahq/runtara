@@ -41,6 +41,8 @@ dashmap = "6.1"
 base64 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+# Async single-flight lock around OAuth token refresh (host-only crate)
+tokio = { version = "1", features = ["sync"] }
 
 # At-rest encryption for connection parameters
 aes-gcm = "0.10"
