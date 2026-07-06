@@ -14,6 +14,32 @@ pub struct ResolvedConnectionAuth {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
     pub azure_signing: Option<AzureSigningParams>,
+    /// Credentials produced by an actual OAuth refresh during this resolution that
+    /// must be persisted back to the connection. `None` on every cache hit / fast
+    /// path and for non-refresh grants. Consumed by the facade write-back.
+    pub rotated_credentials: Option<RotatedCredentials>,
+}
+
+/// Access + (possibly rotated) refresh token captured when an OAuth refresh fires,
+/// to be sealed back into `connection_parameters`. Has a hand-written `Debug` that
+/// redacts the token values so a stray `{:?}` can't leak them to logs.
+pub struct RotatedCredentials {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl std::fmt::Debug for RotatedCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotatedCredentials")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_expires_at", &self.token_expires_at)
+            .finish()
+    }
 }
 
 pub(crate) struct ConnectionAuthDescriptor {
@@ -47,6 +73,7 @@ pub async fn resolve_connection_auth(
 ) -> Result<ResolvedConnectionAuth, String> {
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
 
+    let mut rotated_credentials = None;
     if let Some(deferred_auth) = descriptor.deferred_auth {
         let resolved = token_cache::resolve_deferred_auth(
             client,
@@ -56,13 +83,15 @@ pub async fn resolve_connection_auth(
             integration_id,
         )
         .await?;
-        headers.insert(resolved.0, resolved.1);
+        headers.insert(resolved.header_name, resolved.header_value);
+        rotated_credentials = resolved.rotated;
     }
 
     Ok(ResolvedConnectionAuth {
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
         azure_signing: descriptor.azure_signing,
+        rotated_credentials,
     })
 }
 
