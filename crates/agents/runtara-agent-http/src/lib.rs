@@ -19,13 +19,17 @@
 //! artifact, never hand-edited.
 //!
 //! Routing model:
-//! - If a connection is attached, `runtara-http`'s `call_agent()` reads
-//!   `RUNTARA_HTTP_PROXY_URL` and forwards every request through the proxy
-//!   as a JSON envelope. The `X-Runtara-Connection-Id` header causes the
-//!   proxy to attach credentials server-side.
-//! - If no connection is attached, the request is sent directly to the URL
-//!   via `call()` — useful for plain public-API calls that don't need
-//!   credential injection.
+//! - Every request goes through the proxy via `runtara-http`'s `call_agent()`,
+//!   which reads `RUNTARA_HTTP_PROXY_URL` and forwards the request as a JSON
+//!   envelope. Routing through the proxy — connection or not — lets the host
+//!   apply its egress filtering uniformly: SSRF/private-IP block, the
+//!   DNS-rebinding guard, and no-redirect-follow.
+//! - If a connection is attached, the `X-Runtara-Connection-Id` header
+//!   additionally causes the proxy to inject credentials server-side and pin
+//!   the request to the connection's base URL. Connectionless requests get the
+//!   same egress filtering minus the base-URL pin.
+//! - When no proxy is configured (SDK/local, no `RUNTARA_HTTP_PROXY_URL`),
+//!   `call_agent()` falls back to a direct call.
 //!
 //! The component itself never sees secrets either way.
 #![allow(clippy::result_large_err)]
@@ -409,18 +413,13 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
     // Forward the connection id so the proxy can attach credentials. The
     // wasm build never resolves the connection locally — credential
     // injection and URL-prefix handling happen server-side via the proxy.
-    let has_connection = if let Some(ref raw) = input._connection {
-        if !raw.connection_id.is_empty() {
-            headers
-                .entry("X-Runtara-Connection-Id".to_string())
-                .or_insert_with(|| raw.connection_id.clone());
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    if let Some(ref raw) = input._connection
+        && !raw.connection_id.is_empty()
+    {
+        headers
+            .entry("X-Runtara-Connection-Id".to_string())
+            .or_insert_with(|| raw.connection_id.clone());
+    }
 
     // Append query parameters.
     if !query_parameters.is_empty() {
@@ -461,14 +460,14 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
         }
     };
 
-    // Connection-bound requests go through the proxy (`call_agent`) so it
-    // can inject credentials and resolve the base URL. Plain requests skip
-    // the proxy (`call`) and hit the URL directly.
-    let response_result = if has_connection {
-        request.call_agent()
-    } else {
-        request.call()
-    };
+    // Every request goes through the proxy (`call_agent`) so the host applies
+    // its egress filtering (SSRF/private-IP block, DNS-rebinding guard,
+    // no-redirect-follow) uniformly. Connection-bound requests additionally get
+    // credential injection and base-URL pinning server-side (keyed on the
+    // `X-Runtara-Connection-Id` header); connectionless requests get the same
+    // filtering minus the base-URL pin. When no proxy is configured (SDK/local),
+    // `call_agent` falls back to a direct call.
+    let response_result = request.call_agent();
 
     let response = match response_result {
         Ok(r) => r,
