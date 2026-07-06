@@ -442,16 +442,6 @@ impl WorkflowService {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
 
-        // Reject any step whose agent module is not in this tenant's
-        // `enabled_agents` allowlist. Runs *before* the structural validator
-        // so the rejection is surfaced with AGENT_NOT_ENABLED rather than as
-        // a generic workflow validation error.
-        crate::middleware::entitlement::walk_graph_for_agents(
-            crate::config::entitlements(),
-            &workflow.execution_graph,
-        )
-        .map_err(ServiceError::EntitlementDenied)?;
-
         // Run recursive closure validation from runtara-workflows: the root
         // graph plus every embedded (grand)child, loaded from the database.
         // A saved workflow must always be compilable, so a dangling
@@ -491,6 +481,20 @@ impl WorkflowService {
                 }),
             }
         }
+
+        // Reject any step whose agent module is not in this tenant's
+        // `enabled_agents` allowlist — across the *whole* EmbedWorkflow
+        // closure, not just the root, so a forbidden agent can't be saved
+        // via a child that only gets structural (not allowlist) validation
+        // below. Runs before the structural validator so the rejection is
+        // surfaced with AGENT_NOT_ENABLED rather than as a generic workflow
+        // validation error.
+        crate::middleware::entitlement::walk_closure_for_agents(
+            crate::config::entitlements(),
+            &workflow.execution_graph,
+            closure_children.iter().map(|c| &c.execution_graph),
+        )
+        .map_err(ServiceError::EntitlementDenied)?;
 
         let report = runtara_workflows::validate_workflow_closure(
             workflow_id,

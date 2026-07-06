@@ -113,13 +113,47 @@ pub fn walk_graph_for_agents(
                     walk_graph_for_agents(snapshot, on_wait)?;
                 }
             }
-            // Other step kinds carry no agent module reference: Finish,
-            // Conditional, Switch, EmbedWorkflow, Log, Error, Filter,
+            // Other step kinds carry no agent module reference of their
+            // own: Finish, Conditional, Switch, Log, Error, Filter,
             // GroupBy, Delay, AiAgent (LLM-driven; gated by provider, not
             // by the `enabled_agents` allowlist — left for a follow-up
             // if/when LLM providers join the per-agent gate).
+            //
+            // EmbedWorkflow is deliberately excluded from that list: its
+            // *referenced child graph* can absolutely contain Agent steps,
+            // and skipping it here would silently let a forbidden agent
+            // through via an embedded child. It isn't walked from inside
+            // this function because resolving the child requires an async
+            // database load this pure/sync walk can't perform. Callers
+            // that have resolved the EmbedWorkflow closure (e.g. for
+            // structural validation) must additionally check every child
+            // graph via [`walk_closure_for_agents`] — walking the root
+            // alone is not sufficient.
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Walk the root graph and every already-resolved `EmbedWorkflow` child in
+/// its closure, returning the first `AGENT_NOT_ENABLED` denial found
+/// anywhere — root or any (grand)child — or `Ok(())` if every graph in the
+/// closure only references allowed agents.
+///
+/// [`walk_graph_for_agents`] alone only ever sees the graph it's handed: it
+/// does not (and cannot, being pure/sync) resolve `EmbedWorkflow`
+/// references, which requires an async database load. Callers that have
+/// already resolved the closure — e.g. for `validate_workflow_closure`'s
+/// structural checks — should pass that same resolved list here so a
+/// forbidden agent buried in a saved child can't slip past the allowlist.
+pub fn walk_closure_for_agents<'a>(
+    snapshot: &EntitlementSnapshot,
+    root: &runtara_dsl::ExecutionGraph,
+    children: impl IntoIterator<Item = &'a runtara_dsl::ExecutionGraph>,
+) -> Result<(), EntitlementDenial> {
+    walk_graph_for_agents(snapshot, root)?;
+    for child in children {
+        walk_graph_for_agents(snapshot, child)?;
     }
     Ok(())
 }
@@ -626,6 +660,73 @@ mod tests {
             }
         }));
         assert!(walk_graph_for_agents(&snap, &graph).is_ok());
+    }
+
+    // ── walk_closure_for_agents ─────────────────────────────────────────
+
+    #[test]
+    fn closure_walk_rejects_disallowed_agent_hidden_in_embedded_child() {
+        // Root is clean; the forbidden agent only exists inside an
+        // EmbedWorkflow child's resolved graph — walk_graph_for_agents(root)
+        // alone would miss it.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let root = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "http", "capabilityId": "request"},
+                "embed": {"stepType": "EmbedWorkflow", "id": "embed", "childWorkflowId": "child-wf", "childVersion": "latest"}
+            }
+        }));
+        let child = parse_graph(serde_json::json!({
+            "entryPoint": "inner",
+            "steps": {
+                "inner": {"stepType": "Agent", "id": "inner", "agentId": "csv", "capabilityId": "parse"}
+            }
+        }));
+
+        assert!(
+            walk_graph_for_agents(&snap, &root).is_ok(),
+            "sanity check: root alone must look clean, or this test doesn't reproduce the bug"
+        );
+
+        let denial = walk_closure_for_agents(&snap, &root, [&child])
+            .expect_err("csv step inside the embedded child must be reached");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert_eq!(denial.json_body()["agent"], "csv");
+    }
+
+    #[test]
+    fn closure_walk_passes_when_root_and_every_child_are_allowed() {
+        let snap = snapshot_with(None, Some(r#"{"agents":["http","csv"]}"#));
+        let root = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "http", "capabilityId": "request"}
+            }
+        }));
+        let child = parse_graph(serde_json::json!({
+            "entryPoint": "inner",
+            "steps": {
+                "inner": {"stepType": "Agent", "id": "inner", "agentId": "csv", "capabilityId": "parse"}
+            }
+        }));
+        assert!(walk_closure_for_agents(&snap, &root, [&child]).is_ok());
+    }
+
+    #[test]
+    fn closure_walk_with_no_children_matches_root_only_walk() {
+        // Empty children list must behave exactly like walk_graph_for_agents
+        // alone — no surprises for callers with no EmbedWorkflow steps.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let root = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "csv", "capabilityId": "parse"}
+            }
+        }));
+        let denial = walk_closure_for_agents(&snap, &root, std::iter::empty())
+            .expect_err("csv must still be denied with zero children");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
     }
 
     // ────────────────────────────────────────────────────────────────────
