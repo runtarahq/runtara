@@ -13,7 +13,8 @@ use opentelemetry::global;
 use opentelemetry::metrics::Counter;
 use serde_json::Value;
 
-use crate::auth::provider_auth::{self, ResolvedConnectionAuth};
+use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredentials};
+use crate::auth::token_cache;
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
@@ -286,15 +287,18 @@ impl ConnectionsFacade {
     /// Resolve connection credentials and inject auth into headers.
     ///
     /// Handles per-integration auth logic, OAuth token refresh,
-    /// client credentials flow, and token caching.
+    /// client credentials flow, and token caching. When an OAuth refresh actually
+    /// fires, the (possibly rotated) tokens are persisted back to the connection
+    /// so a rotating provider survives process restarts / cache eviction.
     pub async fn resolve_connection_auth(
         &self,
         connection_id: &str,
+        tenant_id: &str,
         integration_id: &str,
         params: &Value,
         headers: &mut HashMap<String, String>,
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
-        provider_auth::resolve_connection_auth(
+        let resolved = provider_auth::resolve_connection_auth(
             &self.state.http_client,
             connection_id,
             integration_id,
@@ -303,7 +307,97 @@ impl ConnectionsFacade {
             &self.state.connection_events,
         )
         .await
-        .map_err(ConnectionsError::AuthResolution)
+        .map_err(ConnectionsError::AuthResolution)?;
+
+        // Only set when an actual refresh occurred (once per ~55-min cycle, not per
+        // request), so this DB write is off the common hot path.
+        if let Some(rotated) = &resolved.rotated_credentials {
+            self.persist_rotated_credentials(
+                connection_id,
+                tenant_id,
+                integration_id,
+                params,
+                rotated,
+            )
+            .await?;
+        }
+
+        Ok(resolved)
+    }
+
+    /// Seal the refreshed tokens back into `connection_parameters` with an
+    /// optimistic-concurrency guard on the refresh-token hash (see
+    /// [`ConnectionRepository::persist_refreshed_oauth`]).
+    async fn persist_rotated_credentials(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        integration_id: &str,
+        params: &Value,
+        rotated: &RotatedCredentials,
+    ) -> Result<(), ConnectionsError> {
+        let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
+        // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
+        let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
+
+        let mut merged = params.clone();
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert(
+                "access_token".to_string(),
+                Value::String(rotated.access_token.clone()),
+            );
+            if let Some(rt) = new_refresh {
+                obj.insert("refresh_token".to_string(), Value::String(rt.to_string()));
+            }
+            if let Some(exp) = rotated.token_expires_at {
+                obj.insert(
+                    "token_expires_at".to_string(),
+                    Value::String(exp.to_rfc3339()),
+                );
+            }
+        }
+
+        let expected_hash = old_refresh.map(refresh_token_hash);
+        let new_hash = new_refresh.map(refresh_token_hash);
+
+        match self
+            .repo()
+            .persist_refreshed_oauth(
+                connection_id,
+                tenant_id,
+                &merged,
+                expected_hash.as_deref(),
+                new_hash.as_deref(),
+            )
+            .await
+        {
+            // Lost the optimistic race: another process rotated concurrently and already
+            // persisted a valid token. This process's in-memory access token is still good
+            // for the cycle; the DB holds the winner's token for cold starts.
+            Ok(0) => {
+                tracing::warn!(
+                    connection_id,
+                    "oauth rotation persist skipped — concurrent rotation won the optimistic guard"
+                );
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if rotates_refresh_token(integration_id) {
+                    // Fail closed: the DB now holds a dead (rotated-away) token and we could
+                    // not replace it. Drop the just-cached access token so the next attempt
+                    // re-refreshes from the persisted state rather than diverging silently.
+                    token_cache::invalidate_oauth_refresh_cache(connection_id, integration_id);
+                    tracing::error!(connection_id, error = %e, "failed to persist rotated oauth tokens — failing closed");
+                    Err(ConnectionsError::Database(e))
+                } else {
+                    // Non-rotating (e.g. HubSpot): the DB token stays valid, so a failed
+                    // same-value write is harmless — log and continue.
+                    tracing::error!(connection_id, error = %e, "failed to persist refreshed oauth tokens (tolerated: non-rotating provider)");
+                    Ok(())
+                }
+            }
+        }
     }
 
     // ── Rate limiting ───────────────────────────────────────────────────
@@ -387,6 +481,22 @@ impl ConnectionsFacade {
             }
         }
     }
+}
+
+/// SHA-256 (hex) of a refresh token — a non-reversible fingerprint stored in the
+/// `refresh_token_hash` column for the rotation optimistic-concurrency guard. The
+/// token value itself is never persisted in plaintext.
+fn refresh_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Whether a provider rotates (and invalidates) its refresh token on every refresh.
+/// Drives fail-closed handling when a rotated token can't be persisted. Until the
+/// provider descriptor (Workstream B) lands this is a minimal explicit list;
+/// non-rotating providers (e.g. HubSpot) default to `false`.
+fn rotates_refresh_token(integration_id: &str) -> bool {
+    matches!(integration_id, "quickbooks_online")
 }
 
 /// Lua script for atomic token bucket check-and-decrement.

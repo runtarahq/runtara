@@ -979,6 +979,48 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Persist tokens produced by an OAuth *refresh* (rotating providers), sealing
+    /// the merged parameters. Unlike [`Self::update_parameters_and_status`] this
+    /// leaves `status` untouched — a refresh is not a re-authorization.
+    ///
+    /// Optimistic-concurrency guard: the write only lands when the stored
+    /// `refresh_token_hash` is still `NULL` (never rotated / legacy row) or equals
+    /// `expected_hash` (the hash of the refresh token we refreshed from). If another
+    /// process rotated concurrently the guard fails and `0` rows are affected, so the
+    /// caller can adopt the winner's freshly-persisted token instead of clobbering it.
+    ///
+    /// Returns the number of rows updated (`0` == lost the optimistic race).
+    pub async fn persist_refreshed_oauth(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        parameters: &serde_json::Value,
+        expected_hash: Option<&str>,
+        new_hash: Option<&str>,
+    ) -> Result<u64, sqlx::Error> {
+        let sealed = self
+            .seal(Some(parameters))?
+            .unwrap_or(serde_json::Value::Null);
+        let result = sqlx::query(
+            r#"
+            UPDATE connection_data_entity
+            SET connection_parameters = $3,
+                refresh_token_hash = $4,
+                updated_at = NOW()
+            WHERE id = $1 AND tenant_id = $2
+              AND (refresh_token_hash IS NULL OR refresh_token_hash = $5)
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(&sealed)
+        .bind(new_hash)
+        .bind(expected_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Re-encrypt all rows for a given tenant (or all tenants if `tenant_id`
     /// is `None`) using the current cipher.
     ///

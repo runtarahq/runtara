@@ -79,6 +79,7 @@ pub async fn presign_handler(
         .facade
         .resolve_connection_auth(
             &request.connection_id,
+            &tenant_id,
             integration_id,
             &params,
             &mut headers_sink,
