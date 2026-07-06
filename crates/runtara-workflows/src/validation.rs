@@ -58,8 +58,6 @@
 //! | E058 | UndefinedReferenceField | Nested `data.*`/`variables.*` field not known under a validated prefix |
 //! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
-//! | E126 | UnknownReferenceRoot | Reference root is not `data`/`variables`/`workflow`/`steps`/`loop`/`item` |
-//! | E127 | ReferenceRootOutOfScope | `loop`/`item` root used where the runtime never populates it |
 //! | E070 | UnknownVariable | Variable doesn't exist |
 //! | E072 | InvalidConditionalEdge | Conditional outgoing edge is not a true/false branch |
 //! | E080 | TypeMismatch | Value type doesn't match expected |
@@ -254,32 +252,6 @@ pub enum ValidationError {
         attempted_field: String,
     },
 
-    /// A reference's root segment is not one of the runtime's recognized
-    /// scope roots (`data`, `variables`, `workflow`, `steps`, `loop`, `item`
-    /// — see `is_qualified_workflow_path` in the direct-json runtime). The
-    /// runtime resolves any other root to `null` via the same lookup path as
-    /// a legitimate reference, so a typo'd or invented root compiles,
-    /// deploys, and runs silently instead of failing loudly.
-    UnknownReferenceRoot {
-        step_id: String,
-        reference: String,
-        root: String,
-        legal_roots: Vec<String>,
-    },
-
-    /// A reference uses the `loop` or `item` root outside the scope where the
-    /// runtime actually populates it (`item` outside a Filter step's own
-    /// condition or a Split subgraph; `loop` outside a While step's own
-    /// condition or a While/Split subgraph). The root is real, just
-    /// unpopulated here — same silent-null failure mode as
-    /// [`Self::UnknownReferenceRoot`].
-    ReferenceRootOutOfScope {
-        step_id: String,
-        reference: String,
-        root: String,
-        reason: String,
-    },
-
     // === EmbedWorkflow Input Validation Errors ===
     /// EmbedWorkflow provides inputs but child has no inputSchema.
     ChildMissingInputSchema {
@@ -472,8 +444,6 @@ impl ValidationError {
             Self::UndefinedVariableReference { .. } => "E053",
             Self::UndefinedReferenceField { .. } => "E058",
             Self::ReferenceNonObjectTraversal { .. } => "E059",
-            Self::UnknownReferenceRoot { .. } => "E126",
-            Self::ReferenceRootOutOfScope { .. } => "E127",
             Self::ChildMissingInputSchema { .. } => "E054",
             Self::MissingChildWorkflow { .. } => "E124",
             Self::DuplicateEmbedStepId { .. } => "E125",
@@ -791,33 +761,6 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E059] Step '{}' references '{}' but '{}' is '{}' and cannot be traversed to '{}'",
                     step_id, reference, known_prefix, actual_type, attempted_field
-                )
-            }
-            ValidationError::UnknownReferenceRoot {
-                step_id,
-                reference,
-                root,
-                legal_roots,
-            } => {
-                write!(
-                    f,
-                    "[E126] Step '{}' references '{}' but '{}' is not a recognized reference root.\n       Legal roots: {}",
-                    step_id,
-                    reference,
-                    root,
-                    legal_roots.join(", ")
-                )
-            }
-            ValidationError::ReferenceRootOutOfScope {
-                step_id,
-                reference,
-                root,
-                reason,
-            } => {
-                write!(
-                    f,
-                    "[E127] Step '{}' references '{}' but the '{}' root is not available here: {}",
-                    step_id, reference, root, reason
                 )
             }
             ValidationError::ChildMissingInputSchema {
@@ -2689,7 +2632,7 @@ fn validate_template_static_reference(
                     validate_schema_reference_path(
                         step_id,
                         reference,
-                        &["data"],
+                        "data",
                         &context.graph.input_schema,
                         &mut nested_result,
                     );
@@ -2716,7 +2659,6 @@ fn validate_template_static_reference(
                     validate_variable_reference_path(
                         step_id,
                         reference,
-                        &["variables"],
                         field_name,
                         &variable.value,
                         &mut nested_result,
@@ -4395,21 +4337,6 @@ fn parse_reference(reference: &str) -> Option<(&str, &str)> {
     Some((root, parts[1]))
 }
 
-/// The reference roots the runtime resolves — `build_source` in
-/// `direct_json.rs` always populates `data`/`variables`/`steps`/`workflow`,
-/// and conditionally populates `loop`/`item` (see [`ValidationError::ReferenceRootOutOfScope`]).
-/// Anything else falls through `lookup_source_path` to a silent `null`
-/// instead of failing to compile.
-const LEGAL_REFERENCE_ROOTS: &[&str] = &["data", "variables", "workflow", "steps", "loop", "item"];
-
-/// The leading identifier of a reference path, up to the first `.` or `[`
-/// (e.g. `"data"` from `"data.foo"`, `"steps"` from `"steps['id'].outputs"`,
-/// or the whole string for a bare root like `"data"`).
-fn reference_root(reference: &str) -> &str {
-    let end = reference.find(['.', '[']).unwrap_or(reference.len());
-    &reference[..end]
-}
-
 fn reference_segments(reference: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -4454,28 +4381,19 @@ fn reference_segments(reference: &str) -> Vec<String> {
     segments
 }
 
-/// True when `segments` begins with exactly `prefix` (caller has already
-/// checked `segments.len() > prefix.len()`).
-fn segments_start_with(segments: &[String], prefix: &[&str]) -> bool {
-    segments
-        .iter()
-        .zip(prefix.iter())
-        .all(|(segment, expected)| segment == expected)
-}
-
 fn validate_schema_reference_path(
     step_id: &str,
     reference: &str,
-    root_segments: &[&str],
+    root: &str,
     schema: &HashMap<String, SchemaField>,
     result: &mut ValidationResult,
 ) {
     let segments = reference_segments(reference);
-    if segments.len() <= root_segments.len() || !segments_start_with(&segments, root_segments) {
+    if segments.len() <= 1 || segments.first().map(String::as_str) != Some(root) {
         return;
     }
 
-    let Some(first_field) = segments.get(root_segments.len()) else {
+    let Some(first_field) = segments.get(1) else {
         return;
     };
 
@@ -4489,8 +4407,8 @@ fn validate_schema_reference_path(
         return;
     };
 
-    let mut known_prefix = format!("{}.{}", root_segments.join("."), first_field);
-    let mut index = root_segments.len() + 1;
+    let mut known_prefix = format!("{}.{}", root, first_field);
+    let mut index = 2;
 
     while index < segments.len() {
         let segment = &segments[index];
@@ -4581,21 +4499,19 @@ fn validate_schema_reference_path(
 fn validate_variable_reference_path(
     step_id: &str,
     reference: &str,
-    root_segments: &[&str],
     variable_name: &str,
     value: &serde_json::Value,
     result: &mut ValidationResult,
 ) {
     let segments = reference_segments(reference);
-    let skip = root_segments.len() + 1;
-    if segments.len() <= skip || !segments_start_with(&segments, root_segments) {
+    if segments.len() <= 2 || segments.first().map(String::as_str) != Some("variables") {
         return;
     }
 
     let mut current_value = value;
-    let mut known_prefix = format!("{}.{}", root_segments.join("."), variable_name);
+    let mut known_prefix = format!("variables.{}", variable_name);
 
-    for segment in segments.iter().skip(skip) {
+    for segment in segments.iter().skip(2) {
         match current_value {
             serde_json::Value::Object(map) => {
                 let Some(next_value) = map.get(segment) else {
@@ -4816,61 +4732,57 @@ fn validate_data_and_variable_references_with_context(
     all_variables.insert("_tenant_id".to_string());
     let available_variables: Vec<String> = all_variables.iter().cloned().collect();
 
-    // `loop`/`item` are only populated at runtime when the corresponding
-    // scope variable is present (see `build_source` in the direct-json
-    // runtime, which mirrors `variables._loop`/`variables._item` to
-    // `source.loop`/`source.item`) — reuse the same variable set that already
-    // drives variable-existence checks so this tracks Split/While subgraph
-    // inheritance for free.
-    let has_loop_context = all_variables.contains("_loop");
-    let has_item_context = all_variables.contains("_item");
-
     // Check each step for references
     for (step_id, step) in &graph.steps {
         let refs = collect_references_from_step(step);
-        for reference in &refs {
-            validate_reference_root(
-                step_id,
-                reference,
-                graph,
-                has_implicit_data,
-                &all_variables,
-                &available_variables,
-                has_loop_context,
-                has_item_context,
-                result,
-            );
-        }
 
-        // Filter's own `condition` and While's own `condition` run with
-        // `item`/`loop` populated regardless of the graph-level context above
-        // (see `collect_step_scoped_references`).
-        let (item_refs, loop_refs) = collect_step_scoped_references(step);
-        for reference in &item_refs {
-            validate_reference_root(
-                step_id,
-                reference,
-                graph,
-                has_implicit_data,
-                &all_variables,
-                &available_variables,
-                has_loop_context,
-                true,
-                result,
-            );
-        }
-        for reference in &loop_refs {
-            validate_reference_root(
-                step_id,
-                reference,
-                graph,
-                has_implicit_data,
-                &all_variables,
-                &available_variables,
-                true,
-                has_item_context,
-                result,
-            );
+        for reference in refs {
+            if let Some((root, field_name)) = parse_reference(&reference) {
+                match root {
+                    "data" => {
+                        // If this is a Split/While subgraph, data.* references are implicitly valid
+                        // (they refer to the current iteration item)
+                        if !has_implicit_data {
+                            if graph.input_schema.is_empty() {
+                                result.errors.push(ValidationError::MissingInputSchema {
+                                    step_id: step_id.clone(),
+                                    reference: reference.clone(),
+                                });
+                            } else {
+                                validate_schema_reference_path(
+                                    step_id,
+                                    &reference,
+                                    "data",
+                                    &graph.input_schema,
+                                    result,
+                                );
+                            }
+                        }
+                        // If has_implicit_data is true, any data.* reference is valid
+                    }
+                    "variables" => {
+                        if !all_variables.contains(field_name) {
+                            result
+                                .errors
+                                .push(ValidationError::UndefinedVariableReference {
+                                    step_id: step_id.clone(),
+                                    reference: reference.clone(),
+                                    variable_name: field_name.to_string(),
+                                    available_variables: available_variables.clone(),
+                                });
+                        } else if let Some(variable) = graph.variables.get(field_name) {
+                            validate_variable_reference_path(
+                                step_id,
+                                &reference,
+                                field_name,
+                                &variable.value,
+                                result,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -4932,206 +4844,6 @@ fn validate_data_and_variable_references_with_context(
     }
 }
 
-/// Dispatch a single reference by its root segment: validate `data`/
-/// `variables`/`workflow` paths against schema, defer `steps`/`__error`/
-/// `error` to the checks that already cover them elsewhere, gate `loop`/
-/// `item` by whether this call site actually populates them, and reject
-/// anything else as an unrecognized root. Shared between a step's own
-/// (unscoped) references and the item/loop-scoped ones from
-/// `collect_step_scoped_references` — `loop_allowed`/`item_allowed` are the
-/// only thing that differs between those call sites.
-#[allow(clippy::too_many_arguments)]
-fn validate_reference_root(
-    step_id: &str,
-    reference: &str,
-    graph: &ExecutionGraph,
-    has_implicit_data: bool,
-    all_variables: &HashSet<String>,
-    available_variables: &[String],
-    loop_allowed: bool,
-    item_allowed: bool,
-    result: &mut ValidationResult,
-) {
-    match reference_root(reference) {
-        "data" => {
-            let Some((_, _)) = parse_reference(reference) else {
-                return;
-            };
-            // If this is a Split/While subgraph, data.* references are implicitly valid
-            // (they refer to the current iteration item)
-            if !has_implicit_data {
-                if graph.input_schema.is_empty() {
-                    result.errors.push(ValidationError::MissingInputSchema {
-                        step_id: step_id.to_string(),
-                        reference: reference.to_string(),
-                    });
-                } else {
-                    validate_schema_reference_path(
-                        step_id,
-                        reference,
-                        &["data"],
-                        &graph.input_schema,
-                        result,
-                    );
-                }
-            }
-            // If has_implicit_data is true, any data.* reference is valid
-        }
-        "variables" => {
-            let Some((_, field_name)) = parse_reference(reference) else {
-                return;
-            };
-            if !all_variables.contains(field_name) {
-                result
-                    .errors
-                    .push(ValidationError::UndefinedVariableReference {
-                        step_id: step_id.to_string(),
-                        reference: reference.to_string(),
-                        variable_name: field_name.to_string(),
-                        available_variables: available_variables.to_vec(),
-                    });
-            } else if let Some(variable) = graph.variables.get(field_name) {
-                validate_variable_reference_path(
-                    step_id,
-                    reference,
-                    &["variables"],
-                    field_name,
-                    &variable.value,
-                    result,
-                );
-            }
-        }
-        "workflow" => {
-            validate_workflow_reference(
-                step_id,
-                reference,
-                graph,
-                has_implicit_data,
-                all_variables,
-                available_variables,
-                result,
-            );
-        }
-        "steps" | "__error" | "error" => {
-            // Step existence is checked separately by `validate_reference`
-            // (`InvalidStepReference`); the bare `__error`/`error` alias
-            // already gets its own `BareErrorReference` warning there.
-        }
-        "loop" => {
-            if !loop_allowed {
-                result.errors.push(ValidationError::ReferenceRootOutOfScope {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                    root: "loop".to_string(),
-                    reason: "`loop.*` is only populated inside a While step's own condition or a While/Split subgraph".to_string(),
-                });
-            }
-        }
-        "item" => {
-            if !item_allowed {
-                result.errors.push(ValidationError::ReferenceRootOutOfScope {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                    root: "item".to_string(),
-                    reason: "`item.*` is only populated inside a Filter step's own condition or a Split subgraph".to_string(),
-                });
-            }
-        }
-        other => {
-            result.errors.push(ValidationError::UnknownReferenceRoot {
-                step_id: step_id.to_string(),
-                reference: reference.to_string(),
-                root: other.to_string(),
-                legal_roots: LEGAL_REFERENCE_ROOTS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            });
-        }
-    }
-}
-
-/// Validate a `workflow.*` reference. `build_source` in the direct-json
-/// runtime mirrors `workflow.inputs.data`/`workflow.inputs.variables` from the
-/// exact same `data`/`variables` scope as the bare roots, so those two shapes
-/// get identical treatment to `data.*`/`variables.*`. Any other `workflow.*`
-/// path has no runtime meaning — `workflow.inputs` only ever has those two
-/// keys — and would otherwise silently resolve to `null`.
-#[allow(clippy::too_many_arguments)]
-fn validate_workflow_reference(
-    step_id: &str,
-    reference: &str,
-    graph: &ExecutionGraph,
-    has_implicit_data: bool,
-    all_variables: &HashSet<String>,
-    available_variables: &[String],
-    result: &mut ValidationResult,
-) {
-    const DATA_PREFIX: &str = "workflow.inputs.data";
-    const VARIABLES_PREFIX: &str = "workflow.inputs.variables";
-
-    if reference == "workflow" || reference == "workflow.inputs" || reference == DATA_PREFIX {
-        return;
-    }
-
-    if reference.starts_with("workflow.inputs.data.") {
-        if !has_implicit_data {
-            if graph.input_schema.is_empty() {
-                result.errors.push(ValidationError::MissingInputSchema {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                });
-            } else {
-                validate_schema_reference_path(
-                    step_id,
-                    reference,
-                    &["workflow", "inputs", "data"],
-                    &graph.input_schema,
-                    result,
-                );
-            }
-        }
-        return;
-    }
-
-    if reference == VARIABLES_PREFIX {
-        return;
-    }
-
-    if let Some(rest) = reference.strip_prefix("workflow.inputs.variables.") {
-        let field_name = rest.split('.').next().unwrap_or(rest);
-        if !all_variables.contains(field_name) {
-            result
-                .errors
-                .push(ValidationError::UndefinedVariableReference {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                    variable_name: field_name.to_string(),
-                    available_variables: available_variables.to_vec(),
-                });
-        } else if let Some(variable) = graph.variables.get(field_name) {
-            validate_variable_reference_path(
-                step_id,
-                reference,
-                &["workflow", "inputs", "variables"],
-                field_name,
-                &variable.value,
-                result,
-            );
-        }
-        return;
-    }
-
-    result.errors.push(ValidationError::InvalidReferencePath {
-        step_id: step_id.to_string(),
-        reference_path: reference.to_string(),
-        reason: format!(
-            "'workflow.*' references must be 'workflow.inputs.data.*' or 'workflow.inputs.variables.*', not '{}'",
-            reference
-        ),
-    });
-}
-
 /// Collect all reference strings from a step's inputs/mappings.
 fn collect_references_from_step(step: &Step) -> Vec<String> {
     let mut refs = Vec::new();
@@ -5166,11 +4878,8 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
             }
         }
         Step::Filter(filter_step) => {
-            // `filter_step.config.condition` is collected separately by
-            // `collect_step_scoped_references`: it runs per-item, so its
-            // `item.*` references need different root permission than this
-            // (unscoped) source-array reference.
             extract_references_from_mapping_value(&filter_step.config.value, &mut refs);
+            extract_references_from_condition(&filter_step.config.condition, &mut refs);
         }
         Step::GroupBy(group_step) => {
             extract_references_from_mapping_value(&group_step.config.value, &mut refs);
@@ -5180,12 +4889,8 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_mapping_value(&config.value, &mut refs);
             }
         }
-        Step::While(_) => {
-            // `while_step.condition` is collected separately by
-            // `collect_step_scoped_references`: the runtime evaluates it with
-            // a `loop` context injected (see `while_condition_source` in the
-            // direct-json runtime), so it needs different root permission
-            // than a step with no such context.
+        Step::While(while_step) => {
+            extract_references_from_condition(&while_step.condition, &mut refs);
         }
         Step::Delay(delay_step) => {
             extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
@@ -5212,32 +4917,6 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
     }
 
     refs
-}
-
-/// Collect references from the one field per step type where the runtime
-/// injects a per-item (`item.*`) or per-iteration (`loop.*`) context: a
-/// Filter step's own `condition` (evaluated once per array element — see the
-/// `FilterConfig` doc comment) and a While step's own `condition` (evaluated
-/// with `loop` injected by `while_condition_source` in the direct-json
-/// runtime, ahead of the subgraph). Kept separate from
-/// `collect_references_from_step` so `item`/`loop` root permission can be
-/// granted at this specific field rather than the whole step — e.g. Filter's
-/// own `config.value` (the source array) does not get `item` scope.
-fn collect_step_scoped_references(step: &Step) -> (Vec<String>, Vec<String>) {
-    let mut item_refs = Vec::new();
-    let mut loop_refs = Vec::new();
-
-    match step {
-        Step::Filter(filter_step) => {
-            extract_references_from_condition(&filter_step.config.condition, &mut item_refs);
-        }
-        Step::While(while_step) => {
-            extract_references_from_condition(&while_step.condition, &mut loop_refs);
-        }
-        _ => {}
-    }
-
-    (item_refs, loop_refs)
 }
 
 fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
@@ -7501,421 +7180,6 @@ mod tests {
         assert!(
             !loop_ref_errors,
             "loop.index should be a valid reference in while conditions"
-        );
-        // `loop.index` in a While step's own condition must not be treated as
-        // out-of-scope or unrecognized — this is exactly the scope where the
-        // runtime injects `loop` (see `while_condition_source`).
-        assert!(
-            !result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::ReferenceRootOutOfScope { .. }
-                    | ValidationError::UnknownReferenceRoot { .. }
-            )),
-            "loop.index in a While step's own condition should not be out-of-scope or unknown: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_unknown_reference_root_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("step.foo"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::UnknownReferenceRoot { step_id, root, .. }
-                    if step_id == "agent" && root == "step"
-            )),
-            "expected UnknownReferenceRoot for 'step.foo' (typo for 'steps'), got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_loop_root_outside_while_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("loop.index"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::ReferenceRootOutOfScope { step_id, root, .. }
-                    if step_id == "agent" && root == "loop"
-            )),
-            "expected ReferenceRootOutOfScope for 'loop.index' outside any While, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_item_root_outside_filter_or_split_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("item.status"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::ReferenceRootOutOfScope { step_id, root, .. }
-                    if step_id == "agent" && root == "item"
-            )),
-            "expected ReferenceRootOutOfScope for 'item.status' outside any Filter/Split, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_item_root_inside_filter_condition_is_allowed() {
-        let graph: ExecutionGraph = serde_json::from_str(
-            r##"{
-              "entryPoint": "filter",
-              "executionPlan": [
-                {"fromStep":"filter","toStep":"finish"}
-              ],
-              "steps": {
-                "filter": {"id":"filter","stepType":"Filter","config":{
-                  "value": {"valueType":"immediate","value":[1,2,3]},
-                  "condition": {"type":"operation","op":"EQ","arguments":[
-                    {"valueType":"reference","value":"item.status"},
-                    {"valueType":"immediate","value":"active"}
-                  ]}}},
-                "finish": {"id":"finish","stepType":"Finish"}
-              }
-            }"##,
-        )
-        .unwrap();
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            !result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::ReferenceRootOutOfScope { .. }
-                    | ValidationError::UnknownReferenceRoot { .. }
-            )),
-            "item.status inside a Filter step's own condition should be allowed, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_item_root_inside_while_subgraph_is_rejected() {
-        // While subgraphs get an implicit `loop` context but not `item`
-        // (`WHILE_SCOPE_VARIABLES` has no `_item`) — unlike Split, a While has
-        // no "current element" to expose.
-        let mut steps = HashMap::new();
-        steps.insert(
-            "init".to_string(),
-            create_agent_step("init", "transform", None),
-        );
-
-        let condition =
-            create_lt_condition("steps.init.outputs.counter", "steps.init.outputs.target");
-
-        let mut subgraph_steps = HashMap::new();
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("item.x"));
-        subgraph_steps.insert(
-            "process".to_string(),
-            create_agent_step("process", "transform", Some(mapping)),
-        );
-        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let subgraph = ExecutionGraph {
-            name: None,
-            description: None,
-            steps: subgraph_steps,
-            entry_point: "process".to_string(),
-            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
-                from_step: "process".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            }],
-            variables: HashMap::new(),
-            input_schema: HashMap::new(),
-            output_schema: HashMap::new(),
-            notes: None,
-            nodes: None,
-            edges: None,
-            ..Default::default()
-        };
-
-        steps.insert(
-            "loop".to_string(),
-            create_while_step("loop", condition, subgraph, Some(10)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "init");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "init".to_string(),
-                to_step: "loop".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "loop".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::ReferenceRootOutOfScope { step_id, root, .. }
-                    if step_id == "process" && root == "item"
-            )),
-            "expected ReferenceRootOutOfScope for 'item.x' inside a While (not Split) subgraph, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_workflow_inputs_data_validates_like_data() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("workflow.inputs.data.email"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-        graph
-            .input_schema
-            .insert("email".to_string(), schema_field(SchemaFieldType::String));
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            !result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::UndefinedDataReference { .. }
-                    | ValidationError::UnknownReferenceRoot { .. }
-                    | ValidationError::ReferenceRootOutOfScope { .. }
-                    | ValidationError::InvalidReferencePath { .. }
-            )),
-            "workflow.inputs.data.email should validate like data.email, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_workflow_inputs_data_unknown_field_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("workflow.inputs.data.bogus"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-        graph
-            .input_schema
-            .insert("email".to_string(), schema_field(SchemaFieldType::String));
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::UndefinedDataReference { reference, field_name, .. }
-                    if reference == "workflow.inputs.data.bogus" && field_name == "bogus"
-            )),
-            "expected UndefinedDataReference for 'workflow.inputs.data.bogus', got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_workflow_inputs_variables_validates_like_variables() {
-        use runtara_dsl::{Variable, VariableType};
-
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert(
-            "value".to_string(),
-            ref_value("workflow.inputs.variables.myVar"),
-        );
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-        graph.variables.insert(
-            "myVar".to_string(),
-            Variable {
-                var_type: VariableType::String,
-                value: serde_json::json!("some value"),
-                description: None,
-            },
-        );
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            !result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::UndefinedVariableReference { .. }
-                    | ValidationError::UnknownReferenceRoot { .. }
-                    | ValidationError::ReferenceRootOutOfScope { .. }
-                    | ValidationError::InvalidReferencePath { .. }
-            )),
-            "workflow.inputs.variables.myVar should validate like variables.myVar, got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_workflow_inputs_variables_unknown_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert(
-            "value".to_string(),
-            ref_value("workflow.inputs.variables.bogus"),
-        );
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::UndefinedVariableReference { reference, variable_name, .. }
-                    if reference == "workflow.inputs.variables.bogus" && variable_name == "bogus"
-            )),
-            "expected UndefinedVariableReference for 'workflow.inputs.variables.bogus', got: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn test_workflow_unknown_path_is_rejected() {
-        let mut steps = HashMap::new();
-
-        let mut mapping = HashMap::new();
-        mapping.insert("value".to_string(), ref_value("workflow.foo"));
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ValidationError::InvalidReferencePath { reference_path, .. }
-                    if reference_path == "workflow.foo"
-            )),
-            "expected InvalidReferencePath for 'workflow.foo', got: {:?}",
-            result.errors
         );
     }
 
