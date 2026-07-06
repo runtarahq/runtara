@@ -417,6 +417,37 @@ impl ValidationErrorDto {
                 Some(attempted_field.clone()),
                 None,
             ),
+            ValidationError::UnknownReferenceRoot {
+                step_id,
+                reference,
+                root,
+                legal_roots,
+            } => (
+                format!(
+                    "Step '{}' references '{}' but '{}' is not a recognized reference root. Legal roots: {}",
+                    step_id,
+                    reference,
+                    root,
+                    legal_roots.join(", ")
+                ),
+                Some(step_id.clone()),
+                None,
+                None,
+            ),
+            ValidationError::ReferenceRootOutOfScope {
+                step_id,
+                reference,
+                root,
+                reason,
+            } => (
+                format!(
+                    "Step '{}' references '{}' but the '{}' root is not available here: {}",
+                    step_id, reference, root, reason
+                ),
+                Some(step_id.clone()),
+                None,
+                None,
+            ),
             ValidationError::ChildMissingInputSchema {
                 step_id,
                 child_workflow_id,
