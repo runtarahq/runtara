@@ -56,6 +56,8 @@ type TooltipPayload = {
   dataKey?: string | number;
   name?: string | number;
   value?: unknown;
+  /** The full data point behind this series entry (Recharts passes it). */
+  payload?: Record<string, unknown>;
 };
 
 export function ChartBlock({
@@ -132,6 +134,9 @@ export function ChartBlock({
     const yField = series[0].field;
     const yLabel = series[0].label ?? yField;
     const sizeField = chart.sizeField ?? undefined;
+    const sizeName = chart.sizeLabel ?? sizeField;
+    const labelField = chart.labelField ?? undefined;
+    const tooltipFields = chart.tooltipFields ?? [];
     const clouds = buildScatterClouds(chartRows, chart.x, series, {
       groupBy: chart.groupBy ?? undefined,
       sizeField,
@@ -176,13 +181,18 @@ export function ChartBlock({
               <ZAxis
                 type="number"
                 dataKey={SCATTER_Z_KEY}
-                name={sizeField}
+                name={sizeName}
                 range={[60, 400]}
               />
             ) : null}
             <Tooltip
               cursor={{ strokeDasharray: '3 3' }}
-              content={<ChartTooltip />}
+              content={
+                <ChartTooltip
+                  labelField={labelField}
+                  tooltipFields={tooltipFields}
+                />
+              }
             />
             <Legend
               iconType="circle"
@@ -374,14 +384,37 @@ function ChartTooltip({
   active,
   payload,
   label,
+  labelField,
+  tooltipFields,
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
   label?: unknown;
+  /** Scatter-only: dimension whose value titles the point. Only the scatter
+   *  chart passes this; the cartesian/pie tooltips leave it undefined and are
+   *  byte-identical to before. */
+  labelField?: string;
+  /** Scatter-only: extra source columns to list under the title. */
+  tooltipFields?: string[];
 }) {
   if (!active || !payload?.length) {
     return null;
   }
+
+  // The full data point behind the hovered marker (present for scatter).
+  const point = payload[0]?.payload;
+  // Gate strictly on the labelField prop being passed (scatter only) so other
+  // chart kinds keep the numeric `label` header unchanged.
+  const header =
+    labelField && point && point[labelField] != null
+      ? String(point[labelField])
+      : String(label ?? '');
+  const extraRows =
+    point && tooltipFields?.length
+      ? tooltipFields
+          .filter((field) => field !== labelField)
+          .map((field) => ({ field, value: point[field] }))
+      : [];
 
   return (
     <div
@@ -392,8 +425,17 @@ function ChartTooltip({
         color: TEXT_COLOR,
       }}
     >
-      <div className="mb-1 font-medium">{String(label ?? '')}</div>
+      <div className="mb-1 font-medium">{header}</div>
       <div className="flex flex-col gap-1">
+        {extraRows.map((row) => (
+          <div
+            key={`extra-${row.field}`}
+            className="flex min-w-40 items-center justify-between gap-4"
+          >
+            <span className="truncate text-muted-foreground">{row.field}</span>
+            <span className="font-medium">{formatTooltipValue(row.value)}</span>
+          </div>
+        ))}
         {payload.map((item) => (
           <div
             key={String(item.dataKey ?? item.name)}

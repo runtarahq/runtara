@@ -21,6 +21,7 @@ use crate::types::{
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockPosition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<usize>,
@@ -49,6 +50,7 @@ pub struct BlockPosition {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayoutTarget {
     #[serde(
         default,
@@ -71,6 +73,12 @@ pub struct LayoutTarget {
     pub col: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<i64>,
+    /// Selects which layout tree the op targets. `None` (the default) is the
+    /// report's root layout (`definition.layout`); `Some(view_id)` targets
+    /// that `definition.views[].layout` tree. `parent_node_id` / positional
+    /// anchors then resolve *within* the selected tree.
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -112,11 +120,16 @@ pub enum ReportEditOp {
         #[serde(rename = "nodeId")]
         node_id: String,
         node: ReportLayoutNode,
+        /// Layout tree selector; `None` = report root, `Some(id)` = that view.
+        #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+        view_id: Option<String>,
     },
     PatchLayoutNode {
         #[serde(rename = "nodeId")]
         node_id: String,
         patch: Value,
+        #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+        view_id: Option<String>,
     },
     MoveLayoutNode {
         #[serde(rename = "nodeId")]
@@ -127,6 +140,8 @@ pub enum ReportEditOp {
     RemoveLayoutNode {
         #[serde(rename = "nodeId")]
         node_id: String,
+        #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+        view_id: Option<String>,
     },
 }
 
@@ -171,6 +186,125 @@ pub fn apply_edit_ops(
     Ok(())
 }
 
+/// Top-level keys permitted on each op kind's JSON object. Positional /
+/// parent / view fields live under a nested `target` (layout add/move) or
+/// `position` (block add/move) object, NOT at the op top level. Sending them
+/// at the top level was the silent-drop root cause behind the "appended to
+/// root with no error" and "beforeId ignored / append-only" reports:
+/// `ReportEditOp` is an internally-tagged enum, so serde cannot enforce
+/// `deny_unknown_fields` on it and silently discarded the misplaced keys.
+/// [`validate_edit_ops_json`] restores loud rejection with a targeted hint.
+///
+/// Returns `None` for an unrecognized kind.
+fn allowed_top_level_keys(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "add_block" => &["kind", "block", "position"],
+        "replace_block" => &["kind", "blockId", "block"],
+        "patch_block" => &["kind", "blockId", "patch"],
+        "move_block" => &["kind", "blockId", "position"],
+        "remove_block" => &["kind", "blockId"],
+        "add_layout_node" => &["kind", "node", "target"],
+        // `viewId` (Phase: view targeting) is a top-level field on the
+        // ops that carry no `target`; on add/move it lives under `target`.
+        "replace_layout_node" => &["kind", "nodeId", "node", "viewId"],
+        "patch_layout_node" => &["kind", "nodeId", "patch", "viewId"],
+        "move_layout_node" => &["kind", "nodeId", "target"],
+        "remove_layout_node" => &["kind", "nodeId", "viewId"],
+        _ => return None,
+    })
+}
+
+/// A targeted hint for a stray top-level key, naming the correct nested
+/// location or spelling. Returns `None` when no specific guidance applies
+/// (the caller falls back to listing the allowed fields).
+fn misplaced_key_hint(kind: &str, key: &str) -> Option<String> {
+    // The wrapper object where positional / parent fields belong for this kind.
+    let wrapper = match kind {
+        "add_layout_node" | "move_layout_node" => Some("target"),
+        "add_block" | "move_block" => Some("position"),
+        _ => None,
+    };
+    match key {
+        "parentNodeId" | "col" | "row" => {
+            // These only exist under a layout `target`.
+            match kind {
+                "add_layout_node" | "move_layout_node" => Some(format!(
+                    "'{key}' belongs under `target` for {kind}, not at the op top level"
+                )),
+                _ => None,
+            }
+        }
+        "beforeId" | "afterId" | "index" => wrapper
+            .map(|w| format!("'{key}' belongs under `{w}` for {kind}, not at the op top level")),
+        "viewId" => match kind {
+            "add_layout_node" | "move_layout_node" => Some(format!(
+                "'viewId' belongs under `target` for {kind}, not at the op top level"
+            )),
+            _ => None,
+        },
+        "beforeNodeId" => wrapper.map(|w| {
+            format!("unknown field 'beforeNodeId' — did you mean 'beforeId' under `{w}`?")
+        }),
+        "afterNodeId" => wrapper
+            .map(|w| format!("unknown field 'afterNodeId' — did you mean 'afterId' under `{w}`?")),
+        "parentId" => Some(
+            "unknown field 'parentId' — did you mean 'parentNodeId' under `target`?".to_string(),
+        ),
+        "before" | "after" => {
+            wrapper.map(|w| format!("unknown field '{key}' — did you mean '{key}Id' under `{w}`?"))
+        }
+        _ => None,
+    }
+}
+
+/// Reject malformed edit-op JSON *before* it is deserialized into the typed
+/// [`ReportEditOp`] enum. Because the enum is internally tagged, serde cannot
+/// carry `deny_unknown_fields`, so a top-level key that belongs under `target`
+/// / `position` (or a misspelling like `beforeNodeId`) would otherwise be
+/// silently dropped — the op then no-ops or lands in the wrong place with a
+/// success result. This pass runs per op, keyed on `kind`, and errors with a
+/// stable `UNKNOWN_OP_FIELD` code plus a targeted hint. Typos *inside* a
+/// correctly-nested `target` / `position` are caught separately by
+/// `deny_unknown_fields` on [`LayoutTarget`] / [`BlockPosition`] at the typed
+/// deserialization step.
+pub fn validate_edit_ops_json(raw_ops: &[Value]) -> Result<(), EditOpError> {
+    const KNOWN_KINDS: &str = "add_block, replace_block, patch_block, move_block, remove_block, \
+         add_layout_node, replace_layout_node, patch_layout_node, move_layout_node, \
+         remove_layout_node";
+    for (index, op) in raw_ops.iter().enumerate() {
+        let Some(obj) = op.as_object() else {
+            return Err(err(
+                "INVALID_OP",
+                format!("op {index}: each edit op must be a JSON object"),
+            ));
+        };
+        let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) else {
+            return Err(err(
+                "MISSING_OP_KIND",
+                format!("op {index}: missing string 'kind' (one of {KNOWN_KINDS})"),
+            ));
+        };
+        let Some(allowed) = allowed_top_level_keys(kind) else {
+            return Err(err(
+                "UNKNOWN_OP_KIND",
+                format!("op {index}: unknown op kind '{kind}' (expected one of {KNOWN_KINDS})"),
+            ));
+        };
+        for key in obj.keys() {
+            if allowed.contains(&key.as_str()) {
+                continue;
+            }
+            let hint = misplaced_key_hint(kind, key)
+                .unwrap_or_else(|| format!("allowed fields for {kind}: {}", allowed.join(", ")));
+            return Err(err(
+                "UNKNOWN_OP_FIELD",
+                format!("op {index} ({kind}): unknown field '{key}'. {hint}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn op_kind(op: &ReportEditOp) -> &'static str {
     match op {
         ReportEditOp::AddBlock { .. } => "add_block",
@@ -196,12 +330,20 @@ fn apply_op(def: &mut ReportDefinition, op: &ReportEditOp) -> Result<(), EditOpE
         ReportEditOp::MoveBlock { block_id, position } => move_block(def, block_id, position),
         ReportEditOp::RemoveBlock { block_id } => remove_block(def, block_id),
         ReportEditOp::AddLayoutNode { node, target } => add_layout_node(def, node.clone(), target),
-        ReportEditOp::ReplaceLayoutNode { node_id, node } => {
-            replace_layout_node(def, node_id, node.clone())
-        }
-        ReportEditOp::PatchLayoutNode { node_id, patch } => patch_layout_node(def, node_id, patch),
+        ReportEditOp::ReplaceLayoutNode {
+            node_id,
+            node,
+            view_id,
+        } => replace_layout_node(def, node_id, node.clone(), view_id.as_deref()),
+        ReportEditOp::PatchLayoutNode {
+            node_id,
+            patch,
+            view_id,
+        } => patch_layout_node(def, node_id, patch, view_id.as_deref()),
         ReportEditOp::MoveLayoutNode { node_id, target } => move_layout_node(def, node_id, target),
-        ReportEditOp::RemoveLayoutNode { node_id } => remove_layout_node(def, node_id),
+        ReportEditOp::RemoveLayoutNode { node_id, view_id } => {
+            remove_layout_node(def, node_id, view_id.as_deref())
+        }
     }
 }
 
@@ -352,25 +494,61 @@ fn resolve_block_index(
 // Layout ops
 // ============================================================================
 
+/// Resolve which layout tree an op targets. `None` (the default) is the
+/// report's root layout (`definition.layout`); `Some(view_id)` is that
+/// `definition.views[].layout`. Errors with `VIEW_NOT_FOUND` for an unknown
+/// view id. All node resolution/insertion then happens within the returned
+/// tree, so `parent_node_id`/anchors are scoped to it.
+fn target_layout_mut<'a>(
+    def: &'a mut ReportDefinition,
+    view_id: Option<&str>,
+) -> Result<&'a mut ReportGridLayoutNode, EditOpError> {
+    match view_id {
+        None => Ok(&mut def.layout),
+        Some(id) => def
+            .views
+            .iter_mut()
+            .find(|v| v.id == id)
+            .map(|v| &mut v.layout)
+            .ok_or_else(|| err("VIEW_NOT_FOUND", format!("Report view '{id}' not found"))),
+    }
+}
+
+/// `true` if a layout node with `node_id` exists in the root layout or any
+/// view layout. Used for a GLOBAL uniqueness check on `AddLayoutNode` so a
+/// node id can never collide across the root and view trees (blocks are keyed
+/// by id and future lookups may not be view-scoped). Backward-compatible:
+/// existing reports carry no cross-tree duplicate ids.
+fn layout_node_id_exists_anywhere(def: &ReportDefinition, node_id: &str) -> bool {
+    if def.layout.id == node_id || layout_node_exists_in_grid(&def.layout, node_id) {
+        return true;
+    }
+    def.views
+        .iter()
+        .any(|v| v.layout.id == node_id || layout_node_exists_in_grid(&v.layout, node_id))
+}
+
 fn add_layout_node(
     def: &mut ReportDefinition,
     node: ReportLayoutNode,
     target: &LayoutTarget,
 ) -> Result<(), EditOpError> {
     let node_id = layout_node_id(&node).to_string();
-    if node_id == def.layout.id || layout_node_exists_in_grid(&def.layout, &node_id) {
+    if layout_node_id_exists_anywhere(def, &node_id) {
         return Err(err(
             "DUPLICATE_LAYOUT_NODE_ID",
             format!("Layout node '{}' already exists", node_id),
         ));
     }
-    insert_into_target(&mut def.layout, target, node)
+    let root = target_layout_mut(def, target.view_id.as_deref())?;
+    insert_into_target(root, target, node)
 }
 
 fn replace_layout_node(
     def: &mut ReportDefinition,
     node_id: &str,
     node: ReportLayoutNode,
+    view_id: Option<&str>,
 ) -> Result<(), EditOpError> {
     if layout_node_id(&node) != node_id {
         return Err(err(
@@ -382,18 +560,19 @@ fn replace_layout_node(
             ),
         ));
     }
-    if node_id == def.layout.id {
-        // Replacing the root: must remain a grid (it's the layout type).
+    let root = target_layout_mut(def, view_id)?;
+    if node_id == root.id {
+        // Replacing the tree root: must remain a grid (it's the layout type).
         let ReportLayoutNode::Grid(grid) = node else {
             return Err(err(
                 "ROOT_LAYOUT_MUST_BE_GRID",
                 "The root layout node must be a grid; cannot replace with a block",
             ));
         };
-        def.layout = grid;
+        *root = grid;
         return Ok(());
     }
-    if !replace_in_grid(&mut def.layout, node_id, node) {
+    if !replace_in_grid(root, node_id, node) {
         return Err(layout_not_found(node_id));
     }
     Ok(())
@@ -403,6 +582,7 @@ fn patch_layout_node(
     def: &mut ReportDefinition,
     node_id: &str,
     patch: &Value,
+    view_id: Option<&str>,
 ) -> Result<(), EditOpError> {
     if !patch.is_object() {
         return Err(err(
@@ -416,16 +596,17 @@ fn patch_layout_node(
             "Layout node id cannot be changed with patch_layout_node",
         ));
     }
-    if patch.get("type").is_some() && node_id == def.layout.id {
+    let root = target_layout_mut(def, view_id)?;
+    if patch.get("type").is_some() && node_id == root.id {
         return Err(err(
             "ROOT_LAYOUT_MUST_BE_GRID",
             "The root layout node's type cannot be changed; root must remain a grid",
         ));
     }
-    // Special case: patching the root grid in-place.
-    if node_id == def.layout.id {
+    // Special case: patching the tree root grid in-place.
+    if node_id == root.id {
         let mut node_value =
-            serde_json::to_value(&def.layout).map_err(|e| err("INVALID_PATCH", e.to_string()))?;
+            serde_json::to_value(&*root).map_err(|e| err("INVALID_PATCH", e.to_string()))?;
         // Treat the root grid's wire form as `{type: "grid", ...}` for
         // patch purposes so callers can write the same patches they'd
         // use against any other grid. We add `type` only if absent so
@@ -448,10 +629,10 @@ fn patch_layout_node(
                 "Layout node id cannot be changed with patch_layout_node",
             ));
         }
-        def.layout = patched;
+        *root = patched;
         return Ok(());
     }
-    let Some(node) = find_in_grid_mut(&mut def.layout, node_id) else {
+    let Some(node) = find_in_grid_mut(root, node_id) else {
         return Err(layout_not_found(node_id));
     };
     let mut node_value =
@@ -474,27 +655,59 @@ fn move_layout_node(
     node_id: &str,
     target: &LayoutTarget,
 ) -> Result<(), EditOpError> {
-    if node_id == def.layout.id {
-        return Err(err(
-            "CANNOT_MOVE_ROOT_GRID",
-            "The root layout grid cannot be moved",
-        ));
+    let view_id = target.view_id.clone();
+    // Reject moving a tree's own root grid.
+    {
+        let root = target_layout_mut(def, view_id.as_deref())?;
+        if node_id == root.id {
+            return Err(err(
+                "CANNOT_MOVE_ROOT_GRID",
+                "The root layout grid cannot be moved",
+            ));
+        }
     }
-    let Some(node) = remove_from_grid(&mut def.layout, node_id) else {
-        return Err(layout_not_found(node_id));
+    // Remove from the target tree. Source and destination share `target.viewId`,
+    // so this is an intra-tree reposition.
+    let removed = {
+        let root = target_layout_mut(def, view_id.as_deref())?;
+        remove_from_grid(root, node_id)
     };
-    insert_into_target(&mut def.layout, target, node)
+    let node = match removed {
+        Some(node) => node,
+        None => {
+            // Cross-tree move (root <-> view, or between views) is unsupported:
+            // if the node lives in a *different* tree, say so explicitly rather
+            // than returning an opaque not-found.
+            if layout_node_id_exists_anywhere(def, node_id) {
+                return Err(err(
+                    "CROSS_TREE_MOVE_UNSUPPORTED",
+                    format!(
+                        "Layout node '{node_id}' is in a different layout tree than the move target (viewId={view_id:?}); cross-tree moves are unsupported — use remove_layout_node in the source tree then add_layout_node in the destination tree"
+                    ),
+                ));
+            }
+            let root = target_layout_mut(def, view_id.as_deref())?;
+            return Err(layout_not_found_with_item_hint(root, node_id));
+        }
+    };
+    let root = target_layout_mut(def, view_id.as_deref())?;
+    insert_into_target(root, target, node)
 }
 
-fn remove_layout_node(def: &mut ReportDefinition, node_id: &str) -> Result<(), EditOpError> {
-    if node_id == def.layout.id {
+fn remove_layout_node(
+    def: &mut ReportDefinition,
+    node_id: &str,
+    view_id: Option<&str>,
+) -> Result<(), EditOpError> {
+    let root = target_layout_mut(def, view_id)?;
+    if node_id == root.id {
         return Err(err(
             "CANNOT_REMOVE_ROOT_GRID",
             "The root layout grid cannot be removed",
         ));
     }
-    if remove_from_grid(&mut def.layout, node_id).is_none() {
-        return Err(layout_not_found(node_id));
+    if remove_from_grid(root, node_id).is_none() {
+        return Err(layout_not_found_with_item_hint(root, node_id));
     }
     Ok(())
 }
@@ -513,6 +726,43 @@ fn layout_not_found(node_id: &str) -> EditOpError {
         "LAYOUT_NODE_NOT_FOUND",
         format!("Layout node '{}' not found", node_id),
     )
+}
+
+/// Like [`layout_not_found`], but if `node_id` matches a grid *item-wrapper*
+/// id (the `{ id, child }` envelope) rather than a child layout-node id,
+/// append a hint naming the child node id to pass instead. Layout ops address
+/// nodes by their child node id, not the item-wrapper id — an easy wrong guess
+/// because `get_report` surfaces both.
+fn layout_not_found_with_item_hint(grid: &ReportGridLayoutNode, node_id: &str) -> EditOpError {
+    if let Some(child_id) = find_item_wrapper_child_id(grid, node_id) {
+        return err(
+            "LAYOUT_NODE_NOT_FOUND",
+            format!(
+                "Layout node '{node_id}' not found — '{node_id}' is an item-wrapper id; pass the child node id '{child_id}' instead"
+            ),
+        );
+    }
+    layout_not_found(node_id)
+}
+
+/// Find the child node id of the grid item whose *wrapper* id equals
+/// `item_id`, searching nested grids. Mirrors [`remove_from_grid`]'s recursion
+/// but matches on `item.id`.
+fn find_item_wrapper_child_id<'a>(
+    grid: &'a ReportGridLayoutNode,
+    item_id: &str,
+) -> Option<&'a str> {
+    for item in &grid.items {
+        if item.id == item_id {
+            return Some(layout_node_id(&item.child));
+        }
+        if let ReportLayoutNode::Grid(nested) = item.child.as_ref()
+            && let Some(found) = find_item_wrapper_child_id(nested, item_id)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// `true` if a layout node with `node_id` is anywhere under `grid`'s
@@ -895,6 +1145,7 @@ mod tests {
             &mut def,
             &[ReportEditOp::RemoveLayoutNode {
                 node_id: "root".to_string(),
+                view_id: None,
             }],
         )
         .unwrap_err();
@@ -913,6 +1164,7 @@ mod tests {
             &mut def,
             &[ReportEditOp::ReplaceLayoutNode {
                 node_id: "root".to_string(),
+                view_id: None,
                 node: serde_json::from_value(json!({
                     "type": "block",
                     "id": "root",
@@ -938,6 +1190,7 @@ mod tests {
             &[ReportEditOp::PatchLayoutNode {
                 node_id: "root".to_string(),
                 patch: json!({"columns": 3, "title": "Dashboard"}),
+                view_id: None,
             }],
         )
         .unwrap();
@@ -1001,6 +1254,7 @@ mod tests {
             &mut def,
             &[ReportEditOp::RemoveLayoutNode {
                 node_id: "ln1".to_string(),
+                view_id: None,
             }],
         )
         .unwrap();
@@ -1133,5 +1387,305 @@ mod tests {
         // legacy/minimal JSON payloads usable.
         assert!(def.layout.items.is_empty());
         assert_eq!(def.layout.columns, Some(1));
+    }
+
+    // ----- strictness: validate_edit_ops_json -----
+
+    #[test]
+    fn validate_edit_ops_accepts_well_formed_ops() {
+        let ops = json!([
+            {"kind": "add_layout_node", "node": {"type": "block", "id": "n", "blockId": "b"},
+             "target": {"parentNodeId": "root", "beforeId": "x"}},
+            {"kind": "replace_block", "blockId": "b", "block": {"id": "b", "type": "markdown", "markdown": {"content": "y"}}},
+            {"kind": "remove_layout_node", "nodeId": "n", "viewId": "detail"}
+        ]);
+        validate_edit_ops_json(ops.as_array().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn validate_edit_ops_rejects_top_level_parent_node_id_with_hint() {
+        // The literal reported bug: parentNodeId at the op top level (belongs
+        // under `target`) was silently dropped -> appended to root, Ok(()).
+        let ops = json!([
+            {"kind": "add_layout_node", "parentNodeId": "detail_root",
+             "node": {"type": "grid", "id": "g", "items": []}}
+        ]);
+        let e = validate_edit_ops_json(ops.as_array().unwrap()).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_OP_FIELD");
+        assert!(e.message.contains("parentNodeId"), "msg: {}", e.message);
+        assert!(e.message.contains("`target`"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn validate_edit_ops_hints_before_node_id_spelling() {
+        let ops = json!([
+            {"kind": "add_layout_node", "node": {"type": "block", "id": "n", "blockId": "b"},
+             "beforeNodeId": "x"}
+        ]);
+        let e = validate_edit_ops_json(ops.as_array().unwrap()).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_OP_FIELD");
+        assert!(
+            e.message.contains("did you mean 'beforeId'"),
+            "msg: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn validate_edit_ops_hints_view_id_belongs_under_target_for_add() {
+        let ops = json!([
+            {"kind": "add_layout_node", "node": {"type": "block", "id": "n", "blockId": "b"},
+             "viewId": "detail"}
+        ]);
+        let e = validate_edit_ops_json(ops.as_array().unwrap()).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_OP_FIELD");
+        assert!(
+            e.message.contains("viewId") && e.message.contains("`target`"),
+            "msg: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn validate_edit_ops_rejects_missing_and_unknown_kind() {
+        let missing = json!([{ "nodeId": "n" }]);
+        let e = validate_edit_ops_json(missing.as_array().unwrap()).unwrap_err();
+        assert_eq!(e.code, "MISSING_OP_KIND");
+        let unknown = json!([{ "kind": "frobnicate", "nodeId": "n" }]);
+        let e = validate_edit_ops_json(unknown.as_array().unwrap()).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_OP_KIND");
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_typo_inside_target() {
+        // Nested typo inside a correctly-placed `target` is caught by
+        // deny_unknown_fields on LayoutTarget at typed deserialization.
+        let bad: Result<ReportEditOp, _> = serde_json::from_value(json!({
+            "kind": "add_layout_node",
+            "node": {"type": "block", "id": "n", "blockId": "b"},
+            "target": {"beforeNodeId": "x"}
+        }));
+        assert!(
+            bad.is_err(),
+            "expected deny_unknown_fields to reject beforeNodeId under target"
+        );
+    }
+
+    // ----- remove/move item-wrapper-id hint -----
+
+    #[test]
+    fn remove_layout_node_item_id_yields_child_node_hint() {
+        let mut def: ReportDefinition = serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [{"id": "b1", "type": "markdown", "markdown": {"content": "x"}}],
+            "layout": {"id": "root", "items": [
+                {"id": "wrap_1", "child": {"type": "block", "id": "node_1", "blockId": "b1"}}
+            ]}
+        }))
+        .unwrap();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::RemoveLayoutNode {
+                node_id: "wrap_1".to_string(),
+                view_id: None,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "LAYOUT_NODE_NOT_FOUND");
+        assert!(e.message.contains("item-wrapper id"), "msg: {}", e.message);
+        assert!(e.message.contains("node_1"), "msg: {}", e.message);
+    }
+
+    // ----- view-layout targeting -----
+
+    fn def_with_view() -> ReportDefinition {
+        serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "blocks": [
+                {"id": "a", "type": "markdown", "markdown": {"content": "A"}},
+                {"id": "b", "type": "markdown", "markdown": {"content": "B"}},
+                {"id": "c", "type": "markdown", "markdown": {"content": "C"}}
+            ],
+            "layout": {"id": "root", "columns": 1, "items": [
+                {"id": "root_i0", "child": {"type": "block", "id": "a_node", "blockId": "a"}}
+            ]},
+            "views": [
+                {"id": "detail", "title": "Detail", "layout": {"id": "detail_root", "columns": 1, "items": [
+                    {"id": "dv_i0", "child": {"type": "block", "id": "dv_b", "blockId": "b"}}
+                ]}}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn view_node_ids(def: &ReportDefinition, view_id: &str) -> Vec<String> {
+        def.views
+            .iter()
+            .find(|v| v.id == view_id)
+            .unwrap()
+            .layout
+            .items
+            .iter()
+            .map(|i| layout_node_id(&i.child).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn add_layout_node_targets_view_via_view_id() {
+        let mut def = def_with_view();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(
+                    json!({"type": "block", "id": "c_node", "blockId": "c"}),
+                )
+                .unwrap(),
+                target: LayoutTarget {
+                    view_id: Some("detail".to_string()),
+                    before_id: Some("dv_b".to_string()),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap();
+        // Landed in the detail view, before dv_b — not in root.
+        assert_eq!(view_node_ids(&def, "detail"), ["c_node", "dv_b"]);
+        assert_eq!(
+            def.layout
+                .items
+                .iter()
+                .map(|i| layout_node_id(&i.child).to_string())
+                .collect::<Vec<_>>(),
+            ["a_node"]
+        );
+    }
+
+    #[test]
+    fn add_layout_node_unknown_view_errors() {
+        let mut def = def_with_view();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(
+                    json!({"type": "block", "id": "c_node", "blockId": "c"}),
+                )
+                .unwrap(),
+                target: LayoutTarget {
+                    view_id: Some("nope".to_string()),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "VIEW_NOT_FOUND");
+    }
+
+    #[test]
+    fn global_uniqueness_rejects_id_colliding_with_view_node() {
+        // Adding to ROOT a node whose id already exists in a VIEW is rejected.
+        let mut def = def_with_view();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(
+                    json!({"type": "block", "id": "dv_b", "blockId": "c"}),
+                )
+                .unwrap(),
+                target: LayoutTarget::default(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "DUPLICATE_LAYOUT_NODE_ID");
+    }
+
+    #[test]
+    fn remove_layout_node_targets_view() {
+        let mut def = def_with_view();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::RemoveLayoutNode {
+                node_id: "dv_b".to_string(),
+                view_id: Some("detail".to_string()),
+            }],
+        )
+        .unwrap();
+        assert!(view_node_ids(&def, "detail").is_empty());
+    }
+
+    #[test]
+    fn remove_layout_node_view_root_is_rejected() {
+        let mut def = def_with_view();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::RemoveLayoutNode {
+                node_id: "detail_root".to_string(),
+                view_id: Some("detail".to_string()),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "CANNOT_REMOVE_ROOT_GRID");
+    }
+
+    #[test]
+    fn move_layout_node_cross_tree_is_explicit_error() {
+        // Node lives in root; target is the detail view -> CROSS_TREE_MOVE_UNSUPPORTED.
+        let mut def = def_with_view();
+        let e = apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::MoveLayoutNode {
+                node_id: "a_node".to_string(),
+                target: LayoutTarget {
+                    view_id: Some("detail".to_string()),
+                    ..Default::default()
+                },
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "CROSS_TREE_MOVE_UNSUPPORTED");
+    }
+
+    #[test]
+    fn patch_layout_node_targets_view_node() {
+        let mut def = def_with_view();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::PatchLayoutNode {
+                node_id: "detail_root".to_string(),
+                patch: json!({"columns": 2}),
+                view_id: Some("detail".to_string()),
+            }],
+        )
+        .unwrap();
+        let detail = def.views.iter().find(|v| v.id == "detail").unwrap();
+        assert_eq!(detail.layout.columns, Some(2));
+        // Root layout columns untouched.
+        assert_eq!(def.layout.columns, Some(1));
+    }
+
+    #[test]
+    fn absent_view_id_still_targets_root_identically() {
+        // Backward-compat: no viewId behaves exactly as before (root layout).
+        let mut def = def_with_view();
+        apply_edit_ops(
+            &mut def,
+            &[ReportEditOp::AddLayoutNode {
+                node: serde_json::from_value(
+                    json!({"type": "block", "id": "c_node", "blockId": "c"}),
+                )
+                .unwrap(),
+                target: LayoutTarget::default(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            def.layout
+                .items
+                .iter()
+                .map(|i| layout_node_id(&i.child).to_string())
+                .collect::<Vec<_>>(),
+            ["a_node", "c_node"]
+        );
+        // View untouched.
+        assert_eq!(view_node_ids(&def, "detail"), ["dv_b"]);
     }
 }

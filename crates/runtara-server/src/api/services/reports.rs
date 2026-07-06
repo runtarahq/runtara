@@ -6650,6 +6650,22 @@ fn validate_chart_optional_fields(
             "{context} references unknown chart groupBy '{group_by}'"
         )));
     }
+    // `label_field` / `tooltip_fields` name source columns and must exist.
+    // `size_label` / `group_by_label` are free display text — not validated.
+    if let Some(label_field) = &chart.label_field
+        && !field_exists(label_field)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} references unknown chart labelField '{label_field}'"
+        )));
+    }
+    for tooltip_field in &chart.tooltip_fields {
+        if !field_exists(tooltip_field) {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} references unknown chart tooltipFields entry '{tooltip_field}'"
+            )));
+        }
+    }
     Ok(())
 }
 

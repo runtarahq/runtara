@@ -454,7 +454,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Run a typed SQL SELECT against the tenant's object-model database through SQLx prepared statements. Use Postgres positional placeholders ($1, $2, ...); params are typed and bound in array order. Provide resultSchema so rows are decoded and validated into JSON. Include LIMIT/OFFSET in the SQL for large reads."
+        description = "Run a typed SQL SELECT against the tenant's object-model database through SQLx prepared statements. Use Postgres positional placeholders ($1, $2, ...); params are typed and bound in array order. Provide resultSchema (required: an array of {name, type} column defs, type one of string|integer|decimal|boolean|timestamp|json|enum|tsvector|vector) so rows are decoded and validated into JSON — for untyped/generic rows, use query_sql_raw instead. Include LIMIT/OFFSET in the SQL for large reads."
     )]
     async fn query_sql(
         &self,
@@ -464,7 +464,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Run a typed SQL SELECT that must return exactly one row. Same parameters as query_sql: SQLx prepared statement with positional $1/$2 bindings plus resultSchema. Returns an error if the query returns zero or multiple rows."
+        description = "Run a typed SQL SELECT that must return exactly one row. Same parameters as query_sql: SQLx prepared statement with positional $1/$2 bindings plus the required resultSchema (array of {name, type} column defs). Returns an error if the query returns zero or multiple rows."
     )]
     async fn query_sql_one(
         &self,
