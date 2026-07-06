@@ -140,7 +140,8 @@ pub async fn list_step_types() -> Json<Value> {
                 "displayName": meta.display_name,
                 "description": meta.description,
                 "category": meta.category,
-                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null)
+                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null),
+                "outputShape": runtara_dsl::step_output_shape::output_shape_json(meta.id)
             })
         })
         .collect();

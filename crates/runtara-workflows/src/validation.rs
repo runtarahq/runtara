@@ -2256,6 +2256,14 @@ fn validate_references_with_inherited(
     result: &mut ValidationResult,
 ) {
     let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
+    // Step id -> PascalCase type name, in this scope only (mirrors `step_ids`),
+    // so reference validation can check a `steps.<id>.outputs.*` tail against the
+    // step's declared output shape.
+    let step_types: HashMap<String, &'static str> = graph
+        .steps
+        .iter()
+        .map(|(id, step)| (id.clone(), crate::workflow_features::step_type_name(step)))
+        .collect();
 
     // Merge inherited variables with graph's own variables + built-in runtime variables
     let mut variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
@@ -2273,6 +2281,7 @@ fn validate_references_with_inherited(
                     step_id,
                     value,
                     &step_ids,
+                    &step_types,
                     &variable_names,
                     result,
                 );
@@ -2322,6 +2331,7 @@ fn validate_mapping_value_references(
     step_id: &str,
     value: &MappingValue,
     valid_step_ids: &HashSet<String>,
+    step_types: &HashMap<String, &'static str>,
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
@@ -2331,6 +2341,7 @@ fn validate_mapping_value_references(
                 step_id,
                 &ref_value.value,
                 valid_step_ids,
+                step_types,
                 valid_variable_names,
                 result,
             );
@@ -2347,6 +2358,7 @@ fn validate_mapping_value_references(
                             step_id,
                             nested_value,
                             valid_step_ids,
+                            step_types,
                             valid_variable_names,
                             result,
                         );
@@ -2358,6 +2370,7 @@ fn validate_mapping_value_references(
                             step_id,
                             nested_value,
                             valid_step_ids,
+                            step_types,
                             valid_variable_names,
                             result,
                         );
@@ -2383,6 +2396,7 @@ fn validate_reference(
     step_id: &str,
     ref_path: &str,
     valid_step_ids: &HashSet<String>,
+    step_types: &HashMap<String, &'static str>,
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
@@ -2430,6 +2444,16 @@ fn validate_reference(
                 referenced_step_id: referenced_step_id.clone(),
                 available_steps: valid_step_ids.iter().cloned().collect(),
             });
+        } else if let Some(step_type) = step_types.get(referenced_step_id.as_str()) {
+            // The step exists and its type is known: reject a mistyped tail into a
+            // statically-shaped output (e.g. `steps.split.outputs.result`).
+            validate_step_output_reference(
+                step_id,
+                ref_path,
+                &referenced_step_id,
+                step_type,
+                result,
+            );
         }
     }
 
@@ -2442,6 +2466,92 @@ fn validate_reference(
             variable_name: variable_name.clone(),
             available_variables: valid_variable_names.iter().cloned().collect(),
         });
+    }
+}
+
+/// Reject a mistyped reference into a step's output whose shape is statically
+/// known — e.g. `steps.split.outputs.result`, where a Split's `outputs` is the
+/// collected array (not an object with a `result` field). The runtime resolver
+/// now fails loud on these too, but catching them at preflight turns a failed
+/// run into an author-time error.
+///
+/// Deliberately conservative to avoid false positives that would block a save:
+/// - only `steps.<id>.outputs.<field>` tails are inspected; sibling fields
+///   (Split's `data`/`stats`/`hasFailures`, Switch's `route`) and any other
+///   top-level field are left alone;
+/// - dynamic outputs (agents, GroupBy/Switch results, EmbedWorkflow, Finish) are
+///   never flagged;
+/// - bracket forms (`outputs[0]`) are skipped — the runtime normalizes those;
+/// - only the first segment after `outputs` is checked (deeper shape is dynamic).
+///
+/// Emits E059 (array indexed by a named key) or E058 (unknown field on a closed
+/// object), reusing the existing nested-reference diagnostics.
+fn validate_step_output_reference(
+    step_id: &str,
+    ref_path: &str,
+    referenced_step_id: &str,
+    referenced_step_type: &str,
+    result: &mut ValidationResult,
+) {
+    use runtara_dsl::step_output_shape::{OutputsShape, step_output_shape};
+
+    // Bracket indexing is normalized at runtime; don't second-guess it here.
+    if ref_path.contains('[') {
+        return;
+    }
+    let Some(shape) = step_output_shape(referenced_step_type) else {
+        return;
+    };
+
+    let segments: Vec<&str> = ref_path.split('.').collect();
+    // Expect `steps.<id>.<field>[.<rest>]`; bail on anything else (incl. step ids
+    // containing dots, where positional indexing would be wrong).
+    if segments.len() < 3
+        || segments[0] != "steps"
+        || segments.get(1).copied() != Some(referenced_step_id)
+    {
+        return;
+    }
+
+    let top_field = segments[2];
+    // Sibling fields are valid references; only `outputs` has a declared shape.
+    if shape.siblings.contains(&top_field) || top_field != "outputs" {
+        return;
+    }
+    // `steps.<id>.outputs` with no further tail references the whole value: fine.
+    let Some(after) = segments.get(3).copied() else {
+        return;
+    };
+
+    match shape.outputs {
+        OutputsShape::Array => {
+            // Elements are addressed by numeric index (incl. Python-style negatives).
+            if after.parse::<i64>().is_err() {
+                result
+                    .errors
+                    .push(ValidationError::ReferenceNonObjectTraversal {
+                        step_id: step_id.to_string(),
+                        reference: ref_path.to_string(),
+                        known_prefix: format!("steps.{referenced_step_id}.outputs"),
+                        actual_type: "array".to_string(),
+                        attempted_field: after.to_string(),
+                    });
+            }
+        }
+        OutputsShape::Object(fields) => {
+            if !fields.contains(&after) {
+                result
+                    .errors
+                    .push(ValidationError::UndefinedReferenceField {
+                        step_id: step_id.to_string(),
+                        reference: ref_path.to_string(),
+                        known_prefix: format!("steps.{referenced_step_id}.outputs"),
+                        missing_field: after.to_string(),
+                        available_fields: fields.iter().map(|s| s.to_string()).collect(),
+                    });
+            }
+        }
+        OutputsShape::Dynamic => {}
     }
 }
 
@@ -6517,12 +6627,20 @@ mod tests {
     #[test]
     fn bare_error_reference_warns_with_canonical_suggestion() {
         let steps = HashSet::new();
+        let step_types = HashMap::new();
         let vars = HashSet::new();
 
         // Bare `__error.*` (the historically-documented form) warns (W053) but
         // is not an error — the runtime mirrors it to the source root.
         let mut bare = ValidationResult::default();
-        validate_reference("handler", "__error.message", &steps, &vars, &mut bare);
+        validate_reference(
+            "handler",
+            "__error.message",
+            &steps,
+            &step_types,
+            &vars,
+            &mut bare,
+        );
         assert!(!bare.has_errors());
         assert!(matches!(
             bare.warnings.as_slice(),
@@ -6537,11 +6655,126 @@ mod tests {
             "handler",
             "steps.__error.message",
             &steps,
+            &step_types,
             &vars,
             &mut canonical,
         );
         assert!(!canonical.has_errors());
         assert!(!canonical.has_warnings());
+    }
+
+    // === Output-shape preflight (reporter's `steps.split.outputs.result` bug) ===
+
+    #[test]
+    fn output_shape_preflight_flags_named_key_into_array() {
+        // A Split's `outputs` is the collected array; `.result` (a named key) is
+        // an E059 ReferenceNonObjectTraversal.
+        let mut r = ValidationResult::default();
+        validate_step_output_reference(
+            "filter_step",
+            "steps.split_users.outputs.result",
+            "split_users",
+            "Split",
+            &mut r,
+        );
+        assert!(matches!(
+            r.errors.as_slice(),
+            [ValidationError::ReferenceNonObjectTraversal { actual_type, attempted_field, known_prefix, .. }]
+                if actual_type == "array"
+                    && attempted_field == "result"
+                    && known_prefix == "steps.split_users.outputs"
+        ));
+    }
+
+    #[test]
+    fn output_shape_preflight_allows_index_whole_array_and_siblings() {
+        // Numeric index, negative index, and the whole array are all valid; so
+        // are the config-gated sibling fields a Split emits.
+        for path in [
+            "steps.split_users.outputs.0",
+            "steps.split_users.outputs.-1",
+            "steps.split_users.outputs",
+            "steps.split_users.data.success",
+            "steps.split_users.stats.total",
+            "steps.split_users.hasFailures",
+        ] {
+            let mut r = ValidationResult::default();
+            validate_step_output_reference("f", path, "split_users", "Split", &mut r);
+            assert!(!r.has_errors(), "wrongly flagged valid path: {path}");
+        }
+    }
+
+    #[test]
+    fn output_shape_preflight_flags_unknown_field_on_closed_object() {
+        // While's outputs is the closed object {iterations, outputs}.
+        let mut bad = ValidationResult::default();
+        validate_step_output_reference("f", "steps.loop.outputs.bogus", "loop", "While", &mut bad);
+        assert!(matches!(
+            bad.errors.as_slice(),
+            [ValidationError::UndefinedReferenceField { missing_field, .. }] if missing_field == "bogus"
+        ));
+        for path in [
+            "steps.loop.outputs.iterations",
+            "steps.loop.outputs.outputs",
+        ] {
+            let mut ok = ValidationResult::default();
+            validate_step_output_reference("f", path, "loop", "While", &mut ok);
+            assert!(!ok.has_errors(), "known While field flagged: {path}");
+        }
+    }
+
+    #[test]
+    fn output_shape_preflight_skips_dynamic_outputs_and_brackets() {
+        // Agent outputs are dynamic (shape from the capability) -> never flagged.
+        let mut dynamic = ValidationResult::default();
+        validate_step_output_reference(
+            "f",
+            "steps.fetch.outputs.anything.nested",
+            "fetch",
+            "Agent",
+            &mut dynamic,
+        );
+        assert!(!dynamic.has_errors());
+        // Bracket indexing is normalized at runtime; the preflight leaves it be.
+        let mut bracket = ValidationResult::default();
+        validate_step_output_reference("f", "steps.s.outputs[0]", "s", "Split", &mut bracket);
+        assert!(!bracket.has_errors());
+    }
+
+    #[test]
+    fn validate_reference_wires_output_shape_check() {
+        // End-to-end through validate_reference: the step exists and is known to
+        // be a Split, so the bad output tail is caught.
+        let step_ids: HashSet<String> = ["split_users".to_string()].into_iter().collect();
+        let step_types: HashMap<String, &'static str> =
+            [("split_users".to_string(), "Split")].into_iter().collect();
+        let vars = HashSet::new();
+
+        let mut bad = ValidationResult::default();
+        validate_reference(
+            "filter",
+            "steps.split_users.outputs.result",
+            &step_ids,
+            &step_types,
+            &vars,
+            &mut bad,
+        );
+        assert!(matches!(
+            bad.errors.as_slice(),
+            [ValidationError::ReferenceNonObjectTraversal { .. }]
+        ));
+
+        // The blessed bare-array reference produces no error.
+        let mut good = ValidationResult::default();
+        validate_reference(
+            "filter",
+            "steps.split_users.outputs",
+            &step_ids,
+            &step_types,
+            &vars,
+            &mut good,
+        );
+        assert!(!good.has_errors());
     }
 
     // === ValidationResult Tests ===

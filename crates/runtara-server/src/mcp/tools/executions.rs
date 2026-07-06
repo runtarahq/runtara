@@ -516,6 +516,75 @@ fn signed_array_index(segment: &str, len: usize) -> Option<usize> {
     }
 }
 
+/// Explain why a dotted `tail` path failed to resolve against `value`,
+/// distinguishing a *shape mismatch* (a named key indexed into an array, or a
+/// segment reaching into a scalar — the reporter's `steps.split.outputs.result`)
+/// from a plain missing/out-of-range field. Mirrors the workflow runtime's
+/// `descend`, so the diagnostic matches how execution now fails loud on the same
+/// path instead of silently resolving to null.
+///
+/// Returns `None` when the path fully resolves (to any value, including a
+/// genuine `null`) — a real null leaf is not a mismatch and gets no reason.
+/// `base` is the human prefix the tail hangs off (e.g. `steps.split_users`).
+fn explain_unresolved_path(value: &serde_json::Value, base: &str, tail: &str) -> Option<String> {
+    use serde_json::Value;
+    let mut current = value;
+    let mut walked = base.to_string();
+    for segment in tail.split('.') {
+        match current {
+            Value::Object(map) => match map.get(segment) {
+                Some(child) => current = child,
+                None => {
+                    let fields: Vec<&str> = map.keys().map(String::as_str).collect();
+                    return Some(format!(
+                        "'{walked}' has no field '{segment}' (available: {})",
+                        if fields.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            fields.join(", ")
+                        }
+                    ));
+                }
+            },
+            Value::Array(items) => match signed_array_index(segment, items.len()) {
+                Some(index) => match items.get(index) {
+                    Some(child) => current = child,
+                    None => {
+                        return Some(format!(
+                            "'{walked}' is an array of length {} — index {segment} is out of range",
+                            items.len()
+                        ));
+                    }
+                },
+                None => {
+                    return Some(format!(
+                        "'{walked}' is an array, so '{segment}' is not a valid field — address \
+                         elements by numeric index (e.g. '{walked}.0'), or reference '{walked}' \
+                         itself for the whole array"
+                    ));
+                }
+            },
+            scalar => {
+                let kind = match scalar {
+                    Value::String(_) => "a string",
+                    Value::Number(_) => "a number",
+                    Value::Bool(_) => "a boolean",
+                    Value::Null => "null",
+                    _ => "a scalar",
+                };
+                return Some(format!(
+                    "'{walked}' is {kind} and cannot be traversed to '{segment}'"
+                ));
+            }
+        }
+        if !walked.is_empty() {
+            walked.push('.');
+        }
+        walked.push_str(segment);
+    }
+    None
+}
+
 /// Helper: recursively replace large strings with an explicit truncation envelope.
 fn truncate_large_strings(value: &serde_json::Value) -> serde_json::Value {
     match value {
@@ -1377,7 +1446,7 @@ pub async fn trace_reference(
             )
             .unwrap_or(json!(null));
 
-            json_result(json!({
+            let mut response = json!({
                 "reference": params.reference,
                 "resolved": !resolved.is_null(),
                 "value": resolved,
@@ -1387,7 +1456,20 @@ pub async fn trace_reference(
                     "stepStatus": step.get("status"),
                     "fullOutputs": outputs,
                 }
-            }))
+            });
+            // When the path didn't resolve, say WHY instead of just `null`: a
+            // named key indexed into an array (e.g. `steps.split.outputs.result`)
+            // or a scalar traversal is a shape mismatch that now fails loud at
+            // runtime and preflight — the diagnostic must not keep implying the
+            // value is simply absent. `parts[2]` is the tail after `steps.<id>`.
+            if resolved.is_null()
+                && let Some(tail) = parts.get(2)
+                && let Some(reason) =
+                    explain_unresolved_path(&outputs, &format!("steps.{step_id}"), tail)
+            {
+                response["reason"] = json!(reason);
+            }
+            json_result(response)
         }
         "loop" => {
             // `trace_reference` has no step_id param, so there's no scope to
@@ -1661,6 +1743,43 @@ mod tests {
         assert_eq!(resolve_json_path(&value, "items.0"), Some(json!("a")));
         assert_eq!(resolve_json_path(&value, "items.-4"), None);
         assert_eq!(resolve_json_path(&value, "items.5"), None);
+    }
+
+    /// trace_reference must explain a shape mismatch (the reporter's
+    /// `steps.split.outputs.result`) instead of implying the value is absent.
+    #[test]
+    fn explain_unresolved_path_distinguishes_mismatch_from_missing() {
+        // A Split step envelope: `outputs` is the collected array.
+        let envelope = json!({
+            "stepId": "split_users",
+            "stepType": "Split",
+            "outputs": [{"id": 1}, {"id": 2}],
+        });
+
+        // Named key into the array -> shape mismatch, with a numeric-index hint.
+        let reason = explain_unresolved_path(&envelope, "steps.split_users", "outputs.result")
+            .expect("named key into array must produce a reason");
+        assert!(
+            reason.contains("is an array")
+                && reason.contains("'result'")
+                && reason.contains("numeric index"),
+            "unhelpful reason: {reason}"
+        );
+
+        // Unknown top-level field -> missing (not a mismatch), lists available.
+        let reason = explain_unresolved_path(&envelope, "steps.split_users", "bogus")
+            .expect("missing field must produce a reason");
+        assert!(reason.contains("has no field 'bogus'"), "reason: {reason}");
+
+        // Traversing into a scalar -> mismatch.
+        let reason = explain_unresolved_path(&envelope, "steps.split_users", "stepType.first")
+            .expect("scalar traversal must produce a reason");
+        assert!(reason.contains("is a string"), "reason: {reason}");
+
+        // A path that fully resolves (to the array, or into an element) yields no
+        // reason — a real value, including a genuine null leaf, is not a mismatch.
+        assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs").is_none());
+        assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs.0.id").is_none());
     }
 
     fn summaries() -> serde_json::Value {

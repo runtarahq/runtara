@@ -5201,10 +5201,10 @@ fn apply_reference(map: &Map<String, Value>, source: &Value) -> Result<Value, St
         .and_then(Value::as_str)
         .ok_or_else(|| "reference mapping value must be a string path".to_string())?;
     let default = map.get("default").cloned();
-    let value = match lookup_source_path(source, path) {
-        Some(Value::Null) | None => default.unwrap_or(Value::Null),
-        Some(value) => value,
-    };
+    let value = resolve_lookup(
+        lookup_segments_detailed(source, &path_to_segments(path)),
+        default,
+    )?;
     Ok(apply_type_hint(
         value,
         map.get("type").and_then(Value::as_str),
@@ -5464,17 +5464,23 @@ fn insert_nested(output: &mut Map<String, Value>, key: &str, value: Value) {
     }
 }
 
+/// `Option`-returning path probe: `Some` on a hit (including a `null` leaf),
+/// `None` on any miss (absent *or* shape mismatch). Now used only by tests as a
+/// terse `Some/None` shim over the reference walk; production reference
+/// resolution goes through [`lookup_segments_detailed`] so a shape mismatch can
+/// fail loudly rather than collapse to `None`.
+#[cfg(test)]
 fn lookup_source_path(source: &Value, path: &str) -> Option<Value> {
     lookup_segments(source, &path_to_segments(path))
 }
 
 /// Pre-split a reference path into already-unescaped JSON-pointer segments.
 ///
-/// This is the expensive half of [`lookup_source_path`] (the `['..']`/`["..]`
+/// This is the expensive half of a reference lookup (the `['..']`/`["..]`
 /// bracket normalization, the `[N]` numeric-index scan, and the `~0`/`~1`
 /// escape round-trip). Hoisting it into a compiled reference means a per-element
 /// Filter/While/GroupBy reference parses its path **once** instead of on every
-/// evaluation. `lookup_segments` is the cheap walk over the result.
+/// evaluation. [`lookup_segments_detailed`] is the cheap walk over the result.
 fn path_to_segments(path: &str) -> Vec<String> {
     path_to_json_pointer(path)
         .split('/')
@@ -5483,49 +5489,178 @@ fn path_to_segments(path: &str) -> Vec<String> {
         .collect()
 }
 
+/// `Option`-returning walk over pre-split segments — a test-only `Some/None`
+/// shim over [`lookup_segments_detailed`]. Reference resolution proper uses the
+/// detailed walk so a shape mismatch can fail loudly instead of becoming `None`.
+#[cfg(test)]
+fn lookup_segments(source: &Value, segments: &[String]) -> Option<Value> {
+    match lookup_segments_detailed(source, segments) {
+        Lookup::Found(value) => Some(value),
+        Lookup::Absent | Lookup::Mismatch(_) => None,
+    }
+}
+
+/// Outcome of resolving a reference path against the runtime scope.
+enum Lookup {
+    /// The path resolved to a value (which may itself be `null`).
+    Found(Value),
+    /// A segment was legitimately absent — a missing object key, an out-of-range
+    /// array index, or traversal through an explicit `null`. This is the
+    /// possibly-optional case: it resolves to the reference's declared `default`
+    /// (or `null`), preserving `ReferenceValue.default` semantics.
+    Absent,
+    /// A segment traversed into a value of the wrong *shape* — a non-numeric key
+    /// indexed into an array, or any segment reaching into a scalar. Almost
+    /// always an authoring mistake (e.g. `steps.split.outputs.result`, where
+    /// `outputs` is the collected array, not an object). Carries a diagnostic;
+    /// [`resolve_lookup`] surfaces it loudly when no `default` is declared.
+    Mismatch(String),
+}
+
 /// Walk pre-split JSON-pointer segments, resolving any `$wfref` handle
 /// encountered (at the root, mid-path, or the final node) so interned values are
 /// transparent to references. The result is fully materialized, so callers never
 /// see a handle. Only nodes actually traversed are parsed — carrying a large
 /// value through scope without reading it never touches the arena.
-fn lookup_segments(source: &Value, segments: &[String]) -> Option<Value> {
+///
+/// Unlike a plain `Option` walk, this distinguishes an optional miss (`Absent`)
+/// from a shape error (`Mismatch`) so a mistyped reference tail can fail loudly
+/// instead of silently resolving to null. See [`descend`].
+fn lookup_segments_detailed(source: &Value, segments: &[String]) -> Lookup {
     let mut current: Cow<Value> = Cow::Borrowed(source);
     if wfref_id(source).is_some() {
         current = Cow::Owned(deref_handle(source).into_owned());
     }
-    for segment in segments {
+    for (depth, segment) in segments.iter().enumerate() {
         // Borrow the child through inline (non-handle) nodes; clone only when we
         // must deref a `$wfref` handle or when the parent is already owned (its
         // borrow can't outlive this step). The common case — an inline path like
         // `item.sku` — walks entirely by reference and clones once at the leaf.
         current = match current {
-            Cow::Borrowed(parent) => {
-                let child = index_child(parent, segment)?;
-                if wfref_id(child).is_some() {
-                    Cow::Owned(deref_handle(child).into_owned())
-                } else {
-                    Cow::Borrowed(child)
+            Cow::Borrowed(parent) => match descend(parent, segment) {
+                Descent::Child(child) => {
+                    if wfref_id(child).is_some() {
+                        Cow::Owned(deref_handle(child).into_owned())
+                    } else {
+                        Cow::Borrowed(child)
+                    }
                 }
-            }
-            Cow::Owned(parent) => {
-                let child = index_child(&parent, segment)?;
-                if wfref_id(child).is_some() {
-                    Cow::Owned(deref_handle(child).into_owned())
-                } else {
-                    Cow::Owned(child.clone())
+                Descent::Absent => return Lookup::Absent,
+                Descent::Mismatch => {
+                    return Lookup::Mismatch(mismatch_message(segments, depth, parent));
                 }
-            }
+            },
+            Cow::Owned(parent) => match descend(&parent, segment) {
+                Descent::Child(child) => {
+                    if wfref_id(child).is_some() {
+                        Cow::Owned(deref_handle(child).into_owned())
+                    } else {
+                        Cow::Owned(child.clone())
+                    }
+                }
+                Descent::Absent => return Lookup::Absent,
+                Descent::Mismatch => {
+                    return Lookup::Mismatch(mismatch_message(segments, depth, &parent));
+                }
+            },
         };
     }
-    Some(materialize(current.into_owned()))
+    Lookup::Found(materialize(current.into_owned()))
 }
 
-/// Index one JSON-pointer segment into a value: object key or array index.
-fn index_child<'a>(value: &'a Value, segment: &str) -> Option<&'a Value> {
+/// Outcome of indexing one path segment into a value.
+enum Descent<'a> {
+    /// Segment resolved to a child node.
+    Child(&'a Value),
+    /// Segment is legitimately absent (missing object key, out-of-range array
+    /// index, or a `null` intermediate) — an optional miss.
+    Absent,
+    /// The value is the wrong shape to index with this segment (a non-numeric key
+    /// into an array, or any segment into a scalar) — a probable authoring bug.
+    Mismatch,
+}
+
+/// Index one JSON-pointer segment into a value, distinguishing an optional miss
+/// from a shape mismatch.
+///
+/// The ONLY hard `Mismatch` is a **non-numeric key indexed into an array** — the
+/// reporter's `steps.split.outputs.result`, where `outputs` is the collected
+/// array. An array is never a keyed object, so that access has zero legitimate
+/// meaning and is surfaced loudly.
+///
+/// Everything else stays lenient (`Absent`): a missing object key, an
+/// out-of-range array index, a `null` intermediate, AND traversal into a scalar.
+/// Reaching a nested field on a scalar/absent value is a common, intentional
+/// pattern (e.g. filtering a heterogeneous array by `item.status` where some
+/// elements are scalars or lack the field) — those must keep resolving to
+/// `null`/the declared default rather than aborting the run.
+fn descend<'a>(value: &'a Value, segment: &str) -> Descent<'a> {
     match value {
-        Value::Object(map) => map.get(segment),
-        Value::Array(items) => items.get(array_index(segment, items.len())?),
-        _ => None,
+        Value::Object(map) => match map.get(segment) {
+            Some(child) => Descent::Child(child),
+            None => Descent::Absent,
+        },
+        Value::Array(items) => {
+            if is_array_index_token(segment) {
+                // Numeric token: in-range hits a child, out-of-range is an
+                // optional miss (mirrors the historical null/default fall-through
+                // documented on `array_index`).
+                match array_index(segment, items.len()).and_then(|index| items.get(index)) {
+                    Some(child) => Descent::Child(child),
+                    None => Descent::Absent,
+                }
+            } else {
+                // A named key into an array — e.g. `.result` on a Split's
+                // collected array. Never valid; surface it.
+                Descent::Mismatch
+            }
+        }
+        // Scalars and `null`: cannot traverse further, but treated as an optional
+        // miss (lenient), not a hard error. See the doc above.
+        _ => Descent::Absent,
+    }
+}
+
+/// Build the diagnostic for a [`Descent::Mismatch`]: which reference, which
+/// segment failed, and why. Computed purely from `segments` so the interpreter
+/// (`apply_reference`) and compiled (`CompiledReference::resolve`) paths produce
+/// byte-identical messages (the parity contract above).
+fn mismatch_message(segments: &[String], depth: usize, parent: &Value) -> String {
+    let path = segments.join(".");
+    let base = segments[..depth].join(".");
+    let at = if base.is_empty() {
+        "the source".to_string()
+    } else {
+        format!("'{base}'")
+    };
+    let segment = &segments[depth];
+    if parent.is_array() {
+        format!(
+            "reference '{path}' cannot be resolved: {at} is an array with no field '{segment}' \
+             — address array elements by numeric index (e.g. '{base}.0')"
+        )
+    } else {
+        format!(
+            "reference '{path}' cannot be resolved: {at} is a {kind} with no field '{segment}'",
+            kind = json_type_name(parent)
+        )
+    }
+}
+
+/// Apply the reference `default` policy to a [`Lookup`]. A found value is used
+/// as-is; a found `null` or an optional `Absent` miss falls back to the declared
+/// default (or `null`); a shape `Mismatch` is a hard error unless the author
+/// declared a `default`, in which case their explicit fallback is honored.
+///
+/// This is the one place a mistyped reference tail (e.g.
+/// `steps.split.outputs.result` on a Split whose `outputs` is the collected
+/// array) turns into a loud failure instead of a silent null — closing the
+/// "green run, wrong result" failure mode.
+fn resolve_lookup(lookup: Lookup, default: Option<Value>) -> Result<Value, String> {
+    match lookup {
+        Lookup::Found(Value::Null) | Lookup::Absent => Ok(default.unwrap_or(Value::Null)),
+        Lookup::Found(value) => Ok(value),
+        Lookup::Mismatch(message) => default.ok_or(message),
     }
 }
 
@@ -6013,7 +6148,7 @@ fn compiled_length_value(args: &[CompiledArgValue], source: &Value) -> Result<Va
 impl CompiledMapping {
     fn eval(&self, source: &Value) -> Result<Value, String> {
         match self {
-            CompiledMapping::Reference(reference) => Ok(reference.resolve(source)),
+            CompiledMapping::Reference(reference) => reference.resolve(source),
             CompiledMapping::Immediate(value) => Ok(value.clone()),
             CompiledMapping::Composite(composite) => composite.eval(source),
             CompiledMapping::Template(template) => {
@@ -6044,12 +6179,12 @@ impl CompiledComposite {
 }
 
 impl CompiledReference {
-    fn resolve(&self, source: &Value) -> Value {
-        let value = match lookup_segments(source, &self.segments) {
-            Some(Value::Null) | None => self.default.clone().unwrap_or(Value::Null),
-            Some(value) => value,
-        };
-        apply_type_hint(value, self.type_hint.as_deref())
+    fn resolve(&self, source: &Value) -> Result<Value, String> {
+        let value = resolve_lookup(
+            lookup_segments_detailed(source, &self.segments),
+            self.default.clone(),
+        )?;
+        Ok(apply_type_hint(value, self.type_hint.as_deref()))
     }
 }
 
@@ -6483,6 +6618,137 @@ mod tests {
         assert_eq!(
             apply_mapping_value(&with_default, &source).unwrap(),
             json!("fallback")
+        );
+    }
+
+    /// A named key indexed into an array (the reporter's `steps.split.outputs.result`
+    /// on a Split whose `outputs` is the collected array) is a shape mismatch: with
+    /// no `default` it must FAIL LOUD in both resolvers, not silently resolve to
+    /// null. This is the fix for the "green run, wrong result" failure mode.
+    #[test]
+    fn named_key_into_array_with_no_default_fails_loud() {
+        reset_value_store();
+        let source = json!({
+            "steps": { "split_users": { "outputs": ["a", "b", "c"] } }
+        });
+        let reference = json!({
+            "valueType": "reference",
+            "value": "steps.split_users.outputs.result",
+        });
+
+        // Interpreter path errors.
+        let interp = apply_mapping_value(&reference, &source);
+        assert!(interp.is_err(), "interpreter must fail on array.named_key");
+        // Compiled path (Filter/While/GroupBy + condition args) errors identically.
+        let compiled = compile_mapping(&reference).eval(&source);
+        assert!(compiled.is_err(), "compiled must fail on array.named_key");
+        assert_eq!(
+            interp.unwrap_err(),
+            compiled.unwrap_err(),
+            "interpreter and compiled error messages must match (parity contract)"
+        );
+
+        // The message names the reference and explains the shape mismatch.
+        let message = apply_mapping_value(&reference, &source).unwrap_err();
+        assert!(
+            message.contains("steps.split_users.outputs.result")
+                && message.contains("is an array")
+                && message.contains("'result'"),
+            "unhelpful mismatch message: {message}"
+        );
+    }
+
+    /// The same shape mismatch is silenced when the author declares an explicit
+    /// `default` — their opt-out is honored, no error.
+    #[test]
+    fn shape_mismatch_with_explicit_default_is_honored() {
+        reset_value_store();
+        let source = json!({ "steps": { "s": { "outputs": ["a"] } } });
+        let reference = json!({
+            "valueType": "reference",
+            "value": "steps.s.outputs.result",
+            "default": "fallback",
+        });
+        assert_eq!(
+            apply_mapping_value(&reference, &source).unwrap(),
+            json!("fallback")
+        );
+        assert_eq!(
+            compile_mapping(&reference).eval(&source).unwrap(),
+            json!("fallback")
+        );
+    }
+
+    /// Traversing INTO a scalar stays LENIENT (resolves to null / the declared
+    /// default), NOT a hard error: `item.status` on a scalar element of a
+    /// heterogeneous array is a legitimate filter pattern. Only a named key into
+    /// an array is fail-loud (see `named_key_into_array_with_no_default_fails_loud`).
+    #[test]
+    fn traversing_into_scalar_stays_lenient() {
+        reset_value_store();
+        let source = json!({ "data": { "name": "alice" } });
+
+        let no_default = json!({ "valueType": "reference", "value": "data.name.first" });
+        assert_eq!(
+            apply_mapping_value(&no_default, &source).unwrap(),
+            json!(null)
+        );
+        assert_eq!(
+            compile_mapping(&no_default).eval(&source).unwrap(),
+            json!(null)
+        );
+
+        let with_default =
+            json!({ "valueType": "reference", "value": "data.name.first", "default": "d" });
+        assert_eq!(
+            apply_mapping_value(&with_default, &source).unwrap(),
+            json!("d")
+        );
+    }
+
+    /// Optional references MUST stay lenient: a missing OBJECT key and an
+    /// out-of-range NUMERIC index resolve to null (or the declared default)
+    /// without erroring — these are the `ReferenceValue.default` cases the DSL
+    /// documents, distinct from the array-named-key / scalar shape errors above.
+    #[test]
+    fn optional_misses_stay_lenient() {
+        reset_value_store();
+        let source = json!({ "data": { "present": 1, "nested": null }, "arr": ["x"] });
+
+        // Missing object key, no default -> null (not an error).
+        let missing_key = json!({ "valueType": "reference", "value": "data.absent" });
+        assert_eq!(
+            apply_mapping_value(&missing_key, &source).unwrap(),
+            json!(null)
+        );
+        assert_eq!(
+            compile_mapping(&missing_key).eval(&source).unwrap(),
+            json!(null)
+        );
+
+        // Out-of-range numeric index, no default -> null (not an error).
+        let oob_index = json!({ "valueType": "reference", "value": "arr.9" });
+        assert_eq!(
+            apply_mapping_value(&oob_index, &source).unwrap(),
+            json!(null)
+        );
+        assert_eq!(
+            compile_mapping(&oob_index).eval(&source).unwrap(),
+            json!(null)
+        );
+
+        // A `null` intermediate (`data.nested` IS null) stays an optional chain
+        // (lenient) rather than a scalar-traversal mismatch, so `.deeper` through
+        // it falls back to the declared default.
+        let via_null = json!({
+            "valueType": "reference",
+            "value": "data.nested.deeper",
+            "default": "d",
+        });
+        assert_eq!(apply_mapping_value(&via_null, &source).unwrap(), json!("d"));
+        assert_eq!(
+            compile_mapping(&via_null).eval(&source).unwrap(),
+            json!("d")
         );
     }
 

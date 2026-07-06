@@ -408,7 +408,7 @@ fn step_has_breakpoint(step: &Step) -> bool {
     }
 }
 
-fn step_type_name(step: &Step) -> &'static str {
+pub(crate) fn step_type_name(step: &Step) -> &'static str {
     match step {
         Step::Finish(_) => "Finish",
         Step::Agent(_) => "Agent",

@@ -2260,11 +2260,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // as they are in `public_app` below — otherwise MCP connection-discovery
     // tools (list_connections, list_integrations, get_integration) 404 because
     // their `/api/runtime/connections*` targets exist only on the public app.
+    //
+    // `event_routes` is merged here too so the `execute_workflow_sync` MCP tool
+    // (which POSTs to `/api/runtime/events/http-sync/{workflow_id}`) resolves
+    // in-process instead of hitting the router fallback and returning a bare 404
+    // in every deployment. `event_routes` is moved into `public_app` below, so
+    // clone it here.
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
         .nest("/api/runtime", connections_tenant_routes.clone())
-        .merge(public_routes.clone());
+        .merge(public_routes.clone())
+        .merge(event_routes.clone());
 
     // Build MCP (Model Context Protocol) router with JWT authentication.
     // Uses .layer() (not .route_layer()) because the MCP transport is a

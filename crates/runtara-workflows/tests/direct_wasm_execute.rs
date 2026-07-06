@@ -40,6 +40,7 @@ const WAIT_TIMEOUT_ON_ERROR: &str = include_str!("fixtures/wait_timeout_on_error
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
+const SPLIT_WORKFLOW: &str = include_str!("fixtures/split_workflow.json");
 const CONDITIONAL_QUERY_ONLY_OPERATOR: &str =
     include_str!("fixtures/conditional_query_only_operator.json");
 const AGENT_CACHED_REPLAY: &str = r#"{
@@ -3461,6 +3462,41 @@ fn direct_wasm_execute_filter_finish_reports_completion() {
             ],
             "count": 2
         })
+    );
+}
+
+/// The reporter's exact bug: a downstream step references a Split's array output
+/// by a NAMED KEY (`steps.split.outputs.result`) instead of indexing it or using
+/// the bare array. This used to silently resolve to null and produce a green
+/// (but wrong) run; it must now fail loud at runtime. This proves the fix
+/// end-to-end (compile -> execute -> observe failure), not just in the resolver
+/// unit tests.
+#[test]
+fn direct_wasm_execute_named_key_into_split_array_output_fails_loud() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // Same graph as `split_workflow`, but the outer Finish reaches into the
+    // Split's collected ARRAY with a field name that does not exist on an array.
+    let graph = SPLIT_WORKFLOW.replace("\"steps.split.outputs\"", "\"steps.split.outputs.result\"");
+    assert!(
+        graph.contains("steps.split.outputs.result"),
+        "fixture shape changed — the bad-reference injection no longer applies"
+    );
+
+    let failure = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-split-bad-output-ref",
+        &graph,
+        br#"{"items":[{"value":1},{"value":2}]}"#,
+    );
+
+    // The error must name the offending reference, not silently swallow it.
+    let error_text = serde_json::to_string(&failure.error_json).unwrap_or_default();
+    assert!(
+        error_text.contains("steps.split.outputs.result"),
+        "failure must attribute the bad reference; got: {error_text}"
     );
 }
 

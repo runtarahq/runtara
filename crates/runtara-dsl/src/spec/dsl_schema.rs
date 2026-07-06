@@ -44,7 +44,8 @@ pub fn generate_dsl_schema() -> Value {
                 "displayName": meta.display_name,
                 "description": meta.description,
                 "category": meta.category,
-                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null)
+                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null),
+                "outputShape": crate::step_output_shape::output_shape_json(meta.id)
             })
         })
         .collect();
@@ -100,7 +101,8 @@ pub fn get_step_type_schema(step_type_id: &str) -> Option<Value> {
                 "displayName": meta.display_name,
                 "description": meta.description,
                 "category": meta.category,
-                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null)
+                "schema": serde_json::to_value(&step_schema).unwrap_or(Value::Null),
+                "outputShape": crate::step_output_shape::output_shape_json(meta.id)
             })
         })
 }

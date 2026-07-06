@@ -24,6 +24,11 @@ pub mod paths;
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
 
+// Per-step-type output shapes (what each step writes into `steps.<id>`).
+// Surfaced in the authoring schema and consulted by reference validation.
+// Not gated behind `json-schema`: the WASM validator needs the preflight lookup.
+pub mod step_output_shape;
+
 // Type coercion utilities for agent inputs
 pub mod coercion;
 
