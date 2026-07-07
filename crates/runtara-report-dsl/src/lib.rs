@@ -10,6 +10,7 @@ pub mod condition;
 pub mod edit_ops;
 pub mod format;
 pub mod lint;
+pub mod operator_support;
 pub mod row_condition;
 pub mod template;
 pub mod types;
@@ -23,6 +24,7 @@ pub use condition::{
     Condition, ConditionValidationError, condition_from_value, validate_condition_field_refs,
 };
 pub use format::{FormatSpec, Formatter, RenderContext, SimpleAsciiFormatter};
+pub use operator_support::{OperatorSupport, operator_support, parse_operator};
 pub use row_condition::{RowConditionError, evaluate_row_condition};
 pub use template::{
     TemplateError, format_value, make_environment, register_report_filters, render_template,

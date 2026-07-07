@@ -4847,7 +4847,8 @@ fn validate_report_workflow_action_row_condition(
                 )));
             }
         }
-        ConditionOperator::IsDefined
+        ConditionOperator::Length
+        | ConditionOperator::IsDefined
         | ConditionOperator::IsEmpty
         | ConditionOperator::IsNotEmpty => {
             if args.len() != 1 {
@@ -4858,8 +4859,18 @@ fn validate_report_workflow_action_row_condition(
             check_field(&args[0], &format!("{condition_path}.arguments[0]"))?;
         }
         other => {
+            // Row-visibility conditions evaluate in-memory via the shared
+            // `row_condition` evaluator, so the accepted set is exactly the
+            // client-evaluable operators. The remaining operators (MATCH,
+            // similarity, vector distance) only exist as SQL pushdown — tell the
+            // author that rather than implying the operator doesn't exist.
+            let detail = if runtara_report_dsl::operator_support(other.clone()).sql_pushdown {
+                "it runs only in Object Model source filters (SQL pushdown) and cannot be evaluated in-memory for row visibility"
+            } else {
+                "it is not a supported row condition operator"
+            };
             return Err(ReportServiceError::Validation(format!(
-                "{context} {condition_path} uses unsupported row condition op '{other:?}'"
+                "{context} {condition_path} operator '{other:?}' is not available in row conditions: {detail}"
             )));
         }
     }
@@ -9293,6 +9304,142 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![vec![json!("ACME"), Value::Null]]);
+    }
+
+    fn row_condition_expr(value: Value) -> runtara_dsl::ConditionExpression {
+        serde_json::from_value(value).expect("valid ConditionExpression JSON")
+    }
+
+    #[test]
+    fn row_visibility_accepts_client_only_string_ops() {
+        // STARTS_WITH / ENDS_WITH evaluate in-memory, so a row-visibility
+        // condition must accept them — this is the surface the source-filter
+        // error now points authors toward.
+        for op in ["STARTS_WITH", "ENDS_WITH"] {
+            let expr = row_condition_expr(json!({
+                "type": "operation",
+                "op": op,
+                "arguments": [
+                    {"valueType": "reference", "value": "name"},
+                    {"valueType": "immediate", "value": "AC"}
+                ]
+            }));
+            validate_report_workflow_action_row_condition(
+                &expr,
+                &|field| field == "name",
+                "ctx",
+                "workflowAction.visibleWhen",
+            )
+            .unwrap_or_else(|err| panic!("{op} should be accepted in row visibility: {err:?}"));
+        }
+    }
+
+    #[test]
+    fn row_visibility_accepts_length() {
+        // LENGTH is client-evaluable; the validator previously rejected it while
+        // the evaluator supported it. Closing that drift is part of this change.
+        let expr = row_condition_expr(json!({
+            "type": "operation",
+            "op": "LENGTH",
+            "arguments": [ {"valueType": "reference", "value": "name"} ]
+        }));
+        validate_report_workflow_action_row_condition(
+            &expr,
+            &|field| field == "name",
+            "ctx",
+            "workflowAction.visibleWhen",
+        )
+        .expect("LENGTH should be accepted in row visibility");
+    }
+
+    #[test]
+    fn row_visibility_rejects_sql_only_ops_with_pushdown_hint() {
+        for op in ["MATCH", "SIMILARITY_GTE"] {
+            let expr = row_condition_expr(json!({
+                "type": "operation",
+                "op": op,
+                "arguments": [
+                    {"valueType": "reference", "value": "name"},
+                    {"valueType": "immediate", "value": "AC"}
+                ]
+            }));
+            let err = validate_report_workflow_action_row_condition(
+                &expr,
+                &|field| field == "name",
+                "ctx",
+                "workflowAction.visibleWhen",
+            )
+            .expect_err("SQL-only op should be rejected in row visibility");
+            match err {
+                ReportServiceError::Validation(message) => assert!(
+                    message.contains("SQL pushdown"),
+                    "{op} rejection should mention SQL pushdown: {message}"
+                ),
+                other => panic!("expected a validation error for {op}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Drift guard: the row-visibility surface must recognize exactly the
+    /// operators the shared classification marks `client_evaluable`.
+    #[test]
+    fn row_visibility_recognition_matches_client_evaluable_tier() {
+        use runtara_dsl::ConditionOperator::*;
+
+        let all = [
+            And,
+            Or,
+            Not,
+            Gt,
+            Gte,
+            Lt,
+            Lte,
+            Eq,
+            Ne,
+            StartsWith,
+            EndsWith,
+            Contains,
+            In,
+            NotIn,
+            Length,
+            IsDefined,
+            IsEmpty,
+            IsNotEmpty,
+            SimilarityGte,
+            Match,
+            CosineDistanceLte,
+            L2DistanceLte,
+        ];
+        for op in all {
+            let wire = serde_json::to_value(&op)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .expect("operator serializes to a wire string");
+            // A field reference plus an immediate array argument so accepted
+            // operators clear their field/immediate checks; arity mismatches
+            // still count as "recognized" (they aren't unsupported-op errors).
+            let expr = row_condition_expr(json!({
+                "type": "operation",
+                "op": wire,
+                "arguments": [
+                    {"valueType": "reference", "value": "f"},
+                    {"valueType": "immediate", "value": ["x"]}
+                ]
+            }));
+            let recognized =
+                match validate_report_workflow_action_row_condition(&expr, &|_| true, "ctx", "p") {
+                    Ok(()) => true,
+                    Err(ReportServiceError::Validation(message)) => {
+                        !message.contains("is not available in row conditions")
+                    }
+                    Err(_) => true,
+                };
+            assert_eq!(
+                recognized,
+                runtara_report_dsl::operator_support(op.clone()).client_evaluable,
+                "row-visibility recognition of {op:?} disagrees with its client_evaluable tier"
+            );
+        }
     }
 
     #[test]
