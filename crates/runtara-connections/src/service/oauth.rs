@@ -229,16 +229,28 @@ async fn exchange_code(
 ) -> Result<Value, OAuthError> {
     let client = reqwest::Client::new();
 
-    let response = client
+    // Present credentials per the provider's token-endpoint style (Intuit requires
+    // HTTP Basic; the OAuth2 default is credentials in the body).
+    let (basic_auth, body) = crate::auth::token_cache::token_request_parts(
+        oauth_config.token_endpoint_auth,
+        vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), code.to_string()),
+            ("redirect_uri".to_string(), redirect_uri.to_string()),
+        ],
+        client_id,
+        client_secret,
+    );
+
+    let mut request = client
         .post(oauth_config.token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!(
-            "grant_type=authorization_code&code={}&client_id={}&client_secret={}&redirect_uri={}",
-            urlencoding::encode(code),
-            urlencoding::encode(client_id),
-            urlencoding::encode(client_secret),
-            urlencoding::encode(redirect_uri),
-        ))
+        .body(body);
+    if let Some(header) = basic_auth {
+        request = request.header("Authorization", header);
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|e| OAuthError::TokenExchangeFailed(e.to_string()))?;

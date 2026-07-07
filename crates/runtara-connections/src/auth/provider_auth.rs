@@ -444,9 +444,7 @@ fn describe_oauth_refresh_auth(
     let refresh_token = params["refresh_token"].as_str()?.to_string();
     let client_id = params["client_id"].as_str()?.to_string();
     let client_secret = params["client_secret"].as_str()?.to_string();
-    let token_url = find_connection_type(integration_id)?
-        .oauth_config
-        .map(|config| config.token_url.to_string())?;
+    let oauth_config = find_connection_type(integration_id)?.oauth_config?;
 
     Some(DeferredAuth::OAuth2RefreshToken {
         cache_key: token_cache::build_token_cache_key(&[
@@ -454,11 +452,12 @@ fn describe_oauth_refresh_auth(
             connection_id,
             integration_id,
         ]),
-        token_url,
+        token_url: oauth_config.token_url.to_string(),
         header_name: header_name.to_string(),
         client_id,
         client_secret,
         refresh_token,
+        token_endpoint_auth: oauth_config.token_endpoint_auth,
         fallback_access_token: params["access_token"].as_str().map(|s| s.to_string()),
         fallback_expires_at: token_cache::parse_expiry(params["token_expires_at"].as_str()),
     })
