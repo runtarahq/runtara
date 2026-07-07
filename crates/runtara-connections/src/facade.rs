@@ -492,11 +492,14 @@ fn refresh_token_hash(token: &str) -> String {
 }
 
 /// Whether a provider rotates (and invalidates) its refresh token on every refresh.
-/// Drives fail-closed handling when a rotated token can't be persisted. Until the
-/// provider descriptor (Workstream B) lands this is a minimal explicit list;
-/// non-rotating providers (e.g. HubSpot) default to `false`.
+/// Drives fail-closed handling when a rotated token can't be persisted. Sourced from
+/// the connection type's OAuth descriptor; non-rotating providers (e.g. HubSpot)
+/// default to `false`.
 fn rotates_refresh_token(integration_id: &str) -> bool {
-    matches!(integration_id, "quickbooks_online")
+    runtara_agents::registry::find_connection_type(integration_id)
+        .and_then(|meta| meta.oauth_config)
+        .map(|cfg| cfg.refresh_token_rotates)
+        .unwrap_or(false)
 }
 
 /// Lua script for atomic token bucket check-and-decrement.

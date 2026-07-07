@@ -726,6 +726,80 @@ fn default_hubspot_scopes() -> String {
     "oauth crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.companies.write crm.objects.deals.read crm.objects.deals.write crm.objects.quotes.read crm.objects.quotes.write crm.objects.line_items.read crm.objects.line_items.write crm.objects.owners.read".to_string()
 }
 
+/// QuickBooks Online (Intuit) — OAuth 2.0 authorization-code connection.
+///
+/// Bring-your-own Intuit app: `client_id`/`client_secret` are entered per connection.
+/// The descriptor drives every provider quirk: HTTP Basic on the token endpoint,
+/// rotating refresh tokens, sandbox/prod host selection by `environment`, the
+/// `/v3/company/{realm_id}` path template, and capturing `realmId` off the callback.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "quickbooks_online",
+    display_name = "QuickBooks Online",
+    description = "Connect to Intuit QuickBooks Online (Accounting API v3) using OAuth2 authorization",
+    category = "erp",
+    auth_type = "oauth2_authorization_code",
+    oauth_auth_url = "https://appcenter.intuit.com/connect/oauth2",
+    oauth_token_url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+    oauth_default_scopes = "com.intuit.quickbooks.accounting",
+    oauth_token_auth = "basic",
+    oauth_refresh_rotates = true,
+    oauth_base_url = "https://quickbooks.api.intuit.com",
+    oauth_sandbox_base_url = "https://sandbox-quickbooks.api.intuit.com",
+    oauth_base_url_path_template = "/v3/company/{realm_id}",
+    oauth_extra_callback_params = "realm_id:realmId:true"
+)]
+pub struct QuickBooksOnlineParams {
+    /// Intuit app Client ID
+    #[field(
+        display_name = "Client ID",
+        description = "Client ID from your Intuit app's keys"
+    )]
+    pub client_id: String,
+
+    /// Intuit app Client Secret
+    #[field(
+        display_name = "Client Secret",
+        description = "Client Secret from your Intuit app's keys",
+        secret
+    )]
+    pub client_secret: String,
+
+    /// Target Intuit environment: "sandbox" or "production"
+    #[serde(default = "default_quickbooks_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "Target Intuit environment: 'sandbox' or 'production'",
+        default = "sandbox"
+    )]
+    pub environment: String,
+
+    /// Realm ID (Company ID) — populated automatically by the OAuth callback
+    #[serde(default)]
+    #[field(
+        display_name = "Realm ID (Company ID)",
+        description = "Populated automatically after OAuth consent; may be left blank"
+    )]
+    pub realm_id: Option<String>,
+
+    /// OAuth2 scopes (space-separated)
+    #[serde(default = "default_quickbooks_scopes")]
+    #[field(
+        display_name = "Scopes",
+        description = "Space-separated OAuth2 scopes",
+        default = "com.intuit.quickbooks.accounting"
+    )]
+    pub scopes: String,
+}
+
+fn default_quickbooks_environment() -> String {
+    "sandbox".to_string()
+}
+
+fn default_quickbooks_scopes() -> String {
+    "com.intuit.quickbooks.accounting".to_string()
+}
+
 /// HTTP extractor for HubSpot connections.
 ///
 /// Note: the `Authorization` header is NOT set here because the access token

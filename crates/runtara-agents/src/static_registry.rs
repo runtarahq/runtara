@@ -152,6 +152,7 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_MailgunParams,
     &crate::extractors::connection_types::__CONNECTION_META_HubSpotPrivateAppParams,
     &crate::extractors::connection_types::__CONNECTION_META_HubSpotAccessTokenParams,
+    &crate::extractors::connection_types::__CONNECTION_META_QuickBooksOnlineParams,
     &crate::extractors::connection_types::__CONNECTION_META_PostgresDatabaseParams,
     &crate::extractors::connection_types::__CONNECTION_META_S3CompatibleParams,
     &crate::extractors::connection_types::__CONNECTION_META_AzureBlobStorageParams,
