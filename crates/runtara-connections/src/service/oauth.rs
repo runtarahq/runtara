@@ -136,8 +136,16 @@ impl OAuthService {
     }
 
     /// Handle the OAuth2 callback: validate state, exchange code for tokens,
-    /// store tokens in the connection.
-    pub async fn handle_callback(&self, state: &str, code: &str) -> Result<String, OAuthError> {
+    /// capture any provider-specific callback params, and store everything on the
+    /// connection. `callback_params` is the full parsed callback query string, from
+    /// which the descriptor's declared `extra_callback_params` (e.g. Intuit `realmId`)
+    /// are captured.
+    pub async fn handle_callback(
+        &self,
+        state: &str,
+        code: &str,
+        callback_params: &std::collections::HashMap<String, String>,
+    ) -> Result<String, OAuthError> {
         // Atomically consume the state token
         let state_row = self
             .oauth_repo
@@ -195,6 +203,9 @@ impl OAuthService {
                     Value::String(expires_at.to_rfc3339()),
                 );
             }
+            // Capture provider-specific callback params declared by the descriptor
+            // (e.g. Intuit returns `realmId`, needed for every QuickBooks API path).
+            merge_extra_callback_params(obj, oauth_config, callback_params)?;
         }
 
         // Update connection: set parameters + status = ACTIVE
@@ -210,6 +221,28 @@ impl OAuthService {
 
         Ok(state_row.connection_id)
     }
+}
+
+/// Merge the descriptor's declared extra callback params (e.g. Intuit `realmId`) from
+/// the callback query into the connection params object. Errors if a required one is
+/// missing.
+fn merge_extra_callback_params(
+    obj: &mut serde_json::Map<String, Value>,
+    oauth_config: &OAuthConfig,
+    callback_params: &std::collections::HashMap<String, String>,
+) -> Result<(), OAuthError> {
+    for ecp in oauth_config.extra_callback_params {
+        match callback_params.get(ecp.query_name) {
+            Some(val) => {
+                obj.insert(ecp.param_name.to_string(), Value::String(val.clone()));
+            }
+            None if ecp.required => {
+                return Err(OAuthError::MissingParameter(ecp.query_name.to_string()));
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 /// Generate a 32-byte hex-encoded random state token.
@@ -276,4 +309,66 @@ async fn exchange_code(
     }
 
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::agent_meta::{ExtraCallbackParam, TokenEndpointAuth};
+    use std::collections::HashMap;
+
+    fn cfg_with(extra: &'static [ExtraCallbackParam]) -> OAuthConfig {
+        OAuthConfig {
+            auth_url: "",
+            token_url: "",
+            default_scopes: "",
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            refresh_token_rotates: false,
+            base_url: "",
+            sandbox_base_url: "",
+            base_url_path_template: "",
+            extra_callback_params: extra,
+        }
+    }
+
+    static REALM: &[ExtraCallbackParam] = &[ExtraCallbackParam {
+        query_name: "realmId",
+        param_name: "realm_id",
+        required: true,
+    }];
+
+    #[test]
+    fn captures_declared_callback_param_under_stored_key() {
+        let cfg = cfg_with(REALM);
+        let mut obj = serde_json::Map::new();
+        let mut q = HashMap::new();
+        q.insert("realmId".to_string(), "12345".to_string());
+        merge_extra_callback_params(&mut obj, &cfg, &q).unwrap();
+        // Captured under the descriptor's param_name (realm_id), from the query name (realmId).
+        assert_eq!(obj.get("realm_id").and_then(|v| v.as_str()), Some("12345"));
+    }
+
+    #[test]
+    fn errors_when_required_callback_param_missing() {
+        let cfg = cfg_with(REALM);
+        let mut obj = serde_json::Map::new();
+        let q = HashMap::new();
+        assert!(matches!(
+            merge_extra_callback_params(&mut obj, &cfg, &q),
+            Err(OAuthError::MissingParameter(_))
+        ));
+    }
+
+    #[test]
+    fn ignores_missing_optional_callback_param() {
+        static OPT: &[ExtraCallbackParam] = &[ExtraCallbackParam {
+            query_name: "foo",
+            param_name: "foo",
+            required: false,
+        }];
+        let cfg = cfg_with(OPT);
+        let mut obj = serde_json::Map::new();
+        merge_extra_callback_params(&mut obj, &cfg, &HashMap::new()).unwrap();
+        assert!(obj.is_empty());
+    }
 }

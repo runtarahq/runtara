@@ -139,8 +139,20 @@ pub async fn callback_handler(
     State(state): State<ConnectionsState>,
     Path(_tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
 ) -> Html<String> {
     let events = state.connection_events.clone();
+
+    // The full callback query, from which the descriptor's extra_callback_params
+    // (e.g. Intuit realmId) are captured in handle_callback.
+    let callback_params: std::collections::HashMap<String, String> = raw_query
+        .as_deref()
+        .map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Handle provider errors
     if let Some(error) = params.error {
@@ -167,7 +179,10 @@ pub async fn callback_handler(
 
     let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
-    match service.handle_callback(&oauth_state, &code).await {
+    match service
+        .handle_callback(&oauth_state, &code, &callback_params)
+        .await
+    {
         Ok(connection_id) => {
             crate::events::emit(
                 &events,
