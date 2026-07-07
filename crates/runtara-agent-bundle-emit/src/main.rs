@@ -33,6 +33,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("datetime", runtara_agent_datetime::agent_info()),
         ("http", runtara_agent_http::agent_info()),
         ("hubspot", runtara_agent_hubspot::agent_info()),
+        ("quickbooks", runtara_agent_quickbooks::agent_info()),
         ("mailgun", runtara_agent_mailgun::agent_info()),
         ("mcp", runtara_agent_mcp::agent_info()),
         ("object-model", runtara_agent_object_model::agent_info()),
