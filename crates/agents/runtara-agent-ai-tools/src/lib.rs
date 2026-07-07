@@ -1693,13 +1693,13 @@ fn vision_to_text_bedrock(
     let model = input
         .model
         .clone()
-        .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string());
+        .unwrap_or_else(|| "anthropic.claude-sonnet-4-6".to_string());
 
-    // Only Claude 3/3.5 supports vision in Bedrock.
-    if !model.starts_with("anthropic.claude-3") {
+    // Only Anthropic Claude models support vision in Bedrock.
+    if !bedrock_vision_model_supported(&model) {
         return Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_MODEL",
-            "Bedrock vision capabilities require Claude 3 or Claude 3.5 models",
+            "Bedrock vision capabilities require an Anthropic Claude model",
         ));
     }
 
@@ -2343,6 +2343,14 @@ fn is_openai_o_series(model: &str) -> bool {
     model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
 }
 
+/// Whether `model` is an Anthropic Claude id — the only family Bedrock vision
+/// supports. Broad on purpose: the shipped catalog's Claude 4.x entries aren't
+/// tagged with an IMAGE `inputModality`, so gating on modality would reject
+/// them too.
+fn bedrock_vision_model_supported(model: &str) -> bool {
+    model.starts_with("anthropic.claude")
+}
+
 /// Try to parse text as JSON when output_schema was provided. Returns None if
 /// no schema was provided or if parsing fails.
 fn parse_structured_output(text: &str, schema: &Option<Value>) -> Option<Value> {
@@ -2704,5 +2712,65 @@ mod tests {
         };
         let err = embed_text(input).unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_BATCH_TOO_LARGE");
+    }
+
+    fn vision_input(model: Option<String>) -> VisionToTextInput {
+        VisionToTextInput {
+            _connection: Some(fake_connection("aws_credentials")),
+            provider: PROVIDER_BEDROCK.into(),
+            prompt: "describe this".into(),
+            image_data: Some("aGVsbG8=".into()),
+            image_url: None,
+            model,
+            max_tokens: None,
+            temperature: None,
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn vision_to_text_bedrock_rejects_non_anthropic_model() {
+        let err = vision_to_text(vision_input(Some("qwen.qwen3-32b-v1:0".into()))).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_UNSUPPORTED_MODEL");
+    }
+
+    #[test]
+    fn bedrock_vision_model_supported_accepts_catalog_claude_4_ids() {
+        // Every Anthropic id actually shipped in bedrock_models.generated.json.
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-sonnet-4-6"
+        ));
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-opus-4-6-v1"
+        ));
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-opus-4-5-20251101-v1:0"
+        ));
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-sonnet-4-5-20250929-v1:0"
+        ));
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-haiku-4-5-20251001-v1:0"
+        ));
+        // Old Claude 3.x ids remain supported too.
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        ));
+    }
+
+    #[test]
+    fn bedrock_vision_model_supported_rejects_non_anthropic_ids() {
+        assert!(!bedrock_vision_model_supported("qwen.qwen3-32b-v1:0"));
+        assert!(!bedrock_vision_model_supported(
+            "amazon.titan-embed-text-v2:0"
+        ));
+    }
+
+    #[test]
+    fn vision_to_text_bedrock_default_model_clears_gate() {
+        // The fallback default itself must be a catalog-present, gate-passing id.
+        assert!(bedrock_vision_model_supported(
+            "anthropic.claude-sonnet-4-6"
+        ));
     }
 }
