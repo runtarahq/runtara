@@ -151,6 +151,14 @@ impl CompletionModel for OpenAICompletionModel {
     }
 }
 
+/// Whether `model` belongs to the OpenAI "o-series" reasoning family
+/// (o1/o3/o4). These models reject `max_tokens` (requiring
+/// `max_completion_tokens` instead) and reject any `temperature` other than
+/// the default of `1`.
+fn is_openai_o_series(model: &str) -> bool {
+    model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
+}
+
 impl OpenAICompletionModel {
     /// Build the JSON body for the OpenAI `/chat/completions` endpoint.
     fn build_request_body(&self, request: CompletionRequest) -> Result<Value, CompletionError> {
@@ -198,14 +206,24 @@ impl OpenAICompletionModel {
             body["tool_choice"] = json!("auto");
         }
 
-        // Temperature
-        if let Some(temp) = request.temperature {
+        let is_o_series = is_openai_o_series(&self.model);
+
+        // Temperature: o-series reasoning models reject any value other than
+        // the default, so force it explicitly rather than passing through
+        // whatever the caller requested.
+        if is_o_series {
+            body["temperature"] = json!(1);
+        } else if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
 
-        // Max tokens
+        // Max tokens: o-series models use `max_completion_tokens` instead.
         if let Some(mt) = request.max_tokens {
-            body["max_tokens"] = json!(mt);
+            if is_o_series {
+                body["max_completion_tokens"] = json!(mt);
+            } else {
+                body["max_tokens"] = json!(mt);
+            }
         }
 
         // Additional params (shallow merge)
@@ -463,6 +481,32 @@ mod tests {
         assert_eq!(json_msgs[0]["content"], "thinking");
         assert!(json_msgs[0]["tool_calls"].is_array());
         assert_eq!(json_msgs[0]["tool_calls"][0]["function"]["name"], "search");
+    }
+
+    #[test]
+    fn test_build_request_body_o_series_remaps_max_tokens_and_forces_temperature() {
+        let model = Client::new("test-key").completion_model("o3-mini");
+        let request = CompletionRequestBuilder::new(Message::user("hi"))
+            .temperature(0.7)
+            .max_tokens(100)
+            .build();
+        let body = model.build_request_body(request).unwrap();
+        assert_eq!(body["temperature"], 1);
+        assert_eq!(body["max_completion_tokens"], 100);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_non_o_series_keeps_max_tokens_and_temperature() {
+        let model = Client::new("test-key").completion_model("gpt-4o");
+        let request = CompletionRequestBuilder::new(Message::user("hi"))
+            .temperature(0.7)
+            .max_tokens(100)
+            .build();
+        let body = model.build_request_body(request).unwrap();
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 100);
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
