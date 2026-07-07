@@ -691,7 +691,8 @@ impl HttpConnectionExtractor for MailgunExtractor {
     auth_type = "oauth2_authorization_code",
     oauth_auth_url = "https://app.hubspot.com/oauth/authorize",
     oauth_token_url = "https://api.hubapi.com/oauth/v1/token",
-    oauth_default_scopes = "oauth crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.companies.write crm.objects.deals.read crm.objects.deals.write crm.objects.quotes.read crm.objects.quotes.write crm.objects.line_items.read crm.objects.line_items.write crm.objects.owners.read"
+    oauth_default_scopes = "oauth crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.companies.write crm.objects.deals.read crm.objects.deals.write crm.objects.quotes.read crm.objects.quotes.write crm.objects.line_items.read crm.objects.line_items.write crm.objects.owners.read",
+    oauth_base_url = "https://api.hubapi.com"
 )]
 pub struct HubSpotPrivateAppParams {
     /// HubSpot app Client ID

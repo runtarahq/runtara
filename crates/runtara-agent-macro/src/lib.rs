@@ -785,6 +785,25 @@ struct ConnectionContainerArgs {
     /// OAuth2 default scopes (space-separated)
     #[darling(default)]
     oauth_default_scopes: Option<String>,
+    /// Token-endpoint credential style: "basic" (HTTP Basic) or "form_body" (default)
+    #[darling(default)]
+    oauth_token_auth: Option<String>,
+    /// Whether the provider rotates the refresh token on every refresh (default false)
+    #[darling(default)]
+    oauth_refresh_rotates: Option<bool>,
+    /// Static API base host (prod host when a sandbox variant is set)
+    #[darling(default)]
+    oauth_base_url: Option<String>,
+    /// Sandbox API base host, selected when the connection's `environment` == "sandbox"
+    #[darling(default)]
+    oauth_sandbox_base_url: Option<String>,
+    /// Optional path appended after the host, with `{param}` placeholders (e.g. "/v3/company/{realm_id}")
+    #[darling(default)]
+    oauth_base_url_path_template: Option<String>,
+    /// Extra callback params to capture, as comma-separated `param_name:query_name:required`
+    /// triples (e.g. "realm_id:realmId:true")
+    #[darling(default)]
+    oauth_extra_callback_params: Option<String>,
 }
 
 /// Derive macro for connection parameter structs
@@ -975,12 +994,30 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
     let oauth_config_token = match (&args.oauth_auth_url, &args.oauth_token_url) {
         (Some(auth_url), Some(token_url)) => {
             let default_scopes = args.oauth_default_scopes.as_deref().unwrap_or("");
+            let token_auth = match args.oauth_token_auth.as_deref() {
+                Some("basic") | Some("http_basic") => {
+                    quote! { runtara_dsl::agent_meta::TokenEndpointAuth::HttpBasic }
+                }
+                _ => quote! { runtara_dsl::agent_meta::TokenEndpointAuth::FormBody },
+            };
+            let refresh_rotates = args.oauth_refresh_rotates.unwrap_or(false);
+            let base_url = args.oauth_base_url.as_deref().unwrap_or("");
+            let sandbox_base_url = args.oauth_sandbox_base_url.as_deref().unwrap_or("");
+            let path_template = args.oauth_base_url_path_template.as_deref().unwrap_or("");
+            let extra_callback_params =
+                parse_extra_callback_params(args.oauth_extra_callback_params.as_deref());
             quote! {
                 Some({
                     static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
                         auth_url: #auth_url,
                         token_url: #token_url,
                         default_scopes: #default_scopes,
+                        token_endpoint_auth: #token_auth,
+                        refresh_token_rotates: #refresh_rotates,
+                        base_url: #base_url,
+                        sandbox_base_url: #sandbox_base_url,
+                        base_url_path_template: #path_template,
+                        extra_callback_params: #extra_callback_params,
                     };
                     &OAUTH_CFG
                 })
@@ -1008,6 +1045,37 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Parse the `oauth_extra_callback_params` attribute — comma-separated
+/// `param_name:query_name:required` triples — into a `&[ExtraCallbackParam]` literal
+/// suitable for a `static` OAuthConfig. `query_name` defaults to `param_name` when
+/// omitted; `required` defaults to `false`.
+fn parse_extra_callback_params(spec: Option<&str>) -> proc_macro2::TokenStream {
+    let items: Vec<proc_macro2::TokenStream> = spec
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|triple| {
+            let parts: Vec<&str> = triple.split(':').map(str::trim).collect();
+            let param_name = parts.first().copied().unwrap_or("");
+            let query_name = parts
+                .get(1)
+                .copied()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(param_name);
+            let required = parts.get(2).map(|r| *r == "true").unwrap_or(false);
+            quote! {
+                runtara_dsl::agent_meta::ExtraCallbackParam {
+                    query_name: #query_name,
+                    param_name: #param_name,
+                    required: #required,
+                }
+            }
+        })
+        .collect();
+    quote! { &[ #(#items),* ] }
 }
 
 /// Unwrap Option<T> to get T and whether it's optional

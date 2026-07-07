@@ -866,10 +866,37 @@ pub struct ConnectionFieldMeta {
     pub is_required: bool,
 }
 
+/// How client credentials are presented to the OAuth token endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TokenEndpointAuth {
+    /// `client_id` / `client_secret` in the `application/x-www-form-urlencoded`
+    /// body (the OAuth2 default — HubSpot, Google, Salesforce, Microsoft).
+    #[default]
+    FormBody,
+    /// HTTP Basic: `Authorization: Basic base64(client_id:client_secret)`, with the
+    /// credentials kept out of the body (required by Intuit/QuickBooks and Xero).
+    HttpBasic,
+}
+
+/// A provider-specific query parameter returned on the OAuth callback that must be
+/// captured into `connection_parameters` (e.g. Intuit returns `realmId`, which is
+/// not part of the token response but is needed for every API call).
+#[derive(Debug, Clone, Copy)]
+pub struct ExtraCallbackParam {
+    /// The parameter name as the provider sends it on the callback URL (e.g. `realmId`).
+    pub query_name: &'static str,
+    /// The key it is stored under in `connection_parameters` (e.g. `realm_id`).
+    pub param_name: &'static str,
+    /// Whether the callback must fail if this parameter is absent.
+    pub required: bool,
+}
+
 /// OAuth2 configuration for connection types that use the authorization code flow.
 ///
 /// This is provider-agnostic metadata — the same struct works for HubSpot, Google,
-/// Salesforce, or any OAuth2 provider.
+/// Salesforce, QuickBooks, or any OAuth2 provider. The fields below the core
+/// endpoints encode the per-provider quirks so the OAuth entry points stay
+/// data-driven instead of growing hardcoded per-integration branches.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     /// Provider's authorization endpoint (e.g., "https://app.hubapi.com/oauth/authorize")
@@ -878,6 +905,22 @@ pub struct OAuthConfig {
     pub token_url: &'static str,
     /// Space-separated default scopes to request
     pub default_scopes: &'static str,
+    /// How to present client credentials to the token endpoint.
+    pub token_endpoint_auth: TokenEndpointAuth,
+    /// Whether the provider rotates (and invalidates) the refresh token on every
+    /// refresh. Drives rotation-persistence fail-closed handling.
+    pub refresh_token_rotates: bool,
+    /// Static API base host, or the production host when `sandbox_base_url` is set.
+    /// Empty string = the base URL is not resolved from the descriptor.
+    pub base_url: &'static str,
+    /// Sandbox API base host, selected when the connection's `environment` param is
+    /// `"sandbox"`. Empty string = no sandbox variant.
+    pub sandbox_base_url: &'static str,
+    /// Optional path appended after the host, with `{param}` placeholders substituted
+    /// from connection parameters (e.g. `/v3/company/{realm_id}`). Empty = none.
+    pub base_url_path_template: &'static str,
+    /// Provider-specific callback query params to capture into `connection_parameters`.
+    pub extra_callback_params: &'static [ExtraCallbackParam],
 }
 
 /// Metadata for a connection type.
