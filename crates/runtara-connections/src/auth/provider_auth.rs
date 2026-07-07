@@ -609,6 +609,9 @@ mod tests {
             sandbox_base_url,
             base_url_path_template: path_template,
             extra_callback_params: &[],
+            reauth_on_error_codes: &[],
+            revocation_endpoint: "",
+            pkce_required: false,
         }
     }
 
