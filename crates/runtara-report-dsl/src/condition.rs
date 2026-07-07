@@ -139,7 +139,12 @@ fn validate_condition_field_refs_at(
                 &format!("{path}.arguments[0]"),
             )?;
         }
-        "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" | "CONTAINS" | "IN" | "NOT_IN" => {
+        "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" | "CONTAINS" | "IN" | "NOT_IN" | "MATCH" => {
+            // `MATCH` shares this shape — two operands, the first a field
+            // reference — and the SQL builder runs it as
+            // `field @@ plainto_tsquery(...)` on a tsvector column. Keep it
+            // listed here so a full-text filter validates at save time; the
+            // cross-crate parity test below guards the two sets against drift.
             validate_condition_arg_count(context, path, &condition.op, args, 2)?;
             validate_condition_field_arg(context, path, &condition.op, args, is_known_field)?;
         }
@@ -159,7 +164,7 @@ fn validate_condition_field_refs_at(
                     context, path, condition.op
                 ),
                 hint: Some(
-                    "Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.",
+                    "Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, MATCH, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.",
                 ),
             });
         }
@@ -273,5 +278,171 @@ mod tests {
             ],
         );
         validate_condition_field_refs(&nested, &|f| f == "yep", "block").unwrap();
+    }
+
+    #[test]
+    fn accepts_match_on_known_field() {
+        // Full-text `MATCH` runs at the SQL layer as `@@ plainto_tsquery(...)`;
+        // the validator must let it through so the filter saves.
+        let c = cond("MATCH", vec![json!("body"), json!("search terms")]);
+        validate_condition_field_refs(&c, &|f| f == "body", "block").unwrap();
+    }
+
+    #[test]
+    fn match_unknown_field_is_unknown_not_unsupported() {
+        let c = cond("MATCH", vec![json!("nope"), json!("search terms")]);
+        let err = validate_condition_field_refs(&c, &|f| f == "body", "block")
+            .expect_err("expected unknown-field error");
+        assert_eq!(err.code, "UNKNOWN_CONDITION_FIELD");
+    }
+
+    #[test]
+    fn match_requires_two_arguments() {
+        let c = cond("MATCH", vec![json!("body")]);
+        let err = validate_condition_field_refs(&c, &|_| true, "block")
+            .expect_err("expected arity error");
+        assert_eq!(err.code, "INVALID_CONDITION_ARGUMENTS");
+    }
+}
+
+/// Cross-crate guard: the operator vocabulary this validator accepts must
+/// stay identical to the set the object-store SQL builder can execute.
+/// `MATCH` diverging (accepted by the runtime, rejected here) is exactly the
+/// bug this pins down. Runs under the default `aggregate` feature, which
+/// pulls `runtara-object-store` in as a dependency.
+#[cfg(all(test, feature = "aggregate"))]
+mod sql_parity_tests {
+    use super::*;
+    use runtara_dsl::ConditionOperator;
+    use runtara_object_store::{
+        ColumnDefinition, ColumnType, Condition as SqlCondition, Schema, build_condition_clause,
+    };
+    use serde_json::json;
+
+    /// Every operator string both layers reason about: the logical operators
+    /// plus every `ConditionOperator` variant, in its SCREAMING_SNAKE wire
+    /// form. The exhaustive `match` means adding a variant is a compile error
+    /// here until the author decides how the two sets should treat it.
+    fn all_operator_strings() -> Vec<&'static str> {
+        use ConditionOperator::*;
+        // Touch every variant so a new one forces this list to be revisited.
+        let variant_wire = |op: ConditionOperator| -> &'static str {
+            match op {
+                And => "AND",
+                Or => "OR",
+                Not => "NOT",
+                Gt => "GT",
+                Gte => "GTE",
+                Lt => "LT",
+                Lte => "LTE",
+                Eq => "EQ",
+                Ne => "NE",
+                StartsWith => "STARTS_WITH",
+                EndsWith => "ENDS_WITH",
+                Contains => "CONTAINS",
+                In => "IN",
+                NotIn => "NOT_IN",
+                Length => "LENGTH",
+                IsDefined => "IS_DEFINED",
+                IsEmpty => "IS_EMPTY",
+                IsNotEmpty => "IS_NOT_EMPTY",
+                SimilarityGte => "SIMILARITY_GTE",
+                Match => "MATCH",
+                CosineDistanceLte => "COSINE_DISTANCE_LTE",
+                L2DistanceLte => "L2_DISTANCE_LTE",
+            }
+        };
+        [
+            And,
+            Or,
+            Not,
+            Gt,
+            Gte,
+            Lt,
+            Lte,
+            Eq,
+            Ne,
+            StartsWith,
+            EndsWith,
+            Contains,
+            In,
+            NotIn,
+            Length,
+            IsDefined,
+            IsEmpty,
+            IsNotEmpty,
+            SimilarityGte,
+            Match,
+            CosineDistanceLte,
+            L2DistanceLte,
+        ]
+        .into_iter()
+        .map(variant_wire)
+        .collect()
+    }
+
+    /// True when the save-time validator treats `op` as a known operator
+    /// (i.e. any failure other than "unsupported operator"). Args are shaped
+    /// generously so recognized operators don't trip an arity gate before the
+    /// operator itself is classified.
+    fn validator_recognizes(op: &str) -> bool {
+        let args = vec![json!("f"), json!("v"), json!(0.5)];
+        let condition = Condition {
+            op: op.to_string(),
+            arguments: Some(args),
+        };
+        match validate_condition_field_refs(&condition, &|_| true, "parity") {
+            Ok(()) => true,
+            Err(e) => e.code != "UNSUPPORTED_CONDITION_OPERATOR",
+        }
+    }
+
+    /// True when the object-store SQL builder dispatches `op` to a real arm
+    /// (i.e. any failure other than its "Unsupported operation" fallback).
+    fn sql_builder_recognizes(op: &str) -> bool {
+        let schema = Schema {
+            id: "parity".to_string(),
+            name: "parity".to_string(),
+            description: None,
+            table_name: "parity".to_string(),
+            columns: vec![ColumnDefinition::new("f", ColumnType::String)],
+            indexes: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let condition = SqlCondition::new(op, vec![json!("f"), json!("v"), json!(0.5)]);
+        let mut offset = 1;
+        match build_condition_clause(&condition, &mut offset, &schema) {
+            Ok(_) => true,
+            Err(message) => !message.contains("Unsupported operation"),
+        }
+    }
+
+    #[test]
+    fn accepted_set_equals_supported_set() {
+        let mut mismatched = Vec::new();
+        for op in all_operator_strings() {
+            let accepted = validator_recognizes(op);
+            let supported = sql_builder_recognizes(op);
+            if accepted != supported {
+                mismatched.push(format!(
+                    "{op}: validator_accepts={accepted}, sql_supports={supported}"
+                ));
+            }
+        }
+        assert!(
+            mismatched.is_empty(),
+            "condition operator vocabularies diverged between the save-time \
+             validator and the object-store SQL builder: {mismatched:?}"
+        );
+    }
+
+    #[test]
+    fn parity_probe_actually_reaches_match() {
+        // Guard the guard: confirm both probes classify `MATCH` as recognized,
+        // so a future refactor can't make the parity test vacuously pass by
+        // having both probes silently stop recognizing it.
+        assert!(validator_recognizes("MATCH"));
+        assert!(sql_builder_recognizes("MATCH"));
     }
 }
