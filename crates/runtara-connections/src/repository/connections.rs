@@ -979,6 +979,29 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Update only the connection status (parameters untouched). Used to flip a
+    /// connection to `REQUIRES_RECONNECTION` when its OAuth grant is dead.
+    pub async fn update_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        status: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE connection_data_entity
+            SET status = $3, updated_at = NOW()
+            WHERE id = $1 AND tenant_id = $2
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Persist tokens produced by an OAuth *refresh* (rotating providers), sealing
     /// the merged parameters. Unlike [`Self::update_parameters_and_status`] this
     /// leaves `status` untouched — a refresh is not a re-authorization.

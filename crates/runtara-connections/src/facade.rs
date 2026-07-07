@@ -298,7 +298,7 @@ impl ConnectionsFacade {
         params: &Value,
         headers: &mut HashMap<String, String>,
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
-        let resolved = provider_auth::resolve_connection_auth(
+        let resolved = match provider_auth::resolve_connection_auth(
             &self.state.http_client,
             connection_id,
             integration_id,
@@ -307,7 +307,17 @@ impl ConnectionsFacade {
             &self.state.connection_events,
         )
         .await
-        .map_err(ConnectionsError::AuthResolution)?;
+        {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                // A dead grant (e.g. `invalid_grant` on refresh) means retrying forever
+                // is pointless — flip the connection to REQUIRES_RECONNECTION so the UI
+                // can prompt a reconnect.
+                self.maybe_flip_needs_reauth(connection_id, tenant_id, integration_id, &e)
+                    .await;
+                return Err(ConnectionsError::AuthResolution(e));
+            }
+        };
 
         // Only set when an actual refresh occurred (once per ~55-min cycle, not per
         // request), so this DB write is off the common hot path.
@@ -323,6 +333,45 @@ impl ConnectionsFacade {
         }
 
         Ok(resolved)
+    }
+
+    /// If the auth-resolution error carries an OAuth error code the provider's
+    /// descriptor flags as terminal (e.g. `invalid_grant`), flip the connection to
+    /// `REQUIRES_RECONNECTION`. Best-effort: a failed status write is logged, not
+    /// propagated (the original auth error is what the caller sees).
+    async fn maybe_flip_needs_reauth(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        integration_id: &str,
+        error: &str,
+    ) {
+        let codes = runtara_agents::registry::find_connection_type(integration_id)
+            .and_then(|meta| meta.oauth_config)
+            .map(|cfg| cfg.reauth_on_error_codes)
+            .unwrap_or(&[]);
+        if !is_reauth_error(error, codes) {
+            return;
+        }
+        match self
+            .repo()
+            .update_status(
+                connection_id,
+                tenant_id,
+                ConnectionStatus::RequiresReconnection.as_str(),
+            )
+            .await
+        {
+            Ok(_) => tracing::warn!(
+                connection_id,
+                "oauth grant is dead (reauth error) — connection flipped to REQUIRES_RECONNECTION"
+            ),
+            Err(e) => tracing::error!(
+                connection_id,
+                error = %e,
+                "failed to flip connection to REQUIRES_RECONNECTION after a reauth error"
+            ),
+        }
     }
 
     /// Seal the refreshed tokens back into `connection_parameters` with an
@@ -491,6 +540,13 @@ fn refresh_token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// Whether an auth-resolution error message carries one of the provider's terminal
+/// OAuth error codes (matched as a substring — `parse_token_response` places the
+/// provider's `error` code in the message). Empty `codes` never matches.
+fn is_reauth_error(error: &str, codes: &[&str]) -> bool {
+    !codes.is_empty() && codes.iter().any(|code| error.contains(code))
+}
+
 /// Whether a provider rotates (and invalidates) its refresh token on every refresh.
 /// Drives fail-closed handling when a rotated token can't be persisted. Sourced from
 /// the connection type's OAuth descriptor; non-rotating providers (e.g. HubSpot)
@@ -535,8 +591,27 @@ end
 
 #[cfg(test)]
 mod tests {
-    use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot};
+    use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot, is_reauth_error};
     use std::sync::atomic::AtomicI64;
+
+    #[test]
+    fn reauth_error_matches_only_declared_codes() {
+        let codes = &["invalid_grant"];
+        assert!(is_reauth_error(
+            "Token endpoint returned 400: invalid_grant Token expired",
+            codes
+        ));
+        // A transient network error is not a reauth condition.
+        assert!(!is_reauth_error(
+            "OAuth token refresh request failed: connection refused",
+            codes
+        ));
+        // No declared codes → never flips (e.g. HubSpot).
+        assert!(!is_reauth_error(
+            "Token endpoint returned 400: invalid_grant",
+            &[]
+        ));
+    }
 
     #[test]
     fn warn_slot_fires_once_then_throttles_until_interval_elapses() {
