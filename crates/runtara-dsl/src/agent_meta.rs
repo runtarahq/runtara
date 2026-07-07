@@ -921,6 +921,18 @@ pub struct OAuthConfig {
     pub base_url_path_template: &'static str,
     /// Provider-specific callback query params to capture into `connection_parameters`.
     pub extra_callback_params: &'static [ExtraCallbackParam],
+    /// OAuth `error` codes on the token endpoint that mean the grant is dead and the
+    /// user must re-authorize (e.g. `invalid_grant`). When a refresh fails with one of
+    /// these, the connection is flipped to `REQUIRES_RECONNECTION` instead of retried
+    /// forever. Empty = never auto-flip.
+    pub reauth_on_error_codes: &'static [&'static str],
+    /// Provider token-revocation endpoint, called on disconnect to invalidate the
+    /// tokens provider-side. Empty = no revocation.
+    pub revocation_endpoint: &'static str,
+    /// Whether the authorization-code flow must use PKCE (RFC 7636). When true, the
+    /// authorize URL carries an S256 `code_challenge` and the exchange sends the
+    /// `code_verifier`.
+    pub pkce_required: bool,
 }
 
 /// Metadata for a connection type.

@@ -804,6 +804,16 @@ struct ConnectionContainerArgs {
     /// triples (e.g. "realm_id:realmId:true")
     #[darling(default)]
     oauth_extra_callback_params: Option<String>,
+    /// OAuth error codes that mean the grant is dead and the user must reconnect
+    /// (comma-separated, e.g. "invalid_grant")
+    #[darling(default)]
+    oauth_reauth_on_error_codes: Option<String>,
+    /// Provider token-revocation endpoint (called on disconnect)
+    #[darling(default)]
+    oauth_revocation_endpoint: Option<String>,
+    /// Whether the authorization-code flow requires PKCE (default false)
+    #[darling(default)]
+    oauth_pkce_required: Option<bool>,
 }
 
 /// Derive macro for connection parameter structs
@@ -1006,6 +1016,9 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let path_template = args.oauth_base_url_path_template.as_deref().unwrap_or("");
             let extra_callback_params =
                 parse_extra_callback_params(args.oauth_extra_callback_params.as_deref());
+            let reauth_on_error_codes = parse_str_list(args.oauth_reauth_on_error_codes.as_deref());
+            let revocation_endpoint = args.oauth_revocation_endpoint.as_deref().unwrap_or("");
+            let pkce_required = args.oauth_pkce_required.unwrap_or(false);
             quote! {
                 Some({
                     static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
@@ -1018,6 +1031,9 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                         sandbox_base_url: #sandbox_base_url,
                         base_url_path_template: #path_template,
                         extra_callback_params: #extra_callback_params,
+                        reauth_on_error_codes: #reauth_on_error_codes,
+                        revocation_endpoint: #revocation_endpoint,
+                        pkce_required: #pkce_required,
                     };
                     &OAUTH_CFG
                 })
@@ -1074,6 +1090,18 @@ fn parse_extra_callback_params(spec: Option<&str>) -> proc_macro2::TokenStream {
                 }
             }
         })
+        .collect();
+    quote! { &[ #(#items),* ] }
+}
+
+/// Parse a comma-separated attribute value into a `&[&str]` literal.
+fn parse_str_list(spec: Option<&str>) -> proc_macro2::TokenStream {
+    let items: Vec<proc_macro2::TokenStream> = spec
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| quote! { #s })
         .collect();
     quote! { &[ #(#items),* ] }
 }
