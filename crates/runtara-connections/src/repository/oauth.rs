@@ -10,6 +10,9 @@ pub struct OAuthStateRow {
     pub connection_id: String,
     pub integration_id: String,
     pub redirect_uri: String,
+    /// PKCE code verifier, when the authorize step generated one. Sent as
+    /// `code_verifier` in the token exchange.
+    pub code_verifier: Option<String>,
 }
 
 pub struct OAuthRepository {
@@ -29,11 +32,12 @@ impl OAuthRepository {
         connection_id: &str,
         integration_id: &str,
         redirect_uri: &str,
+        code_verifier: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO oauth_state (state, tenant_id, connection_id, integration_id, redirect_uri)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO oauth_state (state, tenant_id, connection_id, integration_id, redirect_uri, code_verifier)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
         )
         .bind(state)
@@ -41,6 +45,7 @@ impl OAuthRepository {
         .bind(connection_id)
         .bind(integration_id)
         .bind(redirect_uri)
+        .bind(code_verifier)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -52,11 +57,11 @@ impl OAuthRepository {
         &self,
         state: &str,
     ) -> Result<Option<OAuthStateRow>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, String, String, String, String)>(
+        let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>)>(
             r#"
             DELETE FROM oauth_state
             WHERE state = $1 AND expires_at > NOW()
-            RETURNING state, tenant_id, connection_id, integration_id, redirect_uri
+            RETURNING state, tenant_id, connection_id, integration_id, redirect_uri, code_verifier
             "#,
         )
         .bind(state)
@@ -64,12 +69,15 @@ impl OAuthRepository {
         .await?;
 
         Ok(row.map(
-            |(state, tenant_id, connection_id, integration_id, redirect_uri)| OAuthStateRow {
-                state,
-                tenant_id,
-                connection_id,
-                integration_id,
-                redirect_uri,
+            |(state, tenant_id, connection_id, integration_id, redirect_uri, code_verifier)| {
+                OAuthStateRow {
+                    state,
+                    tenant_id,
+                    connection_id,
+                    integration_id,
+                    redirect_uri,
+                    code_verifier,
+                }
             },
         ))
     }

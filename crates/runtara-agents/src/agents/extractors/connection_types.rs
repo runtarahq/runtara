@@ -749,7 +749,8 @@ fn default_hubspot_scopes() -> String {
     oauth_base_url_path_template = "/v3/company/{realm_id}",
     oauth_extra_callback_params = "realm_id:realmId:true",
     oauth_reauth_on_error_codes = "invalid_grant",
-    oauth_revocation_endpoint = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke"
+    oauth_revocation_endpoint = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
+    oauth_pkce_required = true
 )]
 pub struct QuickBooksOnlineParams {
     /// Intuit app Client ID
