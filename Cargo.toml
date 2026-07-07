@@ -47,6 +47,7 @@ members = [
     "crates/agents/runtara-agent-bedrock",
     "crates/agents/runtara-agent-object-model",
     "crates/agents/runtara-agent-s3-storage",
+    "crates/agents/runtara-agent-sqs",
     "crates/agents/runtara-agent-azure-blob-storage",
     "crates/agents/runtara-agent-sharepoint",
     "crates/agents/runtara-agent-stripe",

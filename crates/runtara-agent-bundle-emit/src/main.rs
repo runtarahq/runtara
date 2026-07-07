@@ -39,6 +39,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("object-model", runtara_agent_object_model::agent_info()),
         ("openai", runtara_agent_openai::agent_info()),
         ("s3-storage", runtara_agent_s3_storage::agent_info()),
+        ("sqs", runtara_agent_sqs::agent_info()),
         ("sftp", runtara_agent_sftp::agent_info()),
         ("sharepoint", runtara_agent_sharepoint::agent_info()),
         ("shopify", runtara_agent_shopify::agent_info()),

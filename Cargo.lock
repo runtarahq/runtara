@@ -4262,6 +4262,7 @@ dependencies = [
  "runtara-agent-sharepoint",
  "runtara-agent-shopify",
  "runtara-agent-slack",
+ "runtara-agent-sqs",
  "runtara-agent-stripe",
  "runtara-agent-text",
  "runtara-agent-transform",
@@ -4495,6 +4496,18 @@ name = "runtara-agent-slack"
 version = "8.2.1"
 dependencies = [
  "base64",
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-sqs"
+version = "8.2.1"
+dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
