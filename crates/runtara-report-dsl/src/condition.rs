@@ -11,6 +11,7 @@
 //! reference known schema fields. The validator takes a closure for
 //! field-known lookup so callers wire their own schema source.
 
+use crate::operator_support::{operator_support, parse_operator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -157,15 +158,32 @@ fn validate_condition_field_refs_at(
             validate_condition_field_arg(context, path, &condition.op, args, is_known_field)?;
         }
         _ => {
+            // The operator names nothing the SQL builder can emit. Split the
+            // hint so an author isn't sent hunting for a typo when the operator
+            // is real but only runs on the other report-condition surface: ops
+            // like STARTS_WITH / ENDS_WITH / LENGTH evaluate in-memory (row
+            // visibility), not in an Object Model source filter that pushes down
+            // to SQL. The shared classification keeps this in step with the
+            // row-condition evaluator.
+            let hint = match parse_operator(&op) {
+                Some(known) if operator_support(known.clone()).client_evaluable => Some(
+                    "This operator runs only in row-visibility conditions \
+                     (visibleWhen/hiddenWhen/disabledWhen), which evaluate in-memory. \
+                     Object Model source filters push down to SQL — use CONTAINS for \
+                     substring matching, or one of EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, \
+                     IS_DEFINED, IS_EMPTY, IS_NOT_EMPTY, MATCH.",
+                ),
+                _ => Some(
+                    "Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, MATCH, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.",
+                ),
+            };
             return Err(ConditionValidationError {
                 code: "UNSUPPORTED_CONDITION_OPERATOR",
                 message: format!(
                     "{} {} uses unsupported condition operator '{}'",
                     context, path, condition.op
                 ),
-                hint: Some(
-                    "Use Object Model condition operators such as EQ, NE, GT, GTE, LT, LTE, IN, NOT_IN, CONTAINS, MATCH, IS_DEFINED, IS_EMPTY, or IS_NOT_EMPTY.",
-                ),
+                hint,
             });
         }
     }
@@ -302,6 +320,92 @@ mod tests {
         let err = validate_condition_field_refs(&c, &|_| true, "block")
             .expect_err("expected arity error");
         assert_eq!(err.code, "INVALID_CONDITION_ARGUMENTS");
+    }
+
+    #[test]
+    fn client_only_ops_rejected_with_row_visibility_hint() {
+        // STARTS_WITH / ENDS_WITH / LENGTH are real operators that run in
+        // row-visibility conditions but can't push down to SQL, so a source
+        // filter must reject them — and the hint must send the author to the
+        // surface where they work rather than implying a typo.
+        for op in ["STARTS_WITH", "ENDS_WITH", "LENGTH"] {
+            let c = cond(op, vec![json!("field"), json!("value")]);
+            let err = validate_condition_field_refs(&c, &|_| true, "block")
+                .expect_err("client-only op must be rejected by the source-filter validator");
+            assert_eq!(err.code, "UNSUPPORTED_CONDITION_OPERATOR", "{op}");
+            let hint = err.hint.expect("client-only rejection should carry a hint");
+            assert!(
+                hint.contains("row-visibility"),
+                "{op} hint should point at row-visibility conditions: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn truly_unknown_op_keeps_generic_hint() {
+        let c = cond("XOR", vec![json!("a"), json!("b")]);
+        let err = validate_condition_field_refs(&c, &|_| true, "block")
+            .expect_err("expected unsupported-op error");
+        assert_eq!(err.code, "UNSUPPORTED_CONDITION_OPERATOR");
+        let hint = err.hint.expect("hint present");
+        assert!(
+            !hint.contains("row-visibility"),
+            "a nonexistent operator should get the generic hint, not the row-visibility one: {hint}"
+        );
+    }
+
+    /// Drift guard: the source-filter surface must recognize exactly the
+    /// operators the shared classification marks `sql_pushdown`. Mirrors the
+    /// cross-crate `sql_parity_tests` below, but pins against the single
+    /// `operator_support` source of truth (available without the `aggregate`
+    /// feature).
+    #[test]
+    fn source_filter_recognition_matches_sql_pushdown_tier() {
+        use crate::operator_support::operator_support;
+        use runtara_dsl::ConditionOperator::*;
+
+        let all = [
+            And,
+            Or,
+            Not,
+            Gt,
+            Gte,
+            Lt,
+            Lte,
+            Eq,
+            Ne,
+            StartsWith,
+            EndsWith,
+            Contains,
+            In,
+            NotIn,
+            Length,
+            IsDefined,
+            IsEmpty,
+            IsNotEmpty,
+            SimilarityGte,
+            Match,
+            CosineDistanceLte,
+            L2DistanceLte,
+        ];
+        for op in all {
+            let wire = serde_json::to_value(&op)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .expect("operator serializes to a wire string");
+            // Generous args so a recognized operator doesn't trip an arity gate
+            // before the operator itself is classified.
+            let condition = cond(&wire, vec![json!("f"), json!("v"), json!(0.5)]);
+            let recognized = match validate_condition_field_refs(&condition, &|_| true, "parity") {
+                Ok(()) => true,
+                Err(e) => e.code != "UNSUPPORTED_CONDITION_OPERATOR",
+            };
+            assert_eq!(
+                recognized,
+                operator_support(op.clone()).sql_pushdown,
+                "source-filter recognition of {op:?} disagrees with its sql_pushdown tier"
+            );
+        }
     }
 }
 

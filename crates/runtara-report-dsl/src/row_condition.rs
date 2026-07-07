@@ -493,4 +493,55 @@ mod tests {
         assert!(evaluate_row_condition(&expr, &json!({ "status": "paused" })).unwrap());
         assert!(!evaluate_row_condition(&expr, &json!({ "status": "active" })).unwrap());
     }
+
+    /// Drift guard: the operators this evaluator rejects as `ServerOnly` must be
+    /// exactly the ones the shared classification marks non-client-evaluable, so
+    /// the hand-written server-only arm can't drift from `operator_support`.
+    /// The server-only arm runs before any arity check, so an empty-argument
+    /// operation is enough to observe the classification.
+    #[test]
+    fn server_only_arm_matches_classification() {
+        use crate::operator_support::operator_support;
+        use runtara_dsl::{ConditionOperation, ConditionOperator::*};
+
+        let all = [
+            And,
+            Or,
+            Not,
+            Gt,
+            Gte,
+            Lt,
+            Lte,
+            Eq,
+            Ne,
+            StartsWith,
+            EndsWith,
+            Contains,
+            In,
+            NotIn,
+            Length,
+            IsDefined,
+            IsEmpty,
+            IsNotEmpty,
+            SimilarityGte,
+            Match,
+            CosineDistanceLte,
+            L2DistanceLte,
+        ];
+        for op in all {
+            let operation = ConditionOperation {
+                op: op.clone(),
+                arguments: vec![],
+            };
+            let is_server_only = matches!(
+                evaluate_operation(&operation, &json!({})),
+                Err(RowConditionError::ServerOnly(_))
+            );
+            assert_eq!(
+                is_server_only,
+                !operator_support(op.clone()).client_evaluable,
+                "row evaluator server-only classification of {op:?} disagrees with the client_evaluable tier"
+            );
+        }
+    }
 }
