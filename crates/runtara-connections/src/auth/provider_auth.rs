@@ -1,6 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::registry::find_connection_type;
+use runtara_dsl::agent_meta::OAuthConfig;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -151,27 +152,11 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
-        "hubspot_private_app" => {
-            if let Some(auth) =
-                describe_oauth_refresh_auth(connection_id, integration_id, params, "Authorization")
-            {
-                ConnectionAuthDescriptor {
-                    base_url: Some("https://api.hubapi.com".into()),
-                    aws_signing: None,
-                    azure_signing: None,
-                    deferred_auth: Some(auth),
-                }
-            } else {
-                if let Some(token) = params["access_token"].as_str() {
-                    headers.insert("Authorization".into(), format!("Bearer {}", token));
-                }
-                ConnectionAuthDescriptor {
-                    base_url: Some("https://api.hubapi.com".into()),
-                    aws_signing: None,
-                    azure_signing: None,
-                    deferred_auth: None,
-                }
-            }
+        // OAuth2 authorization-code integrations are fully descriptor-driven: base URL,
+        // token-endpoint auth style, refresh rotation and extra callback params all come
+        // from the connection type's OAuthConfig (see runtara-dsl agent_meta).
+        "hubspot_private_app" | "quickbooks_online" => {
+            describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
         }
         "stripe_api_key" => {
             if let Some(key) = params["secret_key"].as_str() {
@@ -435,6 +420,90 @@ fn describe_microsoft_entra_client_credentials_auth(
     })
 }
 
+/// Descriptor-driven auth for OAuth2 authorization-code integrations: resolves the
+/// base URL from the connection type's `OAuthConfig` and builds the refresh-token
+/// deferred auth. Falls back to injecting the stored `access_token` directly when no
+/// refresh token is present yet (immediately post-consent, before the first refresh).
+fn describe_oauth_authcode_auth(
+    connection_id: &str,
+    integration_id: &str,
+    params: &Value,
+    headers: &mut HashMap<String, String>,
+) -> ConnectionAuthDescriptor {
+    let base_url = find_connection_type(integration_id)
+        .and_then(|meta| meta.oauth_config)
+        .and_then(|cfg| resolve_oauth_base_url(cfg, params));
+
+    match describe_oauth_refresh_auth(connection_id, integration_id, params, "Authorization") {
+        Some(auth) => ConnectionAuthDescriptor {
+            base_url,
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: Some(auth),
+        },
+        None => {
+            if let Some(token) = params["access_token"].as_str() {
+                headers.insert("Authorization".into(), format!("Bearer {}", token));
+            }
+            ConnectionAuthDescriptor {
+                base_url,
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+    }
+}
+
+/// Resolve an OAuth integration's API base URL from its descriptor: pick the sandbox
+/// host when the connection's `environment` param is `"sandbox"`, then append any
+/// `{param}`-templated path (e.g. QuickBooks `/v3/company/{realm_id}`). Returns `None`
+/// when the descriptor declares no base URL.
+fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
+    let is_sandbox = params["environment"].as_str() == Some("sandbox");
+    let host = if !cfg.sandbox_base_url.is_empty() && is_sandbox {
+        cfg.sandbox_base_url
+    } else {
+        cfg.base_url
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let mut url = host.trim_end_matches('/').to_string();
+    if !cfg.base_url_path_template.is_empty() {
+        url.push_str(&substitute_path_template(
+            cfg.base_url_path_template,
+            params,
+        ));
+    }
+    Some(url)
+}
+
+/// Replace `{name}` placeholders in a path template with the matching string param.
+/// A missing param substitutes empty (yielding an obviously-broken path the API
+/// rejects clearly, rather than silently hitting the wrong resource).
+fn substitute_path_template(template: &str, params: &Value) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            let mut name = String::new();
+            for c2 in chars.by_ref() {
+                if c2 == '}' {
+                    break;
+                }
+                name.push(c2);
+            }
+            if let Some(val) = params[name.as_str()].as_str() {
+                out.push_str(val);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn describe_oauth_refresh_auth(
     connection_id: &str,
     integration_id: &str,
@@ -522,7 +591,67 @@ fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_dsl::agent_meta::TokenEndpointAuth;
     use serde_json::json;
+
+    fn oauth_cfg(
+        base_url: &'static str,
+        sandbox_base_url: &'static str,
+        path_template: &'static str,
+    ) -> OAuthConfig {
+        OAuthConfig {
+            auth_url: "",
+            token_url: "",
+            default_scopes: "",
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            refresh_token_rotates: false,
+            base_url,
+            sandbox_base_url,
+            base_url_path_template: path_template,
+            extra_callback_params: &[],
+        }
+    }
+
+    #[test]
+    fn resolve_oauth_base_url_static_host() {
+        let cfg = oauth_cfg("https://api.hubapi.com", "", "");
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &json!({})).as_deref(),
+            Some("https://api.hubapi.com")
+        );
+    }
+
+    #[test]
+    fn resolve_oauth_base_url_none_when_no_host() {
+        let cfg = oauth_cfg("", "", "");
+        assert_eq!(resolve_oauth_base_url(&cfg, &json!({})), None);
+    }
+
+    #[test]
+    fn resolve_oauth_base_url_env_select_and_template() {
+        let cfg = oauth_cfg(
+            "https://quickbooks.api.intuit.com",
+            "https://sandbox-quickbooks.api.intuit.com",
+            "/v3/company/{realm_id}",
+        );
+        // production host + realm path
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &json!({"environment":"production","realm_id":"123"}))
+                .as_deref(),
+            Some("https://quickbooks.api.intuit.com/v3/company/123")
+        );
+        // sandbox host selected by the environment param
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &json!({"environment":"sandbox","realm_id":"123"}))
+                .as_deref(),
+            Some("https://sandbox-quickbooks.api.intuit.com/v3/company/123")
+        );
+        // no environment param → defaults to the production host
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &json!({"realm_id":"456"})).as_deref(),
+            Some("https://quickbooks.api.intuit.com/v3/company/456")
+        );
+    }
 
     #[test]
     fn collect_shopify_scopes_keeps_enabled_scopes_only() {
