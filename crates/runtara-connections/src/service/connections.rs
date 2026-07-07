@@ -461,6 +461,10 @@ impl ConnectionService {
 
     /// Delete a connection
     pub async fn delete_connection(&self, id: &str, tenant_id: &str) -> Result<(), ServiceError> {
+        // Best-effort: revoke the provider-side token before dropping the row so a
+        // deleted connection's grant is invalidated upstream, not just forgotten.
+        self.try_revoke_oauth(id, tenant_id).await;
+
         let rows_affected = self
             .repository
             .delete(id, tenant_id)
@@ -472,6 +476,35 @@ impl ConnectionService {
         }
 
         Ok(())
+    }
+
+    /// Revoke the connection's OAuth token at the provider, if the descriptor declares
+    /// a revocation endpoint. Best-effort — failures are logged and never block the
+    /// delete (the row is removed regardless).
+    async fn try_revoke_oauth(&self, id: &str, tenant_id: &str) {
+        let Ok(Some(conn)) = self.repository.get_with_parameters(id, tenant_id).await else {
+            return;
+        };
+        let Some(integration_id) = conn.integration_id.as_deref() else {
+            return;
+        };
+        let Some(oauth_config) = runtara_agents::registry::find_connection_type(integration_id)
+            .and_then(|meta| meta.oauth_config)
+        else {
+            return;
+        };
+        if oauth_config.revocation_endpoint.is_empty() {
+            return;
+        }
+        let params = conn
+            .connection_parameters
+            .unwrap_or(serde_json::Value::Null);
+        let client = reqwest::Client::new();
+        if let Err(e) =
+            crate::auth::provider_auth::revoke_oauth_token(&client, oauth_config, &params).await
+        {
+            tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
+        }
     }
 
     /// List connections whose `integration_id` falls within the given set.

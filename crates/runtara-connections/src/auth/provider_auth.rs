@@ -1,7 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::registry::find_connection_type;
-use runtara_dsl::agent_meta::OAuthConfig;
+use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -532,6 +532,66 @@ fn describe_oauth_refresh_auth(
     })
 }
 
+/// Build the `(optional Basic auth header, JSON body)` for a token-revocation
+/// request from the descriptor + connection params. Returns `None` when there is no
+/// revocation endpoint or no token to revoke. Sends `{"token": <refresh_or_access>}`;
+/// providers that authenticate the revoke with HTTP Basic (Intuit) get the header.
+pub(crate) fn build_revoke_request(
+    oauth_config: &OAuthConfig,
+    params: &Value,
+) -> Option<(Option<String>, String)> {
+    if oauth_config.revocation_endpoint.is_empty() {
+        return None;
+    }
+    let token = params["refresh_token"]
+        .as_str()
+        .or_else(|| params["access_token"].as_str())?;
+    let body = serde_json::json!({ "token": token }).to_string();
+    let basic = match oauth_config.token_endpoint_auth {
+        TokenEndpointAuth::HttpBasic => {
+            let client_id = params["client_id"].as_str().unwrap_or("");
+            let client_secret = params["client_secret"].as_str().unwrap_or("");
+            Some(format!(
+                "Basic {}",
+                BASE64.encode(format!("{client_id}:{client_secret}"))
+            ))
+        }
+        TokenEndpointAuth::FormBody => None,
+    };
+    Some((basic, body))
+}
+
+/// Best-effort provider-side token revocation, called on disconnect. A no-op when the
+/// descriptor declares no revocation endpoint or the connection has no token.
+pub async fn revoke_oauth_token(
+    client: &Client,
+    oauth_config: &OAuthConfig,
+    params: &Value,
+) -> Result<(), String> {
+    let Some((basic_auth, body)) = build_revoke_request(oauth_config, params) else {
+        return Ok(());
+    };
+    let mut request = client
+        .post(oauth_config.revocation_endpoint)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(header) = basic_auth {
+        request = request.header("Authorization", header);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("revocation request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "revocation endpoint returned {}",
+            response.status()
+        ));
+    }
+    Ok(())
+}
+
 fn collect_shopify_scopes(params: &Value) -> String {
     SHOPIFY_SCOPE_FIELDS
         .iter()
@@ -653,6 +713,44 @@ mod tests {
         assert_eq!(
             resolve_oauth_base_url(&cfg, &json!({"realm_id":"456"})).as_deref(),
             Some("https://quickbooks.api.intuit.com/v3/company/456")
+        );
+    }
+
+    fn oauth_cfg_basic_revoke() -> OAuthConfig {
+        OAuthConfig {
+            auth_url: "",
+            token_url: "",
+            default_scopes: "",
+            token_endpoint_auth: TokenEndpointAuth::HttpBasic,
+            refresh_token_rotates: false,
+            base_url: "",
+            sandbox_base_url: "",
+            base_url_path_template: "",
+            extra_callback_params: &[],
+            reauth_on_error_codes: &[],
+            revocation_endpoint: "https://revoke.example.com",
+            pkce_required: false,
+        }
+    }
+
+    #[test]
+    fn revoke_request_basic_sends_json_token_and_basic_header() {
+        let cfg = oauth_cfg_basic_revoke();
+        let params = json!({"client_id":"cid","client_secret":"csec","refresh_token":"rt"});
+        let (basic, body) = build_revoke_request(&cfg, &params).expect("revoke request");
+        assert_eq!(basic.as_deref(), Some("Basic Y2lkOmNzZWM=")); // base64("cid:csec")
+        assert!(body.contains("\"token\":\"rt\""), "body: {body}");
+    }
+
+    #[test]
+    fn revoke_request_none_without_endpoint_or_token() {
+        // No revocation endpoint declared → nothing to do.
+        assert!(
+            build_revoke_request(&oauth_cfg("", "", ""), &json!({"refresh_token":"rt"})).is_none()
+        );
+        // Endpoint declared but no token on the connection → nothing to revoke.
+        assert!(
+            build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
         );
     }
 
