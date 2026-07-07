@@ -689,6 +689,122 @@ pub fn report(input: ReportInput) -> Result<ReportOutput, AgentError> {
 }
 
 // ============================================================================
+// Capability: cdc (Change Data Capture — incremental sync)
+// ============================================================================
+
+fn cdc_path(entities: &[String], changed_since: &str, mv: &str) -> String {
+    format!(
+        "/cdc?entities={}&changedSince={}&minorversion={}",
+        url_encode(&entities.join(",")),
+        url_encode(changed_since),
+        url_encode(mv)
+    )
+}
+
+/// Flatten a QBO CDCResponse into `{ "<Entity>": { "changed": [...], "deleted": [ids] } }`.
+/// In CDC, a deletion is an entity row carrying `status: "Deleted"` (with just Id/MetaData),
+/// intermixed with the changed rows in the same per-entity array — so we split them out.
+fn extract_cdc_changes(response: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let query_responses = response
+        .get("CDCResponse")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("QueryResponse"))
+        .and_then(|qr| qr.as_array());
+    if let Some(qrs) = query_responses {
+        for qr in qrs {
+            let Some(obj) = qr.as_object() else { continue };
+            for (key, val) in obj {
+                // Each per-entity QueryResponse element has one array-valued entity key
+                // plus scalar pagination fields (startPosition/maxResults) we skip.
+                let Some(rows) = val.as_array() else { continue };
+                let mut changed = Vec::new();
+                let mut deleted = Vec::new();
+                for row in rows {
+                    let status = row.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    if status.eq_ignore_ascii_case("Deleted") {
+                        if let Some(id) = row.get("Id") {
+                            deleted.push(id.clone());
+                        }
+                    } else {
+                        changed.push(row.clone());
+                    }
+                }
+                out.insert(
+                    key.clone(),
+                    json!({ "changed": changed, "deleted": deleted }),
+                );
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "CDC Input")]
+pub struct CdcInput {
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Entities",
+        description = "Entity names to check for changes, e.g. [\"Customer\", \"Invoice\"] (max 30 per call)",
+        example = "Customer"
+    )]
+    pub entities: Vec<String>,
+
+    #[field(
+        display_name = "Changed Since",
+        description = "ISO 8601 timestamp; returns entities changed after it, e.g. \"2026-01-01T00:00:00-08:00\" (QBO look-back is ~30 days)",
+        example = "2026-01-01T00:00:00-08:00"
+    )]
+    pub changed_since: String,
+
+    #[field(display_name = "Minor Version", description = "QBO API minor version")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "CDC Output")]
+pub struct CdcOutput {
+    #[field(
+        display_name = "Changes",
+        description = "Per-entity { changed: [rows], deleted: [ids] } split out of the CDC response"
+    )]
+    pub changes: Value,
+    #[field(display_name = "Raw", description = "The raw QBO CDCResponse envelope")]
+    pub raw: Value,
+}
+
+#[capability(
+    module = "quickbooks",
+    display_name = "CDC (Change Data Capture)",
+    description = "Fetch all changes (updates and deletions) to the given entities since a timestamp — for incremental sync"
+)]
+pub fn cdc(input: CdcInput) -> Result<CdcOutput, AgentError> {
+    let connection = require_connection(&input._connection)?;
+    if input.entities.is_empty() {
+        return Err(AgentError::permanent(
+            "QUICKBOOKS_CDC_NO_ENTITIES",
+            "cdc requires at least one entity name",
+        )
+        .with_attr("integration", "QUICKBOOKS_ONLINE"));
+    }
+    let mv = minor(&input.minor_version);
+    let response = qbo_get(
+        connection,
+        &cdc_path(&input.entities, &input.changed_since, &mv),
+    )?;
+    Ok(CdcOutput {
+        changes: extract_cdc_changes(&response),
+        raw: response,
+    })
+}
+
+// ============================================================================
 // AgentInfo assembler (host-only; the wasm binary doesn't need it)
 // ============================================================================
 
@@ -710,6 +826,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         &__CAPABILITY_META_UPDATE,
         &__CAPABILITY_META_DELETE,
         &__CAPABILITY_META_REPORT,
+        &__CAPABILITY_META_CDC,
     ];
 
     let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
@@ -719,6 +836,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ("UpdateInput", &__INPUT_META_UpdateInput as &InputTypeMeta),
         ("DeleteInput", &__INPUT_META_DeleteInput as &InputTypeMeta),
         ("ReportInput", &__INPUT_META_ReportInput as &InputTypeMeta),
+        ("CdcInput", &__INPUT_META_CdcInput as &InputTypeMeta),
     ]
     .into_iter()
     .collect();
@@ -737,6 +855,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "ReportOutput",
             &__OUTPUT_META_ReportOutput as &OutputTypeMeta,
         ),
+        ("CdcOutput", &__OUTPUT_META_CdcOutput as &OutputTypeMeta),
     ]
     .into_iter()
     .collect();
@@ -817,6 +936,7 @@ impl Guest for Component {
             "update" => __executor_update(value),
             "delete" => __executor_delete(value),
             "report" => __executor_report(value),
+            "cdc" => __executor_cdc(value),
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -1005,5 +1125,37 @@ mod tests {
         assert_eq!(minor(&None), "75");
         assert_eq!(minor(&Some("".to_string())), "75");
         assert_eq!(minor(&Some("70".to_string())), "70");
+    }
+
+    #[test]
+    fn cdc_path_joins_entities_and_encodes() {
+        let p = cdc_path(
+            &["Customer".to_string(), "Invoice".to_string()],
+            "2026-01-01T00:00:00-08:00",
+            "75",
+        );
+        assert!(
+            p.starts_with("/cdc?entities=Customer%2CInvoice&changedSince="),
+            "got {p}"
+        );
+        assert!(p.contains("2026-01-01T00%3A00%3A00-08%3A00"), "got {p}");
+        assert!(p.ends_with("&minorversion=75"), "got {p}");
+    }
+
+    #[test]
+    fn extract_cdc_splits_changed_and_deleted() {
+        let resp = json!({
+            "CDCResponse": [ { "QueryResponse": [
+                { "Customer": [ {"Id":"1","DisplayName":"A"}, {"Id":"2","status":"Deleted"} ], "startPosition":1, "maxResults":2 },
+                { "Invoice": [ {"Id":"9"} ], "startPosition":1, "maxResults":1 }
+            ] } ],
+            "time": "…"
+        });
+        let changes = extract_cdc_changes(&resp);
+        // Deletions (status="Deleted") are split out as ids; everything else is a changed row.
+        assert_eq!(changes["Customer"]["changed"].as_array().unwrap().len(), 1);
+        assert_eq!(changes["Customer"]["deleted"], json!(["2"]));
+        assert_eq!(changes["Invoice"]["changed"].as_array().unwrap().len(), 1);
+        assert!(changes["Invoice"]["deleted"].as_array().unwrap().is_empty());
     }
 }
