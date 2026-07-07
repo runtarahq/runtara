@@ -619,6 +619,17 @@ fn normalize_endpoint(endpoint: &str) -> String {
     }
 }
 
+/// Default regional endpoint for a uniform AWS service host,
+/// `https://{service}.{region}.amazonaws.com`. Correct for the many services
+/// that follow the regular naming scheme (SQS, SNS, DynamoDB, Lambda, Kinesis,
+/// regional STS, …). Irregular hosts (bedrock-runtime, S3 virtual-host, global
+/// services like IAM, FIPS/dualstack variants) must instead set an explicit
+/// `endpoint` on the connection. Used by the proxy when an agent declares its
+/// AWS service and the connection pinned no explicit endpoint.
+pub fn aws_default_endpoint(service: &str, region: &str) -> String {
+    format!("https://{service}.{region}.amazonaws.com")
+}
+
 fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
     if let Some(raw) = first_string_param(params, &["endpoint_override", "endpoint"]) {
         let trimmed = raw.trim_end_matches('/').to_string();

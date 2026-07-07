@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use runtara_connections::{
     AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
+    ResolvedConnectionAuth,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -193,6 +194,13 @@ pub struct ProxyRequest {
     /// are applied to the outgoing request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_provider: Option<String>,
+    /// AWS service the calling agent is signing for (e.g. "sqs", "dynamodb").
+    /// When set, it overrides the connection's resolved signing service and, if
+    /// the connection pinned no explicit endpoint, selects the regional
+    /// endpoint `https://{service}.{region}.amazonaws.com`. This lets one
+    /// generic `aws_credentials` connection serve any AWS service.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aws_service: Option<String>,
     /// Request timeout in milliseconds (default: 30 000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -222,6 +230,32 @@ pub async fn proxy_handler(
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
     execute_proxy_request(&tenant_id, &state.facade, &state.client, request).await
+}
+
+/// Apply an agent-declared AWS service to a resolved connection descriptor.
+///
+/// AWS credentials are service-agnostic — the calling agent names the service
+/// it is signing for via the `X-Runtara-Aws-Service` header. This overrides the
+/// resolved SigV4 signing service and, when the connection pinned no explicit
+/// endpoint, synthesizes the default regional endpoint
+/// (`https://{service}.{region}.amazonaws.com`). The net effect: one generic
+/// `aws_credentials` connection can serve SQS, DynamoDB, SNS, … without a
+/// per-service connection type. No-op unless the connection actually resolved
+/// AWS SigV4 signing (so a stray header on a non-AWS connection does nothing).
+fn apply_aws_service_override(aws_service: Option<&str>, resolved: &mut ResolvedConnectionAuth) {
+    if let Some(service) = aws_service
+        && let Some(aws) = resolved.aws_signing.as_mut()
+    {
+        aws.service = service.to_string();
+        if resolved.base_url.is_none() {
+            resolved.base_url = Some(
+                runtara_connections::auth::provider_auth::aws_default_endpoint(
+                    service,
+                    &aws.region,
+                ),
+            );
+        }
+    }
 }
 
 /// Core proxy logic shared between internal and authenticated debug endpoints
@@ -267,7 +301,7 @@ pub async fn execute_proxy_request(
             .cloned()
             .unwrap_or(json!({}));
 
-        let resolved = facade
+        let mut resolved = facade
             .resolve_connection_auth(
                 connection_id,
                 tenant_id,
@@ -282,6 +316,10 @@ pub async fn execute_proxy_request(
                     Json(json!({"error": format!("Credential resolution failed: {}", e)})),
                 )
             })?;
+
+        // Agent-declared AWS service (generic AWS credentials) — see
+        // `apply_aws_service_override`.
+        apply_aws_service_override(request.aws_service.as_deref(), &mut resolved);
 
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
@@ -808,5 +846,88 @@ mod tests {
             "aws_credentials",
         )
         .expect("provider match should pass");
+    }
+
+    fn aws_resolved(base_url: Option<&str>, region: &str, service: &str) -> ResolvedConnectionAuth {
+        ResolvedConnectionAuth {
+            base_url: base_url.map(str::to_string),
+            aws_signing: Some(AwsSigningParams {
+                access_key_id: "AKIA".into(),
+                secret_access_key: "secret".into(),
+                region: region.into(),
+                service: service.into(),
+                session_token: None,
+            }),
+            azure_signing: None,
+            rotated_credentials: None,
+        }
+    }
+
+    #[test]
+    fn aws_default_endpoint_uses_uniform_regional_host() {
+        use runtara_connections::auth::provider_auth::aws_default_endpoint;
+        assert_eq!(
+            aws_default_endpoint("sqs", "us-east-1"),
+            "https://sqs.us-east-1.amazonaws.com"
+        );
+        assert_eq!(
+            aws_default_endpoint("dynamodb", "eu-west-1"),
+            "https://dynamodb.eu-west-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn aws_service_override_sets_service_and_default_endpoint() {
+        // Generic aws_credentials connection: no explicit endpoint, service
+        // defaulted to "bedrock" during resolution. The SQS agent's header
+        // must flip both the signing service and the regional endpoint.
+        let mut resolved = aws_resolved(None, "us-east-1", "bedrock");
+        apply_aws_service_override(Some("sqs"), &mut resolved);
+
+        assert_eq!(resolved.aws_signing.as_ref().unwrap().service, "sqs");
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://sqs.us-east-1.amazonaws.com")
+        );
+    }
+
+    #[test]
+    fn aws_service_override_preserves_explicit_endpoint() {
+        // A LocalStack / VPC / GovCloud endpoint on the connection must win over
+        // the synthesized default, but the signing service is still overridden.
+        let mut resolved = aws_resolved(Some("https://localhost:4566"), "eu-west-1", "bedrock");
+        apply_aws_service_override(Some("sqs"), &mut resolved);
+
+        assert_eq!(resolved.aws_signing.as_ref().unwrap().service, "sqs");
+        assert_eq!(resolved.base_url.as_deref(), Some("https://localhost:4566"));
+    }
+
+    #[test]
+    fn aws_service_override_noop_without_header() {
+        // No agent-declared service → nothing changes (Bedrock/S3 path).
+        let mut resolved = aws_resolved(None, "us-east-1", "bedrock");
+        apply_aws_service_override(None, &mut resolved);
+
+        assert_eq!(resolved.aws_signing.as_ref().unwrap().service, "bedrock");
+        assert_eq!(resolved.base_url, None);
+    }
+
+    #[test]
+    fn aws_service_override_noop_on_non_aws_connection() {
+        // A stray header on a connection that resolved no SigV4 signing must not
+        // invent an endpoint or otherwise mutate the descriptor.
+        let mut resolved = ResolvedConnectionAuth {
+            base_url: Some("https://api.example.com".into()),
+            aws_signing: None,
+            azure_signing: None,
+            rotated_credentials: None,
+        };
+        apply_aws_service_override(Some("sqs"), &mut resolved);
+
+        assert!(resolved.aws_signing.is_none());
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://api.example.com")
+        );
     }
 }

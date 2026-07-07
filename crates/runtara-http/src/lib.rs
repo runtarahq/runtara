@@ -197,6 +197,14 @@ impl RequestBuilder {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-ai-provider"))
             .map(|(_, v)| v.clone());
+        // The AWS service the calling agent is signing for (e.g. "sqs"). Lets a
+        // single generic AWS-credentials connection serve any AWS service — the
+        // proxy uses this to select the signing service and regional endpoint.
+        let aws_service = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-aws-service"))
+            .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
         let clean_headers: Vec<(String, String)> = self
@@ -225,6 +233,7 @@ impl RequestBuilder {
             "body_raw": body_raw,
             "connection_id": connection_id,
             "ai_provider": ai_provider,
+            "aws_service": aws_service,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
         });
 

@@ -363,6 +363,18 @@ pub struct AwsCredentialsParams {
         secret
     )]
     pub aws_session_token: Option<String>,
+
+    /// Optional custom endpoint. Leave blank for the default AWS regional
+    /// endpoint of whatever service the calling agent targets (e.g. SQS →
+    /// `https://sqs.{region}.amazonaws.com`). Set for LocalStack, VPC
+    /// endpoints, GovCloud, or other custom hosts.
+    #[serde(default)]
+    #[field(
+        display_name = "Endpoint",
+        description = "Custom endpoint URL; leave blank for AWS defaults (LocalStack, VPC endpoints, GovCloud)",
+        placeholder = "https://localhost:4566"
+    )]
+    pub endpoint: Option<String>,
 }
 
 fn default_aws_region() -> String {
