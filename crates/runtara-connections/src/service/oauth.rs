@@ -8,10 +8,13 @@ use std::sync::Arc;
 use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::OAuthConfig;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 #[derive(Debug)]
@@ -110,6 +113,19 @@ impl OAuthService {
             tenant_id
         );
 
+        // PKCE (RFC 7636) when the provider descriptor requires it: attach an S256
+        // code_challenge to the authorize URL and stash the verifier on the state row.
+        let (code_verifier, pkce_query) = if oauth_config.pkce_required {
+            let (verifier, challenge) = generate_pkce();
+            let q = format!(
+                "&code_challenge={}&code_challenge_method=S256",
+                urlencoding::encode(&challenge)
+            );
+            (Some(verifier), q)
+        } else {
+            (None, String::new())
+        };
+
         // Store state in DB
         self.oauth_repo
             .create_state(
@@ -118,18 +134,20 @@ impl OAuthService {
                 connection_id,
                 integration_id,
                 &redirect_uri,
+                code_verifier.as_deref(),
             )
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?;
 
         // Build authorization URL
         let auth_url = format!(
-            "{}?client_id={}&redirect_uri={}&scope={}&state={}",
+            "{}?client_id={}&redirect_uri={}&scope={}&state={}{}",
             oauth_config.auth_url,
             urlencoding::encode(client_id),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(scopes),
             urlencoding::encode(&state),
+            pkce_query,
         );
 
         Ok(auth_url)
@@ -177,13 +195,15 @@ impl OAuthService {
             .as_str()
             .ok_or(OAuthError::MissingParameter("client_secret".to_string()))?;
 
-        // Exchange authorization code for tokens
+        // Exchange authorization code for tokens (sending the PKCE verifier if the
+        // authorize step generated one).
         let token_response = exchange_code(
             oauth_config,
             code,
             client_id,
             client_secret,
             &state_row.redirect_uri,
+            state_row.code_verifier.as_deref(),
         )
         .await?;
 
@@ -252,6 +272,17 @@ fn generate_state() -> String {
     hex::encode(bytes)
 }
 
+/// Generate a PKCE (RFC 7636) `(code_verifier, code_challenge)` pair. The verifier
+/// is 32 bytes of CSPRNG entropy, base64url-encoded (43 chars, all unreserved); the
+/// challenge is the base64url of its SHA-256 (the `S256` method).
+fn generate_pkce() -> (String, String) {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
 /// Exchange an authorization code for access + refresh tokens.
 async fn exchange_code(
     oauth_config: &OAuthConfig,
@@ -259,18 +290,24 @@ async fn exchange_code(
     client_id: &str,
     client_secret: &str,
     redirect_uri: &str,
+    code_verifier: Option<&str>,
 ) -> Result<Value, OAuthError> {
     let client = reqwest::Client::new();
 
     // Present credentials per the provider's token-endpoint style (Intuit requires
     // HTTP Basic; the OAuth2 default is credentials in the body).
+    let mut grant_fields = vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("code".to_string(), code.to_string()),
+        ("redirect_uri".to_string(), redirect_uri.to_string()),
+    ];
+    // PKCE: prove possession of the verifier that produced the authorize challenge.
+    if let Some(verifier) = code_verifier {
+        grant_fields.push(("code_verifier".to_string(), verifier.to_string()));
+    }
     let (basic_auth, body) = crate::auth::token_cache::token_request_parts(
         oauth_config.token_endpoint_auth,
-        vec![
-            ("grant_type".to_string(), "authorization_code".to_string()),
-            ("code".to_string(), code.to_string()),
-            ("redirect_uri".to_string(), redirect_uri.to_string()),
-        ],
+        grant_fields,
         client_id,
         client_secret,
     );
@@ -360,6 +397,25 @@ mod tests {
             merge_extra_callback_params(&mut obj, &cfg, &q),
             Err(OAuthError::MissingParameter(_))
         ));
+    }
+
+    #[test]
+    fn pkce_challenge_is_s256_of_verifier() {
+        let (verifier, challenge) = generate_pkce();
+        // Verifier: 43 chars, all PKCE-unreserved (base64url of 32 bytes, no padding).
+        assert_eq!(verifier.len(), 43);
+        assert!(
+            verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        // Challenge must equal base64url(SHA-256(verifier)) — the S256 method.
+        let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        assert_eq!(challenge, expected);
+        assert!(
+            !challenge.contains('='),
+            "challenge must be unpadded base64url"
+        );
     }
 
     #[test]

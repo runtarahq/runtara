@@ -50,6 +50,7 @@ impl PgFixture {
                 connection_id TEXT NOT NULL,
                 integration_id TEXT NOT NULL,
                 redirect_uri TEXT NOT NULL,
+                code_verifier TEXT,
                 expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '10 minutes')
             )
             "#,
@@ -113,13 +114,22 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
         "url: {url}"
     );
     assert!(url.contains("state="), "url: {url}");
+    // PKCE (RFC 7636): the descriptor enables it, so the authorize URL carries an
+    // S256 code_challenge.
+    assert!(url.contains("code_challenge="), "url: {url}");
+    assert!(url.contains("code_challenge_method=S256"), "url: {url}");
 
-    // The CSRF state row was persisted for the callback to consume.
-    let (count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM oauth_state WHERE connection_id = $1")
-            .bind("conn_qb")
-            .fetch_one(&fixture.pool)
-            .await
-            .expect("count state rows");
+    // The CSRF state row was persisted with a PKCE verifier for the callback to consume.
+    let (count, verifier): (i64, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*)::int8, MAX(code_verifier) FROM oauth_state WHERE connection_id = $1",
+    )
+    .bind("conn_qb")
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("count state rows");
     assert_eq!(count, 1, "authorize must persist exactly one state row");
+    assert!(
+        verifier.is_some_and(|v| v.len() == 43),
+        "a PKCE verifier must be stored on the state row"
+    );
 }
