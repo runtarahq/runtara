@@ -51,6 +51,7 @@ members = [
     "crates/agents/runtara-agent-sharepoint",
     "crates/agents/runtara-agent-stripe",
     "crates/agents/runtara-agent-hubspot",
+    "crates/agents/runtara-agent-quickbooks",
     "crates/agents/runtara-agent-shopify",
     "crates/agents/runtara-agent-sftp",
     "crates/agents/runtara-agent-compression",

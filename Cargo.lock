@@ -4256,6 +4256,7 @@ dependencies = [
  "runtara-agent-mcp",
  "runtara-agent-object-model",
  "runtara-agent-openai",
+ "runtara-agent-quickbooks",
  "runtara-agent-s3-storage",
  "runtara-agent-sftp",
  "runtara-agent-sharepoint",
@@ -4417,6 +4418,18 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
+version = "8.1.9"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen-rt 0.44.0",
+]
+
+[[package]]
+name = "runtara-agent-quickbooks"
 version = "8.1.9"
 dependencies = [
  "runtara-agent-macro",
