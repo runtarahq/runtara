@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -195,26 +196,26 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
     })
 }
 
-/// Parse a stored definition JSON into a `ReportDefinition`. Two
-/// failure modes return an empty stub plus a `needs_re_authoring`
-/// message so the FE can surface a clean state instead of letting the
-/// report look superficially fine:
+/// Parse a stored definition JSON into a `ReportDefinition`, degrading
+/// gracefully so a single incompatible field never blanks the whole report.
 ///
-/// 1. The stored JSON carries legacy markers that the cutover spec
-///    flagged as "stop loading" — `markdown` root field or
-///    `markdown` layout nodes from the pre-Phase-1 wrapper. Detected
-///    explicitly so the original JSON is preserved on the server (the
-///    operator can inspect it via `get_report` and re-author through
-///    MCP), rather than silently coerced into something that almost
-///    works.
-/// 2. Serde fails because the JSON doesn't fit the current
-///    `ReportDefinition` shape at all (unknown variants, missing
-///    required fields, etc.).
+/// The stages, in order:
 ///
-/// Phase 9's legacy *container* migration (`section` / `columns` /
-/// `metric_row` -> `grid`) is a structural rewrite with no information
-/// loss, so it runs first; only after that do we fall through to the
-/// stub fallback.
+/// 1. Legacy markers the cutover spec flagged as "stop loading" — a
+///    `markdown` root field or `markdown` layout nodes from the earliest
+///    wrapper format — return an empty stub plus a `needs_re_authoring`
+///    reason. The original JSON is preserved on the server (the operator can
+///    inspect it via `get_report` and re-author through MCP) rather than
+///    silently coerced into something that almost works.
+/// 2. The [migration ladder](migrate_stored_definition) brings older stored
+///    shapes up to the current one (legacy layout containers collapse into
+///    the root grid; version-dispatched rungs handle persisted-shape bumps).
+/// 3. Strict deserialization of the migrated JSON. On success the report
+///    loads with no flag.
+/// 4. If strict deserialization still fails, [`salvage_definition`] recovers
+///    the report component by component — dropping only the incompatible
+///    block / layout node / filter / dataset and flagging
+///    `needs_re_authoring` — instead of throwing the entire report away.
 fn parse_stored_definition(
     value: Value,
     definition_version: i32,
@@ -225,20 +226,155 @@ fn parse_stored_definition(
         );
         return (empty_definition(definition_version), Some(reason));
     }
-    let migrated = migrate_legacy_layout_in_definition(value);
-    match serde_json::from_value::<ReportDefinition>(migrated) {
+    let migrated = migrate_stored_definition(value, definition_version);
+    // Deserialize from a borrow so the healthy path never clones the JSON;
+    // the migrated value stays available for salvage if strict parsing fails.
+    match ReportDefinition::deserialize(&migrated) {
         Ok(definition) => (definition, None),
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "Stored report definition could not be deserialized into the current shape"
+                "Stored report definition failed strict deserialization; recovering per component"
             );
-            (
-                empty_definition(definition_version),
-                Some(error.to_string()),
-            )
+            salvage_definition(migrated, definition_version, &error)
         }
     }
+}
+
+/// Bring a stored definition's raw JSON up to the current definition version
+/// (`runtara_report_dsl::types::CURRENT_DEFINITION_VERSION`) before strict
+/// deserialization.
+///
+/// This is the read-side migration ladder. It has two parts: a
+/// version-independent structural normalization (legacy layout container
+/// shapes into the mandatory root grid), and version-dispatched rungs keyed
+/// on the stored `from_version`. There are no version rungs yet
+/// (`CURRENT_DEFINITION_VERSION` is 1); when the persisted shape changes,
+/// bump the constant and add an `if from_version < N { value = ...; }` rung
+/// here — running in ascending version order — so a report several versions
+/// behind is walked all the way up to the current shape on read, instead of
+/// failing to deserialize and blanking.
+fn migrate_stored_definition(value: Value, from_version: i32) -> Value {
+    let current = runtara_report_dsl::types::CURRENT_DEFINITION_VERSION;
+    if from_version > current {
+        // Written by a server ahead of this one. Its shape is unknown, so
+        // attempt a best-effort load; the salvage path surfaces a clear flag
+        // if the newer shape doesn't deserialize.
+        tracing::warn!(
+            from_version,
+            current,
+            "Stored report definition_version is newer than this server supports; attempting best-effort load"
+        );
+    }
+    // Baseline normalization, applied to every stored version: legacy layout
+    // containers (`section` / `columns` / `metric_row` and the legacy
+    // `layout: [...]` array form) collapse into the root grid.
+    migrate_legacy_layout_in_definition(value)
+}
+
+/// Best-effort recovery when a migrated definition still won't deserialize
+/// strictly. Rebuilds the definition component by component so a single bad
+/// block or layout node degrades to "that piece dropped, report flagged for
+/// re-authoring" instead of blanking the entire report. The stored JSON is
+/// left untouched on the server, so nothing is lost — the operator can
+/// inspect the raw definition via `get_report` and re-author. Returns the
+/// recovered definition plus a human-readable `needs_re_authoring` reason
+/// naming what was dropped.
+fn salvage_definition(
+    migrated: Value,
+    definition_version: i32,
+    strict_error: &serde_json::Error,
+) -> (ReportDefinition, Option<String>) {
+    let Some(object) = migrated.as_object() else {
+        // Not even an object — nothing to salvage; fall back to the empty
+        // stub and surface the strict error.
+        return (
+            empty_definition(definition_version),
+            Some(strict_error.to_string()),
+        );
+    };
+
+    let mut dropped: Vec<String> = Vec::new();
+
+    // Layout: keep it if it parses, otherwise fall back to an empty root grid
+    // so the rest of the report still loads.
+    let layout = match object.get("layout") {
+        Some(raw) => {
+            match serde_json::from_value::<runtara_report_dsl::types::ReportGridLayoutNode>(
+                raw.clone(),
+            ) {
+                Ok(grid) => grid,
+                Err(error) => {
+                    dropped.push(format!("layout ({error})"));
+                    runtara_report_dsl::types::default_root_grid()
+                }
+            }
+        }
+        None => runtara_report_dsl::types::default_root_grid(),
+    };
+
+    // Blocks, views, filters, datasets: deserialize each element on its own so
+    // one incompatible entry drops in isolation rather than taking the whole
+    // collection (and the whole report) down with it.
+    let blocks = salvage_vec(object.get("blocks"), "block", &mut dropped);
+    let views = salvage_vec(object.get("views"), "view", &mut dropped);
+    let filters = salvage_vec(object.get("filters"), "filter", &mut dropped);
+    let datasets = salvage_vec(object.get("datasets"), "dataset", &mut dropped);
+
+    let definition = ReportDefinition {
+        definition_version,
+        layout,
+        views,
+        filters,
+        datasets,
+        blocks,
+    };
+
+    let reason = if dropped.is_empty() {
+        // Strict parsing failed but per-component salvage found nothing
+        // droppable to name (e.g. a scalar type error) — surface the original
+        // error so the flag still carries a diagnostic.
+        strict_error.to_string()
+    } else {
+        format!(
+            "Recovered report after dropping {} incompatible element(s): {}. Re-author to restore them.",
+            dropped.len(),
+            dropped.join("; ")
+        )
+    };
+
+    (definition, Some(reason))
+}
+
+/// Deserialize each element of a JSON array independently into `T`, keeping
+/// the elements that parse and recording a `"<kind> <id> (<err>)"` note for
+/// each that doesn't. A missing or non-array input yields an empty vec. Used
+/// by [`salvage_definition`] to recover the healthy entries of a report's
+/// block / view / filter / dataset collections; every one of those structs
+/// carries an `id` field, read here to label a dropped element.
+fn salvage_vec<T: serde::de::DeserializeOwned>(
+    value: Option<&Value>,
+    kind: &str,
+    dropped: &mut Vec<String>,
+) -> Vec<T> {
+    let Some(Value::Array(elements)) = value else {
+        return Vec::new();
+    };
+    let mut kept = Vec::with_capacity(elements.len());
+    for (index, element) in elements.iter().enumerate() {
+        match serde_json::from_value::<T>(element.clone()) {
+            Ok(parsed) => kept.push(parsed),
+            Err(error) => {
+                let id = element
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("[{index}]"));
+                dropped.push(format!("{kind} {id} ({error})"));
+            }
+        }
+    }
+    kept
 }
 
 fn empty_definition(definition_version: i32) -> ReportDefinition {
@@ -754,6 +890,78 @@ mod tests {
         let (definition, error) = parse_stored_definition(value, 1);
         assert!(error.is_none());
         assert_eq!(definition.blocks.len(), 1);
+    }
+
+    #[test]
+    fn parse_stored_definition_salvages_good_blocks_when_one_is_bad() {
+        // One block has an unknown `type`, so strict deserialization of the
+        // whole definition fails. The report must degrade to "that one block
+        // dropped, everything else recovered", not blank the entire report.
+        let value = json!({
+            "definitionVersion": 1,
+            "layout": {
+                "id": "root",
+                "columns": 1,
+                "items": [
+                    {"id": "i_a", "child": {"type": "block", "id": "n_a", "blockId": "a"}},
+                    {"id": "i_c", "child": {"type": "block", "id": "n_c", "blockId": "c"}}
+                ]
+            },
+            "blocks": [
+                {"id": "a", "type": "markdown", "markdown": {"content": "A"}},
+                {"id": "b", "type": "totallyMadeUpBlockType"},
+                {"id": "c", "type": "markdown", "markdown": {"content": "C"}}
+            ]
+        });
+        let (definition, error) = parse_stored_definition(value, 1);
+
+        let reason = error.expect("a bad block must still flag needs_re_authoring");
+        assert!(
+            reason.contains("block b"),
+            "reason should name the dropped block by id: {reason}"
+        );
+
+        // The two healthy blocks survive; only the incompatible one is dropped.
+        let ids: Vec<&str> = definition.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+
+        // The layout is untouched — the bad block didn't take the structure
+        // (or the good blocks) down with it.
+        assert_eq!(definition.layout.id, "root");
+        assert_eq!(definition.layout.items.len(), 2);
+    }
+
+    #[test]
+    fn parse_stored_definition_keeps_blocks_when_layout_node_has_unknown_field() {
+        // A stray key on a layout node (which carries deny_unknown_fields) is
+        // the audit's headline blast radius: it used to blank the whole
+        // report. Now the layout falls back to an empty root grid while the
+        // blocks are preserved and the report is flagged for re-authoring.
+        let value = json!({
+            "definitionVersion": 1,
+            "layout": {
+                "id": "root",
+                "columns": 1,
+                "items": [],
+                "bogusLayoutKey": true
+            },
+            "blocks": [
+                {"id": "x", "type": "markdown", "markdown": {"content": "X"}},
+                {"id": "y", "type": "markdown", "markdown": {"content": "Y"}}
+            ]
+        });
+        let (definition, error) = parse_stored_definition(value, 1);
+
+        let reason = error.expect("an unknown layout field must flag needs_re_authoring");
+        assert!(
+            reason.contains("layout"),
+            "reason should call out the dropped layout: {reason}"
+        );
+
+        // Both blocks survive despite the layout being unparseable.
+        assert_eq!(definition.blocks.len(), 2);
+        // Layout fell back to the empty root grid rather than blanking blocks.
+        assert!(definition.layout.items.is_empty());
     }
 
     #[test]
