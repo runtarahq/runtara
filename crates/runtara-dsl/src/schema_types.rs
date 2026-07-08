@@ -1463,7 +1463,7 @@ pub enum MappingValue {
 /// - `variables._tenant_id` - Tenant identifier
 ///
 /// Example: `{ "valueType": "reference", "value": "data.user.name" }`
-/// With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`
+/// With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "integer" }`
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1475,11 +1475,21 @@ pub struct ReferenceValue {
     /// Expected type hint for the referenced value.
     /// Used when the source type is unknown (e.g., HTTP response body).
     /// If omitted, the value is passed through as-is (typically as JSON).
+    ///
+    /// The hint must be a known [`ValueType`] — an unrecognized name is rejected
+    /// when the workflow is parsed. At runtime an `integer`/`number` hint coerces
+    /// the resolved value; a `null` passes through, but a present value that
+    /// cannot be parsed as the requested type fails the step rather than
+    /// silently becoming `0`. Declare a `default` to supply an explicit fallback
+    /// for such values.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_hint: Option<ValueType>,
 
-    /// Default value to use when the reference path returns null or doesn't exist.
-    /// This allows graceful handling of optional fields while providing fallback values.
+    /// Default value to use when the reference path is null/absent, when its
+    /// shape does not match, or when a `type` hint cannot coerce the resolved
+    /// value. This allows graceful handling of optional or malformed fields
+    /// while providing an explicit fallback. The default is itself coerced
+    /// through the `type` hint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 }
@@ -1579,6 +1589,13 @@ pub struct TemplateValue {
 /// - `number` for floating point
 /// - `boolean` for true/false
 /// - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
+///
+/// Coercion policy: `string`/`boolean` are total (any value has a
+/// representation), and `json`/`file` pass through untouched. `integer`/`number`
+/// are partial — `null` stays `null`, but a present value that cannot be parsed
+/// as the requested type fails the step rather than silently coercing to `0`.
+/// The reference's `default` (see [`ReferenceValue`]) supplies an explicit
+/// fallback for such values.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

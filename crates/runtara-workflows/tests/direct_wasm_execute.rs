@@ -1445,6 +1445,78 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     assert_eq!(output, serde_json::json!({ "result": "direct-finish" }));
 }
 
+/// A single-Finish workflow that binds `data.count` under an `integer` type
+/// hint, with an optional `default`. Exercises `apply_type_hint`'s coercion
+/// through the full compile → execute path.
+fn integer_hint_graph(default: Option<Value>) -> String {
+    let mut reference = serde_json::json!({
+        "valueType": "reference",
+        "value": "data.count",
+        "type": "integer"
+    });
+    if let Some(default) = default {
+        reference["default"] = default;
+    }
+    let graph = serde_json::json!({
+        "name": "Integer Hint Coercion",
+        "steps": {
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": { "count": reference }
+            }
+        },
+        "entryPoint": "finish",
+        "executionPlan": [],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    });
+    serde_json::to_string(&graph).expect("graph serializes")
+}
+
+#[test]
+fn direct_wasm_execute_integer_hint_fails_loudly_on_unparseable_value() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // A present, non-null value that will not parse as an integer must fail the
+    // run rather than silently becoming `0` and flowing into the output.
+    let graph = integer_hint_graph(None);
+    let failure = run_direct_workflow_expect_failure(
+        &components_dir,
+        "direct-wasm-execute-integer-hint-unparseable",
+        &graph,
+        br#"{"count":"abc"}"#,
+    );
+
+    let message = failure.error_json.to_string();
+    assert!(
+        message.contains("cannot be coerced to integer"),
+        "expected a loud coercion failure, got: {message}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_integer_hint_default_rescues_unparseable_value() {
+    let Some(components_dir) = direct_e2e_components_dir() else {
+        return;
+    };
+
+    // The author's `default` is the explicit escape hatch: the unparseable
+    // value falls back to it and the run completes.
+    let graph = integer_hint_graph(Some(serde_json::json!(7)));
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-integer-hint-default",
+        &graph,
+        br#"{"count":"abc"}"#,
+    );
+
+    assert_eq!(output, serde_json::json!({ "count": 7 }));
+}
+
 #[test]
 fn direct_wasm_execute_single_agent_without_finish_returns_null() {
     let Some(components_dir) = direct_e2e_components_dir() else {
