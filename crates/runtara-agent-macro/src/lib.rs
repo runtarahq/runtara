@@ -814,6 +814,10 @@ struct ConnectionContainerArgs {
     /// Whether the authorization-code flow requires PKCE (default false)
     #[darling(default)]
     oauth_pkce_required: Option<bool>,
+    /// Whether OAuth endpoints/config come from connection parameters (ONLY for
+    /// the generic bring-your-own types; default false)
+    #[darling(default)]
+    oauth_params_driven: Option<bool>,
 }
 
 /// Derive macro for connection parameter structs
@@ -1019,6 +1023,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let reauth_on_error_codes = parse_str_list(args.oauth_reauth_on_error_codes.as_deref());
             let revocation_endpoint = args.oauth_revocation_endpoint.as_deref().unwrap_or("");
             let pkce_required = args.oauth_pkce_required.unwrap_or(false);
+            let params_driven = args.oauth_params_driven.unwrap_or(false);
             quote! {
                 Some({
                     static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
@@ -1034,6 +1039,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                         reauth_on_error_codes: #reauth_on_error_codes,
                         revocation_endpoint: #revocation_endpoint,
                         pkce_required: #pkce_required,
+                        params_driven: #params_driven,
                     };
                     &OAUTH_CFG
                 })

@@ -431,6 +431,53 @@ fn describe_microsoft_entra_client_credentials_auth(
     })
 }
 
+/// Effective OAuth flow config. THE GATE IS PER-TYPE, NOT PER-FIELD: when
+/// `cfg.params_driven == false` (every curated provider), connection params are
+/// ignored for ALL fields — including ones the curated descriptor legitimately
+/// leaves empty (e.g. HubSpot has no revocation endpoint; a per-field-emptiness
+/// fallback would let a hostile `revocation_url` param exfiltrate the refresh
+/// token on disconnect). Only the generic bring-your-own types read params.
+pub(crate) struct EffectiveOAuthConfig {
+    pub auth_url: String,
+    pub token_url: String,
+    pub token_endpoint_auth: TokenEndpointAuth,
+    pub pkce_required: bool,
+    pub refresh_token_rotates: bool,
+    pub revocation_endpoint: String,
+}
+
+pub(crate) fn resolve_effective_oauth_config(
+    cfg: &OAuthConfig,
+    params: &Value,
+) -> EffectiveOAuthConfig {
+    if !cfg.params_driven {
+        return EffectiveOAuthConfig {
+            auth_url: cfg.auth_url.to_string(),
+            token_url: cfg.token_url.to_string(),
+            token_endpoint_auth: cfg.token_endpoint_auth,
+            pkce_required: cfg.pkce_required,
+            refresh_token_rotates: cfg.refresh_token_rotates,
+            revocation_endpoint: cfg.revocation_endpoint.to_string(),
+        };
+    }
+    EffectiveOAuthConfig {
+        auth_url: first_string_param(params, &["auth_url"]).unwrap_or_default(),
+        token_url: first_string_param(params, &["token_url"]).unwrap_or_default(),
+        token_endpoint_auth: if params["token_auth"].as_str() == Some("basic") {
+            TokenEndpointAuth::HttpBasic
+        } else {
+            TokenEndpointAuth::FormBody
+        },
+        // PKCE defaults ON for params-driven types; `pkce = false` disables it
+        // for providers that reject code_challenge.
+        pkce_required: params["pkce"].as_bool().unwrap_or(true),
+        // Fail-closed by default: a rotated-token persist failure must fail the
+        // mint rather than silently losing the rotated token.
+        refresh_token_rotates: params["refresh_rotates"].as_bool().unwrap_or(true),
+        revocation_endpoint: first_string_param(params, &["revocation_url"]).unwrap_or_default(),
+    }
+}
+
 /// Descriptor-driven auth for OAuth2 authorization-code integrations: resolves the
 /// base URL from the connection type's `OAuthConfig` and builds the refresh-token
 /// deferred auth. Falls back to injecting the stored `access_token` directly when no
@@ -471,6 +518,11 @@ fn describe_oauth_authcode_auth(
 /// `{param}`-templated path (e.g. QuickBooks `/v3/company/{realm_id}`). Returns `None`
 /// when the descriptor declares no base URL.
 fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
+    // Params-driven (generic) types: the base URL is the connection's own.
+    if cfg.params_driven {
+        return first_string_param(params, &["base_url"])
+            .map(|u| u.trim_end_matches('/').to_string());
+    }
     let is_sandbox = params["environment"].as_str() == Some("sandbox");
     let host = if !cfg.sandbox_base_url.is_empty() && is_sandbox {
         cfg.sandbox_base_url
@@ -574,19 +626,27 @@ fn describe_oauth_refresh_auth(
     let client_id = params["client_id"].as_str()?.to_string();
     let client_secret = params["client_secret"].as_str()?.to_string();
     let oauth_config = find_connection_type(integration_id)?.oauth_config?;
+    let effective = resolve_effective_oauth_config(oauth_config, params);
+    if effective.token_url.is_empty() {
+        // Fail fast instead of refreshing against an empty-host URL.
+        return None;
+    }
 
     Some(DeferredAuth::OAuth2RefreshToken {
+        // token_url in the key so an endpoint edit on a params-driven connection
+        // naturally misses stale cache entries.
         cache_key: token_cache::build_token_cache_key(&[
             "oauth_refresh",
             connection_id,
             integration_id,
+            &effective.token_url,
         ]),
-        token_url: oauth_config.token_url.to_string(),
+        token_url: effective.token_url,
         header_name: header_name.to_string(),
         client_id,
         client_secret,
         refresh_token,
-        token_endpoint_auth: oauth_config.token_endpoint_auth,
+        token_endpoint_auth: effective.token_endpoint_auth,
         fallback_access_token: params["access_token"].as_str().map(|s| s.to_string()),
         fallback_expires_at: token_cache::parse_expiry(params["token_expires_at"].as_str()),
     })
@@ -599,15 +659,16 @@ fn describe_oauth_refresh_auth(
 pub(crate) fn build_revoke_request(
     oauth_config: &OAuthConfig,
     params: &Value,
-) -> Option<(Option<String>, String)> {
-    if oauth_config.revocation_endpoint.is_empty() {
+) -> Option<(Option<String>, String, String)> {
+    let effective = resolve_effective_oauth_config(oauth_config, params);
+    if effective.revocation_endpoint.is_empty() {
         return None;
     }
     let token = params["refresh_token"]
         .as_str()
         .or_else(|| params["access_token"].as_str())?;
     let body = serde_json::json!({ "token": token }).to_string();
-    let basic = match oauth_config.token_endpoint_auth {
+    let basic = match effective.token_endpoint_auth {
         TokenEndpointAuth::HttpBasic => {
             let client_id = params["client_id"].as_str().unwrap_or("");
             let client_secret = params["client_secret"].as_str().unwrap_or("");
@@ -618,21 +679,21 @@ pub(crate) fn build_revoke_request(
         }
         TokenEndpointAuth::FormBody => None,
     };
-    Some((basic, body))
+    Some((basic, body, effective.revocation_endpoint))
 }
 
 /// Best-effort provider-side token revocation, called on disconnect. A no-op when the
-/// descriptor declares no revocation endpoint or the connection has no token.
+/// effective config declares no revocation endpoint or the connection has no token.
 pub async fn revoke_oauth_token(
     client: &Client,
     oauth_config: &OAuthConfig,
     params: &Value,
 ) -> Result<(), String> {
-    let Some((basic_auth, body)) = build_revoke_request(oauth_config, params) else {
+    let Some((basic_auth, body, endpoint)) = build_revoke_request(oauth_config, params) else {
         return Ok(());
     };
     let mut request = client
-        .post(oauth_config.revocation_endpoint)
+        .post(endpoint)
         .header("Content-Type", "application/json")
         .body(body)
         .timeout(std::time::Duration::from_secs(10));
@@ -743,6 +804,7 @@ mod tests {
             reauth_on_error_codes: &[],
             revocation_endpoint: "",
             pkce_required: false,
+            params_driven: false,
         }
     }
 
@@ -801,6 +863,7 @@ mod tests {
             reauth_on_error_codes: &[],
             revocation_endpoint: "https://revoke.example.com",
             pkce_required: false,
+            params_driven: false,
         }
     }
 
@@ -808,7 +871,8 @@ mod tests {
     fn revoke_request_basic_sends_json_token_and_basic_header() {
         let cfg = oauth_cfg_basic_revoke();
         let params = json!({"client_id":"cid","client_secret":"csec","refresh_token":"rt"});
-        let (basic, body) = build_revoke_request(&cfg, &params).expect("revoke request");
+        let (basic, body, endpoint) = build_revoke_request(&cfg, &params).expect("revoke request");
+        assert_eq!(endpoint, "https://revoke.example.com");
         assert_eq!(basic.as_deref(), Some("Basic Y2lkOmNzZWM=")); // base64("cid:csec")
         assert!(body.contains("\"token\":\"rt\""), "body: {body}");
     }
@@ -823,6 +887,105 @@ mod tests {
         assert!(
             build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
         );
+    }
+
+    #[test]
+    fn curated_provider_ignores_hostile_endpoint_params() {
+        // THE hijack regression: a curated (params_driven=false) descriptor with a
+        // legitimately-EMPTY revocation endpoint + hostile params must resolve
+        // byte-identically to the static descriptor — params never consulted.
+        let cfg = OAuthConfig {
+            auth_url: "https://app.hubspot.com/oauth/authorize",
+            token_url: "https://api.hubapi.com/oauth/v1/token",
+            default_scopes: "oauth",
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            refresh_token_rotates: false,
+            base_url: "https://api.hubapi.com",
+            sandbox_base_url: "",
+            base_url_path_template: "",
+            extra_callback_params: &[],
+            reauth_on_error_codes: &[],
+            revocation_endpoint: "", // legitimately empty on the curated provider
+            pkce_required: false,
+            params_driven: false,
+        };
+        let hostile = json!({
+            "auth_url": "https://attacker.example/authorize",
+            "token_url": "https://attacker.example/token",
+            "revocation_url": "https://attacker.example/revoke",
+            "base_url": "https://attacker.example",
+            "token_auth": "basic",
+            "pkce": true,
+            "refresh_rotates": true,
+            "refresh_token": "rt"
+        });
+        let eff = resolve_effective_oauth_config(&cfg, &hostile);
+        assert_eq!(eff.auth_url, "https://app.hubspot.com/oauth/authorize");
+        assert_eq!(eff.token_url, "https://api.hubapi.com/oauth/v1/token");
+        assert_eq!(eff.token_endpoint_auth, TokenEndpointAuth::FormBody);
+        assert!(!eff.pkce_required);
+        assert!(!eff.refresh_token_rotates);
+        // The empty descriptor endpoint must NOT be filled from params: no revoke
+        // target may be conjured that would receive the refresh token.
+        assert!(eff.revocation_endpoint.is_empty());
+        assert!(
+            build_revoke_request(&cfg, &hostile).is_none(),
+            "hostile revocation_url must not create a revoke request"
+        );
+        // Base URL likewise stays the descriptor's.
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &hostile).as_deref(),
+            Some("https://api.hubapi.com")
+        );
+    }
+
+    #[test]
+    fn params_driven_type_resolves_from_params() {
+        let cfg = OAuthConfig {
+            auth_url: "",
+            token_url: "",
+            default_scopes: "",
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            refresh_token_rotates: false,
+            base_url: "",
+            sandbox_base_url: "",
+            base_url_path_template: "",
+            extra_callback_params: &[],
+            reauth_on_error_codes: &["invalid_grant"],
+            revocation_endpoint: "",
+            pkce_required: false,
+            params_driven: true,
+        };
+        let params = json!({
+            "auth_url": "https://auth.example.com/authorize",
+            "token_url": "https://auth.example.com/token",
+            "base_url": "https://api.example.com/",
+            "token_auth": "basic",
+            "revocation_url": "https://auth.example.com/revoke"
+        });
+        let eff = resolve_effective_oauth_config(&cfg, &params);
+        assert_eq!(eff.auth_url, "https://auth.example.com/authorize");
+        assert_eq!(eff.token_url, "https://auth.example.com/token");
+        assert_eq!(eff.token_endpoint_auth, TokenEndpointAuth::HttpBasic);
+        // Defaults: PKCE on, rotation fail-closed on.
+        assert!(eff.pkce_required);
+        assert!(eff.refresh_token_rotates);
+        assert_eq!(eff.revocation_endpoint, "https://auth.example.com/revoke");
+        // Trailing slash trimmed on the pinned base URL.
+        assert_eq!(
+            resolve_oauth_base_url(&cfg, &params).as_deref(),
+            Some("https://api.example.com")
+        );
+        // Explicit opt-outs are honored for params-driven types only.
+        let eff2 = resolve_effective_oauth_config(
+            &cfg,
+            &json!({"token_url": "https://t", "pkce": false, "refresh_rotates": false}),
+        );
+        assert!(!eff2.pkce_required);
+        assert!(!eff2.refresh_token_rotates);
+        // Missing endpoints stay empty -> call sites fail fast.
+        let eff3 = resolve_effective_oauth_config(&cfg, &json!({}));
+        assert!(eff3.auth_url.is_empty() && eff3.token_url.is_empty());
     }
 
     #[test]

@@ -95,6 +95,14 @@ impl OAuthService {
 
         let params = conn.connection_parameters.unwrap_or(json!({}));
 
+        // Effective config: static descriptor for curated providers; connection
+        // params only for params-driven generic types (see provider_auth).
+        let effective =
+            crate::auth::provider_auth::resolve_effective_oauth_config(oauth_config, &params);
+        if effective.auth_url.is_empty() {
+            return Err(OAuthError::MissingParameter("auth_url".to_string()));
+        }
+
         let client_id = params["client_id"]
             .as_str()
             .ok_or(OAuthError::MissingParameter("client_id".to_string()))?;
@@ -115,7 +123,7 @@ impl OAuthService {
 
         // PKCE (RFC 7636) when the provider descriptor requires it: attach an S256
         // code_challenge to the authorize URL and stash the verifier on the state row.
-        let (code_verifier, pkce_query) = if oauth_config.pkce_required {
+        let (code_verifier, pkce_query) = if effective.pkce_required {
             let (verifier, challenge) = generate_pkce();
             let q = format!(
                 "&code_challenge={}&code_challenge_method=S256",
@@ -142,7 +150,7 @@ impl OAuthService {
         // Build authorization URL
         let auth_url = format!(
             "{}?client_id={}&redirect_uri={}&scope={}&state={}{}",
-            oauth_config.auth_url,
+            effective.auth_url,
             urlencoding::encode(client_id),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(scopes),
@@ -199,6 +207,7 @@ impl OAuthService {
         // authorize step generated one).
         let token_response = exchange_code(
             oauth_config,
+            &params,
             code,
             client_id,
             client_secret,
@@ -286,12 +295,18 @@ fn generate_pkce() -> (String, String) {
 /// Exchange an authorization code for access + refresh tokens.
 async fn exchange_code(
     oauth_config: &OAuthConfig,
+    params: &Value,
     code: &str,
     client_id: &str,
     client_secret: &str,
     redirect_uri: &str,
     code_verifier: Option<&str>,
 ) -> Result<Value, OAuthError> {
+    let effective =
+        crate::auth::provider_auth::resolve_effective_oauth_config(oauth_config, params);
+    if effective.token_url.is_empty() {
+        return Err(OAuthError::MissingParameter("token_url".to_string()));
+    }
     // Hardened egress: no redirect following (a 3xx must not carry the client
     // secret/Basic header to another host), DNS-guarded resolver (private-host
     // token endpoints rejected at connect time).
@@ -309,14 +324,14 @@ async fn exchange_code(
         grant_fields.push(("code_verifier".to_string(), verifier.to_string()));
     }
     let (basic_auth, body) = crate::auth::token_cache::token_request_parts(
-        oauth_config.token_endpoint_auth,
+        effective.token_endpoint_auth,
         grant_fields,
         client_id,
         client_secret,
     );
 
     let mut request = client
-        .post(oauth_config.token_url)
+        .post(&effective.token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body);
     if let Some(header) = basic_auth {
@@ -371,6 +386,7 @@ mod tests {
             reauth_on_error_codes: &[],
             revocation_endpoint: "",
             pkce_required: false,
+            params_driven: false,
         }
     }
 

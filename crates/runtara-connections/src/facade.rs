@@ -432,7 +432,7 @@ impl ConnectionsFacade {
             }
             Ok(_) => Ok(()),
             Err(e) => {
-                if rotates_refresh_token(integration_id) {
+                if rotates_refresh_token(integration_id, params) {
                     // Fail closed: the DB now holds a dead (rotated-away) token and we could
                     // not replace it. Drop the just-cached access token so the next attempt
                     // re-refreshes from the persisted state rather than diverging silently.
@@ -549,12 +549,17 @@ fn is_reauth_error(error: &str, codes: &[&str]) -> bool {
 
 /// Whether a provider rotates (and invalidates) its refresh token on every refresh.
 /// Drives fail-closed handling when a rotated token can't be persisted. Sourced from
-/// the connection type's OAuth descriptor; non-rotating providers (e.g. HubSpot)
-/// default to `false`.
-fn rotates_refresh_token(integration_id: &str) -> bool {
+/// the EFFECTIVE OAuth config: the static descriptor for curated providers, the
+/// connection's own `refresh_rotates` param (default true — fail closed) for the
+/// params-driven generic types. A fail-open default there would recreate the
+/// silent rotation-loss bug class the QuickBooks P0 work fixed.
+fn rotates_refresh_token(integration_id: &str, params: &serde_json::Value) -> bool {
     runtara_agents::registry::find_connection_type(integration_id)
         .and_then(|meta| meta.oauth_config)
-        .map(|cfg| cfg.refresh_token_rotates)
+        .map(|cfg| {
+            crate::auth::provider_auth::resolve_effective_oauth_config(cfg, params)
+                .refresh_token_rotates
+        })
         .unwrap_or(false)
 }
 

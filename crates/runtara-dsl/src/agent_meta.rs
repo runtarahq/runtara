@@ -933,6 +933,13 @@ pub struct OAuthConfig {
     /// authorize URL carries an S256 `code_challenge` and the exchange sends the
     /// `code_verifier`.
     pub pkce_required: bool,
+    /// THE per-type overlay gate: when true (ONLY the generic bring-your-own
+    /// types), OAuth endpoints/config are read from connection parameters.
+    /// When false (every curated provider), parameters are ignored for ALL
+    /// OAuth config fields — including ones the descriptor legitimately leaves
+    /// empty — so a params PATCH can never redirect a curated provider's
+    /// credentialed egress.
+    pub params_driven: bool,
 }
 
 /// Metadata for a connection type.
