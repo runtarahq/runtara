@@ -499,9 +499,9 @@ impl ConnectionService {
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
-        let client = reqwest::Client::new();
+        let client = crate::net::shared_hardened_client();
         if let Err(e) =
-            crate::auth::provider_auth::revoke_oauth_token(&client, oauth_config, &params).await
+            crate::auth::provider_auth::revoke_oauth_token(client, oauth_config, &params).await
         {
             tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
         }

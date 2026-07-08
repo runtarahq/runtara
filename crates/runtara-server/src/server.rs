@@ -1003,7 +1003,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         redis_manager: redis_manager.clone(),
         public_base_url: std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
-        http_client: reqwest::Client::new(),
+        // Hardened: no-redirect + DNS-guarded — this client performs the OAuth
+        // refresh POSTs (token_cache) and other credentialed connection egress.
+        http_client: runtara_connections::net::build_hardened_client(),
         cipher,
         compatibility: integration_compatibility.clone(),
         agent_catalog: agent_catalog.clone(),

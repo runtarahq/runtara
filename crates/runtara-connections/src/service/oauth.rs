@@ -292,7 +292,10 @@ async fn exchange_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
 ) -> Result<Value, OAuthError> {
-    let client = reqwest::Client::new();
+    // Hardened egress: no redirect following (a 3xx must not carry the client
+    // secret/Basic header to another host), DNS-guarded resolver (private-host
+    // token endpoints rejected at connect time).
+    let client = crate::net::shared_hardened_client();
 
     // Present credentials per the provider's token-endpoint style (Intuit requires
     // HTTP Basic; the OAuth2 default is credentials in the body).

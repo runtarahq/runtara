@@ -138,6 +138,13 @@ pub fn build_hardened_client() -> reqwest::Client {
         .expect("hardened egress client should build")
 }
 
+/// Process-shared hardened client for OAuth token / refresh / revoke egress.
+/// One pooled client per process (same lifecycle as any reqwest client).
+pub fn shared_hardened_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(build_hardened_client)
+}
+
 /// Save-time validation for a user-supplied credentialed endpoint URL:
 /// https-only (unless the host is on the `RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`
 /// dev allowlist the caller resolves), non-empty host, and — when the host is
