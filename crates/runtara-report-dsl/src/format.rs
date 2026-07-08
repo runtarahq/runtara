@@ -75,6 +75,35 @@ pub enum FormatSpec {
 }
 
 impl FormatSpec {
+    /// Every format name the DSL recognizes, in the same order as the
+    /// `parse` match arms below. This is the single source of truth shared
+    /// by save-time validation (`template::validate_display_template_format`)
+    /// and the render-time filter set (`template::register_report_filters`):
+    /// keeping the three in lockstep is what stops a template from validating
+    /// green and then throwing an "unknown filter" at render.
+    pub const KNOWN_NAMES: &'static [&'static str] = &[
+        "currency",
+        "currency_compact",
+        "number",
+        "number_compact",
+        "decimal",
+        "percent",
+        "bytes",
+        "date",
+        "datetime",
+        "pill",
+        "bar_indicator",
+        "string",
+        "raw",
+    ];
+
+    /// Whether `name` is a recognized format name. Unlike `parse` (which is
+    /// total and maps anything unknown to `Raw`), this distinguishes a real
+    /// format from an arbitrary word, so validators can reject the latter.
+    pub fn is_known_name(name: &str) -> bool {
+        Self::KNOWN_NAMES.contains(&name)
+    }
+
     /// Parse a format string into a `FormatSpec`.
     ///
     /// Grammar: `name` or `name:arg`. Unknown names map to `Raw`. Empty
@@ -113,6 +142,7 @@ impl FormatSpec {
             "pill" => FormatSpec::Pill,
             "bar_indicator" => FormatSpec::BarIndicator,
             "string" => FormatSpec::String,
+            "raw" => FormatSpec::Raw,
             _ => FormatSpec::Raw,
         }
     }
@@ -354,6 +384,27 @@ mod tests {
         assert_eq!(FormatSpec::Bytes.to_format_string(), "bytes");
         assert_eq!(FormatSpec::parse(""), FormatSpec::Raw);
         assert_eq!(FormatSpec::parse("nonsense"), FormatSpec::Raw);
+        assert_eq!(FormatSpec::parse("raw"), FormatSpec::Raw);
+    }
+
+    #[test]
+    fn known_names_agree_with_parse() {
+        // Every advertised name parses to a real spec: only `raw` is allowed
+        // to land on `Raw` — any other name doing so would be a silent
+        // unknown, exactly the drift this set exists to prevent.
+        for name in FormatSpec::KNOWN_NAMES {
+            assert!(FormatSpec::is_known_name(name), "{name} should be known");
+            let spec = FormatSpec::parse(name);
+            if *name == "raw" {
+                assert_eq!(spec, FormatSpec::Raw);
+            } else {
+                assert_ne!(spec, FormatSpec::Raw, "{name} degraded to Raw");
+            }
+        }
+        // Anything outside the set is not a known name.
+        assert!(!FormatSpec::is_known_name("foobar"));
+        assert!(!FormatSpec::is_known_name(""));
+        assert!(!FormatSpec::is_known_name("Currency"));
     }
 
     #[test]
