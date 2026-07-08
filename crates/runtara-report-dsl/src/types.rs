@@ -13,8 +13,17 @@ use std::fmt;
 use crate::condition::Condition;
 use runtara_dsl::ConditionExpression;
 
+/// The report definition shape the current server writes and expects on
+/// read. Stored definitions carry the version they were saved under; the
+/// repository's read path dispatches on it to migrate older shapes up to
+/// this version before deserializing. Bump this whenever the persisted
+/// `ReportDefinition` wire shape changes in a way that older stored
+/// definitions must be migrated to, and add a matching rung to the read-path
+/// migration ladder.
+pub const CURRENT_DEFINITION_VERSION: i32 = 1;
+
 fn default_definition_version() -> i32 {
-    1
+    CURRENT_DEFINITION_VERSION
 }
 
 fn default_report_status() -> ReportStatus {
