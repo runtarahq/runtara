@@ -115,12 +115,27 @@ fn validate_url_field(
         ServiceError::ValidationError(format!("{field_display} must include a host"))
     })?;
     match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if connection_http_allowed(host) => Ok(()),
-        _ => Err(ServiceError::ValidationError(format!(
-            "{field_display} must use https:// ({value})"
-        ))),
+        "https" => {}
+        "http" if connection_http_allowed(host) => {}
+        _ => {
+            return Err(ServiceError::ValidationError(format!(
+                "{field_display} must use https:// ({value})"
+            )));
+        }
     }
+    // SSRF rule B: a literal private/internal IP host is rejected outright even
+    // over https (hostnames are enforced at connect time by the guarded DNS
+    // resolver — see crate::net). The dev http-allowlist doubles as the escape
+    // hatch for loopback test endpoints.
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
+        && crate::net::is_private_ip(&ip)
+        && !connection_http_allowed(host)
+    {
+        return Err(ServiceError::ValidationError(format!(
+            "{field_display} host {host} is a private/internal address"
+        )));
+    }
+    Ok(())
 }
 
 /// Hosts allowed to use an `http://` base URL (`RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`).
@@ -628,6 +643,29 @@ mod tests {
 
     fn is_validation_err(r: Result<(), ServiceError>) -> bool {
         matches!(r, Err(ServiceError::ValidationError(_)))
+    }
+
+    #[test]
+    fn url_field_rejects_private_literal_ip_hosts() {
+        // SSRF rule B: private/internal IP literals rejected even over https.
+        for bad in [
+            "https://169.254.169.254/latest",
+            "https://10.0.0.5/token",
+            "https://127.0.0.1/token",
+            "https://[::1]/token",
+        ] {
+            assert!(
+                validate_url_field("Token URL", Some(bad), true, true).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        // Public literals + hostnames pass (hostname privacy enforced at connect time).
+        assert!(
+            validate_url_field("Token URL", Some("https://93.184.216.34/t"), true, true).is_ok()
+        );
+        assert!(
+            validate_url_field("Token URL", Some("https://auth.example.com/t"), true, true).is_ok()
+        );
     }
 
     #[test]

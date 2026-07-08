@@ -62,6 +62,10 @@ pub(crate) enum DeferredAuth {
         header_name: String,
         header_value_prefix: Option<String>,
         request_body: TokenRequestBody,
+        /// When set, send `Authorization: Basic base64(id:secret)` on the mint
+        /// request (credentials must then be OMITTED from `request_body`).
+        /// Required by Okta-style providers; `None` = creds live in the body.
+        basic_auth: Option<(String, String)>,
         default_ttl_seconds: i64,
     },
     OAuth2RefreshToken {
@@ -94,6 +98,7 @@ pub(crate) async fn resolve_deferred_auth(
             header_name,
             header_value_prefix,
             request_body,
+            basic_auth,
             default_ttl_seconds,
         } => {
             let token = resolve_cached_token(&cache_key, || async {
@@ -101,6 +106,7 @@ pub(crate) async fn resolve_deferred_auth(
                     client,
                     &token_url,
                     request_body,
+                    basic_auth,
                     default_ttl_seconds,
                 )
                 .await
@@ -240,9 +246,10 @@ async fn exchange_client_credentials_token(
     client: &Client,
     token_url: &str,
     request_body: TokenRequestBody,
+    basic_auth: Option<(String, String)>,
     default_ttl_seconds: i64,
 ) -> Result<CachedAccessToken, String> {
-    let request = match request_body {
+    let mut request = match request_body {
         TokenRequestBody::Json(body) => client
             .post(token_url)
             .header("Content-Type", "application/json")
@@ -252,6 +259,11 @@ async fn exchange_client_credentials_token(
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_urlencoded(&fields)),
     };
+    if let Some((client_id, client_secret)) = basic_auth {
+        use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+        let basic = BASE64.encode(format!("{client_id}:{client_secret}"));
+        request = request.header("Authorization", format!("Basic {basic}"));
+    }
 
     let response = request
         .timeout(std::time::Duration::from_secs(10))

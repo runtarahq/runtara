@@ -149,6 +149,7 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_SlackBotParams,
     &crate::extractors::connection_types::__CONNECTION_META_TeamsBotParams,
     &crate::extractors::connection_types::__CONNECTION_META_MicrosoftEntraClientCredentialsParams,
+    &crate::extractors::connection_types::__CONNECTION_META_HttpOAuth2ClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_MailgunParams,
     &crate::extractors::connection_types::__CONNECTION_META_HubSpotPrivateAppParams,
     &crate::extractors::connection_types::__CONNECTION_META_HubSpotAccessTokenParams,

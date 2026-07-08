@@ -141,6 +141,15 @@ fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: describe_microsoft_entra_client_credentials_auth(connection_id, params),
         },
+        // Generic bring-your-own-endpoint OAuth2 client-credentials (M2M): every
+        // endpoint/config value comes from the connection's own parameters. The mint
+        // request goes through the hardened egress client (no redirects, DNS-guarded).
+        "http_oauth2_client_credentials" => ConnectionAuthDescriptor {
+            base_url: first_string_param(params, &["base_url"]),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: describe_http_oauth2_client_credentials_auth(connection_id, params),
+        },
         "hubspot_access_token" => {
             if let Some(token) = params["access_token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
@@ -378,6 +387,7 @@ fn describe_shopify_client_credentials_auth(
         header_name: "X-Shopify-Access-Token".to_string(),
         header_value_prefix: None,
         request_body: TokenRequestBody::Json(Value::Object(body)),
+        basic_auth: None,
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
 }
@@ -416,6 +426,7 @@ fn describe_microsoft_entra_client_credentials_auth(
             ("client_secret".to_string(), client_secret),
             ("scope".to_string(), scope),
         ]),
+        basic_auth: None,
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
 }
@@ -502,6 +513,55 @@ fn substitute_path_template(template: &str, params: &Value) -> String {
         }
     }
     out
+}
+
+/// Generic OAuth2 client-credentials mint, fully parameter-driven. `token_auth =
+/// "basic"` sends the credentials as an HTTP Basic header and keeps them OUT of
+/// the form body (Okta-style); the default puts them in the body (RFC 6749).
+/// The cache key folds in token_url + base_url so editing either endpoint on the
+/// connection naturally misses any stale cached token.
+fn describe_http_oauth2_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let token_url = first_string_param(params, &["token_url"])?;
+    let client_id = first_string_param(params, &["client_id"])?;
+    let client_secret = first_string_param(params, &["client_secret"])?;
+    let scope = first_string_param(params, &["scope"]).unwrap_or_default();
+    let base_url = first_string_param(params, &["base_url"]).unwrap_or_default();
+    let use_basic = params["token_auth"].as_str() == Some("basic");
+
+    let mut fields = vec![("grant_type".to_string(), "client_credentials".to_string())];
+    if !use_basic {
+        fields.push(("client_id".to_string(), client_id.clone()));
+        fields.push(("client_secret".to_string(), client_secret.clone()));
+    }
+    if !scope.is_empty() {
+        fields.push(("scope".to_string(), scope.clone()));
+    }
+    if let Some(audience) = first_string_param(params, &["audience"]) {
+        fields.push(("audience".to_string(), audience));
+    }
+    if let Some(resource) = first_string_param(params, &["resource"]) {
+        fields.push(("resource".to_string(), resource));
+    }
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(&[
+            "http_oauth2_client_credentials",
+            connection_id,
+            &token_url,
+            &base_url,
+            &client_id,
+            &scope,
+        ]),
+        token_url,
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::FormUrlEncoded(fields),
+        basic_auth: use_basic.then_some((client_id, client_secret)),
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
 }
 
 fn describe_oauth_refresh_auth(
@@ -762,6 +822,96 @@ mod tests {
         // Endpoint declared but no token on the connection → nothing to revoke.
         assert!(
             build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
+        );
+    }
+
+    #[test]
+    fn generic_client_credentials_form_body_puts_creds_in_body() {
+        let params = json!({
+            "token_url": "https://auth.example.com/token",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "scope": "read write",
+            "base_url": "https://api.example.com",
+            "token_auth": "form_body",
+            "audience": "https://api.example.com"
+        });
+        let auth = describe_http_oauth2_client_credentials_auth("conn1", &params).unwrap();
+        match auth {
+            DeferredAuth::OAuth2ClientCredentials {
+                token_url,
+                basic_auth,
+                request_body,
+                ..
+            } => {
+                assert_eq!(token_url, "https://auth.example.com/token");
+                assert!(basic_auth.is_none(), "form_body must not set Basic auth");
+                match request_body {
+                    TokenRequestBody::FormUrlEncoded(fields) => {
+                        assert!(fields.contains(&("client_id".to_string(), "cid".to_string())));
+                        assert!(
+                            fields.contains(&("client_secret".to_string(), "csec".to_string()))
+                        );
+                        assert!(fields.contains(&("scope".to_string(), "read write".to_string())));
+                        assert!(fields.contains(&(
+                            "audience".to_string(),
+                            "https://api.example.com".to_string()
+                        )));
+                    }
+                    _ => panic!("expected form body"),
+                }
+            }
+            _ => panic!("expected client credentials"),
+        }
+    }
+
+    #[test]
+    fn generic_client_credentials_basic_moves_creds_to_header() {
+        let params = json!({
+            "token_url": "https://auth.example.com/token",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "base_url": "https://api.example.com",
+            "token_auth": "basic"
+        });
+        let auth = describe_http_oauth2_client_credentials_auth("conn1", &params).unwrap();
+        match auth {
+            DeferredAuth::OAuth2ClientCredentials {
+                basic_auth,
+                request_body,
+                ..
+            } => {
+                assert_eq!(
+                    basic_auth,
+                    Some(("cid".to_string(), "csec".to_string())),
+                    "basic style must carry creds for the Authorization header"
+                );
+                match request_body {
+                    TokenRequestBody::FormUrlEncoded(fields) => {
+                        // Credentials must be OMITTED from the body under Basic.
+                        assert!(!fields.iter().any(|(k, _)| k == "client_id"));
+                        assert!(!fields.iter().any(|(k, _)| k == "client_secret"));
+                        assert!(fields.contains(&(
+                            "grant_type".to_string(),
+                            "client_credentials".to_string()
+                        )));
+                    }
+                    _ => panic!("expected form body"),
+                }
+            }
+            _ => panic!("expected client credentials"),
+        }
+    }
+
+    #[test]
+    fn generic_client_credentials_requires_endpoints() {
+        // Missing token_url -> no deferred auth (fail fast, no empty-host URL).
+        assert!(
+            describe_http_oauth2_client_credentials_auth(
+                "c",
+                &json!({"client_id": "a", "client_secret": "b"})
+            )
+            .is_none()
         );
     }
 

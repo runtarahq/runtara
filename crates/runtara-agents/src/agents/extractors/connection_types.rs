@@ -1243,3 +1243,133 @@ impl HttpConnectionExtractor for McpExtractor {
         })
     }
 }
+
+// ============================================================================
+// Generic HTTP OAuth2 (Client Credentials) Connection Type
+// ============================================================================
+
+/// Generic OAuth2 client-credentials (machine-to-machine) connection.
+///
+/// Bring-your-own endpoints: the token is minted server-side from the
+/// user-supplied `token_url` (cached + single-flighted) and injected as a
+/// Bearer header; the proxy pins all credentialed egress to `base_url`. The
+/// hardened egress client (no redirects, DNS-guarded) makes the mint call.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "http_oauth2_client_credentials",
+    display_name = "HTTP OAuth2 (Client Credentials)",
+    description = "Authenticate HTTP requests with an OAuth2 client-credentials (M2M) token minted from your own token endpoint",
+    category = "http",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct HttpOAuth2ClientCredentialsParams {
+    /// OAuth2 token endpoint the mint request is POSTed to
+    #[field(
+        display_name = "Token URL",
+        description = "OAuth2 token endpoint (must be https)",
+        placeholder = "https://auth.example.com/oauth/token",
+        is_url,
+        is_required
+    )]
+    pub token_url: String,
+
+    /// OAuth2 client id
+    #[field(display_name = "Client ID", description = "OAuth2 client id")]
+    pub client_id: String,
+
+    /// OAuth2 client secret
+    #[field(
+        display_name = "Client Secret",
+        description = "OAuth2 client secret",
+        secret
+    )]
+    pub client_secret: String,
+
+    /// Space-separated OAuth2 scopes (optional)
+    #[serde(default)]
+    #[field(
+        display_name = "Scope",
+        description = "Space-separated OAuth2 scopes (optional)"
+    )]
+    pub scope: Option<String>,
+
+    /// API base URL — the proxy pins every credentialed request to this host
+    #[serde(default)]
+    #[field(
+        display_name = "Base URL",
+        description = "API base URL — all requests using this connection are pinned to it (must be https)",
+        placeholder = "https://api.example.com",
+        is_url,
+        is_required
+    )]
+    pub base_url: Option<String>,
+
+    /// How client credentials reach the token endpoint
+    #[serde(default = "default_generic_token_auth")]
+    #[field(
+        display_name = "Token Endpoint Auth",
+        description = "How client credentials are sent to the token endpoint: 'form_body' (default) or 'basic' (HTTP Basic header)",
+        default = "form_body"
+    )]
+    pub token_auth: String,
+
+    /// Optional `audience` body parameter (Auth0-style M2M)
+    #[serde(default)]
+    #[field(
+        display_name = "Audience",
+        description = "Optional 'audience' parameter sent with the token request (Auth0-style)"
+    )]
+    pub audience: Option<String>,
+
+    /// Optional `resource` body parameter
+    #[serde(default)]
+    #[field(
+        display_name = "Resource",
+        description = "Optional 'resource' parameter sent with the token request"
+    )]
+    pub resource: Option<String>,
+}
+
+fn default_generic_token_auth() -> String {
+    "form_body".to_string()
+}
+
+/// HTTP extractor for generic OAuth2 client-credentials connections.
+///
+/// The Bearer token is minted + injected at request time by the connection
+/// subsystem (`describe_connection_auth`); this extractor only pins the base
+/// URL and Content-Type.
+pub struct HttpOAuth2ClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for HttpOAuth2ClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "http_oauth2_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: HttpOAuth2ClientCredentialsParams =
+            serde_json::from_value(params.clone()).map_err(|e| {
+                format!(
+                    "Invalid http_oauth2_client_credentials connection parameters: {}",
+                    e
+                )
+            })?;
+
+        let base_url = p.base_url.as_deref().map(str::trim).unwrap_or("");
+        if base_url.is_empty() {
+            return Err(
+                "Invalid http_oauth2_client_credentials connection: missing base_url".to_string(),
+            );
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: base_url.trim_end_matches('/').to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
