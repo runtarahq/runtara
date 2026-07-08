@@ -1001,8 +1001,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
         redis_manager: redis_manager.clone(),
-        public_base_url: std::env::var("PUBLIC_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+        // Used to build the OAuth callback redirect_uri. Production sets this
+        // explicitly; for local dev, default it to the port THIS server actually
+        // binds (SERVER_PORT, default 7001) so the callback lands here instead of
+        // a stale hardcoded port. `localhost` (not SERVER_HOST, which may be
+        // 0.0.0.0) — it's a browser-facing URL.
+        public_base_url: std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| {
+            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+            format!("http://localhost:{port}")
+        }),
         // Hardened: no-redirect + DNS-guarded — this client performs the OAuth
         // refresh POSTs (token_cache) and other credentialed connection egress.
         http_client: runtara_connections::net::build_hardened_client(),
