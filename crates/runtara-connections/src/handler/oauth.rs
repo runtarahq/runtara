@@ -331,7 +331,7 @@ fn oauth_response_page(
         connectionId: '{conn_id}',
         success: {success_js},
         error: "{error_js}"
-      }}, '*');
+      }}, window.location.origin);
       {close_js}
     }}
   }})();
@@ -411,6 +411,10 @@ mod tests {
         assert!(body.contains("connectionId: 'conn-123'"));
         assert!(body.contains("success: true"));
         assert!(body.contains("window.close()"));
+        // postMessage is scoped to the SPA (same) origin, never the '*' wildcard,
+        // so a foreign opener can't receive the result.
+        assert!(body.contains("}, window.location.origin);"));
+        assert!(!body.contains("}, '*')"));
         // No inline event handlers — they can't be covered by a nonce.
         assert!(!body.contains("onclick"));
     }

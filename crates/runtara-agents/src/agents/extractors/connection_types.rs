@@ -536,8 +536,10 @@ pub struct MicrosoftEntraClientCredentialsParams {
     /// Base URL for proxied API requests.
     #[field(
         display_name = "Base URL",
-        description = "Base URL for API requests, for example https://graph.microsoft.com/v1.0 or https://api.businesscentral.dynamics.com/v2.0/production/api/v2.0",
-        placeholder = "https://graph.microsoft.com/v1.0"
+        description = "Base URL for API requests, for example https://graph.microsoft.com/v1.0 or https://api.businesscentral.dynamics.com/v2.0/production/api/v2.0 (must be https)",
+        placeholder = "https://graph.microsoft.com/v1.0",
+        is_url,
+        is_required
     )]
     pub base_url: String,
 
@@ -545,8 +547,9 @@ pub struct MicrosoftEntraClientCredentialsParams {
     #[serde(default = "default_microsoft_entra_authority_host")]
     #[field(
         display_name = "Authority Host",
-        description = "Microsoft identity authority host",
-        default = "https://login.microsoftonline.com"
+        description = "Microsoft identity authority host (must be https)",
+        default = "https://login.microsoftonline.com",
+        is_url
     )]
     pub authority_host: String,
 }

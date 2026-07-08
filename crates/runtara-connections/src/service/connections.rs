@@ -824,6 +824,47 @@ mod tests {
     }
 
     #[test]
+    fn connection_params_enforce_microsoft_entra_urls() {
+        // Regression: microsoft_entra_client_credentials.base_url / authority_host
+        // must be is_url-validated at save time (https + rule-B private-literal
+        // rejection), matching the generic http_oauth2 types — an IP-literal host
+        // slips past the connect-time DNS guard, so it must be caught here.
+        let ok = json!({
+            "client_id": "c", "client_secret": "s",
+            "scope": "https://graph.microsoft.com/.default",
+            "base_url": "https://graph.microsoft.com/v1.0",
+            "authority_host": "https://login.microsoftonline.com"
+        });
+        assert!(
+            validate_connection_parameters("microsoft_entra_client_credentials", Some(&ok)).is_ok()
+        );
+
+        // base_url required + must be https.
+        let mut bad = ok.clone();
+        bad["base_url"] = json!("");
+        assert!(is_validation_err(validate_connection_parameters(
+            "microsoft_entra_client_credentials",
+            Some(&bad)
+        )));
+
+        // authority_host pointed at a private/loopback IP literal → SSRF vector, rejected.
+        let mut ssrf = ok.clone();
+        ssrf["authority_host"] = json!("http://127.0.0.1:9999");
+        assert!(is_validation_err(validate_connection_parameters(
+            "microsoft_entra_client_credentials",
+            Some(&ssrf)
+        )));
+
+        // link-local (IMDS) authority_host → rejected.
+        let mut imds = ok.clone();
+        imds["authority_host"] = json!("http://169.254.169.254");
+        assert!(is_validation_err(validate_connection_parameters(
+            "microsoft_entra_client_credentials",
+            Some(&imds)
+        )));
+    }
+
+    #[test]
     fn connection_params_noop_for_unflagged_and_unknown_types() {
         // Types with a derived base URL (not flagged) are unaffected even w/o base_url.
         assert!(

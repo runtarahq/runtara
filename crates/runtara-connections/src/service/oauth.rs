@@ -333,7 +333,10 @@ async fn exchange_code(
     let mut request = client
         .post(&effective.token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body);
+        .body(body)
+        // Bound a hostile/slow token endpoint, matching the mint/refresh/revoke
+        // egress calls (token_cache.rs:269/304, provider_auth.rs revoke).
+        .timeout(std::time::Duration::from_secs(10));
     if let Some(header) = basic_auth {
         request = request.header("Authorization", header);
     }
@@ -349,18 +352,27 @@ async fn exchange_code(
         .await
         .map_err(|e| OAuthError::TokenExchangeFailed(format!("Failed to parse response: {}", e)))?;
 
+    // NEVER echo the full token-endpoint response body upward: it reaches the
+    // popup page + postMessage and is persisted to the (plaintext) event store,
+    // and a provider's error body can echo back the client_secret/tokens it was
+    // sent. Log it host-side; surface only status + the standard OAuth fields.
+    // Mirrors parse_token_response() in token_cache.rs.
     if !status.is_success() {
-        return Err(OAuthError::TokenExchangeFailed(format!(
-            "HTTP {}: {}",
-            status, body
-        )));
+        tracing::debug!(status = %status, body = %body, "oauth code exchange returned non-success");
+        let code = body["error"].as_str().unwrap_or("unknown_error");
+        let desc = body["error_description"].as_str().unwrap_or("");
+        return Err(OAuthError::TokenExchangeFailed(
+            format!("token endpoint returned {status}: {code} {desc}")
+                .trim()
+                .to_string(),
+        ));
     }
 
     if body.get("access_token").is_none() {
-        return Err(OAuthError::TokenExchangeFailed(format!(
-            "Response missing access_token: {}",
-            body
-        )));
+        tracing::debug!(body = %body, "oauth code exchange response missing access_token");
+        return Err(OAuthError::TokenExchangeFailed(
+            "token endpoint response missing access_token".to_string(),
+        ));
     }
 
     Ok(body)
