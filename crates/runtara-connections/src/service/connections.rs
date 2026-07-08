@@ -579,9 +579,10 @@ impl ConnectionService {
         else {
             return;
         };
-        if oauth_config.revocation_endpoint.is_empty() {
-            return;
-        }
+        // No static-descriptor pre-check here: for params-driven types the
+        // revocation endpoint lives in the connection params, and
+        // build_revoke_request (inside revoke_oauth_token) resolves the
+        // EFFECTIVE endpoint — returning None (a no-op) when there is none.
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
