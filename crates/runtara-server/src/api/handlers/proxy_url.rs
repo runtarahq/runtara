@@ -26,8 +26,6 @@
 //! applies) are passed in by the caller. The HTTP-status mapping for
 //! [`ProxyReject`] lives in `internal_proxy.rs`, not here.
 
-use std::net::{IpAddr, Ipv4Addr};
-
 /// Why the proxy refused to forward a request. Pure; the HTTP-status mapping
 /// lives in `internal_proxy.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,55 +247,15 @@ fn normalize_segments(path: &str) -> String {
     out
 }
 
-/// SSRF address classifier: is this IP one we must never let the proxy reach?
-///
-/// Covers loopback, RFC-1918 private, link-local (incl. cloud metadata
-/// 169.254.169.254), CGNAT 100.64/10, broadcast, unspecified, IPv6 ULA
-/// (fc00::/7) and link-local (fe80::/10). Crucially, IPv4-mapped
-/// (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`) IPv6 addresses are
-/// decoded to their embedded v4 first, so `::ffff:127.0.0.1` is classified as
-/// loopback (the F5 bypass).
-pub fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                // CGNAT 100.64.0.0/10
-                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
-        }
-        IpAddr::V6(v6) => {
-            // IPv4-mapped ::ffff:a.b.c.d → classify the embedded v4.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_ip(&IpAddr::V4(v4));
-            }
-            if v6.is_loopback() || v6.is_unspecified() {
-                return true;
-            }
-            // IPv4-compatible ::a.b.c.d (high 96 bits zero) → classify embedded v4.
-            if v6.segments()[..6].iter().all(|s| *s == 0) {
-                let s = v6.segments();
-                let v4 = Ipv4Addr::new(
-                    (s[6] >> 8) as u8,
-                    (s[6] & 0xff) as u8,
-                    (s[7] >> 8) as u8,
-                    (s[7] & 0xff) as u8,
-                );
-                if !v4.is_unspecified() {
-                    return is_private_ip(&IpAddr::V4(v4));
-                }
-            }
-            // ULA fc00::/7 and link-local fe80::/10.
-            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
+/// SSRF address classifier — moved to `runtara_connections::net` so the OAuth
+/// token/refresh/revoke egress can share it; re-exported here so existing call
+/// sites and tests keep working.
+pub use runtara_connections::net::is_private_ip;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     fn opts(path_prefix: bool) -> PinOptions {
         PinOptions {

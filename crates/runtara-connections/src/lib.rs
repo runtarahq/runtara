@@ -6,6 +6,7 @@ pub mod events;
 pub mod facade;
 pub mod handler;
 pub mod integration_compatibility;
+pub mod net;
 pub mod repository;
 pub mod router;
 pub mod service;

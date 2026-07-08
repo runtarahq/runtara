@@ -755,37 +755,10 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     Ok(())
 }
 
-/// Read and cache the `RUNTARA_PROXY_ALLOWED_HOSTS` allowlist.
-///
-/// Entries are case-insensitive and may be either bare hosts (matches any port)
-/// or `host:port` pairs (matches only that port). Empty entries are ignored.
-fn allowed_private_hosts() -> &'static [String] {
-    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    HOSTS
-        .get_or_init(|| {
-            std::env::var("RUNTARA_PROXY_ALLOWED_HOSTS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim().to_ascii_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .as_slice()
-}
-
-/// Host-only variant of the SSRF allowlist check, used by the egress client's
-/// DNS resolver (which sees a bare host, no port). Matches a bare-host entry or
-/// the host part of any `host:port` entry. Dev/test escape hatch only.
-pub(crate) fn host_is_allowlisted_for_egress(host: &str) -> bool {
-    let allowed = allowed_private_hosts();
-    if allowed.is_empty() {
-        return false;
-    }
-    let h = host.to_ascii_lowercase();
-    allowed
-        .iter()
-        .any(|entry| entry == &h || entry.starts_with(&format!("{h}:")))
-}
+// The egress allowlist + host check moved to `runtara_connections::net` so the
+// OAuth token/refresh/revoke egress can share them (the egress client now uses
+// them from there directly).
+pub(crate) use runtara_connections::net::allowed_private_hosts;
 
 fn is_explicitly_allowed_host(url: &url::Url) -> bool {
     let allowed = allowed_private_hosts();
