@@ -5203,12 +5203,13 @@ fn apply_reference(map: &Map<String, Value>, source: &Value) -> Result<Value, St
     let default = map.get("default").cloned();
     let value = resolve_lookup(
         lookup_segments_detailed(source, &path_to_segments(path)),
-        default,
+        default.clone(),
     )?;
-    Ok(apply_type_hint(
+    coerce_reference_value(
         value,
         map.get("type").and_then(Value::as_str),
-    ))
+        default.as_ref(),
+    )
 }
 
 fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
@@ -5386,39 +5387,54 @@ fn is_field_argument_operator(op: &str) -> bool {
     )
 }
 
-fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Value {
-    match type_hint {
+/// Coerce a resolved reference value to its declared `type` hint.
+///
+/// String and boolean hints are total — every JSON value has a representation.
+/// The numeric hints are partial: a `null` passes through as `null` (an absent
+/// optional stays absent), but a present value that cannot be parsed as the
+/// requested type is a hard `Err` rather than a silent `0`, so malformed data
+/// fails at the step that produced it instead of flowing onward as a plausible
+/// zero.
+///
+/// Authors opt back into a fallback via the reference's `default`: see
+/// [`coerce_reference_value`], which substitutes the `default` when coercion
+/// fails.
+///
+/// Any other hint is a pass-through. The `type` key is overloaded in the raw
+/// manifest — a condition value expression carries `type: "value"` as a wrapper
+/// marker, not a `ValueType` — so the runtime cannot treat every unrecognized
+/// `type` as an error. Unknown *`ValueType`* hints on real reference mappings
+/// are instead rejected by the typed authoring layer (`ReferenceValue.type_hint`
+/// is `Option<ValueType>`) before a manifest is ever compiled.
+fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Result<Value, String> {
+    let coerced = match type_hint {
         Some("string") => match value {
             Value::String(_) | Value::Null => value,
             Value::Number(number) => Value::String(number.to_string()),
             Value::Bool(boolean) => Value::String(boolean.to_string()),
             other => Value::String(other.to_string()),
         },
-        Some("integer") => value
-            .as_i64()
-            .or_else(|| value.as_f64().map(|value| value as i64))
-            .or_else(|| value.as_str().and_then(|value| value.parse::<i64>().ok()))
-            .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }))
-            .map(|value| Value::Number(value.into()))
-            .unwrap_or_else(|| {
-                if value.is_null() {
-                    Value::Null
-                } else {
-                    Value::Number(0.into())
-                }
-            }),
-        Some("number") => value
-            .as_f64()
-            .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number)
-            .unwrap_or_else(|| {
-                if value.is_null() {
-                    Value::Null
-                } else {
-                    Value::Number(0.into())
-                }
-            }),
+        Some("integer") => {
+            let parsed = value
+                .as_i64()
+                .or_else(|| value.as_f64().map(|value| value as i64))
+                .or_else(|| value.as_str().and_then(|value| value.parse::<i64>().ok()))
+                .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }));
+            match parsed {
+                Some(parsed) => Value::Number(parsed.into()),
+                None => return coercion_result(value, "integer"),
+            }
+        }
+        Some("number") => {
+            let parsed = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
+                .and_then(serde_json::Number::from_f64);
+            match parsed {
+                Some(parsed) => Value::Number(parsed),
+                None => return coercion_result(value, "number"),
+            }
+        }
         Some("boolean") => match value {
             Value::Bool(_) | Value::Null => value,
             Value::String(value) => Value::Bool(value == "true" || value == "1"),
@@ -5426,8 +5442,41 @@ fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Value {
             Value::Array(value) => Value::Bool(!value.is_empty()),
             Value::Object(value) => Value::Bool(!value.is_empty()),
         },
-        Some("json" | "file") | None => value,
-        Some(_) => value,
+        // `json`/`file`, no hint, and any unrecognized hint pass through
+        // untouched — see the overload note above.
+        _ => value,
+    };
+    Ok(coerced)
+}
+
+/// Outcome for a numeric hint that failed to parse its value: `null` stays
+/// `null` (an absent optional is not corrupt), but any present value that would
+/// not parse is a hard error rather than a silently substituted zero.
+fn coercion_result(value: Value, type_name: &str) -> Result<Value, String> {
+    if value.is_null() {
+        Ok(Value::Null)
+    } else {
+        Err(format!("value {value} cannot be coerced to {type_name}"))
+    }
+}
+
+/// Apply a reference's `type` hint, falling back to its declared `default` when
+/// coercion fails. A value that will not coerce is a hard error, but the author
+/// can opt into an explicit fallback by declaring a `default` — mirroring how
+/// [`resolve_lookup`] honors a `default` over a shape mismatch. The `default` is
+/// coerced through the same hint, so a `default` that itself fails to coerce
+/// still surfaces as an error rather than being masked.
+fn coerce_reference_value(
+    value: Value,
+    type_hint: Option<&str>,
+    default: Option<&Value>,
+) -> Result<Value, String> {
+    match apply_type_hint(value, type_hint) {
+        Ok(coerced) => Ok(coerced),
+        Err(error) => match default {
+            Some(default) => apply_type_hint(default.clone(), type_hint),
+            None => Err(error),
+        },
     }
 }
 
@@ -6184,7 +6233,7 @@ impl CompiledReference {
             lookup_segments_detailed(source, &self.segments),
             self.default.clone(),
         )?;
-        Ok(apply_type_hint(value, self.type_hint.as_deref()))
+        coerce_reference_value(value, self.type_hint.as_deref(), self.default.as_ref())
     }
 }
 
@@ -7406,6 +7455,138 @@ mod tests {
         let output: Value = serde_json::from_slice(&output).expect("output json");
 
         assert_eq!(output, json!({ "result": "hello" }));
+    }
+
+    /// Build a manifest whose sole mapping resolves `data.count` under a `type`
+    /// hint (and optional `default`), then run it against `data`.
+    fn coerce_count(type_hint: &str, default: Option<Value>, data: &[u8]) -> Result<Value, String> {
+        let mut reference = json!({
+            "valueType": "reference",
+            "value": "data.count",
+            "type": type_hint,
+        });
+        if let Some(default) = default {
+            reference["default"] = default;
+        }
+        let manifest =
+            DirectJsonManifest::parse(&manifest(json!({ "result": reference }))).expect("manifest");
+        let source = build_source(data, b"{}", b"{}").expect("source");
+        manifest
+            .apply_mapping(0, &source)
+            .map(|bytes| serde_json::from_slice(&bytes).expect("output json"))
+    }
+
+    #[test]
+    fn integer_hint_rejects_unparseable_value_instead_of_zero() {
+        // A present, non-null value that will not parse must fail the step, not
+        // become a plausible `0` flowing into downstream totals/thresholds.
+        let error = coerce_count("integer", None, br#"{"count":"abc"}"#)
+            .expect_err("unparseable integer should error");
+        assert!(
+            error.contains("cannot be coerced to integer"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn number_hint_rejects_unparseable_value_instead_of_zero() {
+        let error = coerce_count("number", None, br#"{"count":"not-a-number"}"#)
+            .expect_err("unparseable number should error");
+        assert!(
+            error.contains("cannot be coerced to number"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn integer_hint_default_rescues_unparseable_value() {
+        // The author's `default` is the explicit escape hatch: an unparseable
+        // value falls back to it rather than erroring or silently zeroing.
+        let output = coerce_count("integer", Some(json!(7)), br#"{"count":"abc"}"#)
+            .expect("default should rescue");
+        assert_eq!(output, json!({ "result": 7 }));
+    }
+
+    #[test]
+    fn integer_hint_default_is_coerced_through_the_hint() {
+        // A string default is coerced by the same hint, matching the treatment
+        // a resolved value would receive.
+        let output = coerce_count("integer", Some(json!("42")), br#"{"count":"abc"}"#)
+            .expect("string default should coerce");
+        assert_eq!(output, json!({ "result": 42 }));
+    }
+
+    #[test]
+    fn integer_hint_unparseable_default_still_errors() {
+        // A `default` that itself will not coerce is an authoring error, not a
+        // silent escape — it must surface rather than be masked.
+        let error = coerce_count("integer", Some(json!("also-bad")), br#"{"count":"abc"}"#)
+            .expect_err("unparseable default should error");
+        assert!(
+            error.contains("cannot be coerced to integer"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn integer_hint_passes_null_through() {
+        // An absent/optional field is not corrupt data — `null` stays `null`.
+        let output = coerce_count("integer", None, br#"{"count":null}"#).expect("null passes");
+        assert_eq!(output, json!({ "result": null }));
+    }
+
+    #[test]
+    fn integer_hint_still_coerces_parseable_values() {
+        assert_eq!(
+            coerce_count("integer", None, br#"{"count":"42"}"#).expect("string parses"),
+            json!({ "result": 42 })
+        );
+        assert_eq!(
+            coerce_count("integer", None, br#"{"count":42}"#).expect("number passes"),
+            json!({ "result": 42 })
+        );
+    }
+
+    #[test]
+    fn unrecognized_type_hint_passes_value_through() {
+        // The `type` key is overloaded in the raw manifest (a condition value
+        // expression carries `type: "value"`), so an unrecognized hint must not
+        // corrupt or reject the value — it passes through untouched. Unknown
+        // `ValueType` hints on real reference mappings are caught earlier, by the
+        // typed authoring layer.
+        assert_eq!(
+            coerce_count("value", None, br#"{"count":5}"#).expect("unknown hint passes through"),
+            json!({ "result": 5 })
+        );
+    }
+
+    #[test]
+    fn apply_type_hint_string_and_boolean_are_total() {
+        // String/boolean coercions never fail — every value has a representation.
+        assert_eq!(
+            apply_type_hint(json!(5), Some("string")).expect("string is total"),
+            json!("5")
+        );
+        assert_eq!(
+            apply_type_hint(json!("anything"), Some("boolean")).expect("boolean is total"),
+            json!(false)
+        );
+        assert_eq!(
+            apply_type_hint(json!("true"), Some("boolean")).expect("boolean is total"),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn apply_type_hint_passthrough_hints_do_not_coerce() {
+        // json/file/no-hint and any unrecognized hint leave the value untouched,
+        // including values a numeric hint would reject.
+        for hint in [Some("json"), Some("file"), Some("value"), None] {
+            assert_eq!(
+                apply_type_hint(json!("abc"), hint).expect("passthrough"),
+                json!("abc")
+            );
+        }
     }
 
     #[test]
