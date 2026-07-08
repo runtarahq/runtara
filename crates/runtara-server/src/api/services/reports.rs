@@ -1273,7 +1273,7 @@ impl ReportService {
                     block.id
                 )));
             }
-            validate_show_when_value(
+            validate_show_when_condition(
                 block.show_when.as_ref(),
                 &format!("block '{}'", block.id),
                 &filter_ids,
@@ -4890,43 +4890,31 @@ fn validate_layout_visibility(
     path: &str,
     filter_ids: &HashSet<String>,
 ) -> Result<(), ReportServiceError> {
-    validate_show_when_value(
-        object.get("showWhen"),
-        &format!("layout node at {path}"),
-        filter_ids,
-    )
+    let context = format!("layout node at {path}");
+    let Some(raw) = object.get("showWhen") else {
+        return Ok(());
+    };
+    let condition: ReportVisibilityCondition =
+        serde_json::from_value(raw.clone()).map_err(|err| {
+            ReportServiceError::Validation(format!(
+                "Report {context} has an invalid showWhen: {err}"
+            ))
+        })?;
+    validate_show_when_condition(Some(&condition), &context, filter_ids)
 }
 
-fn validate_show_when_value(
-    show_when: Option<&Value>,
+fn validate_show_when_condition(
+    show_when: Option<&ReportVisibilityCondition>,
     context: &str,
     filter_ids: &HashSet<String>,
 ) -> Result<(), ReportServiceError> {
     let Some(show_when) = show_when else {
         return Ok(());
     };
-    let Some(show_when) = show_when.as_object() else {
-        return Err(ReportServiceError::Validation(format!(
-            "Report {context} showWhen must be an object"
-        )));
-    };
-    let filter_id = show_when
-        .get("filter")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ReportServiceError::Validation(format!("Report {context} showWhen must include filter"))
-        })?;
-    if !filter_ids.contains(filter_id) {
+    if !filter_ids.contains(&show_when.filter) {
         return Err(ReportServiceError::Validation(format!(
             "Report {context} showWhen references unknown filter '{}'",
-            filter_id
-        )));
-    }
-    if let Some(exists) = show_when.get("exists")
-        && !exists.is_boolean()
-    {
-        return Err(ReportServiceError::Validation(format!(
-            "Report {context} showWhen.exists must be boolean"
+            show_when.filter
         )));
     }
     Ok(())
@@ -9189,6 +9177,85 @@ mod tests {
             &mut layout_node_ids,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn layout_validation_accepts_show_when_equals_clauses() {
+        let block = test_block("case_summary");
+        let block_ids = HashSet::from([block.id.clone()]);
+        let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let filter_ids = HashSet::from(["case_id".to_string()]);
+        let mut layout_node_ids = HashSet::new();
+
+        validate_layout_node(
+            &json!({
+                "id": "case_summary_node",
+                "type": "block",
+                "blockId": "case_summary",
+                "showWhen": {"filter": "case_id", "equals": "open", "notEquals": "closed"}
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn layout_validation_rejects_show_when_typo_key() {
+        let block = test_block("case_summary");
+        let block_ids = HashSet::from([block.id.clone()]);
+        let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let filter_ids = HashSet::from(["case_id".to_string()]);
+        let mut layout_node_ids = HashSet::new();
+
+        let error = validate_layout_node(
+            &json!({
+                "id": "case_summary_node",
+                "type": "block",
+                "blockId": "case_summary",
+                "showWhen": {"filter": "case_id", "exsits": true}
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid showWhen"), "{error}");
+    }
+
+    #[test]
+    fn layout_validation_rejects_show_when_unknown_filter() {
+        let block = test_block("case_summary");
+        let block_ids = HashSet::from([block.id.clone()]);
+        let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let filter_ids = HashSet::from(["case_id".to_string()]);
+        let mut layout_node_ids = HashSet::new();
+
+        let error = validate_layout_node(
+            &json!({
+                "id": "case_summary_node",
+                "type": "block",
+                "blockId": "case_summary",
+                "showWhen": {"filter": "not_a_filter", "exists": true}
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &filter_ids,
+            &mut layout_node_ids,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown filter 'not_a_filter'"),
+            "{error}"
+        );
     }
 
     #[test]

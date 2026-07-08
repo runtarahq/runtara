@@ -671,7 +671,7 @@ fn report_authoring_schema() -> Value {
                 "type": "table | chart | metric | actions | markdown | card",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
-                "showWhen": "Optional visibility condition such as {filter:'case_id', exists:true}. Use this for inline dependent content.",
+                "showWhen": "Optional visibility condition gating this block on a filter's value: {filter: <filterId>, exists?: bool, equals?: any, notEquals?: any}. The filter clauses are optional; unknown keys are rejected. Use this for inline dependent content.",
                 "dataset": "Preferred BI query shape: {id, dimensions, measures, orderBy?, limit?}. The id must match definition.datasets[].id.",
                 "source": "Object Model data source and query plan. Required only when block.dataset is absent, except static markdown blocks can omit source data.",
                 "filters": "Optional per-block filter presets.",

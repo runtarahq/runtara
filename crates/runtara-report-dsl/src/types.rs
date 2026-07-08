@@ -203,6 +203,30 @@ pub enum ReportLayoutNode {
     Grid(ReportGridLayoutNode),
 }
 
+/// Visibility condition for a report block or layout node. Evaluated
+/// against the current filter values: the node is shown only when the
+/// referenced filter satisfies every present clause. Mirrors the viewer's
+/// `isVisibleByShowWhen` evaluator and its `ReportVisibilityCondition`
+/// type.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportVisibilityCondition {
+    /// Id of the filter whose current value gates visibility.
+    pub filter: String,
+    /// When set, require the filter to have (`true`) / not have (`false`) a
+    /// value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exists: Option<bool>,
+    /// When set, require the filter value to equal this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<Value>,
+    /// When set, require the filter value to differ from this.
+    #[serde(default, rename = "notEquals", skip_serializing_if = "Option::is_none")]
+    pub not_equals: Option<Value>,
+}
+
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,7 +236,7 @@ pub struct ReportBlockLayoutNode {
     #[serde(rename = "blockId")]
     pub block_id: String,
     #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
+    pub show_when: Option<ReportVisibilityCondition>,
 }
 
 /// Grid container with optional title/description and a list of items.
@@ -253,7 +277,7 @@ pub struct ReportGridLayoutNode {
     pub column_widths: Option<Vec<f64>>,
     pub items: Vec<ReportGridLayoutItem>,
     #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
+    pub show_when: Option<ReportVisibilityCondition>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -498,7 +522,7 @@ pub struct ReportBlockDefinition {
     #[serde(default)]
     pub interactions: Vec<ReportInteractionDefinition>,
     #[serde(default, rename = "showWhen", skip_serializing_if = "Option::is_none")]
-    pub show_when: Option<Value>,
+    pub show_when: Option<ReportVisibilityCondition>,
     /// When true, the renderer drops the entire block (title bar included) if
     /// its data is empty (e.g. zero table rows or zero open actions). Useful
     /// for action lists or "open issues" tables that should disappear once
@@ -2064,5 +2088,69 @@ mod chart_config_tests {
         assert!(json.get("labelField").is_none());
         assert!(json.get("tooltipFields").is_none());
         assert!(json.get("groupByLabel").is_none());
+    }
+}
+
+#[cfg(test)]
+mod visibility_condition_tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_all_clauses() {
+        let json = serde_json::json!({
+            "filter": "case_id",
+            "exists": true,
+            "equals": "open",
+            "notEquals": "closed",
+        });
+        let cond: ReportVisibilityCondition = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(cond.filter, "case_id");
+        assert_eq!(cond.exists, Some(true));
+        assert_eq!(cond.equals, Some(Value::String("open".into())));
+        assert_eq!(cond.not_equals, Some(Value::String("closed".into())));
+        assert_eq!(serde_json::to_value(&cond).unwrap(), json);
+    }
+
+    #[test]
+    fn bare_filter_round_trips_without_optional_clauses() {
+        let cond: ReportVisibilityCondition =
+            serde_json::from_value(serde_json::json!({ "filter": "case_id" })).unwrap();
+        assert_eq!(cond.exists, None);
+        // Optional clauses are omitted from the wire form when unset.
+        assert_eq!(
+            serde_json::to_value(&cond).unwrap(),
+            serde_json::json!({ "filter": "case_id" })
+        );
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        // A typo like `exsits` used to be silently ignored at runtime; the
+        // typed struct now rejects it at parse time.
+        let err = serde_json::from_value::<ReportVisibilityCondition>(
+            serde_json::json!({ "filter": "case_id", "exsits": true }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exsits"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_filter_is_rejected() {
+        assert!(
+            serde_json::from_value::<ReportVisibilityCondition>(
+                serde_json::json!({ "exists": true })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn non_boolean_exists_is_rejected() {
+        assert!(
+            serde_json::from_value::<ReportVisibilityCondition>(
+                serde_json::json!({ "filter": "case_id", "exists": "yes" })
+            )
+            .is_err()
+        );
     }
 }
