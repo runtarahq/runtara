@@ -6,7 +6,8 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::response::Html;
+use axum::http::header::CONTENT_SECURITY_POLICY;
+use axum::response::{Html, IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConnectionsState;
@@ -140,7 +141,7 @@ pub async fn callback_handler(
     Path(_tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
-) -> Html<String> {
+) -> Response {
     let events = state.connection_events.clone();
 
     // The full callback query, from which the descriptor's extra_callback_params
@@ -226,17 +227,87 @@ pub async fn callback_handler(
     }
 }
 
-/// Generate the HTML response for the OAuth callback popup.
-/// On success, sends a postMessage to the opener and closes the window.
-/// On failure, shows an error message with a close button.
-fn oauth_response_html(connection_id: Option<&str>, success: bool, error: &str) -> Html<String> {
-    let conn_id_json = connection_id.unwrap_or("");
-    let error_json = error.replace('\\', "\\\\").replace('"', "\\\"");
+/// Escape text interpolated into HTML element content.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
 
-    Html(format!(
+/// Escape text interpolated into a JavaScript string literal inside an inline
+/// `<script>`. Escapes both quote styles (so the result is safe in a single- or
+/// double-quoted string), `<` (so a `</script>` in the text can't terminate the
+/// element), backslashes, and line terminators (which are illegal inside a JS
+/// string literal — U+2028/U+2029 included).
+fn js_string_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '<' => out.push_str("\\u003C"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Generate the HTML response for the OAuth callback popup.
+///
+/// On success, posts an `oauth-complete` message to `window.opener` and closes
+/// the popup; on failure, shows the reason with a Close button.
+///
+/// The page carries its own Content-Security-Policy. The global security-headers
+/// middleware would otherwise apply `default-src 'none'`, which blocks the inline
+/// `<script>`/`<style>` this page relies on to hand the result back to the opener
+/// (without them the popup renders "Authorization Successful" but never notifies
+/// the SPA or closes). A per-response nonce whitelists exactly this page's inline
+/// script and style — not `'unsafe-inline'` — so an injected `<script>` (e.g. via
+/// a hostile provider `error_description`) still cannot execute. All interpolated
+/// text is additionally escaped for its context (HTML body vs. JS string literal).
+/// Returns `(html_body, csp_header_value)`. Split from the response wrapper so
+/// the page and its scoped CSP can be asserted in a synchronous unit test.
+fn oauth_response_page(
+    connection_id: Option<&str>,
+    success: bool,
+    error: &str,
+) -> (String, String) {
+    // Unguessable per-response nonce for the inline <script>/<style>.
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+
+    let conn_id_js = js_string_escape(connection_id.unwrap_or(""));
+    let error_js = js_string_escape(error);
+    let error_html = html_escape(error);
+
+    let content = if success {
+        "<h2 class=\"success\">Authorization Successful</h2><p>You can close this window.</p>"
+            .to_string()
+    } else {
+        format!(
+            "<h2 class=\"error\">Authorization Failed</h2><p>{error_html}</p>\
+             <button id=\"oauth-close-btn\" type=\"button\">Close</button>"
+        )
+    };
+
+    // NB: this is a plain value substituted into the format!() below, so it uses
+    // single braces — brace-escaping (`{{`) only applies to the format literal.
+    let close_js = if success {
+        "setTimeout(function() { window.close(); }, 1000);"
+    } else {
+        ""
+    };
+
+    let body = format!(
         r#"<!DOCTYPE html>
 <html><head><title>OAuth Authorization</title>
-<style>
+<style nonce="{nonce}">
   body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex;
          justify-content: center; align-items: center; height: 100vh; margin: 0;
          background: #f5f5f5; color: #333; }}
@@ -250,34 +321,119 @@ fn oauth_response_html(connection_id: Option<&str>, success: bool, error: &str) 
 <body><div class="card">
 {content}
 </div>
-<script>
-  if (window.opener) {{
-    window.opener.postMessage({{
-      type: 'oauth-complete',
-      connectionId: '{conn_id}',
-      success: {success_js},
-      error: "{error_js}"
-    }}, '*');
-    {close_js}
-  }}
+<script nonce="{nonce}">
+  (function() {{
+    var closeBtn = document.getElementById('oauth-close-btn');
+    if (closeBtn) {{ closeBtn.addEventListener('click', function() {{ window.close(); }}); }}
+    if (window.opener) {{
+      window.opener.postMessage({{
+        type: 'oauth-complete',
+        connectionId: '{conn_id}',
+        success: {success_js},
+        error: "{error_js}"
+      }}, '*');
+      {close_js}
+    }}
+  }})();
 </script>
 </body></html>"#,
-        content = if success {
-            "<h2 class=\"success\">Authorization Successful</h2><p>You can close this window.</p>"
-                .to_string()
-        } else {
-            format!(
-                "<h2 class=\"error\">Authorization Failed</h2><p>{}</p><button onclick=\"window.close()\">Close</button>",
-                error
-            )
-        },
-        conn_id = conn_id_json,
+        nonce = nonce,
+        content = content,
+        conn_id = conn_id_js,
         success_js = if success { "true" } else { "false" },
-        error_js = error_json,
-        close_js = if success {
-            "setTimeout(() => window.close(), 1000);"
-        } else {
-            ""
-        },
-    ))
+        error_js = error_js,
+        close_js = close_js,
+    );
+
+    let csp = format!(
+        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; frame-ancestors 'none'"
+    );
+
+    (body, csp)
+}
+
+/// Wrap the callback page into an axum response carrying its page-scoped CSP.
+fn oauth_response_html(connection_id: Option<&str>, success: bool, error: &str) -> Response {
+    let (body, csp) = oauth_response_page(connection_id, success, error);
+    ([(CONTENT_SECURITY_POLICY, csp)], Html(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Extract the nonce advertised in the CSP header value.
+    fn csp_nonce(csp: &str) -> &str {
+        let start = csp
+            .find("script-src 'nonce-")
+            .expect("script-src nonce present")
+            + "script-src 'nonce-".len();
+        let rest = &csp[start..];
+        &rest[..rest.find('\'').expect("nonce terminator")]
+    }
+
+    #[test]
+    fn html_escape_neutralizes_markup() {
+        assert_eq!(
+            html_escape(r#"<script>alert('x')&"</script>"#),
+            "&lt;script&gt;alert(&#x27;x&#x27;)&amp;&quot;&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn js_string_escape_prevents_breakout() {
+        // `</script>` must not be able to terminate the inline script element,
+        // and quotes/backslashes/newlines must not break the JS string literal.
+        let out = js_string_escape("a\"b'c\\d</script>\n");
+        assert_eq!(out, "a\\\"b\\'c\\\\d\\u003C/script>\\n");
+        assert!(!out.contains("</script>"));
+    }
+
+    #[test]
+    fn success_page_has_nonced_inline_script_and_style() {
+        let (body, csp) = oauth_response_page(Some("conn-123"), true, "");
+        let nonce = csp_nonce(&csp);
+
+        // CSP must whitelist THIS page's inline script/style by nonce, never
+        // fall back to 'unsafe-inline', and keep the strict defaults.
+        assert!(csp.contains(&format!("script-src 'nonce-{nonce}'")));
+        assert!(csp.contains(&format!("style-src 'nonce-{nonce}'")));
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(!csp.contains("unsafe-inline"));
+
+        // The nonce must actually be stamped on the tags, or the browser blocks them.
+        assert!(body.contains(&format!("<style nonce=\"{nonce}\">")));
+        assert!(body.contains(&format!("<script nonce=\"{nonce}\">")));
+
+        // Success behavior: message the opener + auto-close.
+        assert!(body.contains("'oauth-complete'"));
+        assert!(body.contains("connectionId: 'conn-123'"));
+        assert!(body.contains("success: true"));
+        assert!(body.contains("window.close()"));
+        // No inline event handlers — they can't be covered by a nonce.
+        assert!(!body.contains("onclick"));
+    }
+
+    #[test]
+    fn failure_page_escapes_error_in_both_contexts() {
+        // A hostile provider error_description carrying markup must not execute:
+        // escaped in the HTML body, and unable to break out of the JS string.
+        let evil = "boom<img src=x onerror=alert(1)></script>";
+        let (body, csp) = oauth_response_page(None, false, evil);
+        let nonce = csp_nonce(&csp);
+
+        // Raw markup must never appear verbatim in the body.
+        assert!(!body.contains("<img src=x"));
+        assert!(body.contains("&lt;img src=x"));
+        // The only `</script>` in the document is the real closing tag (exactly one).
+        assert_eq!(body.matches("</script>").count(), 1);
+        // Failure page reports failure and offers a nonce-wired Close button
+        // (no inline onclick).
+        assert!(body.contains("success: false"));
+        assert!(body.contains("id=\"oauth-close-btn\""));
+        assert!(!body.contains("onclick"));
+        assert!(body.contains(&format!("<script nonce=\"{nonce}\">")));
+        assert!(!csp.contains("unsafe-inline"));
+    }
 }
