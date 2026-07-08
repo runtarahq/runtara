@@ -4681,6 +4681,7 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+ "wiremock",
  "zeroize",
 ]
 
