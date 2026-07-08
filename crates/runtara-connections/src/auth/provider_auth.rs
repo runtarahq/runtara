@@ -478,6 +478,26 @@ pub(crate) fn resolve_effective_oauth_config(
     }
 }
 
+/// Evict every in-memory token-cache entry a connection's (old) parameters can
+/// address. Called when a params-driven connection's endpoint params change
+/// (SSRF rule E): the stored tokens are cleared in the DB, and without this a
+/// still-fresh cached access token would keep being served — and flow to the
+/// NEWLY-edited base_url host.
+pub fn invalidate_connection_token_caches(
+    connection_id: &str,
+    integration_id: &str,
+    old_params: &Value,
+) {
+    if let Some(cfg) = find_connection_type(integration_id).and_then(|meta| meta.oauth_config) {
+        let effective = resolve_effective_oauth_config(cfg, old_params);
+        token_cache::invalidate_oauth_refresh_cache(
+            connection_id,
+            integration_id,
+            &effective.token_url,
+        );
+    }
+}
+
 /// Descriptor-driven auth for OAuth2 authorization-code integrations: resolves the
 /// base URL from the connection type's `OAuthConfig` and builds the refresh-token
 /// deferred auth. Falls back to injecting the stored `access_token` directly when no

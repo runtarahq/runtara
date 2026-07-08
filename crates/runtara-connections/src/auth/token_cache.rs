@@ -421,8 +421,12 @@ fn cache_token(cache_key: &str, token: CachedAccessToken) {
 /// resolution re-refreshes from the persisted connection state. Used on the
 /// fail-closed path when a rotated token could not be persisted. The key must
 /// match how `describe_oauth_refresh_auth` builds it.
-pub(crate) fn invalidate_oauth_refresh_cache(connection_id: &str, integration_id: &str) {
-    let key = build_token_cache_key(&["oauth_refresh", connection_id, integration_id]);
+pub(crate) fn invalidate_oauth_refresh_cache(
+    connection_id: &str,
+    integration_id: &str,
+    token_url: &str,
+) {
+    let key = build_token_cache_key(&["oauth_refresh", connection_id, integration_id, token_url]);
     token_cache().remove(&key);
 }
 

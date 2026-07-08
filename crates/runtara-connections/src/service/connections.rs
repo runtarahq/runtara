@@ -437,6 +437,64 @@ impl ConnectionService {
             );
         }
 
+        // SSRF rule E: on a params-driven OAuth type, changing an endpoint param
+        // must invalidate the captured tokens (DB + in-memory cache) and force a
+        // reconnect. Otherwise a captured refresh token could be replayed against
+        // a swapped-in token endpoint, or a still-cached Bearer would flow to the
+        // newly-edited base_url host.
+        let endpoint_edit_requires_reauth =
+            if let Some(ref new_params) = request.connection_parameters {
+                let params_driven = runtara_agents::registry::find_connection_type(&integration_id)
+                    .and_then(|meta| meta.oauth_config)
+                    .map(|cfg| cfg.params_driven)
+                    .unwrap_or(false);
+                if params_driven {
+                    let old = self
+                        .repository
+                        .get_with_parameters(id, tenant_id)
+                        .await
+                        .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+                    let old_params = old
+                        .and_then(|c| c.connection_parameters)
+                        .unwrap_or(serde_json::Value::Null);
+                    const ENDPOINT_KEYS: [&str; 5] = [
+                        "auth_url",
+                        "token_url",
+                        "base_url",
+                        "revocation_url",
+                        "token_auth",
+                    ];
+                    let changed = ENDPOINT_KEYS
+                        .iter()
+                        .any(|k| old_params.get(k) != new_params.get(k));
+                    if changed {
+                        // Strip captured tokens from the params being written.
+                        if let Some(obj) = request
+                            .connection_parameters
+                            .as_mut()
+                            .and_then(|p| p.as_object_mut())
+                        {
+                            obj.remove("access_token");
+                            obj.remove("refresh_token");
+                            obj.remove("token_expires_at");
+                        }
+                        // Evict the in-memory cache under the OLD params' keys.
+                        crate::auth::provider_auth::invalidate_connection_token_caches(
+                            id,
+                            &integration_id,
+                            &old_params,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
         // If marking as default file storage, clear any existing default first
         if request.is_default_file_storage == Some(true) {
             self.repository
@@ -461,6 +519,19 @@ impl ConnectionService {
 
         if rows_affected == 0 {
             return Err(ServiceError::NotFound("Connection not found".to_string()));
+        }
+
+        // SSRF rule E (continued): the tokens were stripped above; also force a
+        // fresh interactive consent against the new endpoints.
+        if endpoint_edit_requires_reauth {
+            self.repository
+                .update_status(
+                    id,
+                    tenant_id,
+                    ConnectionStatus::RequiresReconnection.as_str(),
+                )
+                .await
+                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
         }
 
         if let Some(default_for) = default_for {

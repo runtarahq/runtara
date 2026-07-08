@@ -35,13 +35,30 @@ impl PgFixture {
             CREATE TABLE connection_data_entity (
                 id VARCHAR(255) PRIMARY KEY,
                 tenant_id VARCHAR(255) NOT NULL,
+                title VARCHAR(255) NOT NULL DEFAULT 'conn',
                 integration_id VARCHAR(255),
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
                 rate_limit_config JSONB,
                 status VARCHAR(64) DEFAULT 'UNKNOWN',
                 refresh_token_hash TEXT DEFAULT NULL,
+                is_default_file_storage BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                valid_until TIMESTAMPTZ DEFAULT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok()?;
+        sqlx::query(
+            r#"
+            CREATE TABLE connection_defaults (
+                tenant_id VARCHAR(255) NOT NULL,
+                default_for VARCHAR(255) NOT NULL,
+                connection_id VARCHAR(255) NOT NULL,
+                PRIMARY KEY (tenant_id, default_for)
             )
             "#,
         )
@@ -259,4 +276,138 @@ async fn generic_authcode_pkce_can_be_disabled() {
         !url.contains("code_challenge"),
         "pkce=false must disable the code challenge: {url}"
     );
+}
+
+#[tokio::test]
+async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
+    unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
+    // Save-time https gate: allow the loopback wiremock endpoints for this PATCH.
+    unsafe { std::env::set_var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS", "127.0.0.1,localhost") };
+    let Some(fixture) = PgFixture::start().await else {
+        eprintln!("Skipping rule E test: Docker/Postgres unavailable");
+        return;
+    };
+    let provider = MockServer::start().await;
+    // Refresh endpoint: each mint hits it once — expect exactly 2 (warm + post-evict).
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "fresh", "token_type": "Bearer", "expires_in": 3600
+        })))
+        .expect(2)
+        .mount(&provider)
+        .await;
+
+    let params = json!({
+        "auth_url": format!("{}/oauth/authorize", provider.uri()),
+        "token_url": format!("{}/oauth/token", provider.uri()),
+        "client_id": "cid",
+        "client_secret": "csec",
+        "base_url": "https://api.example.com",
+        "access_token": "expired",
+        "refresh_token": "rt-1",
+        "token_expires_at": "2020-01-01T00:00:00Z"
+    });
+    sqlx::query(
+        "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status) \
+         VALUES ($1, $2, 'rule-e', $3, $4, 'ACTIVE')",
+    )
+    .bind("conn_rule_e")
+    .bind("tenant_gen")
+    .bind("http_oauth2_authorization_code")
+    .bind(&params)
+    .execute(&fixture.pool)
+    .await
+    .expect("insert connection");
+
+    // Warm the in-memory cache: expired stored token forces a mint (wiremock hit #1).
+    let client = reqwest::Client::new();
+    let mut headers = std::collections::HashMap::new();
+    runtara_connections::auth::provider_auth::resolve_connection_auth(
+        &client,
+        "conn_rule_e",
+        "http_oauth2_authorization_code",
+        &params,
+        &mut headers,
+        &runtara_connections::events::ConnectionEvents::default(),
+    )
+    .await
+    .expect("warm mint");
+    assert_eq!(
+        headers.get("Authorization").map(String::as_str),
+        Some("Bearer fresh")
+    );
+
+    // PATCH an endpoint param through the SERVICE (rule E path).
+    let repo = Arc::new(
+        runtara_connections::repository::connections::ConnectionRepository::new(
+            fixture.pool.clone(),
+            Arc::new(NoOpCipher),
+        ),
+    );
+    let compatibility = Arc::new(
+        runtara_connections::integration_compatibility::IntegrationCompatibility::new(
+            Default::default(),
+        ),
+    );
+    let service =
+        runtara_connections::service::connections::ConnectionService::new(repo, compatibility);
+
+    let mut new_params = params.clone();
+    new_params["base_url"] = json!("https://api.other-host.example");
+    let update = runtara_connections::types::UpdateConnectionRequest {
+        title: None,
+        connection_subtype: None,
+        connection_parameters: Some(new_params),
+        integration_id: None,
+        rate_limit_config: None,
+        valid_until: None,
+        status: None,
+        is_default_file_storage: None,
+        default_for: None,
+    };
+    let dto = service
+        .update_connection("conn_rule_e", "tenant_gen", update)
+        .await
+        .expect("rule E update");
+    assert_eq!(
+        dto.status.as_str(),
+        "REQUIRES_RECONNECTION",
+        "endpoint edit must force reconnect"
+    );
+
+    // Captured tokens stripped from the stored params.
+    let row = sqlx::query(
+        "SELECT connection_parameters FROM connection_data_entity WHERE id = 'conn_rule_e'",
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("read back");
+    let stored: serde_json::Value = row.get("connection_parameters");
+    assert!(
+        stored.get("access_token").is_none(),
+        "access_token must be cleared"
+    );
+    assert!(
+        stored.get("refresh_token").is_none(),
+        "refresh_token must be cleared"
+    );
+    assert!(stored.get("token_expires_at").is_none());
+    assert_eq!(stored["base_url"], "https://api.other-host.example");
+
+    // Cache evicted: resolving with the OLD params again (an in-flight caller)
+    // must MISS the cache and re-mint (wiremock hit #2), not serve the stale token.
+    let mut headers2 = std::collections::HashMap::new();
+    runtara_connections::auth::provider_auth::resolve_connection_auth(
+        &client,
+        "conn_rule_e",
+        "http_oauth2_authorization_code",
+        &params,
+        &mut headers2,
+        &runtara_connections::events::ConnectionEvents::default(),
+    )
+    .await
+    .expect("post-evict mint");
+    // Mock .expect(2) verifies the second network mint on drop.
 }

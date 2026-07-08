@@ -14,7 +14,6 @@ use opentelemetry::metrics::Counter;
 use serde_json::Value;
 
 use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredentials};
-use crate::auth::token_cache;
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
@@ -436,7 +435,11 @@ impl ConnectionsFacade {
                     // Fail closed: the DB now holds a dead (rotated-away) token and we could
                     // not replace it. Drop the just-cached access token so the next attempt
                     // re-refreshes from the persisted state rather than diverging silently.
-                    token_cache::invalidate_oauth_refresh_cache(connection_id, integration_id);
+                    provider_auth::invalidate_connection_token_caches(
+                        connection_id,
+                        integration_id,
+                        params,
+                    );
                     tracing::error!(connection_id, error = %e, "failed to persist rotated oauth tokens — failing closed");
                     Err(ConnectionsError::Database(e))
                 } else {
