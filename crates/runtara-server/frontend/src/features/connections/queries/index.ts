@@ -151,12 +151,14 @@ export async function removeConnection(token: string, connectionId: string) {
 }
 
 export async function getOAuthAuthorizeUrl(
-  token: string,
+  token: string | null | undefined,
   connectionId: string
 ): Promise<string> {
+  // Use the shared header builder: it omits Authorization when there is no
+  // token (local / trust_proxy auth modes), matching every other runtime call.
   const result = await RuntimeREST.instance.get(
     `/api/runtime/connections/${connectionId}/oauth/authorize`,
-    { headers: { Authorization: `Bearer ${token}` } }
+    createAuthHeaders(token)
   );
   return result.data.authorizationUrl;
 }

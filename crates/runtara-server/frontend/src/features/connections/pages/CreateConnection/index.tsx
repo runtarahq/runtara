@@ -14,6 +14,7 @@ import {
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useOAuthPopup } from '@/features/connections/hooks/useOAuthPopup';
 import { useAuth } from 'react-oidc-context';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { queryClient } from '@/main.tsx';
 
 export function CreateConnection() {
@@ -39,7 +40,9 @@ export function CreateConnection() {
 
   const startOAuthFlow = useCallback(
     async (connectionId: string) => {
-      if (!token) return;
+      // Only OIDC mode needs a bearer token; local / trust_proxy modes have
+      // none and the server accepts unauthenticated calls there.
+      if (isOidcAuth && !token) return;
       try {
         const authUrl = await getOAuthAuthorizeUrl(token, connectionId);
         await openOAuthPopup(authUrl);

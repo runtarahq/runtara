@@ -1462,7 +1462,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[serde(default)]
     #[field(
         display_name = "PKCE",
-        description = "Use PKCE (S256 code challenge) on the authorization flow — recommended, on by default"
+        description = "Use PKCE (S256 code challenge) on the authorization flow — recommended, on by default",
+        default = "true"
     )]
     pub pkce: Option<bool>,
 
@@ -1470,7 +1471,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[serde(default)]
     #[field(
         display_name = "Refresh Token Rotates",
-        description = "Whether the provider rotates the refresh token on every refresh (default on — safest)"
+        description = "Whether the provider rotates the refresh token on every refresh (default on — safest)",
+        default = "true"
     )]
     pub refresh_rotates: Option<bool>,
 
