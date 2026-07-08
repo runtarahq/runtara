@@ -123,9 +123,18 @@ pub fn register_report_filters(
     register_filter(env, "pill", ctx.clone(), formatter.clone(), |_| {
         FormatSpec::Pill
     });
-    register_filter(env, "bar_indicator", ctx, formatter, |_| {
+    register_filter(env, "bar_indicator", ctx.clone(), formatter.clone(), |_| {
         FormatSpec::BarIndicator
     });
+    // `string` and `raw` route through the same `Formatter` as `format_value`
+    // so `{{ x | string }}` / `{{ x | raw }}` and `format: 'string' | 'raw'`
+    // agree. `string` overrides minijinja's built-in filter of the same name;
+    // `raw` isn't a minijinja filter at all, so without this the pipe would
+    // throw "unknown filter" at render despite validating green.
+    register_filter(env, "string", ctx.clone(), formatter.clone(), |_| {
+        FormatSpec::String
+    });
+    register_filter(env, "raw", ctx, formatter, |_| FormatSpec::Raw);
 }
 
 /// Helper: register a one-or-two-arg filter that delegates to the
@@ -254,6 +263,12 @@ fn validate_display_template_format(format: &str) -> Result<(), &'static str> {
     };
     if !is_identifier_part(name) {
         return Err("format is invalid");
+    }
+    // Reject identifier-shaped-but-unknown names (e.g. `foobar`) here rather
+    // than letting them save and throw "unknown filter" at render time. The
+    // known set is shared with the render-time filter registry via `FormatSpec`.
+    if !FormatSpec::is_known_name(name) {
+        return Err("unknown format");
     }
     if let Some(argument) = parts.next()
         && (argument.is_empty()
@@ -414,5 +429,61 @@ mod tests {
             render("{{ x | currency }}", &json!({ "x": 1234.5 })),
             "$1,234.50"
         );
+    }
+
+    #[test]
+    fn unknown_format_name_is_rejected_at_save() {
+        // Regression: before the known-name check these validated green and
+        // then threw "unknown filter" at render time.
+        assert!(validate_safe_display_template("{{ x | foobar }}").is_err());
+        assert!(validate_safe_display_template("{{ amount | dollars }}").is_err());
+        // A plain field with no format pipe is still fine.
+        assert!(validate_safe_display_template("{{ x }}").is_ok());
+    }
+
+    #[test]
+    fn every_known_format_name_validates_and_renders() {
+        let row = json!({ "v": 1234.5 });
+        for name in FormatSpec::KNOWN_NAMES {
+            let template = format!("{{{{ v | {name} }}}}");
+            // Save-time validation accepts every advertised name...
+            validate_safe_display_template(&template)
+                .unwrap_or_else(|e| panic!("validator rejected known name `{name}`: {e}"));
+            // ...and each name resolves to a registered filter at render time
+            // (before this change, `raw` threw "unknown filter" here).
+            render_template(
+                &template,
+                &row,
+                &RenderContext::default(),
+                Arc::new(SimpleAsciiFormatter),
+            )
+            .unwrap_or_else(|e| panic!("render failed for known name `{name}`: {e}"));
+        }
+    }
+
+    #[test]
+    fn string_and_raw_filters_match_format_value() {
+        // The pipe path and the raw `format_value` path must produce the same
+        // output for `string`/`raw`. Before registering these filters, `string`
+        // hit minijinja's built-in and `raw` threw, so the two paths diverged.
+        let ctx = RenderContext {
+            locale: "en-US".into(),
+            currency: "USD".into(),
+            timezone: "UTC".into(),
+        };
+        let fmt = SimpleAsciiFormatter;
+        for value in [json!("hi"), json!(42), json!(true), json!(3.5)] {
+            for format in ["string", "raw"] {
+                let via_pipe = render(
+                    &format!("{{{{ v | {format} }}}}"),
+                    &json!({ "v": value.clone() }),
+                );
+                let via_format_value = format_value(&value, format, &ctx, &fmt);
+                assert_eq!(
+                    via_pipe, via_format_value,
+                    "`{format}` diverged for value {value}"
+                );
+            }
+        }
     }
 }
