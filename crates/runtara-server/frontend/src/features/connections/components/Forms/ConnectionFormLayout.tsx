@@ -1,6 +1,13 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { Loader2, AlertTriangle, ArrowLeft, Save, Trash2 } from 'lucide-react';
+import {
+  Loader2,
+  AlertTriangle,
+  ArrowLeft,
+  Save,
+  Trash2,
+  RefreshCw,
+} from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 
 type ConnectionFormLayoutProps = {
@@ -18,6 +25,13 @@ type ConnectionFormLayoutProps = {
   integrationCategory?: string;
   onDelete?: () => void;
   isDeleting?: boolean;
+  /** Show the interactive-OAuth "Reconnect" affordance (edit mode, OAuth types). */
+  showReconnect?: boolean;
+  /** Re-run the OAuth authorize popup using the connection's stored credentials. */
+  onReconnect?: () => void;
+  isReconnecting?: boolean;
+  /** When true the connection needs re-authorization — shows a banner + emphasis. */
+  needsReconnect?: boolean;
 };
 
 export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
@@ -34,9 +48,31 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
     integrationCategory,
     onDelete,
     isDeleting,
+    showReconnect,
+    onReconnect,
+    isReconnecting,
+    needsReconnect,
   } = props;
 
   const isEditMode = title.toLowerCase().includes('edit');
+
+  const reconnectButton = showReconnect && onReconnect && (
+    <Button
+      type="button"
+      variant={needsReconnect ? 'default' : 'outline'}
+      size="sm"
+      onClick={onReconnect}
+      disabled={isReconnecting}
+      className={needsReconnect ? 'shadow-sm shadow-blue-600/20' : undefined}
+    >
+      {isReconnecting ? (
+        <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+      ) : (
+        <RefreshCw className="w-4 h-4 mr-1.5" />
+      )}
+      Reconnect
+    </Button>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-background">
@@ -78,6 +114,7 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {isEditMode && reconnectButton}
               {isEditMode && onDelete && (
                 <Button
                   type="button"
@@ -130,6 +167,36 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
 
       {/* Form Content */}
       <div className="px-6 py-6 max-w-2xl">
+        {/* Needs-reconnection banner — the stored credentials are kept; a single
+            click re-runs the OAuth consent to mint fresh tokens. */}
+        {needsReconnect && showReconnect && onReconnect && (
+          <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200/60 rounded-lg mb-6 dark:bg-amber-900/20 dark:border-amber-700/40">
+            <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5 dark:text-amber-500" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+                This connection needs to be reconnected
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5 dark:text-amber-400">
+                Its access has expired or was revoked. Your saved credentials are
+                kept — click Reconnect to re-authorize without re-entering them.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              onClick={onReconnect}
+              disabled={isReconnecting}
+            >
+              {isReconnecting ? (
+                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-1.5" />
+              )}
+              Reconnect
+            </Button>
+          </div>
+        )}
+
         {/* Edit Notice */}
         {editNotice && (
           <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200/60 rounded-lg mb-6 dark:bg-amber-900/20 dark:border-amber-700/40">

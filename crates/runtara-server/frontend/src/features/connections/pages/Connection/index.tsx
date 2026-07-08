@@ -14,6 +14,7 @@ import {
 } from '@/features/connections/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useConnectionRateLimitStatus } from '@/features/analytics/hooks/useRateLimits';
+import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
 import { queryClient } from '@/main.tsx';
 
 export function Connection() {
@@ -34,6 +35,10 @@ export function Connection() {
 
   // Live rate-limit status for the honest protection badge in the form.
   const rateLimitStatusQuery = useConnectionRateLimitStatus(id);
+
+  // Interactive-OAuth reconnect: re-runs the authorize popup using the
+  // connection's stored credentials (no re-entry).
+  const { authorize, isAuthorizing } = useConnectionOAuth();
 
   const mutation = useCustomMutation({
     mutationFn: updateConnection,
@@ -137,6 +142,16 @@ export function Connection() {
     }
   };
 
+  // Only interactive authorization-code types (those with an OAuthConfig) can be
+  // re-authorized via a popup; client-credentials / API-key types mint or carry
+  // their own credentials and have nothing to reconnect.
+  const isOAuthAuthCode = !!(currentConnectionType as unknown as {
+    oauthConfig?: unknown;
+  })?.oauthConfig;
+  const needsReconnect =
+    (connection.data as { status?: string })?.status ===
+    'REQUIRES_RECONNECTION';
+
   return (
     <DynamicConnectionForm
       connectionType={currentConnectionType}
@@ -147,6 +162,10 @@ export function Connection() {
       onDelete={handleDelete}
       isDeleting={deleteMutation.isPending}
       rateLimitStatus={rateLimitStatusQuery.data?.data}
+      showReconnect={isOAuthAuthCode}
+      onReconnect={id ? () => authorize(id) : undefined}
+      isReconnecting={isAuthorizing(id)}
+      needsReconnect={needsReconnect}
     />
   );
 }

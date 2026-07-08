@@ -473,6 +473,12 @@ type DynamicConnectionFormProps = {
   isDeleting?: boolean;
   /** Live rate-limit status for this connection (edit mode), if loaded. */
   rateLimitStatus?: RateLimitStatusDto | null;
+  /** Show the interactive-OAuth "Reconnect" affordance (edit mode, OAuth types). */
+  showReconnect?: boolean;
+  onReconnect?: () => void;
+  isReconnecting?: boolean;
+  /** When true the connection needs re-authorization. */
+  needsReconnect?: boolean;
 };
 
 /**
@@ -487,6 +493,10 @@ export function DynamicConnectionForm({
   onDelete,
   isDeleting,
   rateLimitStatus,
+  showReconnect,
+  onReconnect,
+  isReconnecting,
+  needsReconnect,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
@@ -653,6 +663,10 @@ export function DynamicConnectionForm({
       integrationCategory={connectionType.category || undefined}
       onDelete={onDelete}
       isDeleting={isDeleting}
+      showReconnect={showReconnect}
+      onReconnect={onReconnect}
+      isReconnecting={isReconnecting}
+      needsReconnect={needsReconnect}
     >
       <div className="space-y-6">
         {/* Server Details Section */}

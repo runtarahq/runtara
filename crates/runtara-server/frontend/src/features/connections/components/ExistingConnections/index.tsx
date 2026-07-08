@@ -1,7 +1,7 @@
 import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Activity, Pencil, Trash2, Loader2 } from 'lucide-react';
+import { Activity, Pencil, Trash2, Loader2, RefreshCw } from 'lucide-react';
 import { queryClient } from '@/main';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -36,6 +36,7 @@ import {
   getConnections,
   removeConnection,
 } from '@/features/connections/queries';
+import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
 
 function connectionStatusPill(status: ConnectionStatus): {
   tone: StatusTone;
@@ -115,6 +116,10 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
   });
 
   const deletingId = mutation.isPending ? deleteTarget?.id : null;
+
+  // One-click reconnect for OAuth connections whose access has expired/been
+  // revoked — reuses the stored credentials, no re-entry.
+  const { authorize, isAuthorizing } = useConnectionOAuth();
 
   const handleDelete = () => {
     if (deleteTarget) {
@@ -209,6 +214,25 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
+                    {connection.connectionType?.oauthConfig &&
+                      connection.status === 'REQUIRES_RECONNECTION' && (
+                        <Can permission="connection:update">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-amber-600 hover:text-amber-700 dark:text-amber-500"
+                            title="Reconnect (re-authorize with saved credentials)"
+                            disabled={isAuthorizing(connection.id)}
+                            onClick={() => authorize(connection.id)}
+                          >
+                            {isAuthorizing(connection.id) ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </Can>
+                      )}
                     <Can permission="connection:update">
                     <Link to={`/connections/${connection.id}`}>
                       <Button
