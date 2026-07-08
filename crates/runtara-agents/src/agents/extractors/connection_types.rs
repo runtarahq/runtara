@@ -1373,3 +1373,152 @@ impl HttpConnectionExtractor for HttpOAuth2ClientCredentialsExtractor {
         })
     }
 }
+
+// ============================================================================
+// Generic HTTP OAuth2 (Authorization Code) Connection Type
+// ============================================================================
+
+/// Generic OAuth2 authorization-code (interactive) connection.
+///
+/// Bring-your-own endpoints: the user supplies auth/token URLs and app
+/// credentials; runtara runs the standard popup flow (PKCE on by default),
+/// captures + refreshes the tokens, and pins credentialed egress to
+/// `base_url`. `oauth_params_driven` is what lets this ONE type read its OAuth
+/// config from connection parameters — curated providers never do.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "http_oauth2_authorization_code",
+    display_name = "HTTP OAuth2 (Authorization Code)",
+    description = "Interactive OAuth2 authorization-code flow against your own endpoints; runtara captures and refreshes the token",
+    category = "http",
+    auth_type = "oauth2_authorization_code",
+    oauth_auth_url = "",
+    oauth_token_url = "",
+    oauth_reauth_on_error_codes = "invalid_grant",
+    oauth_params_driven = true
+)]
+pub struct HttpOAuth2AuthorizationCodeParams {
+    /// OAuth2 authorization endpoint the user's browser is sent to
+    #[field(
+        display_name = "Authorization URL",
+        description = "OAuth2 authorization endpoint (must be https)",
+        placeholder = "https://auth.example.com/oauth/authorize",
+        is_url,
+        is_required
+    )]
+    pub auth_url: String,
+
+    /// OAuth2 token endpoint (code exchange + refresh)
+    #[field(
+        display_name = "Token URL",
+        description = "OAuth2 token endpoint for the code exchange and refreshes (must be https)",
+        placeholder = "https://auth.example.com/oauth/token",
+        is_url,
+        is_required
+    )]
+    pub token_url: String,
+
+    /// OAuth2 client id
+    #[field(display_name = "Client ID", description = "OAuth2 client id")]
+    pub client_id: String,
+
+    /// OAuth2 client secret
+    #[field(
+        display_name = "Client Secret",
+        description = "OAuth2 client secret",
+        secret
+    )]
+    pub client_secret: String,
+
+    /// Space-separated OAuth2 scopes to request
+    #[serde(default)]
+    #[field(
+        display_name = "Scopes",
+        description = "Space-separated OAuth2 scopes to request at authorization"
+    )]
+    pub scopes: Option<String>,
+
+    /// API base URL — the proxy pins every credentialed request to this host
+    #[serde(default)]
+    #[field(
+        display_name = "Base URL",
+        description = "API base URL — all requests using this connection are pinned to it (must be https)",
+        placeholder = "https://api.example.com",
+        is_url,
+        is_required
+    )]
+    pub base_url: Option<String>,
+
+    /// How client credentials reach the token endpoint
+    #[serde(default = "default_generic_token_auth")]
+    #[field(
+        display_name = "Token Endpoint Auth",
+        description = "How client credentials are sent to the token endpoint: 'form_body' (default) or 'basic' (HTTP Basic header)",
+        default = "form_body"
+    )]
+    pub token_auth: String,
+
+    /// PKCE (RFC 7636) — on by default; disable only for providers that reject code_challenge
+    #[serde(default)]
+    #[field(
+        display_name = "PKCE",
+        description = "Use PKCE (S256 code challenge) on the authorization flow — recommended, on by default"
+    )]
+    pub pkce: Option<bool>,
+
+    /// Whether the provider rotates the refresh token on every refresh
+    #[serde(default)]
+    #[field(
+        display_name = "Refresh Token Rotates",
+        description = "Whether the provider rotates the refresh token on every refresh (default on — safest)"
+    )]
+    pub refresh_rotates: Option<bool>,
+
+    /// Optional token revocation endpoint, called on disconnect
+    #[serde(default)]
+    #[field(
+        display_name = "Revocation URL",
+        description = "Optional token revocation endpoint called when the connection is deleted (must be https)",
+        is_url
+    )]
+    pub revocation_url: Option<String>,
+}
+
+/// HTTP extractor for generic OAuth2 authorization-code connections.
+///
+/// The Bearer token is resolved (and refreshed) at request time by the
+/// connection subsystem; this extractor only pins the base URL and Content-Type.
+pub struct HttpOAuth2AuthorizationCodeExtractor;
+
+impl HttpConnectionExtractor for HttpOAuth2AuthorizationCodeExtractor {
+    fn integration_id(&self) -> &'static str {
+        "http_oauth2_authorization_code"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: HttpOAuth2AuthorizationCodeParams =
+            serde_json::from_value(params.clone()).map_err(|e| {
+                format!(
+                    "Invalid http_oauth2_authorization_code connection parameters: {}",
+                    e
+                )
+            })?;
+
+        let base_url = p.base_url.as_deref().map(str::trim).unwrap_or("");
+        if base_url.is_empty() {
+            return Err(
+                "Invalid http_oauth2_authorization_code connection: missing base_url".to_string(),
+            );
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: base_url.trim_end_matches('/').to_string(),
+            rate_limit_config: None,
+        })
+    }
+}

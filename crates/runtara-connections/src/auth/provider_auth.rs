@@ -164,7 +164,7 @@ fn describe_connection_auth(
         // OAuth2 authorization-code integrations are fully descriptor-driven: base URL,
         // token-endpoint auth style, refresh rotation and extra callback params all come
         // from the connection type's OAuthConfig (see runtara-dsl agent_meta).
-        "hubspot_private_app" | "quickbooks_online" => {
+        "hubspot_private_app" | "quickbooks_online" | "http_oauth2_authorization_code" => {
             describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
         }
         "stripe_api_key" => {

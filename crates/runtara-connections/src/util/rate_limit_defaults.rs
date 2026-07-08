@@ -29,6 +29,7 @@ pub const RATE_LIMIT_OPT_OUT: &[&str] = &[
     "http_api_key",
     "http_bearer",
     "http_oauth2_client_credentials",
+    "http_oauth2_authorization_code",
     // Arbitrary user-provided MCP server — target limits unknowable.
     "mcp",
     // OAuth client-credentials token-mint endpoint only; the throttled Graph/API

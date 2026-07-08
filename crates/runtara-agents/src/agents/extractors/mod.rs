@@ -57,6 +57,7 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &connection_types::OpenAiExtractor,
     &connection_types::MicrosoftEntraClientCredentialsExtractor,
     &connection_types::HttpOAuth2ClientCredentialsExtractor,
+    &connection_types::HttpOAuth2AuthorizationCodeExtractor,
     &connection_types::MailgunExtractor,
     &connection_types::HubSpotExtractor,
     &connection_types::HubSpotAccessTokenExtractor,
