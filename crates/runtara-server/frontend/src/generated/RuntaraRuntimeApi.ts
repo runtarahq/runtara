@@ -32,13 +32,6 @@ export type VariableType =
  * - `number` for floating point
  * - `boolean` for true/false
  * - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
- *
- * Coercion policy: `string`/`boolean` are total (any value has a
- * representation), and `json`/`file` pass through untouched. `integer`/`number`
- * are partial — `null` stays `null`, but a present value that cannot be parsed
- * as the requested type fails the step rather than silently coercing to `0`.
- * The reference's `default` (see [`ReferenceValue`]) supplies an explicit
- * fallback for such values.
  */
 export type ValueType =
   | "string"
@@ -3131,28 +3124,18 @@ export interface RateLimitTimelineResponse {
  * - `variables._tenant_id` - Tenant identifier
  *
  * Example: `{ "valueType": "reference", "value": "data.user.name" }`
- * With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "integer" }`
+ * With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`
  */
 export interface ReferenceValue {
   /**
-   * Default value to use when the reference path is null/absent, when its
-   * shape does not match, or when a `type` hint cannot coerce the resolved
-   * value. This allows graceful handling of optional or malformed fields
-   * while providing an explicit fallback. The default is itself coerced
-   * through the `type` hint.
+   * Default value to use when the reference path returns null or doesn't exist.
+   * This allows graceful handling of optional fields while providing fallback values.
    */
   default?: any;
   /**
    * Expected type hint for the referenced value.
    * Used when the source type is unknown (e.g., HTTP response body).
    * If omitted, the value is passed through as-is (typically as JSON).
-   *
-   * The hint must be a known [`ValueType`] — an unrecognized name is rejected
-   * when the workflow is parsed. At runtime an `integer`/`number` hint coerces
-   * the resolved value; a `null` passes through, but a present value that
-   * cannot be parsed as the requested type fails the step rather than
-   * silently becoming `0`. Declare a `default` to supply an explicit fallback
-   * for such values.
    */
   type?: null | ValueType;
   /** Path to the data using dot notation (e.g., "data.user.name") */
@@ -3241,7 +3224,7 @@ export interface ReportBlockDefinition {
   lazy?: boolean;
   markdown?: null | ReportMarkdownConfig;
   metric?: null | ReportMetricConfig;
-  showWhen?: null | ReportVisibilityCondition;
+  showWhen?: any;
   source?: ReportSource;
   table?: null | ReportTableConfig;
   title?: string | null;
@@ -3257,7 +3240,7 @@ export interface ReportBlockError {
 export interface ReportBlockLayoutNode {
   blockId: string;
   id: string;
-  showWhen?: null | ReportVisibilityCondition;
+  showWhen?: any;
 }
 
 export interface ReportBlockOnlyDataRequest {
@@ -3808,7 +3791,7 @@ export interface ReportGridLayoutNode {
    * @format int64
    */
   rows?: number | null;
-  showWhen?: null | ReportVisibilityCondition;
+  showWhen?: any;
   /** Optional section-style heading rendered above the grid contents. */
   title?: string | null;
 }
@@ -4229,27 +4212,6 @@ export interface ReportViewDefinition {
    * otherwise from the block column flagged `descriptive: true`.
    */
   titleFromBlock?: null | ReportTitleFromBlock;
-}
-
-/**
- * Visibility condition for a report block or layout node. Evaluated
- * against the current filter values: the node is shown only when the
- * referenced filter satisfies every present clause. Mirrors the viewer's
- * `isVisibleByShowWhen` evaluator and its `ReportVisibilityCondition`
- * type.
- */
-export interface ReportVisibilityCondition {
-  /** When set, require the filter value to equal this. */
-  equals?: any;
-  /**
-   * When set, require the filter to have (`true`) / not have (`false`) a
-   * value.
-   */
-  exists?: boolean | null;
-  /** Id of the filter whose current value gates visibility. */
-  filter: string;
-  /** When set, require the filter value to differ from this. */
-  notEquals?: any;
 }
 
 export interface ReportWorkflowActionConfig {
