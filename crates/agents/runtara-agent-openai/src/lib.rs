@@ -20,6 +20,12 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
+// Shared per-provider defaults; the `#[field(default = ...)]` literals below
+// must stay in sync with these (pinned by tests, since macro attributes
+// cannot reference consts).
+const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
+const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
+
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
@@ -301,7 +307,7 @@ pub struct TextCompletionInput {
         display_name = "Model",
         description = "The OpenAI model to use for generation",
         example = "gpt-4o",
-        default = "gpt-4"
+        default = "gpt-4o"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -384,7 +390,9 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
     }
     messages.push(json!({"role": "user", "content": input.prompt}));
 
-    let model = input.model.unwrap_or_else(|| "gpt-4".to_string());
+    let model = input
+        .model
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
     let o_series = is_o_series(&model);
 
     let mut body = json!({
@@ -701,7 +709,7 @@ pub fn structured_output(
     messages.push(json!({"role": "user", "content": input.prompt}));
 
     let mut body = json!({
-        "model": input.model.unwrap_or_else(|| "gpt-4o-mini".to_string()),
+        "model": input.model.unwrap_or_else(|| DEFAULT_OPENAI_MINI_MODEL.to_string()),
         "messages": messages,
         "response_format": {
             "type": "json_schema",
@@ -846,7 +854,9 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, Ag
         }));
     }
 
-    let model = input.model.unwrap_or_else(|| "gpt-4o".to_string());
+    let model = input
+        .model
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
     let o_series = is_o_series(&model);
 
     let mut body = json!({
@@ -1052,7 +1062,7 @@ pub struct OpenaiChatCompletionInput {
         display_name = "Model",
         description = "The OpenAI model to use",
         example = "gpt-4o",
-        default = "gpt-4"
+        default = "gpt-4o"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1155,7 +1165,9 @@ pub fn openai_chat_completion(
 ) -> Result<OpenaiChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
-    let model = input.model.unwrap_or_else(|| "gpt-4".to_string());
+    let model = input
+        .model
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
     let o_series = is_o_series(&model);
 
     let mut body = json!({
@@ -1634,6 +1646,49 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
             retry_after_ms: None,
             attributes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::agent_meta::{InputFieldMeta, InputTypeMeta};
+
+    fn model_field(meta: &'static InputTypeMeta) -> &'static InputFieldMeta {
+        meta.fields
+            .iter()
+            .find(|f| f.name == "model")
+            .unwrap_or_else(|| panic!("{} has no model field", meta.type_name))
+    }
+
+    // `#[field(default/example = ...)]` are attribute literals and cannot
+    // reference consts, so pin them to the shared defaults here — otherwise
+    // the authoring metadata can silently drift from the runtime fallbacks.
+    #[test]
+    fn gpt_model_field_metadata_matches_shared_defaults() {
+        for meta in [
+            &__INPUT_META_TextCompletionInput,
+            &__INPUT_META_VisionToTextInput,
+            &__INPUT_META_OpenaiChatCompletionInput,
+        ] {
+            let field = model_field(meta);
+            assert_eq!(
+                field.default_value,
+                Some(DEFAULT_OPENAI_MODEL),
+                "{} model default",
+                meta.type_name
+            );
+            assert_eq!(
+                field.example,
+                Some(DEFAULT_OPENAI_MODEL),
+                "{} model example",
+                meta.type_name
+            );
+        }
+
+        let structured = model_field(&__INPUT_META_StructuredOutputInput);
+        assert_eq!(structured.default_value, Some(DEFAULT_OPENAI_MINI_MODEL));
+        assert_eq!(structured.example, Some(DEFAULT_OPENAI_MINI_MODEL));
     }
 }
 

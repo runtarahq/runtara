@@ -27,6 +27,11 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
+// Shared Bedrock default model id; the `#[field(default = ...)]` literals
+// below must stay in sync with this (pinned by tests, since macro attributes
+// cannot reference consts).
+const DEFAULT_BEDROCK_MODEL: &str = runtara_ai::defaults::DEFAULT_BEDROCK_MODEL;
+
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
@@ -360,8 +365,8 @@ pub struct TextCompletionInput {
     #[field(
         display_name = "Model",
         description = "The Bedrock model ID to use (Claude or Titan)",
-        example = "anthropic.claude-3-5-sonnet-20240620-v1:0",
-        default = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        example = "anthropic.claude-sonnet-4-6",
+        default = "anthropic.claude-sonnet-4-6"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -435,7 +440,7 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
 
     let model = input
         .model
-        .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string());
+        .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.to_string());
 
     let (request_body, is_claude) = if model.starts_with("anthropic.claude") {
         let mut body = json!({
@@ -747,7 +752,7 @@ pub struct StructuredOutputInput {
     #[field(
         display_name = "Model",
         description = "The Bedrock model to use",
-        example = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        example = "anthropic.claude-sonnet-4-6"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -918,7 +923,7 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, Ag
 
     let model = input
         .model
-        .unwrap_or_else(|| "anthropic.claude-sonnet-4-6".to_string());
+        .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.to_string());
 
     // Only Anthropic Claude models support vision in Bedrock.
     if !bedrock_vision_model_supported(&model) {
@@ -1161,7 +1166,7 @@ pub struct BedrockInvokeModelInput {
     #[field(
         display_name = "Model ID",
         description = "The Bedrock model ID to invoke",
-        example = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        example = "anthropic.claude-sonnet-4-6"
     )]
     pub model_id: String,
 
@@ -1614,6 +1619,35 @@ mod tests {
             max_tokens: None,
             temperature: None,
         }
+    }
+
+    // `#[field(default/example = ...)]` are attribute literals and cannot
+    // reference consts, so pin them to the shared default here — otherwise
+    // the authoring metadata can silently drift from the runtime fallbacks.
+    #[test]
+    fn model_field_metadata_matches_shared_default() {
+        use runtara_dsl::agent_meta::{InputFieldMeta, InputTypeMeta};
+
+        fn field(meta: &'static InputTypeMeta, name: &str) -> &'static InputFieldMeta {
+            meta.fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{} has no field {}", meta.type_name, name))
+        }
+
+        let text = field(&__INPUT_META_TextCompletionInput, "model");
+        assert_eq!(text.default_value, Some(DEFAULT_BEDROCK_MODEL));
+        assert_eq!(text.example, Some(DEFAULT_BEDROCK_MODEL));
+
+        let structured = field(&__INPUT_META_StructuredOutputInput, "model");
+        assert_eq!(structured.example, Some(DEFAULT_BEDROCK_MODEL));
+
+        let vision = field(&__INPUT_META_VisionToTextInput, "model");
+        assert_eq!(vision.default_value, Some(DEFAULT_BEDROCK_MODEL));
+        assert_eq!(vision.example, Some(DEFAULT_BEDROCK_MODEL));
+
+        let invoke = field(&__INPUT_META_BedrockInvokeModelInput, "model_id");
+        assert_eq!(invoke.example, Some(DEFAULT_BEDROCK_MODEL));
     }
 
     #[test]

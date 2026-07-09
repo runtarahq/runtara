@@ -10,11 +10,10 @@ use crate::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionRequestBuilder,
     CompletionResponse, Usage,
 };
+use crate::defaults::DEFAULT_BEDROCK_MODEL;
 use crate::message::{self, AssistantContent, Message, UserContent};
 use crate::one_or_many::OneOrMany;
 use serde_json::{Value, json};
-
-const DEFAULT_BEDROCK_MODEL: &str = "anthropic.claude-sonnet-4-6";
 
 // ================================================================
 // Client

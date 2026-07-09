@@ -130,6 +130,9 @@ pub struct RawConnection {
 
 const PROVIDER_OPENAI: &str = runtara_ai::provider::PROVIDER_OPENAI;
 const PROVIDER_BEDROCK: &str = runtara_ai::provider::PROVIDER_BEDROCK;
+const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
+const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
+const DEFAULT_BEDROCK_MODEL: &str = runtara_ai::defaults::DEFAULT_BEDROCK_MODEL;
 // Only referenced from the host-only `agent_info()`; the wasm component
 // resolves integrations at runtime via the connection proxy.
 #[cfg(not(target_arch = "wasm32"))]
@@ -464,7 +467,10 @@ fn text_completion_openai(
     }
     messages.push(json!({"role": "user", "content": input.prompt}));
 
-    let model = input.model.clone().unwrap_or_else(|| "gpt-4".to_string());
+    let model = input
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
     let is_o_series = is_openai_o_series(&model);
 
     let mut body = json!({
@@ -525,7 +531,7 @@ fn text_completion_openai_structured(
     messages.push(json!({"role": "user", "content": input.prompt}));
 
     let mut body = json!({
-        "model": input.model.clone().unwrap_or_else(|| "gpt-4o-mini".to_string()),
+        "model": input.model.clone().unwrap_or_else(|| DEFAULT_OPENAI_MINI_MODEL.to_string()),
         "messages": messages,
         "response_format": {
             "type": "json_schema",
@@ -573,7 +579,7 @@ fn text_completion_bedrock(
     let model = input
         .model
         .clone()
-        .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string());
+        .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.to_string());
 
     let (request_body, is_claude) = build_bedrock_text_request(
         &input.prompt,
@@ -619,7 +625,7 @@ fn text_completion_bedrock_structured(
     let model = input
         .model
         .clone()
-        .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string());
+        .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.to_string());
     let (request_body, is_claude) = build_bedrock_text_request(
         &enhanced_prompt,
         input.system_prompt.as_deref(),
@@ -1637,7 +1643,10 @@ fn vision_to_text_openai(
         }));
     }
 
-    let model = input.model.clone().unwrap_or_else(|| "gpt-4o".to_string());
+    let model = input
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
     let is_o_series = is_openai_o_series(&model);
 
     let mut body = json!({
@@ -1693,7 +1702,7 @@ fn vision_to_text_bedrock(
     let model = input
         .model
         .clone()
-        .unwrap_or_else(|| "anthropic.claude-sonnet-4-6".to_string());
+        .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.to_string());
 
     // Only Anthropic Claude models support vision in Bedrock.
     if !bedrock_vision_model_supported(&model) {
@@ -2628,6 +2637,30 @@ mod tests {
             parameters: serde_json::Value::Null,
             rate_limit_config: None,
         }
+    }
+
+    // `#[field(example = ...)]` values are attribute literals and cannot
+    // reference consts, so pin the model examples to the shared defaults here
+    // (the runtime fallbacks already reference the consts directly).
+    #[test]
+    fn model_field_examples_match_shared_defaults() {
+        use runtara_dsl::agent_meta::InputTypeMeta;
+
+        fn model_example(meta: &'static InputTypeMeta) -> Option<&'static str> {
+            meta.fields
+                .iter()
+                .find(|f| f.name == "model")
+                .and_then(|f| f.example)
+        }
+
+        assert_eq!(
+            model_example(&__INPUT_META_TextCompletionInput),
+            Some(DEFAULT_OPENAI_MODEL)
+        );
+        assert_eq!(
+            model_example(&__INPUT_META_VisionToTextInput),
+            Some(DEFAULT_OPENAI_MODEL)
+        );
     }
 
     #[test]
