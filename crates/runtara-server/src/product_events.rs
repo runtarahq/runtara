@@ -860,7 +860,7 @@ mod tests {
             eprintln!("Skipping test: VALKEY_HOST not set");
             return;
         };
-        let client = redis::Client::open(cfg.connection_url()).expect("open valkey client");
+        let client = crate::valkey::open_client(&cfg.connection_url()).expect("open valkey client");
         let manager = ConnectionManager::new(client)
             .await
             .expect("connect valkey");
@@ -887,7 +887,7 @@ mod tests {
             eprintln!("Skipping test: VALKEY_HOST not set");
             return;
         };
-        let client = redis::Client::open(cfg.connection_url()).expect("open valkey client");
+        let client = crate::valkey::open_client(&cfg.connection_url()).expect("open valkey client");
         let manager = ConnectionManager::new(client)
             .await
             .expect("connect valkey");

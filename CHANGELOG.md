@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
+  connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
+  self-signed or private-CA certificate with full verification;
+  `VALKEY_TLS_INSECURE=1` (strict opt-in — only `1/true/yes/on`) skips
+  verification for local testing, and a configured CA always wins over
+  insecure mode. Connection credentials are now percent-encoded in the URL so
+  passwords containing `@ / : # %` work, IPv6 hosts are bracketed, a CA file
+  without a PEM certificate block is rejected at client build with an error
+  naming `VALKEY_TLS_CA_CERT`, and debug-logging `ValkeyConfig` or the
+  compilation worker config redacts credentials instead of printing them.
 - Two new `object-model` agent capabilities give workflows raw SQL against the
   tenant object-model database: `query-sql` (reads, DB-enforced `READ ONLY`
   transaction, optional `result_schema` for typed decoding of columns generic

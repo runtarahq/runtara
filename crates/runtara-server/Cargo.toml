@@ -92,7 +92,14 @@ jsonschema = "0.26"
 croner = "2"
 
 # Redis/Valkey
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+# tokio-rustls-comp enables `rediss://` TLS URLs; tls-rustls-insecure allows the
+# `#insecure` URL fragment (skip server-cert verification, local testing only).
+redis = { version = "0.27", features = [
+    "tokio-comp",
+    "connection-manager",
+    "tokio-rustls-comp",
+    "tls-rustls-insecure",
+] }
 
 # JWT authentication
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }

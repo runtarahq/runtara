@@ -34,7 +34,7 @@ macro_rules! redis_url_or_skip {
 /// so a manager cached by an earlier test is driven by a now-dropped runtime and every later op
 /// fails with "broken pipe". A per-test manager is bound to the current runtime and works.
 async fn fresh_manager(url: &str) -> redis::aio::ConnectionManager {
-    let client = redis::Client::open(url).expect("open valkey client");
+    let client = runtara_server::valkey::open_client(url).expect("open valkey client");
     redis::aio::ConnectionManager::new(client)
         .await
         .expect("connect valkey")

@@ -151,6 +151,11 @@ export VALKEY_HOST=localhost
 cargo run -p runtara-server --release
 ```
 
+Valkey supports auth (`VALKEY_USER` / `VALKEY_PASSWORD`) and TLS: set
+`VALKEY_TLS=1`, plus `VALKEY_TLS_CA_CERT=/path/cert.pem` to trust a
+self-signed certificate or `VALKEY_TLS_INSECURE=1` to skip verification
+(local testing only).
+
 Default local ports:
 
 | Component | Default port |

@@ -1404,7 +1404,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Start cleanup task for Redis streams
         tokio::spawn(async move {
             let redis_url = cleanup_config.connection_url();
-            match redis::Client::open(redis_url.as_str()) {
+            match valkey::open_client(redis_url.as_str()) {
                 Ok(redis_client) => {
                     valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
                 }

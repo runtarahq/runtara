@@ -21,7 +21,7 @@ use crate::shutdown::ShutdownSignal;
 use crate::valkey::compilation_queue::{CompilationQueue, CompilationRequest};
 
 /// Configuration for the compilation worker
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompilationWorkerConfig {
     /// Redis/Valkey connection URL
     pub redis_url: String,
@@ -29,6 +29,21 @@ pub struct CompilationWorkerConfig {
     pub dequeue_timeout_secs: u64,
     /// Connection service URL for compiled workflows
     pub connection_service_url: Option<String>,
+}
+
+/// Manual `Debug` so logging this config can never leak the password embedded
+/// in the redis URL.
+impl std::fmt::Debug for CompilationWorkerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompilationWorkerConfig")
+            .field(
+                "redis_url",
+                &crate::valkey::redact_credentials(&self.redis_url),
+            )
+            .field("dequeue_timeout_secs", &self.dequeue_timeout_secs)
+            .field("connection_service_url", &self.connection_service_url)
+            .finish()
+    }
 }
 
 impl CompilationWorkerConfig {
@@ -459,6 +474,26 @@ mod tests {
         assert!(debug_str.contains("dequeue_timeout_secs"));
         assert!(debug_str.contains("10"));
         assert!(debug_str.contains("connection_service_url"));
+    }
+
+    #[test]
+    fn test_compilation_worker_config_debug_redacts_credentials() {
+        let config = CompilationWorkerConfig {
+            redis_url: "rediss://app:s3cret%40pw@valkey.internal:6390".to_string(),
+            dequeue_timeout_secs: 10,
+            connection_service_url: None,
+        };
+
+        let debug_str = format!("{:?}", config);
+        assert!(
+            !debug_str.contains("s3cret"),
+            "password leaked: {debug_str}"
+        );
+        assert!(!debug_str.contains("app:"), "username leaked: {debug_str}");
+        assert!(
+            debug_str.contains("rediss://***@valkey.internal:6390"),
+            "host/port must stay visible for debugging: {debug_str}"
+        );
     }
 
     #[test]

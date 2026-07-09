@@ -143,6 +143,9 @@ mod tests {
             trigger_stream_prefix: prefix.to_string(),
             trigger_consumer_group: "runtara-trigger-workers".to_string(),
             trigger_stream_maxlen: crate::valkey::DEFAULT_TRIGGER_STREAM_MAXLEN,
+            tls: false,
+            tls_insecure: false,
+            tls_ca_cert: None,
         }
     }
 

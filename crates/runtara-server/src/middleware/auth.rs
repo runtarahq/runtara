@@ -642,8 +642,8 @@ mod tests {
                 // to AUTH_MEMBERSHIP_UNAVAILABLE/503 instead of the expected status). A per-test
                 // manager is bound to the current runtime and behaves correctly.
                 Some(cfg) => {
-                    let client =
-                        redis::Client::open(cfg.connection_url()).expect("open valkey client");
+                    let client = crate::valkey::open_client(&cfg.connection_url())
+                        .expect("open valkey client");
                     redis::aio::ConnectionManager::new(client)
                         .await
                         .expect("connect valkey")
