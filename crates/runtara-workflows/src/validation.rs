@@ -1259,6 +1259,12 @@ pub enum ValidationWarning {
         reference_path: String,
         suggested_path: String,
     },
+    /// A `data.*` reference inside a Split/While subgraph cannot be checked
+    /// because no schema is declared for `data` in that scope. Declaring
+    /// `inputSchema` on the enclosing Split step (or on the workflow, for a
+    /// top-level While) makes the reference checkable — otherwise a typo
+    /// silently resolves to null at runtime.
+    UnverifiedDataReference { step_id: String, reference: String },
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -1440,6 +1446,13 @@ impl std::fmt::Display for ValidationWarning {
                     f,
                     "[W053] Step '{}' references the onError error context via '{}'. Use the canonical '{}' instead; the bare root still resolves for back-compat but is not typo-checked.",
                     step_id, reference_path, suggested_path
+                )
+            }
+            ValidationWarning::UnverifiedDataReference { step_id, reference } => {
+                write!(
+                    f,
+                    "[W080] Step '{}': reference '{}' cannot be checked — no schema is declared for `data` in this scope. Declare inputSchema on the enclosing Split step (or the workflow) to catch typos; an unknown field silently resolves to null at runtime.",
+                    step_id, reference
                 )
             }
         }
@@ -2666,14 +2679,70 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
 // Phase 2.6: Static Template Reference Validation
 // ============================================================================
 
+/// What `data.*` resolves against in the scope currently being validated.
+///
+/// The runtime rebinds `data` per scope: a Split subgraph sees the current
+/// array element, a While subgraph sees the enclosing scope's `data`
+/// unchanged, and the top-level graph sees the workflow input. Reference
+/// validation mirrors that by threading the governing schema (when one is
+/// declared) into subgraph recursion instead of skipping `data.*` checks.
+#[derive(Clone, Copy)]
+enum DataScope<'a> {
+    /// Top-level graph or WaitForSignal `onWait` handler: `data.*` references
+    /// require the graph's own `inputSchema` and error when it is absent.
+    RequireSchema,
+    /// Subgraph whose `data` has a known schema: a Split's declared
+    /// `input_schema`, or the schema a While body inherits from its enclosing
+    /// scope. Non-empty by construction.
+    Declared(&'a HashMap<String, SchemaField>),
+    /// Subgraph whose `data` has no declared schema anywhere in the enclosing
+    /// chain: `data.*` references are unverifiable and only warn.
+    Unchecked,
+}
+
+impl<'a> DataScope<'a> {
+    /// The scope a Split body validates `data.*` against: the step's declared
+    /// iteration schema, or unverifiable when none is declared.
+    fn for_split_body(input_schema: &'a HashMap<String, SchemaField>) -> DataScope<'a> {
+        if input_schema.is_empty() {
+            DataScope::Unchecked
+        } else {
+            DataScope::Declared(input_schema)
+        }
+    }
+
+    /// The scope a While body validates `data.*` against. While passes the
+    /// enclosing `data` through unchanged, so the body inherits the enclosing
+    /// schema — materializing the enclosing graph's own `inputSchema` when
+    /// validation was anchored to it (the subgraph is a different graph, so
+    /// `RequireSchema` cannot simply be forwarded).
+    fn for_while_body(self, enclosing_graph: &'a ExecutionGraph) -> DataScope<'a> {
+        match self {
+            DataScope::RequireSchema => {
+                if enclosing_graph.input_schema.is_empty() {
+                    DataScope::Unchecked
+                } else {
+                    DataScope::Declared(&enclosing_graph.input_schema)
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 fn validate_template_static_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    validate_template_static_references_with_context(graph, &HashSet::new(), false, result);
+    validate_template_static_references_with_context(
+        graph,
+        &HashSet::new(),
+        DataScope::RequireSchema,
+        result,
+    );
 }
 
 fn validate_template_static_references_with_context(
     graph: &ExecutionGraph,
     inherited_variables: &HashSet<String>,
-    has_implicit_data: bool,
+    data_scope: DataScope<'_>,
     result: &mut ValidationResult,
 ) {
     let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
@@ -2692,7 +2761,7 @@ fn validate_template_static_references_with_context(
         step_ids: &step_ids,
         variable_names: &variable_names,
         available_variables: &available_variables,
-        has_implicit_data,
+        data_scope,
         adjacency: &adjacency,
     };
 
@@ -2714,7 +2783,7 @@ fn validate_template_static_references_with_context(
                 validate_template_static_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
-                    true,
+                    DataScope::for_split_body(&split_step.input_schema),
                     result,
                 );
             }
@@ -2722,7 +2791,7 @@ fn validate_template_static_references_with_context(
                 validate_template_static_references_with_context(
                     &while_step.subgraph,
                     &HashSet::new(),
-                    true,
+                    data_scope.for_while_body(graph),
                     result,
                 );
             }
@@ -2735,7 +2804,7 @@ fn validate_template_static_references_with_context(
                     validate_template_static_references_with_context(
                         on_wait,
                         &injected_vars,
-                        false,
+                        DataScope::RequireSchema,
                         result,
                     );
                 }
@@ -2750,7 +2819,7 @@ struct TemplateStaticReferenceContext<'a> {
     step_ids: &'a HashSet<String>,
     variable_names: &'a HashSet<String>,
     available_variables: &'a [String],
-    has_implicit_data: bool,
+    data_scope: DataScope<'a>,
     adjacency: &'a HashMap<String, Vec<String>>,
 }
 
@@ -2802,29 +2871,47 @@ fn validate_template_static_reference(
 
     if let Some((root, field_name)) = parse_reference(reference) {
         match root {
-            "data" => {
-                if context.has_implicit_data {
-                    return;
+            "data" => match context.data_scope {
+                DataScope::RequireSchema => {
+                    if context.graph.input_schema.is_empty() {
+                        push_template_reference_issue(
+                            result,
+                            step_id,
+                            reference,
+                            "no inputSchema is defined for data.* references",
+                        );
+                    } else {
+                        let mut nested_result = ValidationResult::default();
+                        validate_schema_reference_path(
+                            step_id,
+                            reference,
+                            &["data"],
+                            &context.graph.input_schema,
+                            &mut nested_result,
+                        );
+                        push_template_nested_issues(result, step_id, reference, nested_result);
+                    }
                 }
-                if context.graph.input_schema.is_empty() {
-                    push_template_reference_issue(
-                        result,
-                        step_id,
-                        reference,
-                        "no inputSchema is defined for data.* references",
-                    );
-                } else {
+                DataScope::Declared(schema) => {
                     let mut nested_result = ValidationResult::default();
                     validate_schema_reference_path(
                         step_id,
                         reference,
                         &["data"],
-                        &context.graph.input_schema,
+                        schema,
                         &mut nested_result,
                     );
                     push_template_nested_issues(result, step_id, reference, nested_result);
                 }
-            }
+                DataScope::Unchecked => {
+                    push_template_reference_issue(
+                        result,
+                        step_id,
+                        reference,
+                        "no schema is declared for `data` in this scope; declare inputSchema on the enclosing Split step (or the workflow) to make it checkable",
+                    );
+                }
+            },
             "variables" => {
                 if !context.variable_names.contains(field_name) {
                     let suggestion = find_similar_name(field_name, context.available_variables);
@@ -4916,8 +5003,8 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
     // Start validation with no inherited variables and require inputSchema for data references
     validate_data_and_variable_references_with_context(
         graph,
-        &HashSet::new(), // No inherited variables at top level
-        false,           // Top level requires inputSchema for data references
+        &HashSet::new(),          // No inherited variables at top level
+        DataScope::RequireSchema, // Top level requires inputSchema for data references
         result,
     );
 }
@@ -4927,12 +5014,12 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
 /// # Arguments
 /// * `graph` - The execution graph to validate
 /// * `inherited_variables` - Variable names inherited from parent scope (e.g., Split config.variables)
-/// * `has_implicit_data` - If true, data.* references don't require inputSchema (e.g., in Split subgraphs)
+/// * `data_scope` - What `data.*` references resolve against in this scope (see [`DataScope`])
 /// * `result` - Accumulator for validation errors
 fn validate_data_and_variable_references_with_context(
     graph: &ExecutionGraph,
     inherited_variables: &HashSet<String>,
-    has_implicit_data: bool,
+    data_scope: DataScope<'_>,
     result: &mut ValidationResult,
 ) {
     // Merge inherited variables with graph's own variables + built-in runtime variables.
@@ -4962,7 +5049,7 @@ fn validate_data_and_variable_references_with_context(
                 step_id,
                 reference,
                 graph,
-                has_implicit_data,
+                data_scope,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -4980,7 +5067,7 @@ fn validate_data_and_variable_references_with_context(
                 step_id,
                 reference,
                 graph,
-                has_implicit_data,
+                data_scope,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -4993,7 +5080,7 @@ fn validate_data_and_variable_references_with_context(
                 step_id,
                 reference,
                 graph,
-                has_implicit_data,
+                data_scope,
                 &all_variables,
                 &available_variables,
                 true,
@@ -5009,7 +5096,8 @@ fn validate_data_and_variable_references_with_context(
             Step::Split(split_step) => {
                 // Split subgraphs:
                 // 1. Inherit config.variables as available variables
-                // 2. Have implicit data access (data.* refers to iteration item)
+                // 2. Rebind `data` to the current iteration item, whose shape
+                //    is the step's declared `input_schema` (when present)
                 let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
@@ -5025,13 +5113,14 @@ fn validate_data_and_variable_references_with_context(
                 validate_data_and_variable_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
-                    true, // Split subgraphs have implicit data access
+                    DataScope::for_split_body(&split_step.input_schema),
                     result,
                 );
             }
             Step::While(while_step) => {
                 // While subgraphs:
-                // 1. Have implicit data access (data.* refers to iteration item)
+                // 1. See the enclosing scope's `data` unchanged (the runtime
+                //    passes it through), so they inherit the enclosing schema
                 // 2. No config.variables, but the runtime injects per-iteration vars
                 let mut injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
                     .iter()
@@ -5045,7 +5134,7 @@ fn validate_data_and_variable_references_with_context(
                 validate_data_and_variable_references_with_context(
                     &while_step.subgraph,
                     &injected_vars,
-                    true, // While subgraphs have implicit data access
+                    data_scope.for_while_body(graph),
                     result,
                 );
             }
@@ -5061,7 +5150,7 @@ fn validate_data_and_variable_references_with_context(
                     validate_data_and_variable_references_with_context(
                         on_wait,
                         &injected_vars,
-                        false,
+                        DataScope::RequireSchema,
                         result,
                     );
                 }
@@ -5084,7 +5173,7 @@ fn validate_reference_root(
     step_id: &str,
     reference: &str,
     graph: &ExecutionGraph,
-    has_implicit_data: bool,
+    data_scope: DataScope<'_>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     loop_allowed: bool,
@@ -5096,25 +5185,14 @@ fn validate_reference_root(
             let Some((_, _)) = parse_reference(reference) else {
                 return;
             };
-            // If this is a Split/While subgraph, data.* references are implicitly valid
-            // (they refer to the current iteration item)
-            if !has_implicit_data {
-                if graph.input_schema.is_empty() {
-                    result.errors.push(ValidationError::MissingInputSchema {
-                        step_id: step_id.to_string(),
-                        reference: reference.to_string(),
-                    });
-                } else {
-                    validate_schema_reference_path(
-                        step_id,
-                        reference,
-                        &["data"],
-                        &graph.input_schema,
-                        result,
-                    );
-                }
-            }
-            // If has_implicit_data is true, any data.* reference is valid
+            validate_data_reference_in_scope(
+                step_id,
+                reference,
+                &["data"],
+                graph,
+                data_scope,
+                result,
+            );
         }
         "variables" => {
             let Some((_, field_name)) = parse_reference(reference) else {
@@ -5145,7 +5223,7 @@ fn validate_reference_root(
                 step_id,
                 reference,
                 graph,
-                has_implicit_data,
+                data_scope,
                 all_variables,
                 available_variables,
                 result,
@@ -5190,6 +5268,49 @@ fn validate_reference_root(
     }
 }
 
+/// Validate a data-rooted reference against whatever governs `data` in the
+/// current scope (see [`DataScope`]): the graph's own required `inputSchema`,
+/// a schema inherited from an enclosing Split, or nothing — in which case the
+/// reference is unverifiable and only warns.
+fn validate_data_reference_in_scope(
+    step_id: &str,
+    reference: &str,
+    root_segments: &[&str],
+    graph: &ExecutionGraph,
+    data_scope: DataScope<'_>,
+    result: &mut ValidationResult,
+) {
+    match data_scope {
+        DataScope::RequireSchema => {
+            if graph.input_schema.is_empty() {
+                result.errors.push(ValidationError::MissingInputSchema {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                });
+            } else {
+                validate_schema_reference_path(
+                    step_id,
+                    reference,
+                    root_segments,
+                    &graph.input_schema,
+                    result,
+                );
+            }
+        }
+        DataScope::Declared(schema) => {
+            validate_schema_reference_path(step_id, reference, root_segments, schema, result);
+        }
+        DataScope::Unchecked => {
+            result
+                .warnings
+                .push(ValidationWarning::UnverifiedDataReference {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                });
+        }
+    }
+}
+
 /// Validate a `workflow.*` reference. `build_source` in the direct-json
 /// runtime mirrors `workflow.inputs.data`/`workflow.inputs.variables` from the
 /// exact same `data`/`variables` scope as the bare roots, so those two shapes
@@ -5201,7 +5322,7 @@ fn validate_workflow_reference(
     step_id: &str,
     reference: &str,
     graph: &ExecutionGraph,
-    has_implicit_data: bool,
+    data_scope: DataScope<'_>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     result: &mut ValidationResult,
@@ -5214,22 +5335,14 @@ fn validate_workflow_reference(
     }
 
     if reference.starts_with("workflow.inputs.data.") {
-        if !has_implicit_data {
-            if graph.input_schema.is_empty() {
-                result.errors.push(ValidationError::MissingInputSchema {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                });
-            } else {
-                validate_schema_reference_path(
-                    step_id,
-                    reference,
-                    &["workflow", "inputs", "data"],
-                    &graph.input_schema,
-                    result,
-                );
-            }
-        }
+        validate_data_reference_in_scope(
+            step_id,
+            reference,
+            &["workflow", "inputs", "data"],
+            graph,
+            data_scope,
+            result,
+        );
         return;
     }
 
@@ -10377,6 +10490,350 @@ mod tests {
             relevant_errors.is_empty(),
             "Split subgraph should allow data.* and config.variables; got errors: {:?}",
             relevant_errors
+        );
+    }
+
+    // === Split/While iteration-schema validation (E051 / W080) ===
+
+    fn subgraph_with_agent_mapping(mapping: InputMapping) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "sub_agent".to_string(),
+            create_agent_step("sub_agent", "transform", Some(mapping)),
+        );
+        steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+        let mut graph = create_basic_graph(steps, "sub_agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "sub_agent".to_string(),
+            to_step: "sub_finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+        graph
+    }
+
+    fn split_step_with_schema(
+        id: &str,
+        subgraph: ExecutionGraph,
+        input_schema: HashMap<String, SchemaField>,
+    ) -> Step {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
+        Step::Split(SplitStep {
+            id: id.to_string(),
+            name: None,
+            subgraph: Box::new(subgraph),
+            config: Some(SplitConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!([{ "id": 1, "name": "item1" }]),
+                }),
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                variables: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: None,
+                convert_single_value: None,
+                batch_size: None,
+            }),
+            input_schema,
+            output_schema: HashMap::new(),
+            breakpoint: None,
+            durable: None,
+        })
+    }
+
+    fn always_true_condition() -> runtara_dsl::ConditionExpression {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+            ImmediateValue,
+        };
+        ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(2),
+                })),
+            ],
+        })
+    }
+
+    fn wrap_in_main_graph(step_id: &str, step: Step) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(step_id.to_string(), step);
+        steps.insert(
+            "main_finish".to_string(),
+            create_finish_step("main_finish", None),
+        );
+        let mut graph = create_basic_graph(steps, step_id);
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: step_id.to_string(),
+            to_step: "main_finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+        graph
+    }
+
+    fn item_schema() -> HashMap<String, SchemaField> {
+        let mut nested_props = HashMap::new();
+        nested_props.insert(
+            "property".to_string(),
+            schema_field(SchemaFieldType::String),
+        );
+        let mut schema = HashMap::new();
+        schema.insert("id".to_string(), schema_field(SchemaFieldType::Integer));
+        schema.insert("name".to_string(), schema_field(SchemaFieldType::String));
+        schema.insert("nested".to_string(), object_schema_field(nested_props));
+        schema
+    }
+
+    #[test]
+    fn test_split_subgraph_data_typo_against_declared_schema_errors() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("item_name".to_string(), ref_value("data.nmae"));
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sub_agent" && field_name == "nmae"
+            )),
+            "typo against declared Split inputSchema should be an error; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_data_refs_valid_against_declared_schema() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("value".to_string(), ref_value("data.id"));
+        mapping.insert(
+            "property_path".to_string(),
+            ref_value("data.nested.property"),
+        );
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.is_empty(),
+            "valid refs against declared Split inputSchema should pass; got: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ValidationWarning::UnverifiedDataReference { .. })),
+            "declared schema means refs are checked, not unverified; got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_without_schema_warns_unverified_data_reference() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("value".to_string(), ref_value("data.id"));
+        mapping.insert("property_path".to_string(), ref_value("data.name"));
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema(
+                "split",
+                subgraph_with_agent_mapping(mapping),
+                HashMap::new(),
+            ),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.is_empty(),
+            "schema-less Split must not error on data.* refs; got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::UnverifiedDataReference { step_id, reference }
+                    if step_id == "sub_agent" && reference == "data.id"
+            )),
+            "schema-less Split should warn that data.* refs are unverifiable; got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_while_body_data_typo_validated_against_workflow_schema() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("value".to_string(), ref_value("data.nmae"));
+
+        let mut graph = wrap_in_main_graph(
+            "loop",
+            create_while_step(
+                "loop",
+                always_true_condition(),
+                subgraph_with_agent_mapping(mapping),
+                Some(3),
+            ),
+        );
+        graph.input_schema = item_schema();
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sub_agent" && field_name == "nmae"
+            )),
+            "While body sees the parent's data, so a typo against the workflow inputSchema should error; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_while_body_without_any_schema_warns_unverified_data_reference() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("value".to_string(), ref_value("data.id"));
+        mapping.insert("property_path".to_string(), ref_value("data.name"));
+
+        let graph = wrap_in_main_graph(
+            "loop",
+            create_while_step(
+                "loop",
+                always_true_condition(),
+                subgraph_with_agent_mapping(mapping),
+                Some(3),
+            ),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.is_empty(),
+            "While body data.* refs without any schema must not error; got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::UnverifiedDataReference { step_id, reference }
+                    if step_id == "sub_agent" && reference == "data.id"
+            )),
+            "While body data.* refs without any schema should warn; got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_while_nested_in_split_inherits_split_schema() {
+        let mut mapping = InputMapping::new();
+        mapping.insert("value".to_string(), ref_value("data.nmae"));
+
+        let while_step = create_while_step(
+            "inner_loop",
+            always_true_condition(),
+            subgraph_with_agent_mapping(mapping),
+            Some(3),
+        );
+        let mut split_body_steps = HashMap::new();
+        split_body_steps.insert("inner_loop".to_string(), while_step);
+        split_body_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+        let mut split_body = create_basic_graph(split_body_steps, "inner_loop");
+        split_body.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "inner_loop".to_string(),
+            to_step: "sub_finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema("split", split_body, item_schema()),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sub_agent" && field_name == "nmae"
+            )),
+            "While nested in a Split inherits the Split's iteration schema; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_workflow_inputs_data_typo_errors() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "item_name".to_string(),
+            ref_value("workflow.inputs.data.nmae"),
+        );
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sub_agent" && field_name == "nmae"
+            )),
+            "workflow.inputs.data mirrors the iteration data, so typos should error; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_template_data_typo_warns() {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "item_name".to_string(),
+            MappingValue::Template(runtara_dsl::TemplateValue {
+                value: "{{ data.nmae }}".to_string(),
+            }),
+        );
+
+        let graph = wrap_in_main_graph(
+            "split",
+            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::TemplateReferenceIssue { step_id, reference, .. }
+                    if step_id == "sub_agent" && reference == "data.nmae"
+            )),
+            "template typo against declared Split inputSchema should warn; got: {:?}",
+            result.warnings
         );
     }
 
