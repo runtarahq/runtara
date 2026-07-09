@@ -4747,7 +4747,6 @@ dependencies = [
  "futures",
  "nix",
  "percent-encoding",
- "runtara-agents",
  "runtara-component-host",
  "runtara-core",
  "runtara-dsl",
