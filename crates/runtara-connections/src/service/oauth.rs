@@ -147,9 +147,11 @@ impl OAuthService {
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?;
 
-        // Build authorization URL
+        // Build authorization URL. `response_type=code` is mandatory for the
+        // authorization-code grant (RFC 6749 §4.1.1); strict providers (Intuit)
+        // reject the request outright without it.
         let auth_url = format!(
-            "{}?client_id={}&redirect_uri={}&scope={}&state={}{}",
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}",
             effective.auth_url,
             urlencoding::encode(client_id),
             urlencoding::encode(&redirect_uri),

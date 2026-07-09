@@ -100,6 +100,9 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
         url.starts_with("https://appcenter.intuit.com/connect/oauth2"),
         "unexpected authorize URL: {url}"
     );
+    // response_type=code is mandatory for the auth-code grant (RFC 6749 §4.1.1);
+    // Intuit rejects the request without it ("response_type query parameter is missing").
+    assert!(url.contains("response_type=code"), "url: {url}");
     assert!(url.contains("client_id=QBCID"), "url: {url}");
     // Default scopes from the descriptor (dots are URL-unreserved, so unencoded).
     assert!(
