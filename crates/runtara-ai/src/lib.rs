@@ -11,6 +11,7 @@
 //! - Shared types for conversation history, tool call logs, and usage tracking
 
 pub mod completion;
+pub mod defaults;
 pub mod message;
 pub mod one_or_many;
 pub mod orchestration;

@@ -4242,6 +4242,7 @@ name = "runtara-agent-bedrock"
 version = "8.2.4"
 dependencies = [
  "runtara-agent-macro",
+ "runtara-ai",
  "runtara-dsl",
  "runtara-http",
  "serde",
@@ -4433,6 +4434,7 @@ name = "runtara-agent-openai"
 version = "8.2.4"
 dependencies = [
  "runtara-agent-macro",
+ "runtara-ai",
  "runtara-dsl",
  "runtara-http",
  "serde",

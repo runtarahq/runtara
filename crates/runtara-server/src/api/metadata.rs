@@ -73,19 +73,10 @@ pub async fn get_llm_models_handler(
             let catalog = runtara_ai::providers::bedrock_models::catalog_json();
             (StatusCode::OK, Json(catalog))
         }
-        "openai" | "openai_api_key" => (
-            StatusCode::OK,
-            Json(json!({
-                "generatedAt": null,
-                "source": "static OpenAI AI Agent defaults",
-                "models": [
-                    {"provider": "OpenAI", "modelName": "GPT-4.1", "modelId": "gpt-4.1", "recommendedForAiAgent": true},
-                    {"provider": "OpenAI", "modelName": "GPT-4.1 Mini", "modelId": "gpt-4.1-mini", "recommendedForAiAgent": true},
-                    {"provider": "OpenAI", "modelName": "GPT-4o", "modelId": "gpt-4o", "recommendedForAiAgent": true},
-                    {"provider": "OpenAI", "modelName": "GPT-4o Mini", "modelId": "gpt-4o-mini", "recommendedForAiAgent": true}
-                ]
-            })),
-        ),
+        "openai" | "openai_api_key" => {
+            let catalog = runtara_ai::providers::openai_models::catalog_json();
+            (StatusCode::OK, Json(catalog))
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(json!({

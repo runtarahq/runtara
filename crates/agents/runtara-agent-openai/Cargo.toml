@@ -26,6 +26,9 @@ serde_json = { workspace = true }
 # the `.wasm` — the JSON is a build artifact, never hand-edited.
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+# Shared per-provider default model ids (runtara_ai::defaults); wasm-safe with
+# default features off, matching how runtara-agent-ai-tools consumes runtara-ai.
+runtara-ai = { path = "../../runtara-ai", default-features = false }
 
 [package.metadata.component]
 package = "runtara:agent-openai"

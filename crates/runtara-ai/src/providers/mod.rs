@@ -5,3 +5,4 @@
 pub mod bedrock;
 pub mod bedrock_models;
 pub mod openai;
+pub mod openai_models;

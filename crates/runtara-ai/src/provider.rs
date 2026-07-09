@@ -50,7 +50,8 @@ pub fn provider_supports_integration(provider: &str, integration_id: &str) -> bo
 ///
 /// # Arguments
 /// * `parameters` - Connection parameters JSON (must contain `api_key` in direct mode)
-/// * `model` - Model identifier (e.g., "gpt-4o"). Defaults to "gpt-4o" if None.
+/// * `model` - Model identifier (e.g., "gpt-4o"). Defaults to
+///   [`crate::defaults::DEFAULT_OPENAI_MODEL`] if None.
 /// * `connection_id` - Optional connection ID for proxy mode
 pub fn create_openai_model(
     parameters: &Value,
@@ -86,7 +87,7 @@ pub fn create_openai_model_with_connection(
         }
     };
 
-    let model_id = model.unwrap_or("gpt-4o");
+    let model_id = model.unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL);
     Ok(client.completion_model(model_id))
 }
 
