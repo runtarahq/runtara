@@ -469,20 +469,145 @@ pub async fn execute_workflow_wait(
 
 // ===== Debugging Tools =====
 
-/// Helper: fetch all step summaries with full inputs/outputs for an instance.
-async fn fetch_full_step_summaries(
+/// Cap on step records per targeted summaries fetch. Matches the REST
+/// endpoint's own hard maximum; fetches that hit it report a truncation flag
+/// instead of silently dropping records.
+const STEP_SUMMARY_FETCH_LIMIT: u32 = 500;
+/// Cap on in-flight steps listed when diagnosing an abnormally terminated
+/// execution.
+const IN_FLIGHT_FETCH_LIMIT: u32 = 50;
+
+/// Filters for a targeted step-summaries fetch. The REST endpoint always
+/// returns full inputs/outputs per record, so narrowing *which* records are
+/// fetched (by step id and/or status) is what keeps debugging loop-heavy
+/// instances bounded — an unfiltered fetch drags every step's full payload
+/// across the wire only to discard most of it.
+struct StepSummariesFetch<'a> {
+    /// Restrict to these step ids (empty = no step-id filter). Sent
+    /// comma-separated, so ids containing commas cannot be filtered on.
+    step_ids: &'a [String],
+    /// Restrict to a status ("running", "completed", "failed").
+    status: Option<&'a str>,
+    /// Maximum records returned; the response's `totalCount` still reflects
+    /// everything matching the filter. `0` fetches counts only.
+    limit: u32,
+}
+
+/// Helper: fetch step summaries (full inputs/outputs) matching the filter.
+/// Records are newest-first, so `limit: 1` yields a step id's most recent
+/// record — the same one `find_step_in_summaries` picks from a full listing.
+async fn fetch_step_summaries(
     server: &SmoMcpServer,
     workflow_id: &str,
     instance_id: &str,
+    fetch: &StepSummariesFetch<'_>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let mut query = Vec::new();
+    if !fetch.step_ids.is_empty() {
+        push_query_param(&mut query, "stepIds", &fetch.step_ids.join(","));
+    }
+    if let Some(status) = fetch.status {
+        push_query_param(&mut query, "status", status);
+    }
+    query.push(format!("limit={}", fetch.limit));
     api_get(
         server,
         &format!(
-            "/api/runtime/workflows/{}/instances/{}/steps?compact=false&limit=500",
-            workflow_id, instance_id
+            "/api/runtime/workflows/{}/instances/{}/steps?{}",
+            workflow_id,
+            instance_id,
+            query.join("&")
         ),
     )
     .await
+}
+
+/// Extract the step records from a summaries response.
+fn steps_from_summaries(summaries: &serde_json::Value) -> Vec<serde_json::Value> {
+    summaries
+        .pointer("/data/steps")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Extract the exact number of records matching the fetch's filter (the
+/// endpoint counts beyond the page limit).
+fn total_count_from_summaries(summaries: &serde_json::Value) -> u64 {
+    summaries
+        .pointer("/data/totalCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// Truncation flag for a capped fetch: `Some({returned, totalMatching})`
+/// when records beyond the page limit exist, `None` when the page is
+/// complete.
+fn truncation_flag(returned: usize, total_matching: u64) -> Option<serde_json::Value> {
+    (total_matching > returned as u64).then(|| {
+        json!({
+            "returned": returned,
+            "totalMatching": total_matching,
+        })
+    })
+}
+
+/// Wrap targeted-fetch results in the same envelope shape the `/steps`
+/// listing returns, so the shared resolvers (`find_step_in_summaries`,
+/// `resolve_reference_value`, `resolve_input_mappings`) work unchanged on a
+/// reduced step set.
+fn synthetic_summaries(steps: Vec<serde_json::Value>) -> serde_json::Value {
+    json!({ "data": { "steps": steps } })
+}
+
+/// Collect the step ids referenced as `steps.<id>...` anywhere in a step's
+/// input mapping, plus whether the synthetic `__error`/`error` root is
+/// referenced (not a real step — it resolves to the newest failed step's
+/// error envelope). Direct references, composite payloads, condition/fn
+/// arguments, and immediate values all embed the same
+/// `{valueType: "reference", value: "steps..."}` envelope shape, so one
+/// uniform walk over the mapping tree covers every place a reference can
+/// hide. Over-collecting is harmless (an extra step is fetched); the ids
+/// found here decide which steps' payloads are worth fetching at all.
+fn referenced_step_ids(mapping: &serde_json::Value) -> (std::collections::BTreeSet<String>, bool) {
+    fn walk(
+        value: &serde_json::Value,
+        ids: &mut std::collections::BTreeSet<String>,
+        wants_error: &mut bool,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if matches!(
+                    map.get("valueType"),
+                    Some(serde_json::Value::String(kind)) if kind == "reference"
+                ) && let Some(path) = map.get("value").and_then(|v| v.as_str())
+                    && let Some(rest) = path.strip_prefix("steps.")
+                {
+                    match rest.split('.').next() {
+                        Some("__error" | "error") => *wants_error = true,
+                        Some(id) if !id.is_empty() => {
+                            ids.insert(id.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                for child in map.values() {
+                    walk(child, ids, wants_error);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, ids, wants_error);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    let mut wants_error = false;
+    walk(mapping, &mut ids, &mut wants_error);
+    (ids, wants_error)
 }
 
 /// Helper: resolve a JSON path like "field.nested.0.name" against a Value.
@@ -1307,21 +1432,9 @@ pub async fn inspect_step(
     validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
-    // Fetch step summaries (full, not compact) and workflow definition in parallel
-    let summaries =
-        fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
-
-    let target = find_step_in_summaries(&summaries, &params.step_id).ok_or_else(|| {
-        rmcp::ErrorData::internal_error(
-            format!(
-                "Step '{}' not found in execution {}",
-                params.step_id, params.instance_id
-            ),
-            None,
-        )
-    })?;
-
-    // Fetch workflow definition to get inputMapping
+    // Fetch the workflow definition first: the target's inputMapping decides
+    // which other steps are needed for reference resolution, so it must be
+    // known before any step payloads are fetched.
     let workflow = api_get(
         server,
         &format!("/api/runtime/workflows/{}", params.workflow_id),
@@ -1349,10 +1462,78 @@ pub async fn inspect_step(
         .cloned()
         .unwrap_or(json!({}));
 
+    // The target step is fetched alone with `limit: 1` (newest record — the
+    // same one a full listing would resolve to), so a loop-heavy instance can
+    // neither push it out of a capped page nor drag unrelated payloads along.
+    let target_page = fetch_step_summaries(
+        server,
+        &params.workflow_id,
+        &params.instance_id,
+        &StepSummariesFetch {
+            step_ids: std::slice::from_ref(&params.step_id),
+            status: None,
+            limit: 1,
+        },
+    )
+    .await?;
+    let target = steps_from_summaries(&target_page)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                format!(
+                    "Step '{}' not found in execution {}",
+                    params.step_id, params.instance_id
+                ),
+                None,
+            )
+        })?;
+
+    // Steps referenced by the mapping are fetched as one batch; anything the
+    // mapping doesn't reference never crosses the wire.
+    let (mut ref_ids, wants_error) = referenced_step_ids(&input_mapping);
+    ref_ids.remove(&params.step_id);
+    let mut steps = vec![target.clone()];
+    let mut referenced_truncation = None;
+    if !ref_ids.is_empty() {
+        let ref_ids: Vec<String> = ref_ids.into_iter().collect();
+        let refs_page = fetch_step_summaries(
+            server,
+            &params.workflow_id,
+            &params.instance_id,
+            &StepSummariesFetch {
+                step_ids: &ref_ids,
+                status: None,
+                limit: STEP_SUMMARY_FETCH_LIMIT,
+            },
+        )
+        .await?;
+        let ref_steps = steps_from_summaries(&refs_page);
+        referenced_truncation =
+            truncation_flag(ref_steps.len(), total_count_from_summaries(&refs_page));
+        steps.extend(ref_steps);
+    }
+    if wants_error {
+        // `steps.__error` resolves to the newest failed step's error envelope.
+        let failed_page = fetch_step_summaries(
+            server,
+            &params.workflow_id,
+            &params.instance_id,
+            &StepSummariesFetch {
+                step_ids: &[],
+                status: Some("failed"),
+                limit: 1,
+            },
+        )
+        .await?;
+        steps.extend(steps_from_summaries(&failed_page));
+    }
+    let summaries = synthetic_summaries(steps);
+
     let scope_id = target.get("scopeId").and_then(|v| v.as_str());
     let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution, scope_id);
 
-    let response = json!({
+    let mut response = json!({
         "step": {
             "stepId": target.get("stepId"),
             "stepName": target.get("stepName"),
@@ -1367,6 +1548,9 @@ pub async fn inspect_step(
             .map(truncate_large_strings)
             .unwrap_or(serde_json::Value::Null),
     });
+    if let Some(truncated) = referenced_truncation {
+        response["referencedStepsTruncated"] = truncated;
+    }
 
     json_result(response)
 }
@@ -1396,15 +1580,23 @@ pub async fn trace_reference(
             }
             let step_id = parts[1];
 
-            let summaries =
-                fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
-
             if step_id == "__error" || step_id == "error" {
                 // Not a real step — the runtime injects the captured onError
                 // envelope under this synthetic id (see `error_steps` in
-                // runtara-workflow-stdlib). Resolve it via the shared resolver's
-                // "first failed step" fallback instead of requiring a literal
-                // step named `__error` to exist in the summaries.
+                // runtara-workflow-stdlib). It resolves to the newest failed
+                // step's error envelope, so only that one record is fetched.
+                let failed_page = fetch_step_summaries(
+                    server,
+                    &params.workflow_id,
+                    &params.instance_id,
+                    &StepSummariesFetch {
+                        step_ids: &[],
+                        status: Some("failed"),
+                        limit: 1,
+                    },
+                )
+                .await?;
+                let summaries = synthetic_summaries(steps_from_summaries(&failed_page));
                 let resolved = resolve_reference_value(
                     &params.reference,
                     &summaries,
@@ -1423,6 +1615,22 @@ pub async fn trace_reference(
                     }
                 }));
             }
+
+            // Only the referenced step's newest record is needed to resolve
+            // the path — fetching it alone keeps this bounded on loop-heavy
+            // instances.
+            let step_page = fetch_step_summaries(
+                server,
+                &params.workflow_id,
+                &params.instance_id,
+                &StepSummariesFetch {
+                    step_ids: &[step_id.to_string()],
+                    status: None,
+                    limit: 1,
+                },
+            )
+            .await?;
+            let summaries = synthetic_summaries(steps_from_summaries(&step_page));
 
             let step = find_step_in_summaries(&summaries, step_id).ok_or_else(|| {
                 rmcp::ErrorData::internal_error(
@@ -1477,11 +1685,11 @@ pub async fn trace_reference(
             // "Unknown reference root" rejection; the resolver-level fix (and
             // its test coverage) is what actually proves loop.* resolves given
             // a scope id, via inspect_step / resolve_reference_value directly.
-            let summaries =
-                fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
+            // Without a scope id the resolver never consults step summaries,
+            // so none are fetched.
             let resolved = resolve_reference_value(
                 &params.reference,
-                &summaries,
+                &synthetic_summaries(Vec::new()),
                 &serde_json::Value::Null,
                 None,
             )
@@ -1584,32 +1792,53 @@ pub async fn why_execution_failed(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    // Fetch all step summaries (full)
-    let summaries =
-        fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
+    // Three targeted fetches replace one full-payload listing: the failed
+    // page carries the primary failing step's payload, the running page the
+    // in-flight steps, and a count-only fetch the exact record total — each
+    // `totalCount` is exact beyond the page limit, so the summary can no
+    // longer be silently distorted by a capped listing.
+    let failed_page = fetch_step_summaries(
+        server,
+        &params.workflow_id,
+        &params.instance_id,
+        &StepSummariesFetch {
+            step_ids: &[],
+            status: Some("failed"),
+            limit: 1,
+        },
+    )
+    .await?;
+    let failed_steps = steps_from_summaries(&failed_page);
+    let failed_total = total_count_from_summaries(&failed_page);
 
-    let steps = summaries
-        .pointer("/data/steps")
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let running_page = fetch_step_summaries(
+        server,
+        &params.workflow_id,
+        &params.instance_id,
+        &StepSummariesFetch {
+            step_ids: &[],
+            status: Some("running"),
+            limit: IN_FLIGHT_FETCH_LIMIT,
+        },
+    )
+    .await?;
+    let running_steps = steps_from_summaries(&running_page);
+    let running_total = total_count_from_summaries(&running_page);
 
-    let mut completed = 0;
-    let mut failed_steps = Vec::new();
-    let mut running_steps = Vec::new();
-    for step in &steps {
-        match effective_step_status(step) {
-            Some("completed") => completed += 1,
-            Some("failed") => {
-                failed_steps.push(step.clone());
-            }
-            Some("running") => running_steps.push(step.clone()),
-            _ => {}
-        }
-    }
-    let running = running_steps.len();
+    let total_page = fetch_step_summaries(
+        server,
+        &params.workflow_id,
+        &params.instance_id,
+        &StepSummariesFetch {
+            step_ids: &[],
+            status: None,
+            limit: 0,
+        },
+    )
+    .await?;
+    let total_steps = total_count_from_summaries(&total_page);
 
-    if status != "failed" && failed_steps.is_empty() {
+    if status != "failed" && failed_total == 0 {
         return json_result(json!({
             "execution": {
                 "instanceId": params.instance_id,
@@ -1619,9 +1848,12 @@ pub async fn why_execution_failed(
         }));
     }
 
-    let not_reached = steps.len() - completed - failed_steps.len() - running;
+    // Every step record is exactly one of running/completed/failed, so the
+    // completed count follows from the other two without a fourth fetch.
+    let completed_total = total_steps.saturating_sub(failed_total + running_total);
 
-    // Build failure diagnosis for the first (primary) failing step
+    // Build failure diagnosis for the primary (newest) failing step
+    let mut in_flight_truncation = None;
     let failing_step = if let Some(first_failed) = failed_steps.first() {
         let step_id = first_failed
             .get("stepId")
@@ -1648,6 +1880,29 @@ pub async fn why_execution_failed(
             .and_then(|step| step.get("inputMapping"))
             .cloned()
             .unwrap_or(json!({}));
+
+        // Fetch only the steps the failing step's mapping references; its
+        // own record already carries the error, so a `steps.__error`
+        // reference resolves against it without another fetch.
+        let (mut ref_ids, _wants_error) = referenced_step_ids(&input_mapping);
+        ref_ids.remove(step_id);
+        let mut steps = vec![first_failed.clone()];
+        if !ref_ids.is_empty() {
+            let ref_ids: Vec<String> = ref_ids.into_iter().collect();
+            let refs_page = fetch_step_summaries(
+                server,
+                &params.workflow_id,
+                &params.instance_id,
+                &StepSummariesFetch {
+                    step_ids: &ref_ids,
+                    status: None,
+                    limit: STEP_SUMMARY_FETCH_LIMIT,
+                },
+            )
+            .await?;
+            steps.extend(steps_from_summaries(&refs_page));
+        }
+        let summaries = synthetic_summaries(steps);
 
         let scope_id = first_failed.get("scopeId").and_then(|v| v.as_str());
         let resolved_inputs =
@@ -1681,6 +1936,7 @@ pub async fn why_execution_failed(
                 })
             })
             .collect();
+        in_flight_truncation = truncation_flag(in_flight.len(), running_total);
         let first = &running_steps[0];
         json!({
             "stepId": first.get("stepId"),
@@ -1699,7 +1955,7 @@ pub async fn why_execution_failed(
         json!(null)
     };
 
-    json_result(json!({
+    let mut response = json!({
         "execution": {
             "instanceId": params.instance_id,
             "status": status,
@@ -1707,13 +1963,16 @@ pub async fn why_execution_failed(
         },
         "failingStep": failing_step,
         "executionSummary": {
-            "totalSteps": steps.len(),
-            "completed": completed,
-            "failed": failed_steps.len(),
-            "running": running,
-            "notReached": not_reached,
+            "totalSteps": total_steps,
+            "completed": completed_total,
+            "failed": failed_total,
+            "running": running_total,
         },
-    }))
+    });
+    if let Some(truncated) = in_flight_truncation {
+        response["inFlightStepsTruncated"] = truncated;
+    }
+    json_result(response)
 }
 
 #[cfg(test)]
@@ -1780,6 +2039,75 @@ mod tests {
         // reason — a real value, including a genuine null leaf, is not a mismatch.
         assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs").is_none());
         assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs.0.id").is_none());
+    }
+
+    /// The referenced-id walk decides which steps' payloads are fetched at
+    /// all, so it must find `steps.<id>` references in every envelope
+    /// position a mapping can hide one: direct references, composite
+    /// payloads, condition arguments, fn-call arguments, and envelopes
+    /// nested inside immediate values.
+    #[test]
+    fn referenced_step_ids_finds_references_in_all_mapping_shapes() {
+        let mapping = json!({
+            "direct": { "valueType": "reference", "value": "steps.fetch.outputs.items" },
+            "composite": {
+                "valueType": "composite",
+                "value": {
+                    "nested": { "valueType": "reference", "value": "steps.enrich.outputs" },
+                    "list": [
+                        { "valueType": "reference", "value": "steps.split_users.outputs.0" }
+                    ],
+                }
+            },
+            "condition": {
+                "op": "EQ",
+                "arguments": [
+                    { "valueType": "reference", "value": "steps.check.outputs.flag" },
+                    { "valueType": "immediate", "value": true },
+                ]
+            },
+            "fnCall": {
+                "fn": "concat",
+                "arguments": [
+                    { "valueType": "reference", "value": "steps.build.outputs.name" }
+                ]
+            },
+            "immediateWithEnvelope": {
+                "valueType": "immediate",
+                "value": { "valueType": "reference", "value": "steps.inner.outputs" }
+            },
+            "notAStep": { "valueType": "reference", "value": "data.orders.0" },
+            "errorRef": { "valueType": "reference", "value": "steps.__error.message" },
+        });
+
+        let (ids, wants_error) = referenced_step_ids(&mapping);
+
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            ids,
+            ["build", "check", "enrich", "fetch", "inner", "split_users"]
+        );
+        assert!(wants_error);
+
+        // `data.*`/`variables.*` roots and plain values contribute nothing.
+        let (ids, wants_error) = referenced_step_ids(&json!({
+            "a": { "valueType": "reference", "value": "data.x" },
+            "b": { "valueType": "immediate", "value": "steps.not_a_reference" },
+        }));
+        assert!(ids.is_empty());
+        assert!(!wants_error);
+    }
+
+    /// A capped fetch must say so: flag present (with exact totals) only when
+    /// records beyond the page limit exist.
+    #[test]
+    fn truncation_flag_reports_only_actual_truncation() {
+        assert_eq!(truncation_flag(2, 2), None);
+        assert_eq!(truncation_flag(0, 0), None);
+        assert_eq!(
+            truncation_flag(500, 731),
+            Some(json!({"returned": 500, "totalMatching": 731}))
+        );
     }
 
     fn summaries() -> serde_json::Value {

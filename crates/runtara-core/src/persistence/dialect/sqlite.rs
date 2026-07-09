@@ -277,6 +277,7 @@ impl Dialect for SqliteDialect {
                   AND (?4 IS NULL OR scope_id = ?4) \
                   AND (?5 IS NULL OR parent_scope_id = ?5) \
                   AND (NOT ?6 OR parent_scope_id IS NULL) \
+                  AND (?9 IS NULL OR step_id IN (SELECT value FROM json_each(?9))) \
                 ORDER BY id {order_direction} \
                 LIMIT ?7 OFFSET ?8 \
             ) \
@@ -340,7 +341,8 @@ impl Dialect for SqliteDialect {
           AND (?3 IS NULL OR step_type = ?3) \
           AND (?4 IS NULL OR scope_id = ?4) \
           AND (?5 IS NULL OR parent_scope_id = ?5) \
-          AND (NOT ?6 OR parent_scope_id IS NULL)"
+          AND (NOT ?6 OR parent_scope_id IS NULL) \
+          AND (?7 IS NULL OR step_id IN (SELECT value FROM json_each(?7)))"
     }
 }
 
