@@ -33,6 +33,9 @@ pub struct StepSummariesQuery {
     pub parent_scope_id: Option<String>,
     /// When true, only return steps from root scopes (no parent)
     pub root_scopes_only: Option<bool>,
+    /// Comma-separated list of step IDs to restrict the result to
+    /// (step IDs containing commas cannot be filtered on)
+    pub step_ids: Option<String>,
 }
 
 /// Response wrapper for step summaries (used for OpenAPI documentation)
@@ -229,6 +232,17 @@ pub async fn get_step_summaries(
 
     if query.root_scopes_only == Some(true) {
         options = options.with_root_scopes_only();
+    }
+
+    if let Some(step_ids) = &query.step_ids {
+        let ids: Vec<&str> = step_ids
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if !ids.is_empty() {
+            options = options.with_step_ids(ids);
+        }
     }
 
     // Fetch step summaries from runtara-environment

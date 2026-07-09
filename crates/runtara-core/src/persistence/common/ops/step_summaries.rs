@@ -54,6 +54,13 @@ macro_rules! impl_step_summary_ops {
                 let order_direction = sort_direction_sql(filter.sort_order);
                 let status_filter: ::core::option::Option<&str> =
                     filter.status.map(step_status_filter_str);
+                // Bound as a JSON-array string so both dialects can expand it
+                // (json_each / jsonb_array_elements_text) without any
+                // delimiter or quoting assumptions about step-id contents.
+                let step_ids_json: ::core::option::Option<::std::string::String> = filter
+                    .step_ids
+                    .as_ref()
+                    .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
                 let sql = <$Dialect>::sql_list_step_summaries(order_direction);
 
                 let rows = ::sqlx::query(&sql)
@@ -65,6 +72,7 @@ macro_rules! impl_step_summary_ops {
                     .bind(filter.root_scopes_only)
                     .bind(limit)
                     .bind(offset)
+                    .bind(step_ids_json)
                     .fetch_all(pool)
                     .await?;
 
@@ -106,6 +114,10 @@ macro_rules! impl_step_summary_ops {
                 use $crate::persistence::dialect::Dialect;
                 let status_filter: ::core::option::Option<&str> =
                     filter.status.map(step_status_filter_str);
+                let step_ids_json: ::core::option::Option<::std::string::String> = filter
+                    .step_ids
+                    .as_ref()
+                    .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
                 let sql = <$Dialect>::sql_count_step_summaries();
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
@@ -114,6 +126,7 @@ macro_rules! impl_step_summary_ops {
                     .bind(&filter.scope_id)
                     .bind(&filter.parent_scope_id)
                     .bind(filter.root_scopes_only)
+                    .bind(step_ids_json)
                     .fetch_one(pool)
                     .await?;
                 Ok(count.0)

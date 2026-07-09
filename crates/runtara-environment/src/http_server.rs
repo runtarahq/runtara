@@ -334,6 +334,9 @@ struct ListStepSummariesQuery {
     parent_scope_id: Option<String>,
     #[serde(default)]
     root_scopes_only: Option<bool>,
+    /// Comma-separated step ids to restrict the result to.
+    #[serde(default)]
+    step_ids: Option<String>,
     #[serde(default)]
     sort_order: Option<String>,
     #[serde(default)]
@@ -1614,6 +1617,17 @@ async fn handle_list_step_summaries(
         _ => None,
     };
 
+    let step_ids = query
+        .step_ids
+        .map(|ids| {
+            ids.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|ids| !ids.is_empty());
+
     let filter = ListStepSummariesFilter {
         sort_order,
         status,
@@ -1621,6 +1635,7 @@ async fn handle_list_step_summaries(
         scope_id: query.scope_id,
         parent_scope_id: query.parent_scope_id,
         root_scopes_only: query.root_scopes_only.unwrap_or(false),
+        step_ids,
     };
 
     let steps = match state

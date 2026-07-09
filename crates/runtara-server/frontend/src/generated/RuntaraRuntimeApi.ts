@@ -8132,6 +8132,11 @@ export class Api<
         parentScopeId?: string | null;
         /** When true, only return steps from root scopes (no parent) */
         rootScopesOnly?: boolean | null;
+        /**
+         * Comma-separated list of step IDs to restrict the result to
+         * (step IDs containing commas cannot be filtered on)
+         */
+        stepIds?: string | null;
       },
       params: RequestParams = {},
     ) =>

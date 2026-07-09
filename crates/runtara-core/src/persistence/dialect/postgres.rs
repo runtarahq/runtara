@@ -274,6 +274,9 @@ impl Dialect for PostgresDialect {
                   AND ($4::TEXT IS NULL OR scope_id = $4) \
                   AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
                   AND (NOT $6 OR parent_scope_id IS NULL) \
+                  AND ($9::TEXT IS NULL OR step_id IN ( \
+                      SELECT jsonb_array_elements_text($9::jsonb) \
+                  )) \
                 ORDER BY id {order_direction} \
                 LIMIT $7 OFFSET $8 \
             ) \
@@ -349,7 +352,10 @@ impl Dialect for PostgresDialect {
           AND ($3::TEXT IS NULL OR step_type = $3) \
           AND ($4::TEXT IS NULL OR scope_id = $4) \
           AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
-          AND (NOT $6 OR parent_scope_id IS NULL)"
+          AND (NOT $6 OR parent_scope_id IS NULL) \
+          AND ($7::TEXT IS NULL OR step_id IN ( \
+              SELECT jsonb_array_elements_text($7::jsonb) \
+          ))"
     }
 }
 

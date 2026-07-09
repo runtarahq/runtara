@@ -1559,6 +1559,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1620,6 +1621,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1667,6 +1669,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1722,6 +1725,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1778,6 +1782,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1881,6 +1886,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1974,6 +1980,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -1984,6 +1991,78 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].step_id, "step-http");
         assert_eq!(steps[0].step_type, "Http");
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_step_ids() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // The quoted id proves the filter binds ids as data (a JSON array)
+        // rather than splicing them into the SQL text.
+        for step_id in ["step-a", "step-b", "step-\"quoted\""] {
+            insert_step_start(
+                &persistence,
+                &instance_id,
+                step_id,
+                None,
+                "Http",
+                None,
+                None,
+                None,
+            )
+            .await;
+            insert_step_end(&persistence, &instance_id, step_id, None, None, None).await;
+        }
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Asc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+            step_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "step-a");
+        assert_eq!(steps[1].step_id, "step-\"quoted\"");
+
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // An id that matches nothing filters everything out.
+        let filter = ListStepSummariesFilter {
+            step_ids: Some(vec!["missing".to_string()]),
+            ..filter
+        };
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+        assert!(steps.is_empty());
+        assert_eq!(
+            persistence
+                .count_step_summaries(&instance_id, &filter)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2029,6 +2108,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
+            step_ids: None,
         };
 
         // Get total count
@@ -2134,6 +2214,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: true,
+            step_ids: None,
         };
 
         let steps = persistence
@@ -2155,6 +2236,7 @@ mod tests {
             scope_id: None,
             parent_scope_id: Some("sc_main".to_string()),
             root_scopes_only: false,
+            step_ids: None,
         };
 
         let steps = persistence

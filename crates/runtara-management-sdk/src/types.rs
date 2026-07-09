@@ -1162,6 +1162,8 @@ pub struct ListStepSummariesOptions {
     pub parent_scope_id: Option<String>,
     /// When true, only return steps with no parent_scope_id (root-level).
     pub root_scopes_only: bool,
+    /// Only return steps whose step_id is in this set.
+    pub step_ids: Option<Vec<String>>,
     /// Sort order for steps by started_at.
     pub sort_order: Option<StepSortOrder>,
     /// Maximum results to return.
@@ -1203,6 +1205,18 @@ impl ListStepSummariesOptions {
     /// Only return steps with no parent_scope_id (root-level).
     pub fn with_root_scopes_only(mut self) -> Self {
         self.root_scopes_only = true;
+        self
+    }
+
+    /// Only return steps whose step_id is in the given set. Step ids are
+    /// sent as a comma-separated query value, so ids containing commas
+    /// cannot be filtered on.
+    pub fn with_step_ids<I, S>(mut self, step_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.step_ids = Some(step_ids.into_iter().map(Into::into).collect());
         self
     }
 
@@ -2196,12 +2210,17 @@ mod tests {
             .with_status(StepStatus::Failed)
             .with_step_type("Http")
             .with_scope_id("sc_main")
+            .with_step_ids(["step-a", "step-b"])
             .with_limit(50)
             .with_offset(10);
 
         assert_eq!(opts.status, Some(StepStatus::Failed));
         assert_eq!(opts.step_type, Some("Http".to_string()));
         assert_eq!(opts.scope_id, Some("sc_main".to_string()));
+        assert_eq!(
+            opts.step_ids,
+            Some(vec!["step-a".to_string(), "step-b".to_string()])
+        );
         assert_eq!(opts.limit, Some(50));
         assert_eq!(opts.offset, Some(10));
     }
@@ -2215,6 +2234,7 @@ mod tests {
         assert!(opts.scope_id.is_none());
         assert!(opts.parent_scope_id.is_none());
         assert!(!opts.root_scopes_only);
+        assert!(opts.step_ids.is_none());
         assert!(opts.sort_order.is_none());
         assert!(opts.limit.is_none());
         assert!(opts.offset.is_none());

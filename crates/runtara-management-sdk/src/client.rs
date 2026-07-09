@@ -1427,6 +1427,9 @@ impl ManagementSdk {
         if options.root_scopes_only {
             query.push(("root_scopes_only".to_string(), "true".to_string()));
         }
+        if let Some(ref step_ids) = options.step_ids {
+            query.push(("step_ids".to_string(), step_ids.join(",")));
+        }
         if let Some(sort_order) = options.sort_order {
             query.push(("sort_order".to_string(), sort_order.as_str().to_string()));
         }

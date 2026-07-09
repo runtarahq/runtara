@@ -235,6 +235,9 @@ pub struct ListStepSummariesFilter {
     pub parent_scope_id: Option<String>,
     /// When true, only return steps with no parent_scope_id (root-level steps).
     pub root_scopes_only: bool,
+    /// Only return steps whose step_id is in this set. `None` means no
+    /// step-id filtering; an empty vec matches nothing.
+    pub step_ids: Option<Vec<String>>,
 }
 
 /// Error history record for structured error tracking.
