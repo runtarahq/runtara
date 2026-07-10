@@ -399,11 +399,17 @@ pub fn record_membership_denial(code: &'static str, auth_method: &'static str, e
 }
 
 /// Count a route-level authorization denial, keyed by the colon-form `permission` that was
-/// refused. No-op when telemetry is disabled.
-pub fn record_permission_denial(permission: &'static str) {
+/// refused and whether enforcement actually blocked the request (`enforced=false` is a
+/// `Logging`-mode shadow denial). No-op when telemetry is disabled.
+pub fn record_permission_denial(permission: &'static str, enforced: bool) {
     if let Some(m) = metrics() {
-        m.auth_permission_denials_total
-            .add(1, &[KeyValue::new("permission", permission)]);
+        m.auth_permission_denials_total.add(
+            1,
+            &[
+                KeyValue::new("permission", permission),
+                KeyValue::new("enforced", enforced),
+            ],
+        );
     }
 }
 
