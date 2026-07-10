@@ -540,7 +540,7 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: false,
     },
     AgentModuleConfig {
-        id: "object_model",
+        id: "object-model",
         name: "Object Model",
         description: "Object Model capabilities for database CRUD operations - create, query, and check instances in object model schemas (has side effects)",
         has_side_effects: true,
@@ -557,9 +557,14 @@ pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
     BUILTIN_AGENT_MODULES.iter().collect()
 }
 
-/// Find agent module config by id
+/// Find agent module config by id (matched canonically; see
+/// [`canonical_agent_id`], so legacy `object_model` resolves to
+/// `object-model`).
 pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
-    get_all_agent_modules().into_iter().find(|m| m.id == id)
+    let query = canonical_agent_id(id);
+    get_all_agent_modules()
+        .into_iter()
+        .find(|m| canonical_agent_id(m.id) == query)
 }
 
 // ============================================================================
@@ -1267,10 +1272,12 @@ pub fn get_agents() -> Vec<AgentInfo> {
     let output_types: HashMap<&str, &OutputTypeMeta> =
         get_all_output_types().map(|m| (m.type_name, m)).collect();
 
-    // Group capabilities by module
-    let mut caps_by_module: HashMap<&str, Vec<&CapabilityMeta>> = HashMap::new();
+    // Group capabilities by module. Keyed canonically — capability macros
+    // may declare `module = "object_model"` while the module config id is
+    // kebab; both must land in the same bucket.
+    let mut caps_by_module: HashMap<String, Vec<&CapabilityMeta>> = HashMap::new();
     for cap in get_all_capabilities() {
-        let module = cap.module.unwrap_or("unknown");
+        let module = canonical_agent_id(cap.module.unwrap_or("unknown"));
         caps_by_module.entry(module).or_default().push(cap);
     }
 
@@ -1278,7 +1285,10 @@ pub fn get_agents() -> Vec<AgentInfo> {
     let mut agents = Vec::new();
 
     for config in get_all_agent_modules() {
-        let caps = caps_by_module.get(config.id).cloned().unwrap_or_default();
+        let caps = caps_by_module
+            .get(&canonical_agent_id(config.id))
+            .cloned()
+            .unwrap_or_default();
 
         if caps.is_empty() {
             continue;
@@ -1877,7 +1887,21 @@ mod tests {
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"compression"), "Missing compression module");
         assert!(ids.contains(&"sftp"), "Missing sftp module");
-        assert!(ids.contains(&"object_model"), "Missing object_model module");
+        assert!(ids.contains(&"object-model"), "Missing object-model module");
+    }
+
+    #[test]
+    fn test_builtin_agent_module_ids_are_canonical() {
+        // Registered dispatcher modules are kebab-canonical; the builtin
+        // list must match so id comparisons never depend on spelling.
+        for module in BUILTIN_AGENT_MODULES {
+            assert_eq!(
+                module.id,
+                canonical_agent_id(module.id),
+                "builtin module id `{}` is not canonical kebab",
+                module.id
+            );
+        }
     }
 
     #[test]
@@ -1951,11 +1975,20 @@ mod tests {
     }
 
     #[test]
+    fn test_find_agent_module_legacy_snake_case() {
+        // Legacy DSL graphs and operator config may still spell the id
+        // snake_case; the lookup folds to the canonical kebab module.
+        let module = find_agent_module("object_model");
+        assert!(module.is_some(), "object_model should fold to object-model");
+        assert_eq!(module.unwrap().id, "object-model");
+    }
+
+    #[test]
     fn test_side_effects_modules() {
-        // http, sftp, and object_model have side effects
+        // http, sftp, and object-model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object_model" => {
+                "http" | "sftp" | "object-model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
@@ -1975,10 +2008,10 @@ mod tests {
 
     #[test]
     fn test_connection_supporting_modules() {
-        // http, sftp, and object_model support connections
+        // http, sftp, and object-model support connections
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object_model" => {
+                "http" | "sftp" | "object-model" => {
                     assert!(
                         module.supports_connections,
                         "{} module should support connections",

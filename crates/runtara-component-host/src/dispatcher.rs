@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use runtara_dsl::agent_meta::AgentInfo;
+use runtara_dsl::agent_meta::{AgentInfo, canonical_agent_id};
 use serde::{Deserialize, Serialize};
 use wasmtime::Engine;
 
@@ -117,7 +117,7 @@ impl ComponentDispatcherService {
             // canonical agent id everywhere else — `meta.json`,
             // `AgentsService`, workflow DSL refs — is kebab. Convert here so
             // both halves of the bundle agree on the id format.
-            let agent_id = stem_id.replace('_', "-");
+            let agent_id = canonical_agent_id(stem_id);
 
             let meta_path = path.with_extension("meta.json");
             let meta_bytes = std::fs::read(&meta_path).with_context(|| {
@@ -136,7 +136,7 @@ impl ComponentDispatcherService {
             // cargo-component drops snake_case filenames, but the canonical
             // id everywhere else is kebab, so an agent crate can sensibly
             // write either form in its `agent_info().id` literal.
-            if info.id.replace('_', "-") != agent_id {
+            if canonical_agent_id(&info.id) != agent_id {
                 anyhow::bail!(
                     "agent id mismatch: filename stem is `{agent_id}` but meta.id is `{}`",
                     info.id
@@ -179,9 +179,10 @@ impl ComponentDispatcherService {
 
     /// Whether the dispatcher knows about an agent. Used by the server-side
     /// routing decision: components-mode for known agents, legacy fallback
-    /// for the rest.
+    /// for the rest. Matched canonically, so legacy snake_case or mixed-case
+    /// ids resolve to the same agent.
     pub fn has_agent(&self, agent_id: &str) -> bool {
-        self.agents.contains_key(agent_id)
+        self.agents.contains_key(&canonical_agent_id(agent_id))
     }
 
     /// All loaded agent ids.
@@ -206,7 +207,7 @@ impl ComponentDispatcherService {
     pub async fn test_capability(&self, req: TestCapabilityRequest) -> Result<TestResult> {
         let agent = self
             .agents
-            .get(&req.agent_id)
+            .get(&canonical_agent_id(&req.agent_id))
             .with_context(|| format!("unknown agent `{}`", req.agent_id))?;
 
         let conn = req.connection.as_ref().map(|c| ConnectionInfo {
