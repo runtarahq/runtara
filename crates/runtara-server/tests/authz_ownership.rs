@@ -83,6 +83,7 @@ async fn member_may_update_any_workflow_but_only_delete_own() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Member),
             Permission::WorkflowUpdate,
             owner.as_deref(),
@@ -96,6 +97,7 @@ async fn member_may_update_any_workflow_but_only_delete_own() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Member),
             Permission::WorkflowDelete,
             owner.as_deref(),
@@ -109,6 +111,7 @@ async fn member_may_update_any_workflow_but_only_delete_own() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Member),
             Permission::WorkflowDelete,
             owner.as_deref(),
@@ -139,6 +142,7 @@ async fn owner_and_admin_bypass_ownership_on_any_workflow() {
         assert!(
             require_ownership(
                 MembershipPolicy::Required,
+                &tenant,
                 Some(role),
                 Permission::WorkflowDelete,
                 owner.as_deref(),
@@ -172,6 +176,7 @@ async fn unowned_legacy_workflow_is_member_denied_but_admin_allowed() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Member),
             Permission::WorkflowDelete,
             owner.as_deref(),
@@ -184,6 +189,7 @@ async fn unowned_legacy_workflow_is_member_denied_but_admin_allowed() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Admin),
             Permission::WorkflowDelete,
             owner.as_deref(),
@@ -215,6 +221,7 @@ async fn ownership_is_dormant_unless_membership_is_required() {
         assert!(
             require_ownership(
                 policy,
+                &tenant,
                 Some(Role::Member),
                 Permission::WorkflowDelete,
                 owner.as_deref(),
@@ -245,6 +252,7 @@ async fn owner_query_returns_none_for_missing_workflow() {
     assert!(
         require_ownership(
             MembershipPolicy::Required,
+            &tenant,
             Some(Role::Member),
             Permission::WorkflowDelete,
             owner.as_deref(),

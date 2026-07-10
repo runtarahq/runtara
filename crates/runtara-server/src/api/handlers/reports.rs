@@ -126,6 +126,7 @@ pub async fn update_report(
     let owner = service.owner(&tenant_id, &report_id).await;
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::ReportUpdate,
         owner.as_deref(),
@@ -160,6 +161,7 @@ pub async fn delete_report(
     let owner = service.owner(&tenant_id, &report_id).await;
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::ReportDelete,
         owner.as_deref(),
