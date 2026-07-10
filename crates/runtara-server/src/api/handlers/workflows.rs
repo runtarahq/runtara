@@ -300,6 +300,7 @@ pub async fn update_workflow_handler(
         .flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::WorkflowUpdate,
         owner.as_deref(),
@@ -466,6 +467,7 @@ pub async fn patch_version_graph_handler(
         .flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::WorkflowUpdate,
         owner.as_deref(),
@@ -546,6 +548,7 @@ pub async fn toggle_track_events_handler(
         .flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::WorkflowUpdate,
         owner.as_deref(),
@@ -775,6 +778,7 @@ pub async fn delete_workflow_handler(
         .flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::WorkflowDelete,
         owner.as_deref(),
@@ -2289,6 +2293,7 @@ pub async fn set_current_version_handler(
         .flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::WorkflowUpdate,
         owner.as_deref(),

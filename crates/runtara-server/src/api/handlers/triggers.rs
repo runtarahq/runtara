@@ -280,6 +280,7 @@ pub async fn update_invocation_trigger(
     let owner = repository.owner(&id).await.ok().flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::TriggerUpdate,
         owner.as_deref(),
@@ -387,6 +388,7 @@ pub async fn delete_invocation_trigger(
     let owner = repository.owner(&id).await.ok().flatten();
     if let Err(denial) = crate::middleware::authorization::require_ownership(
         crate::auth::membership_policy(),
+        &tenant_id,
         role,
         crate::authz::Permission::TriggerDelete,
         owner.as_deref(),

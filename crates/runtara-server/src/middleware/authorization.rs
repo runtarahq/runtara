@@ -472,7 +472,11 @@ pub fn authorize(
                         enforced,
                         "authorization denied"
                     );
-                    crate::observability::record_permission_denial(permission.as_str(), enforced);
+                    crate::observability::record_permission_denial(
+                        permission.as_str(),
+                        "route",
+                        enforced,
+                    );
                     if enforced {
                         return denial.into_response();
                     }
@@ -484,37 +488,87 @@ pub fn authorize(
     }
 }
 
-/// The resource-level ownership decision for an `Own`-scoped permission. This is the second
-/// half of enforcement: the route gate ([`authorize`]) lets `Own` through, then the handler
-/// loads the resource's `created_by` and calls this to decide whether the caller may act on
-/// *this specific* resource.
+/// Compute the resource-level ownership decision for an `Own`-scoped permission. This is the
+/// second half of enforcement: the route gate ([`authorize`]) lets `Own` through, then the
+/// handler loads the resource's `created_by` and this decides whether the caller may act on
+/// *this specific* resource. Mirrors [`decision_for`], one level down:
 ///
-/// - Non-`Required` policy or `role == None` → `Ok` (enforcement dormant; mirrors
-///   [`require_permission`]).
-/// - `Access::Allow` → `Ok` (Owner/Admin, who bypass ownership entirely).
-/// - `Access::Own` → `Ok` only when `resource_owner == Some(caller_id)`. A different owner or a
-///   `None` owner (unowned legacy row, or a resource that does not exist) denies — such rows are
-///   manageable only by Owner/Admin, by design.
-/// - `Access::Deny` → denies (defense in depth; the route gate already blocks these, but a
+/// - [`MembershipPolicy::Disabled`] or `role == None` → [`GateDecision::Pass`] (gate dormant /
+///   trusted in-process caller).
+/// - `Access::Allow` → `Pass` (Owner/Admin, who bypass ownership entirely).
+/// - `Access::Own` → `Pass` only when `resource_owner == Some(caller_id)`. A different owner or
+///   a `None` owner (unowned legacy row, or a resource that does not exist) denies — such rows
+///   are manageable only by Owner/Admin, by design.
+/// - `Access::Deny` denies (defense in depth; the route gate already blocks these, but a
 ///   handler calling this directly must still fail closed).
-pub fn require_ownership(
+/// - A denial is [`GateDecision::Deny`] under `Required` and [`GateDecision::ShadowDeny`]
+///   under `Logging`, so the shadow stage previews ownership rejections too.
+pub fn ownership_decision_for(
     policy: MembershipPolicy,
     role: Option<Role>,
     permission: Permission,
     resource_owner: Option<&str>,
     caller_id: &str,
-) -> Result<(), AuthzDenial> {
-    if policy != MembershipPolicy::Required {
-        return Ok(());
+) -> GateDecision {
+    if policy == MembershipPolicy::Disabled {
+        return GateDecision::Pass;
     }
     let Some(role) = role else {
-        return Ok(());
+        return GateDecision::Pass;
     };
-    match access_for(role, permission) {
-        Access::Allow => Ok(()),
-        Access::Own if resource_owner == Some(caller_id) => Ok(()),
-        Access::Own | Access::Deny => Err(AuthzDenial::forbidden(permission)),
+    let allowed = match access_for(role, permission) {
+        Access::Allow => true,
+        Access::Own => resource_owner == Some(caller_id),
+        Access::Deny => false,
+    };
+    if allowed {
+        GateDecision::Pass
+    } else {
+        let denial = AuthzDenial::forbidden(permission);
+        if policy == MembershipPolicy::Required {
+            GateDecision::Deny(denial)
+        } else {
+            GateDecision::ShadowDeny(denial)
+        }
     }
+}
+
+/// Enforce the ownership decision ([`ownership_decision_for`]) and emit its denial telemetry.
+/// `Ok(())` lets the handler proceed; `Err` carries the `403` to surface.
+///
+/// Unlike the route gate, ownership has no middleware layer — the handler call site is the
+/// emission point — so the denial log and metric live here rather than in a wrapper. Both an
+/// enforced denial (`Required`, returns `Err`) and a shadow denial (`Logging`, returns `Ok`)
+/// emit the same warn line and `record_permission_denial` count, distinguished by the
+/// `enforced` field, keeping the promotion preview symmetric with [`authorize`]. `tenant_id`
+/// exists only to make the denial log self-contained, matching the route-gate log shape.
+pub fn require_ownership(
+    policy: MembershipPolicy,
+    tenant_id: &str,
+    role: Option<Role>,
+    permission: Permission,
+    resource_owner: Option<&str>,
+    caller_id: &str,
+) -> Result<(), AuthzDenial> {
+    let decision = ownership_decision_for(policy, role, permission, resource_owner, caller_id);
+    if let GateDecision::ShadowDeny(denial) | GateDecision::Deny(denial) = decision {
+        let enforced = matches!(decision, GateDecision::Deny(_));
+        tracing::warn!(
+            tenant_id,
+            user_id = caller_id,
+            role = role.map(|r| r.as_str()),
+            permission = permission.as_str(),
+            code = AuthzDenial::CODE,
+            resource_owner,
+            enforced,
+            "ownership check denied"
+        );
+        crate::observability::record_permission_denial(permission.as_str(), "ownership", enforced);
+        if enforced {
+            return Err(denial);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -716,6 +770,7 @@ mod tests {
         assert!(
             require_ownership(
                 p,
+                "tenant",
                 Some(Role::Member),
                 Permission::WorkflowUpdate,
                 other,
@@ -727,6 +782,7 @@ mod tests {
         assert!(
             require_ownership(
                 p,
+                "tenant",
                 Some(Role::Member),
                 Permission::WorkflowDelete,
                 other,
@@ -738,8 +794,15 @@ mod tests {
         // Owner/Admin bypass ownership entirely for delete.
         for role in [Role::Owner, Role::Admin] {
             assert!(
-                require_ownership(p, Some(role), Permission::WorkflowDelete, other, "member-b")
-                    .is_ok(),
+                require_ownership(
+                    p,
+                    "tenant",
+                    Some(role),
+                    Permission::WorkflowDelete,
+                    other,
+                    "member-b"
+                )
+                .is_ok(),
                 "{role:?} must bypass the delete ownership check"
             );
         }
@@ -1380,6 +1443,7 @@ mod tests {
         assert!(
             require_ownership(
                 REQ,
+                "tenant",
                 Some(Role::Member),
                 Permission::WorkflowDelete,
                 Some("u1"),
@@ -1389,6 +1453,7 @@ mod tests {
         );
         let err = require_ownership(
             REQ,
+            "tenant",
             Some(Role::Member),
             Permission::WorkflowDelete,
             Some("u2"),
@@ -1406,6 +1471,7 @@ mod tests {
         assert!(
             require_ownership(
                 REQ,
+                "tenant",
                 Some(Role::Member),
                 Permission::WorkflowDelete,
                 None,
@@ -1422,6 +1488,7 @@ mod tests {
             assert!(
                 require_ownership(
                     REQ,
+                    "tenant",
                     Some(role),
                     Permission::WorkflowDelete,
                     Some("someone-else"),
@@ -1431,7 +1498,15 @@ mod tests {
             );
             // even an unowned row:
             assert!(
-                require_ownership(REQ, Some(role), Permission::WorkflowDelete, None, "me").is_ok()
+                require_ownership(
+                    REQ,
+                    "tenant",
+                    Some(role),
+                    Permission::WorkflowDelete,
+                    None,
+                    "me"
+                )
+                .is_ok()
             );
         }
     }
@@ -1443,6 +1518,7 @@ mod tests {
         assert!(
             require_ownership(
                 REQ,
+                "tenant",
                 Some(Role::Member),
                 Permission::DatabaseDelete,
                 Some("someone-else"),
@@ -1454,11 +1530,13 @@ mod tests {
 
     #[test]
     fn ownership_dormant_unless_required() {
-        // Under Logging/Disabled the check never blocks, even a non-owner Member.
+        // Under Logging/Disabled the check never blocks, even a non-owner Member (under
+        // Logging the denial is shadow-logged instead, see the ownership_decision_for tests).
         for policy in [MembershipPolicy::Disabled, MembershipPolicy::Logging] {
             assert!(
                 require_ownership(
                     policy,
+                    "tenant",
                     Some(Role::Member),
                     Permission::WorkflowDelete,
                     Some("u2"),
@@ -1472,7 +1550,197 @@ mod tests {
     #[test]
     fn ownership_no_role_passes() {
         // Trusted internal callers (role None) are not ownership-checked.
-        assert!(require_ownership(REQ, None, Permission::WorkflowDelete, Some("u2"), "u1").is_ok());
+        assert!(
+            require_ownership(
+                REQ,
+                "tenant",
+                None,
+                Permission::WorkflowDelete,
+                Some("u2"),
+                "u1"
+            )
+            .is_ok()
+        );
+    }
+
+    // ── ownership_decision_for: the Logging shadow preview, one level down ───
+
+    #[test]
+    fn ownership_decision_shadow_denies_non_owner_under_logging() {
+        // Member + workflow:delete is Own: a non-owner is blocked under Required, previewed
+        // under Logging, and invisible under Disabled.
+        let denial = AuthzDenial::forbidden(Permission::WorkflowDelete);
+        let other = Some("member-a");
+        assert_eq!(
+            ownership_decision_for(
+                MembershipPolicy::Required,
+                Some(Role::Member),
+                Permission::WorkflowDelete,
+                other,
+                "member-b"
+            ),
+            GateDecision::Deny(denial)
+        );
+        assert_eq!(
+            ownership_decision_for(
+                MembershipPolicy::Logging,
+                Some(Role::Member),
+                Permission::WorkflowDelete,
+                other,
+                "member-b"
+            ),
+            GateDecision::ShadowDeny(denial)
+        );
+        assert_eq!(
+            ownership_decision_for(
+                MembershipPolicy::Disabled,
+                Some(Role::Member),
+                Permission::WorkflowDelete,
+                other,
+                "member-b"
+            ),
+            GateDecision::Pass
+        );
+    }
+
+    #[test]
+    fn ownership_decision_passes_silently_where_allowed_under_logging() {
+        // No shadow noise for: the actual owner, an Allow-bypassing Admin on someone else's
+        // resource, or a trusted role-less caller.
+        for (role, owner, caller) in [
+            (Some(Role::Member), Some("u1"), "u1"),
+            (Some(Role::Admin), Some("someone-else"), "me"),
+            (None, Some("someone-else"), "me"),
+        ] {
+            assert_eq!(
+                ownership_decision_for(
+                    MembershipPolicy::Logging,
+                    role,
+                    Permission::WorkflowDelete,
+                    owner,
+                    caller
+                ),
+                GateDecision::Pass,
+                "{role:?} owner={owner:?} caller={caller} must pass silently"
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_logging_preview_matches_required_enforcement_for_every_cell() {
+        // Same property the route gate pins, one level down: Logging must preview exactly
+        // what Required will reject — for every Role × Permission across all three owner
+        // relations (caller owns it, someone else owns it, unowned/missing row).
+        for role in Role::ALL {
+            for permission in Permission::ALL {
+                for owner in [Some("caller"), Some("someone-else"), None] {
+                    let required = ownership_decision_for(
+                        MembershipPolicy::Required,
+                        Some(role),
+                        permission,
+                        owner,
+                        "caller",
+                    );
+                    let logging = ownership_decision_for(
+                        MembershipPolicy::Logging,
+                        Some(role),
+                        permission,
+                        owner,
+                        "caller",
+                    );
+                    match required {
+                        GateDecision::Deny(denial) => assert_eq!(
+                            logging,
+                            GateDecision::ShadowDeny(denial),
+                            "({role:?}, {permission}, owner={owner:?}) denied under Required \
+                             must shadow-deny under Logging"
+                        ),
+                        GateDecision::Pass => assert_eq!(
+                            logging,
+                            GateDecision::Pass,
+                            "({role:?}, {permission}, owner={owner:?}) allowed under Required \
+                             must pass silently under Logging"
+                        ),
+                        GateDecision::ShadowDeny(_) => {
+                            unreachable!("Required never shadow-denies")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── require_ownership: shadow-denial log emission ────────────────────────
+
+    #[test]
+    fn require_ownership_shadow_logs_denial_with_enforced_false_under_logging() {
+        let (capture, _guard) = capture_logs();
+        let result = require_ownership(
+            MembershipPolicy::Logging,
+            "tenant",
+            Some(Role::Member),
+            Permission::WorkflowDelete,
+            Some("member-a"),
+            "member-b",
+        );
+        // The check passes — shadow mode never blocks…
+        assert!(result.is_ok());
+        // …but the would-be denial is visible, flagged as not enforced.
+        let logs = capture.contents();
+        assert!(
+            logs.contains("ownership check denied"),
+            "missing shadow denial line: {logs}"
+        );
+        assert!(
+            logs.contains("enforced=false"),
+            "shadow denial must carry enforced=false: {logs}"
+        );
+        assert!(
+            logs.contains("workflow:delete"),
+            "shadow denial must name the permission: {logs}"
+        );
+    }
+
+    #[test]
+    fn require_ownership_logs_denial_with_enforced_true_under_required() {
+        let (capture, _guard) = capture_logs();
+        let result = require_ownership(
+            MembershipPolicy::Required,
+            "tenant",
+            Some(Role::Member),
+            Permission::WorkflowDelete,
+            Some("member-a"),
+            "member-b",
+        );
+        assert!(result.is_err());
+        let logs = capture.contents();
+        assert!(
+            logs.contains("ownership check denied"),
+            "missing denial line: {logs}"
+        );
+        assert!(
+            logs.contains("enforced=true"),
+            "enforced denial must carry enforced=true: {logs}"
+        );
+    }
+
+    #[test]
+    fn require_ownership_logs_nothing_for_the_owner_under_logging() {
+        // The owner acting on their own resource produces no shadow noise.
+        let (capture, _guard) = capture_logs();
+        let result = require_ownership(
+            MembershipPolicy::Logging,
+            "tenant",
+            Some(Role::Member),
+            Permission::WorkflowDelete,
+            Some("member-a"),
+            "member-a",
+        );
+        assert!(result.is_ok());
+        assert!(
+            !capture.contents().contains("ownership check denied"),
+            "owner's own action must not emit a denial line"
+        );
     }
 
     // ── coverage guard: the known mutating routes stay gated ─────────────────
