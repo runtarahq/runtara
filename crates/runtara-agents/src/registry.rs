@@ -6,8 +6,8 @@
 use runtara_dsl::agent_meta::CapabilityExecutor;
 use runtara_dsl::agent_meta::{
     AgentInfo, AgentModuleConfig, AgentValidationError, BUILTIN_AGENT_MODULES, CapabilityField,
-    CapabilityMeta, ConnectionTypeMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
-    input_field_to_api,
+    CapabilityMeta, ConnectionTypeMeta, InputTypeMeta, OutputTypeMeta, canonical_agent_id,
+    capability_to_api, input_field_to_api,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -115,9 +115,14 @@ pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
     modules
 }
 
-/// Find agent module config by id.
+/// Find agent module config by id (matched canonically; see
+/// [`canonical_agent_id`], so legacy `object_model` resolves to
+/// `object-model`).
 pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
-    get_all_agent_modules().into_iter().find(|m| m.id == id)
+    let query = canonical_agent_id(id);
+    get_all_agent_modules()
+        .into_iter()
+        .find(|m| canonical_agent_id(m.id) == query)
 }
 
 /// Build API-compatible agent list from statically registered metadata.
@@ -125,16 +130,22 @@ pub fn get_agents() -> Vec<AgentInfo> {
     let output_types: HashMap<&str, &OutputTypeMeta> =
         get_all_output_types().map(|m| (m.type_name, m)).collect();
 
-    let mut caps_by_module: HashMap<&str, Vec<_>> = HashMap::new();
+    // Keyed canonically — capability macros may declare
+    // `module = "object_model"` while the module config id is kebab; both
+    // must land in the same bucket.
+    let mut caps_by_module: HashMap<String, Vec<_>> = HashMap::new();
     for registration in static_registry::CAPABILITY_REGISTRATIONS {
-        let module = registration.meta.module.unwrap_or("unknown");
+        let module = canonical_agent_id(registration.meta.module.unwrap_or("unknown"));
         caps_by_module.entry(module).or_default().push(registration);
     }
 
     let mut agents = Vec::new();
 
     for config in get_all_agent_modules() {
-        let caps = caps_by_module.get(config.id).cloned().unwrap_or_default();
+        let caps = caps_by_module
+            .get(&canonical_agent_id(config.id))
+            .cloned()
+            .unwrap_or_default();
 
         if caps.is_empty() {
             continue;

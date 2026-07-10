@@ -57,6 +57,11 @@ pub async fn test_agent_handler(
     Query(query): Query<TestAgentQuery>,
     Json(request): Json<TestAgentRequest>,
 ) -> Result<Json<TestAgentResponse>, Response> {
+    // Fold the path segment to the canonical kebab id once, so snake_case or
+    // mixed-case spellings hit the same allowlist decision, rate-limit bucket,
+    // metric labels, and product events as the canonical form.
+    let agent_name = runtara_dsl::agent_meta::canonical_agent_id(&agent_name);
+
     // Per-agent allowlist check.
     if let Err(err) = crate::config::entitlements().require_agent(&agent_name) {
         return Err(EntitlementDenial::from(err).into_response());

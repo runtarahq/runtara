@@ -1,4 +1,5 @@
 use crate::config::ConfigError;
+use runtara_dsl::agent_meta::canonical_agent_id;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
@@ -86,6 +87,13 @@ impl EntitlementSnapshot {
         // RUNTARA_ENTITLEMENTS_JSON / _OVERRIDES_JSON apply as partial diffs on top.
         let tier = get_tier(runtara_pricing_tier)?;
         let base = tier.get();
+        // The snapshot stores every agent id in canonical kebab form so
+        // membership checks can't miss on spelling. Component discovery
+        // already yields kebab; folding here keeps that true for any caller.
+        let registered_agents: BTreeSet<String> = registered_agents
+            .iter()
+            .map(|a| canonical_agent_id(a))
+            .collect();
         let mut snapshot = EntitlementSnapshot {
             tenant_id: tenant_id.to_string(),
             pricing_tier: tier,
@@ -95,7 +103,7 @@ impl EntitlementSnapshot {
             registered_agents: registered_agents.clone(),
         };
         if let Some(agents) = &snapshot.enabled_agents {
-            validate_agents("RUNTARA_PRICING_TIER", agents, registered_agents)?;
+            validate_agents("RUNTARA_PRICING_TIER", agents, &registered_agents)?;
         }
 
         if let Some(json) = runtara_entitlement_json {
@@ -103,7 +111,7 @@ impl EntitlementSnapshot {
             apply_layer(
                 &mut snapshot,
                 "RUNTARA_ENTITLEMENTS_JSON",
-                registered_agents,
+                &registered_agents,
                 layer,
             )?;
         }
@@ -112,7 +120,7 @@ impl EntitlementSnapshot {
             apply_layer(
                 &mut snapshot,
                 "RUNTARA_ENTITLEMENT_OVERRIDES_JSON",
-                registered_agents,
+                &registered_agents,
                 layer,
             )?;
         }
@@ -132,13 +140,17 @@ impl EntitlementSnapshot {
         }
     }
     pub fn is_agent_enabled(&self, agent: &str) -> bool {
+        // Callers pass ids in whatever spelling they were handed (DSL graphs
+        // and operator requests may still carry legacy snake_case or stray
+        // capitalization); the snapshot's sets are canonical kebab.
+        let agent = canonical_agent_id(agent);
         // Must be a registered dispatcher module first — `enabled_agents: None`
         // means "all registered agents", not "any string you can dream up".
-        self.registered_agents.contains(agent)
+        self.registered_agents.contains(&agent)
             && self
                 .enabled_agents
                 .as_ref()
-                .is_none_or(|allowed| allowed.contains(agent))
+                .is_none_or(|allowed| allowed.contains(&agent))
     }
 
     pub fn require_agent(&self, agent: &str) -> Result<(), EntitlementError> {
@@ -322,6 +334,10 @@ fn apply_layer(
     }
 
     if let Some(agents) = layer.agents {
+        // Operator JSON may spell ids snake_case or mixed-case; fold to
+        // canonical kebab before validating and storing so the allowlist
+        // matches the (canonical) registered set.
+        let agents: BTreeSet<String> = agents.iter().map(|a| canonical_agent_id(a)).collect();
         validate_agents(env_name, &agents, registered_agents)?;
         snapshot.enabled_agents = Some(agents);
     }
@@ -342,13 +358,15 @@ fn apply_layer(
     Ok(())
 }
 
-/// Verify a single agent id is a registered dispatcher module.
+/// Verify a single agent id is a registered dispatcher module. Matched in
+/// canonical kebab form so an operator's snake_case or mixed-case spelling
+/// of a deployed module doesn't fail boot; genuinely unknown modules still do.
 fn validate_agent(
     env_name: &'static str,
     agent: &str,
     registered_agents: &BTreeSet<String>,
 ) -> Result<(), ConfigError> {
-    if registered_agents.contains(agent) {
+    if registered_agents.contains(&canonical_agent_id(agent)) {
         Ok(())
     } else {
         Err(ConfigError::InvalidValue(
@@ -514,7 +532,7 @@ fn get_tier(tier: Option<&str>) -> Result<Tier, ConfigError> {
 }
 
 pub fn parse_agents(agents: &[&str]) -> BTreeSet<String> {
-    agents.iter().map(|s| s.to_string()).collect()
+    agents.iter().map(|s| canonical_agent_id(s)).collect()
 }
 
 #[cfg(test)]
@@ -529,7 +547,8 @@ mod tests {
         runtara_entitlement_json: Option<&str>,
         runtara_entitlement_overrides_json: Option<&str>,
     ) -> Result<EntitlementSnapshot, ConfigError> {
-        let agents = super::parse_agents(&["http", "csv", "xml", "openai", "anthropic"]);
+        let agents =
+            super::parse_agents(&["http", "csv", "xml", "openai", "anthropic", "object-model"]);
         EntitlementSnapshot::parse_entitlements(
             "tenant-123",
             runtara_pricing_tier,
@@ -622,6 +641,67 @@ mod tests {
         assert_eq!(
             snap.require_agent("fake"),
             Err(EntitlementError::AgentNotEnabled("fake".to_string())),
+        );
+    }
+
+    // ── agent-id canonicalization ────────────────────────────────────────
+
+    #[test]
+    fn snake_case_allowlist_entry_boots_and_folds_to_kebab() {
+        // Operator config spelled the id snake_case while the registered
+        // module is kebab. Parsing must succeed (previously a boot
+        // hard-fail) and the stored allowlist must be canonical.
+        let snap = parse(None, Some(r#"{"agents":["object_model"]}"#), None).unwrap();
+        assert_eq!(
+            snap.enabled_agents,
+            Some(super::parse_agents(&["object-model"]))
+        );
+        assert!(snap.is_agent_enabled("object-model"));
+    }
+
+    #[test]
+    fn agent_queries_match_canonically() {
+        // Queries in any spelling resolve to the same allowlist decision.
+        let snap = parse(None, Some(r#"{"agents":["object_model","http"]}"#), None).unwrap();
+        assert!(snap.is_agent_enabled("object_model"));
+        assert!(snap.is_agent_enabled("Object-Model"));
+        assert!(snap.is_agent_enabled("HTTP"));
+        assert!(!snap.is_agent_enabled("csv"));
+        assert_eq!(snap.require_agent("OBJECT_MODEL"), Ok(()));
+    }
+
+    #[test]
+    fn registered_agents_fold_at_parse() {
+        // A registered set handed over in a non-canonical spelling still
+        // matches canonical allowlist entries and queries.
+        let registered: BTreeSet<String> = ["Object_Model".to_string()].into();
+        let snap = EntitlementSnapshot::parse_entitlements(
+            "tenant-123",
+            None,
+            Some(r#"{"agents":["object-model"]}"#),
+            None,
+            &registered,
+        )
+        .unwrap();
+        assert!(snap.is_agent_enabled("object_model"));
+        assert!(snap.is_agent_enabled("object-model"));
+    }
+
+    #[test]
+    fn unknown_agent_still_rejected_after_folding() {
+        // Canonicalization must not soften the boot-time guard: a module
+        // that isn't registered under any spelling still fails parse.
+        assert!(parse(None, Some(r#"{"agents":["no_such_agent"]}"#), None).is_err());
+    }
+
+    #[test]
+    fn mixed_case_agent_error_keeps_caller_spelling() {
+        // The denial reports the id exactly as the caller sent it, even
+        // though matching happens canonically.
+        let snap = parse(Some("starter"), None, None).unwrap();
+        assert_eq!(
+            snap.require_agent("OpenAI"),
+            Err(EntitlementError::AgentNotEnabled("OpenAI".to_string())),
         );
     }
 
@@ -842,8 +922,8 @@ mod tests {
         // Default snapshot has `enabled_agents = None` → implicit-all.
         assert!(!s.agents_explicit);
         // ... and materialises to the registered set, which the test
-        // fixture seeds with five agents.
-        assert_eq!(s.agents_allowlist_size, 5);
+        // fixture seeds with six agents.
+        assert_eq!(s.agents_allowlist_size, 6);
         // No tier caps in the default.
         assert_eq!(s.max_workflows, None);
         assert_eq!(s.max_api_keys, None);

@@ -108,6 +108,44 @@ async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Agent-id lookups fold to the canonical kebab form — legacy snake_case or
+/// stray capitalization must resolve to the same loaded agent instead of
+/// reporting it missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatcher_matches_agent_ids_canonically() -> anyhow::Result<()> {
+    let Some(bundle) = build_test_bundle() else {
+        eprintln!("SKIP: crypto wasm not built");
+        return Ok(());
+    };
+
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    assert!(
+        dispatcher.has_agent("CRYPTO"),
+        "case-folded id should match"
+    );
+    assert!(dispatcher.has_agent("Crypto"), "mixed-case id should match");
+    assert!(
+        !dispatcher.has_agent("no-such-agent"),
+        "unknown ids still miss"
+    );
+
+    let result = dispatcher
+        .test_capability(TestCapabilityRequest {
+            tenant_id: "tenant-test".into(),
+            agent_id: "Crypto".into(),
+            capability_id: "hash".into(),
+            input: serde_json::json!({ "data": "hello" }),
+            connection: None,
+        })
+        .await?;
+    assert!(
+        result.success,
+        "mixed-case agent id should dispatch, got {:?}",
+        result.error
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_returns_guest_error_for_unknown_capability() -> anyhow::Result<()> {
     let Some(bundle) = build_test_bundle() else {
