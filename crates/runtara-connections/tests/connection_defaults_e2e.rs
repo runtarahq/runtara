@@ -268,11 +268,15 @@ async fn create_leaves_opt_out_integration_without_rate_limit() {
     let (_repo, service) = service(fixture.pool.clone());
 
     // http_bearer is on RATE_LIMIT_OPT_OUT (generic target) → no default applied.
+    // Unlike the derived-base-URL types the other tests use, http_bearer's
+    // schema requires a token and an https base_url at creation time.
+    let mut request = create_request("Generic Bearer API", "http_bearer", None);
+    request.connection_parameters = Some(json!({
+        "token": "test-token",
+        "base_url": "https://api.example.com",
+    }));
     let id = service
-        .create_connection(
-            create_request("Generic Bearer API", "http_bearer", None),
-            tenant_id,
-        )
+        .create_connection(request, tenant_id)
         .await
         .expect("create generic bearer connection");
 
