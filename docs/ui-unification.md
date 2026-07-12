@@ -18,19 +18,21 @@ Implementation in progress.
   and legacy schema normalization remain.
 - [x] Generalize the validation WASM bridge and add native/WASM parity fixtures.
 - [x] Build the shared controlled React field/control registry.
-- [ ] Implement the safe connection edit projection and explicit patch contract.
-- [ ] Generate canonical forms from every connection descriptor and migrate the
+- [x] Implement the safe connection edit projection and explicit patch contract.
+- [x] Generate canonical forms from every connection descriptor and migrate the
   connection editor.
 - [ ] Adopt shared form validation/rendering in workflow UI surfaces without
   changing the workflow DSL.
-- [ ] Adapt report filters, inline editors, and visibility to the shared engine.
+- [ ] **In progress:** Adapt report filters, inline editors, and visibility to the
+  shared engine. Persisted `showWhen` now has a lossless canonical-condition
+  adapter; filter controls and inline editors remain.
 - [ ] Remove superseded TypeScript validators, condition evaluators, and legacy
   renderers after compatibility gates pass.
 - [ ] Complete unit, integration, browser E2E, and local-server verification.
 
 Verification completed so far:
 
-- `cargo test -p runtara-dsl` — 196 passed.
+- `cargo test -p runtara-dsl` — 197 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
 - `cargo test -p runtara-workflow-validation-wasm` — 17 passed, including
   native/WASM form-analysis parity.
@@ -41,6 +43,12 @@ Verification completed so far:
 - `npx tsc -b --pretty false` — passed.
 - Shared form renderer Vitest suites — 5 passed; targeted ESLint and TypeScript
   checks passed.
+- `cargo test -p runtara-connections --lib -F runtara-agents/native` — 114
+  passed, including every registered descriptor-to-form conversion.
+- `cargo test -p runtara-connections --test create_connection_status_e2e -F
+  runtara-agents/native` — 2 passed against local containerized PostgreSQL,
+  including safe projection, explicit patching, secret preservation, and stale
+  version rejection.
 
 This document defines how Runtara will unify schema-driven form rendering across
 connections, workflows, and reports without adding third-party form or schema

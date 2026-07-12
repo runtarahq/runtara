@@ -16,6 +16,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useConnectionRateLimitStatus } from '@/features/analytics/hooks/useRateLimits';
 import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
 import { queryClient } from '@/main.tsx';
+import type { FormDefinition } from '@/shared/forms';
 
 export function Connection() {
   const { id } = useParams();
@@ -104,10 +105,55 @@ export function Connection() {
         }
       : null;
 
+    const descriptor = (
+      currentConnectionType as ConnectionTypeDto & {
+        formDefinition?: FormDefinition;
+      }
+    ).formDefinition;
+    const projection = (
+      connection.data as unknown as {
+        editProjection?: {
+          values?: Record<string, unknown>;
+          version?: string;
+        };
+      }
+    ).editProjection;
+    if (!descriptor || !projection?.version) {
+      toast.error(
+        'Connection edit metadata is unavailable. Reload and try again.'
+      );
+      return;
+    }
+    const set: Record<string, unknown> = {};
+    const replaceSecrets: Record<string, string> = {};
+    const clear: string[] = [];
+    for (const [name, field] of Object.entries(descriptor.fields)) {
+      const value = parameters[name];
+      if (field.access === 'read') continue;
+      if (field.access === 'write' || field.secret) {
+        if (typeof value === 'string' && value.length > 0) {
+          replaceSecrets[name] = value;
+        }
+        continue;
+      }
+      const previous = projection.values?.[name];
+      if (JSON.stringify(value) === JSON.stringify(previous)) continue;
+      if (value === '' || value === null || value === undefined) {
+        if (previous !== undefined) clear.push(name);
+      } else {
+        set[name] = value;
+      }
+    }
+
     mutation.mutate({
       id: id as string,
       title: title as string | undefined,
-      parameters: parameters as Record<string, unknown>,
+      parameterPatch: {
+        version: projection.version,
+        set,
+        replaceSecrets,
+        clear,
+      },
       rateLimitConfig,
       isDefaultFileStorage:
         isDefaultFileStorage !== undefined
@@ -145,9 +191,11 @@ export function Connection() {
   // Only interactive authorization-code types (those with an OAuthConfig) can be
   // re-authorized via a popup; client-credentials / API-key types mint or carry
   // their own credentials and have nothing to reconnect.
-  const isOAuthAuthCode = !!(currentConnectionType as unknown as {
-    oauthConfig?: unknown;
-  })?.oauthConfig;
+  const isOAuthAuthCode = !!(
+    currentConnectionType as unknown as {
+      oauthConfig?: unknown;
+    }
+  )?.oauthConfig;
   const needsReconnect =
     (connection.data as { status?: string })?.status ===
     'REQUIRES_RECONNECTION';

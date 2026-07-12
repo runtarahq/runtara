@@ -334,7 +334,7 @@ pub fn analyze_form(definition: &FormDefinition, data: &Value) -> FormAnalysis {
             Some(value) => {
                 validate_field_value(&field.schema, value, &format!("data.{name}"), &mut issues)
             }
-            None if state.required => issues.push(error(
+            None if state.required && field.schema.default.is_none() => issues.push(error(
                 "REQUIRED_FORM_FIELD_MISSING",
                 format!("data.{name}"),
                 format!(
@@ -353,6 +353,195 @@ pub fn analyze_form(definition: &FormDefinition, data: &Value) -> FormAnalysis {
         fields,
         issues,
     }
+}
+
+/// Build a canonical form definition from connection descriptor metadata.
+///
+/// This is the compatibility adapter for the existing `ConnectionParams`
+/// mini-DSL. New UI metadata is emitted by the derive macro, while field type,
+/// default, enum, secret, and optionality metadata retain their existing wire
+/// meaning.
+pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) -> FormDefinition {
+    let mut fields = HashMap::new();
+    let mut section_ids = HashSet::new();
+
+    for field in meta.fields {
+        let field_type = connection_field_type(field.type_name);
+        let section = field
+            .section
+            .unwrap_or(if field.is_secret {
+                "credentials"
+            } else {
+                "configuration"
+            })
+            .to_string();
+        section_ids.insert(section.clone());
+
+        let control_kind = field.control.or_else(|| {
+            if field.is_secret {
+                Some(ControlKind::Password)
+            } else if field.enum_values.is_some() {
+                Some(if field_type == SchemaFieldType::Array {
+                    ControlKind::MultiSelect
+                } else {
+                    ControlKind::Select
+                })
+            } else {
+                None
+            }
+        });
+        let options = field
+            .enum_values
+            .unwrap_or_default()
+            .iter()
+            .map(|value| FormOption {
+                value: Value::String((*value).to_string()),
+                label: humanize_identifier(value),
+            })
+            .collect();
+
+        fields.insert(
+            field.name.to_string(),
+            FormField {
+                schema: SchemaField {
+                    field_type: field_type.clone(),
+                    description: field.description.map(str::to_string),
+                    required: field.is_required || !field.is_optional,
+                    default: field
+                        .default_value
+                        .map(|value| connection_default_value(value, &field_type)),
+                    example: None,
+                    items: (field_type == SchemaFieldType::Array)
+                        .then(|| Box::new(empty_schema_field(SchemaFieldType::String))),
+                    enum_values: field.enum_values.map(|values| {
+                        values
+                            .iter()
+                            .map(|value| Value::String((*value).to_string()))
+                            .collect()
+                    }),
+                    label: field.display_name.map(str::to_string),
+                    placeholder: field.placeholder.map(str::to_string),
+                    order: None,
+                    format: field.is_url.then(|| "url".to_string()),
+                    min: None,
+                    max: None,
+                    pattern: None,
+                    properties: None,
+                    visible_when: None,
+                    nullable: None,
+                },
+                control: control_kind.map(|kind| FormControl { kind, options }),
+                section: Some(section),
+                conditions: FormConditions::default(),
+                access: field.access,
+                secret: field.is_secret,
+            },
+        );
+    }
+
+    let mut sections: Vec<FormSection> = section_ids
+        .into_iter()
+        .map(|id| FormSection {
+            label: match id.as_str() {
+                "configuration" => "Connection details".to_string(),
+                "credentials" => "Credentials".to_string(),
+                _ => humanize_identifier(&id),
+            },
+            order: if id == "configuration" { 0 } else { 100 },
+            advanced: false,
+            description: None,
+            conditions: FormConditions::default(),
+            id,
+        })
+        .collect();
+    sections.sort_by(|left, right| left.order.cmp(&right.order).then(left.id.cmp(&right.id)));
+
+    FormDefinition {
+        fields,
+        sections,
+        allow_unknown_fields: false,
+        ..FormDefinition::default()
+    }
+}
+
+fn connection_field_type(type_name: &str) -> SchemaFieldType {
+    let normalized = type_name.to_ascii_lowercase().replace(' ', "");
+    match normalized.as_str() {
+        "bool" | "boolean" => SchemaFieldType::Boolean,
+        "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" => {
+            SchemaFieldType::Integer
+        }
+        "f32" | "f64" | "number" => SchemaFieldType::Number,
+        value if value.starts_with("vec<") || value == "array" || value == "string[]" => {
+            SchemaFieldType::Array
+        }
+        value if value.starts_with("hashmap<") || value.starts_with("map<") => {
+            SchemaFieldType::Object
+        }
+        _ => SchemaFieldType::String,
+    }
+}
+
+fn connection_default_value(value: &str, field_type: &SchemaFieldType) -> Value {
+    match field_type {
+        SchemaFieldType::Boolean => Value::Bool(value.eq_ignore_ascii_case("true")),
+        SchemaFieldType::Integer => value
+            .parse::<i64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(value.to_string())),
+        SchemaFieldType::Number => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(value.to_string())),
+        SchemaFieldType::Array => Value::Array(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| Value::String(item.to_string()))
+                .collect(),
+        ),
+        _ => Value::String(value.to_string()),
+    }
+}
+
+fn empty_schema_field(field_type: SchemaFieldType) -> SchemaField {
+    SchemaField {
+        field_type,
+        description: None,
+        required: false,
+        default: None,
+        example: None,
+        items: None,
+        enum_values: None,
+        label: None,
+        placeholder: None,
+        order: None,
+        format: None,
+        min: None,
+        max: None,
+        pattern: None,
+        properties: None,
+        visible_when: None,
+        nullable: None,
+    }
+}
+
+fn humanize_identifier(value: &str) -> String {
+    value
+        .split(['_', '-', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn evaluate_field_states(
@@ -798,5 +987,81 @@ mod tests {
                 .any(|issue| issue.path == "data.profile.name"
                     && issue.code == "FORM_FIELD_BELOW_MINIMUM")
         );
+    }
+
+    #[test]
+    fn connection_metadata_normalizes_to_canonical_form() {
+        use crate::agent_meta::{ConnectionFieldMeta, ConnectionTypeMeta};
+
+        static FIELDS: &[ConnectionFieldMeta] = &[
+            ConnectionFieldMeta {
+                name: "environment",
+                type_name: "String",
+                is_optional: false,
+                display_name: Some("Environment"),
+                description: None,
+                placeholder: None,
+                default_value: Some("sandbox"),
+                is_secret: false,
+                enum_values: Some(&["sandbox", "production"]),
+                is_url: false,
+                is_required: false,
+                control: None,
+                section: None,
+                access: FieldAccessMode::ReadWrite,
+            },
+            ConnectionFieldMeta {
+                name: "private_key",
+                type_name: "String",
+                is_optional: true,
+                display_name: Some("Private Key"),
+                description: None,
+                placeholder: None,
+                default_value: None,
+                is_secret: true,
+                enum_values: None,
+                is_url: false,
+                is_required: false,
+                control: Some(ControlKind::SecretTextarea),
+                section: None,
+                access: FieldAccessMode::Write,
+            },
+        ];
+        let meta = ConnectionTypeMeta {
+            integration_id: "fixture",
+            display_name: "Fixture",
+            description: None,
+            category: None,
+            service_id: None,
+            auth_type: None,
+            fields: FIELDS,
+            oauth_config: None,
+        };
+
+        let definition = connection_form_definition(&meta);
+        assert_eq!(
+            definition.fields["environment"].section.as_deref(),
+            Some("configuration")
+        );
+        assert!(matches!(
+            definition.fields["environment"]
+                .control
+                .as_ref()
+                .map(|control| control.kind),
+            Some(ControlKind::Select)
+        ));
+        assert_eq!(
+            definition.fields["private_key"].access,
+            FieldAccessMode::Write
+        );
+        assert!(definition.fields["private_key"].secret);
+        assert!(matches!(
+            definition.fields["private_key"]
+                .control
+                .as_ref()
+                .map(|control| control.kind),
+            Some(ControlKind::SecretTextarea)
+        ));
+        assert!(validate_form_definition(&definition).is_empty());
     }
 }

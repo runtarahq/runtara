@@ -360,6 +360,7 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
         title: None,
         connection_subtype: None,
         connection_parameters: Some(new_params),
+        connection_parameter_patch: None,
         integration_id: None,
         rate_limit_config: None,
         valid_until: None,

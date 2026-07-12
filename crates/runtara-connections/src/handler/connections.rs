@@ -465,6 +465,7 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
                 is_required: f.is_required,
             })
             .collect(),
+        form_definition: runtara_dsl::form::connection_form_definition(meta),
         default_rate_limit_config: get_default_rate_limit_config(meta.integration_id),
         oauth_config: meta.oauth_config.map(|c| OAuthConfigDto {
             auth_url: c.auth_url.to_string(),

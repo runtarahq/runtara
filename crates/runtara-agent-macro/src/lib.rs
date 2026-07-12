@@ -751,6 +751,15 @@ struct ConnectionFieldArgs {
     /// of the structurally-derived optional-ness. Used for a mandatory base URL.
     #[darling(default)]
     is_required: bool,
+    /// Explicit shared form control kind.
+    #[darling(default)]
+    control: Option<String>,
+    /// Explicit shared form section id.
+    #[darling(default)]
+    section: Option<String>,
+    /// Shared form access mode: read_write, read, or write.
+    #[darling(default)]
+    access: Option<String>,
 }
 
 /// Container attributes for ConnectionParams derive
@@ -878,6 +887,42 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let is_secret = f.secret;
             let is_url = f.is_url;
             let is_required = f.is_required;
+            let section_token = option_to_tokens(&f.section);
+            let control_token = match f.control.as_deref() {
+                None => quote! { None },
+                Some("text") => quote! { Some(runtara_dsl::form::ControlKind::Text) },
+                Some("textarea") => quote! { Some(runtara_dsl::form::ControlKind::Textarea) },
+                Some("secret_textarea") => quote! { Some(runtara_dsl::form::ControlKind::SecretTextarea) },
+                Some("password") => quote! { Some(runtara_dsl::form::ControlKind::Password) },
+                Some("number") => quote! { Some(runtara_dsl::form::ControlKind::Number) },
+                Some("toggle") => quote! { Some(runtara_dsl::form::ControlKind::Toggle) },
+                Some("select") => quote! { Some(runtara_dsl::form::ControlKind::Select) },
+                Some("multi_select") => quote! { Some(runtara_dsl::form::ControlKind::MultiSelect) },
+                Some("radio") => quote! { Some(runtara_dsl::form::ControlKind::Radio) },
+                Some("date") => quote! { Some(runtara_dsl::form::ControlKind::Date) },
+                Some("datetime") => quote! { Some(runtara_dsl::form::ControlKind::Datetime) },
+                Some("date_range") => quote! { Some(runtara_dsl::form::ControlKind::DateRange) },
+                Some("number_range") => quote! { Some(runtara_dsl::form::ControlKind::NumberRange) },
+                Some("tags") => quote! { Some(runtara_dsl::form::ControlKind::Tags) },
+                Some("key_value") => quote! { Some(runtara_dsl::form::ControlKind::KeyValue) },
+                Some("lookup") => quote! { Some(runtara_dsl::form::ControlKind::Lookup) },
+                Some("file") => quote! { Some(runtara_dsl::form::ControlKind::File) },
+                Some(other) => {
+                    let message = format!("unsupported connection form control '{other}'");
+                    quote! {{ compile_error!(#message); None }}
+                }
+            };
+            let access_token = match f.access.as_deref() {
+                None if is_secret => quote! { runtara_dsl::form::FieldAccessMode::Write },
+                None => quote! { runtara_dsl::form::FieldAccessMode::ReadWrite },
+                Some("read_write") => quote! { runtara_dsl::form::FieldAccessMode::ReadWrite },
+                Some("read") => quote! { runtara_dsl::form::FieldAccessMode::Read },
+                Some("write") => quote! { runtara_dsl::form::FieldAccessMode::Write },
+                Some(other) => {
+                    let message = format!("unsupported connection field access mode '{other}'");
+                    quote! {{ compile_error!(#message); runtara_dsl::form::FieldAccessMode::ReadWrite }}
+                }
+            };
             let enum_values_token = match &f.enum_values {
                 Some(raw) => {
                     let values: Vec<String> = raw
@@ -908,6 +953,9 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     enum_values: #enum_values_token,
                     is_url: #is_url,
                     is_required: #is_required,
+                    control: #control_token,
+                    section: #section_token,
+                    access: #access_token,
                 }
             }
         })

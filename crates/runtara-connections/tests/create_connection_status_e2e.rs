@@ -222,15 +222,30 @@ async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() 
     )
     .await;
 
-    // Edit exactly what the UI submits: schema fields only, secret left blank, and
-    // no OAuth params (getConnectionById omits connection_parameters).
+    let projection = svc
+        .get_connection(&id, "t")
+        .await
+        .expect("safe edit projection")
+        .edit_projection
+        .expect("projection present");
+    assert_eq!(projection.values["client_id"], "QBCID");
+    assert_eq!(projection.values["realm_id"], "123456789");
+    assert!(projection.values.get("client_secret").is_none());
+    assert!(projection.secret_state["client_secret"].configured);
+    let stale_version = projection.version.clone();
+
+    // The canonical editor sends only changed ordinary fields. Untouched secrets
+    // and provider-captured OAuth values are absent rather than blank placeholders.
     update(
         &svc,
         &id,
         "t",
         json!({
-            "connectionParameters": {
-                "client_id": "QBCID", "client_secret": "", "environment": "sandbox"
+            "connectionParameterPatch": {
+                "version": projection.version,
+                "set": {"environment": "sandbox"},
+                "replaceSecrets": {},
+                "clear": []
             }
         }),
     )
@@ -241,14 +256,26 @@ async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() 
         after["environment"], "sandbox",
         "environment edit must persist"
     );
-    // Merge preserves the server-captured OAuth params + the blanked secret.
+    // Explicit patching preserves server-captured OAuth params + untouched secret.
     assert_eq!(after["access_token"], "at-live");
     assert_eq!(after["refresh_token"], "rt-live");
     assert_eq!(after["realm_id"], "123456789");
     assert_eq!(
         after["client_secret"], "QBSEC",
-        "blank secret keeps existing"
+        "untouched secret keeps existing"
     );
+
+    let stale_request = serde_json::from_value(json!({
+        "connectionParameterPatch": {
+            "version": stale_version,
+            "set": {"environment": "production"}
+        }
+    }))
+    .expect("valid stale update");
+    assert!(matches!(
+        svc.update_connection(&id, "t", stale_request).await,
+        Err(runtara_connections::service::connections::ServiceError::Conflict(_))
+    ));
 
     // --- Generic params-driven authcode: an ENDPOINT change strips tokens ---
     let g = create(

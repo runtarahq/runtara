@@ -308,6 +308,7 @@ impl ConnectionRepository {
                         rate_limit_stats: None,
                         is_default_file_storage,
                         default_for: Vec::new(),
+                        edit_projection: None,
                     }
                 },
             )
@@ -382,6 +383,7 @@ impl ConnectionRepository {
                     rate_limit_stats: None,
                     is_default_file_storage,
                     default_for: Vec::new(),
+                    edit_projection: None,
                 }
             },
         );
@@ -400,6 +402,7 @@ impl ConnectionRepository {
         id: &str,
         tenant_id: &str,
         request: &UpdateConnectionRequest,
+        expected_updated_at: Option<&str>,
     ) -> Result<u64, sqlx::Error> {
         // Build dynamic UPDATE query based on provided fields
         let mut updates = vec!["updated_at = NOW()".to_string()];
@@ -435,11 +438,17 @@ impl ConnectionRepository {
         }
         if request.is_default_file_storage.is_some() {
             updates.push(format!("is_default_file_storage = ${}", param_idx));
+            param_idx += 1;
         }
 
+        let version_parameter = expected_updated_at.map(|_| param_idx);
+        let version_clause = version_parameter
+            .map(|parameter| format!(" AND updated_at = ${parameter}"))
+            .unwrap_or_default();
         let query_str = format!(
-            "UPDATE connection_data_entity SET {} WHERE id = $1 AND tenant_id = $2",
-            updates.join(", ")
+            "UPDATE connection_data_entity SET {} WHERE id = $1 AND tenant_id = $2{}",
+            updates.join(", "),
+            version_clause
         );
 
         // Pre-encrypt parameters (if any) before binding — must live long
@@ -480,6 +489,12 @@ impl ConnectionRepository {
         }
         if let Some(is_default) = request.is_default_file_storage {
             query = query.bind(is_default);
+        }
+        if let Some(expected_updated_at) = expected_updated_at {
+            let parsed = chrono::DateTime::parse_from_rfc3339(expected_updated_at)
+                .map_err(|error| sqlx::Error::Encode(error.into()))?
+                .with_timezone(&chrono::Utc);
+            query = query.bind(parsed);
         }
 
         let result = query.execute(&self.pool).await?;
@@ -635,6 +650,7 @@ impl ConnectionRepository {
                         rate_limit_stats: None,
                         is_default_file_storage,
                         default_for: Vec::new(),
+                        edit_projection: None,
                     }
                 },
             )

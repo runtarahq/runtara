@@ -29,6 +29,10 @@ import { ActionsBlockEditor } from './ActionsBlockEditor';
 import { SourceEditor } from './SourceEditor';
 import { VisibilityEditor } from './VisibilityEditor';
 import { DatasetReconcileButton } from './DatasetReconcileButton';
+import {
+  canonicalConditionToReportVisibility,
+  reportVisibilityToCanonicalCondition,
+} from '../../../utils';
 
 interface BlockEditorProps {
   block: ReportBlockDefinition;
@@ -80,10 +84,7 @@ export function BlockEditor({
           />
         </div>
         <div className="grid gap-1.5">
-          <Label
-            className="text-xs"
-            htmlFor={`block_type_${block.id}`}
-          >
+          <Label className="text-xs" htmlFor={`block_type_${block.id}`}>
             Block type
           </Label>
           <Select
@@ -136,11 +137,7 @@ export function BlockEditor({
         <MarkdownBlockEditor block={block} onChange={onChange} />
       ) : null}
       {block.type === 'table' ? (
-        <TableBlockEditor
-          block={block}
-          schemas={schemas}
-          onChange={onChange}
-        />
+        <TableBlockEditor block={block} schemas={schemas} onChange={onChange} />
       ) : null}
       {block.type === 'metric' ? (
         <MetricBlockEditor
@@ -150,11 +147,7 @@ export function BlockEditor({
         />
       ) : null}
       {block.type === 'chart' ? (
-        <ChartBlockEditor
-          block={block}
-          schemas={schemas}
-          onChange={onChange}
-        />
+        <ChartBlockEditor block={block} schemas={schemas} onChange={onChange} />
       ) : null}
       {block.type === 'card' ? (
         <CardBlockEditor block={block} schemas={schemas} onChange={onChange} />
@@ -166,7 +159,7 @@ export function BlockEditor({
       <VisibilityEditor
         label="Show when"
         description="Optional canonical condition controlling whether this block renders."
-        condition={block.showWhen}
+        condition={reportVisibilityToCanonicalCondition(block.showWhen)}
         onChange={(condition) => {
           if (condition === undefined) {
             const { showWhen: _drop, ...rest } = block;
@@ -174,7 +167,9 @@ export function BlockEditor({
             onChange(rest as ReportBlockDefinition);
             return;
           }
-          onChange({ ...block, showWhen: condition });
+          const showWhen = canonicalConditionToReportVisibility(condition);
+          if (!showWhen) return;
+          onChange({ ...block, showWhen });
         }}
       />
 

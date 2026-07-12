@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, Loader2 } from 'lucide-react';
 
 import {
@@ -26,6 +26,7 @@ interface FormRendererProps {
   disabled?: boolean;
   className?: string;
   onAnalysisChange?: (analysis: FormAnalysisResult) => void;
+  fieldAnnotations?: Record<string, ReactNode>;
 }
 
 function orderedFields(definition: FormDefinition): [string, FormField][] {
@@ -63,6 +64,7 @@ export function FormRenderer({
   disabled = false,
   className,
   onAnalysisChange,
+  fieldAnnotations,
 }: FormRendererProps) {
   const formId = useId().replace(/:/g, '');
   const request = useRef(0);
@@ -144,6 +146,7 @@ export function FormRenderer({
                       {field.description}
                     </p>
                   )}
+                  {fieldAnnotations?.[name]}
                   <FieldControl
                     id={inputId}
                     field={field}

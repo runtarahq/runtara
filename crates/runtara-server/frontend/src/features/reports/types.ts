@@ -211,7 +211,7 @@ export type ReportRowCondition =
 /** Visibility-condition shape used on layout nodes (`showWhen`). FE-internal. */
 export interface ReportVisibilityCondition {
   filter: string;
-  exists?: boolean;
+  exists?: boolean | null;
   equals?: unknown;
   notEquals?: unknown;
 }

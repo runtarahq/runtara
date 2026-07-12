@@ -788,7 +788,8 @@ pub struct QuickBooksOnlineParams {
     #[field(
         display_name = "Environment",
         description = "Target Intuit environment: 'sandbox' or 'production'",
-        default = "sandbox"
+        default = "sandbox",
+        enum_values = "sandbox,production"
     )]
     pub environment: String,
 
@@ -796,7 +797,8 @@ pub struct QuickBooksOnlineParams {
     #[serde(default)]
     #[field(
         display_name = "Realm ID (Company ID)",
-        description = "Populated automatically after OAuth consent; may be left blank"
+        description = "Populated automatically after OAuth consent",
+        access = "read"
     )]
     pub realm_id: Option<String>,
 

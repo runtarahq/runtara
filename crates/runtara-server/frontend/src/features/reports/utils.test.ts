@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canonicalConditionToReportVisibility,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
+  reportVisibilityToCanonicalCondition,
   truncateCellText,
 } from './utils';
 import type { ReportDefinition, ReportViewDefinition } from './types';
@@ -107,6 +109,21 @@ describe('report row conditions', () => {
   });
 });
 
+describe('report visibility compatibility', () => {
+  it('round-trips the persisted legacy shape through canonical conditions', () => {
+    const visibility = {
+      filter: 'status',
+      equals: 'ready',
+      notEquals: 'archived',
+      exists: true,
+    };
+
+    const canonical = reportVisibilityToCanonicalCondition(visibility);
+    expect(canonical).toBeDefined();
+    expect(canonicalConditionToReportVisibility(canonical)).toEqual(visibility);
+  });
+});
+
 describe('report view navigation', () => {
   const reportDefinition: ReportDefinition = {
     definitionVersion: 1,
@@ -114,7 +131,11 @@ describe('report view navigation', () => {
     filters: [],
     blocks: [],
     views: [
-      { id: 'a', title: 'Accounts', layout: { id: 'view_a_root', columns: 1, items: [] } },
+      {
+        id: 'a',
+        title: 'Accounts',
+        layout: { id: 'view_a_root', columns: 1, items: [] },
+      },
       {
         id: 'b',
         title: 'Branches',

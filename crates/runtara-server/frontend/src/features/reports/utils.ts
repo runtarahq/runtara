@@ -10,10 +10,7 @@ import {
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from './types';
-import {
-  defaultRenderContext,
-  reportDsl,
-} from '@/wasm/runtara-report-dsl';
+import { defaultRenderContext, reportDsl } from '@/wasm/runtara-report-dsl';
 
 export const TIME_RANGE_PRESETS = [
   { label: 'Today', value: 'today' },
@@ -159,7 +156,7 @@ export function getBlockById(
 }
 
 export function isVisibleByShowWhen(
-  showWhen: ReportVisibilityCondition | undefined,
+  showWhen: ReportVisibilityCondition | null | undefined,
   filters: Record<string, unknown>
 ): boolean {
   if (!showWhen) return true;
@@ -183,6 +180,81 @@ export function isVisibleByShowWhen(
     return false;
   }
   return true;
+}
+
+/** Normalize the persisted legacy report visibility shape into the canonical
+ * condition vocabulary used by the shared condition editor/evaluator. */
+export function reportVisibilityToCanonicalCondition(
+  visibility: ReportVisibilityCondition | null | undefined
+): ReportRowCondition | undefined {
+  if (!visibility?.filter) return undefined;
+  const conditions: ReportCondition[] = [];
+  if (visibility.equals !== undefined) {
+    conditions.push({
+      op: 'EQ',
+      arguments: [visibility.filter, visibility.equals],
+    });
+  }
+  if (visibility.notEquals !== undefined) {
+    conditions.push({
+      op: 'NE',
+      arguments: [visibility.filter, visibility.notEquals],
+    });
+  }
+  if (visibility.exists !== undefined) {
+    const defined: ReportCondition = {
+      op: 'IS_DEFINED',
+      arguments: [visibility.filter],
+    };
+    conditions.push(
+      visibility.exists ? defined : { op: 'NOT', arguments: [defined] }
+    );
+  }
+  if (conditions.length === 0) return undefined;
+  return legacyToCanonicalCondition(
+    conditions.length === 1
+      ? conditions[0]
+      : { op: 'AND', arguments: conditions }
+  );
+}
+
+/** Convert editor output back to the persisted legacy report visibility
+ * shape while that wire format remains supported. */
+export function canonicalConditionToReportVisibility(
+  condition: ReportRowCondition | null | undefined
+): ReportVisibilityCondition | undefined {
+  const legacy = canonicalToLegacyCondition(condition);
+  if (!legacy) return undefined;
+  const clauses = legacy.op === 'AND' ? (legacy.arguments ?? []) : [legacy];
+  const visibility: ReportVisibilityCondition = { filter: '' };
+  for (const clause of clauses) {
+    if (!clause || typeof clause !== 'object' || !('op' in clause))
+      return undefined;
+    const item = clause as ReportCondition;
+    const op = item.op.toUpperCase();
+    if (
+      op === 'NOT' &&
+      typeof item.arguments?.[0] === 'object' &&
+      (item.arguments[0] as ReportCondition).op === 'IS_DEFINED'
+    ) {
+      const inner = item.arguments[0] as ReportCondition;
+      if (typeof inner.arguments?.[0] !== 'string') return undefined;
+      if (visibility.filter && visibility.filter !== inner.arguments[0])
+        return undefined;
+      visibility.filter = inner.arguments[0];
+      visibility.exists = false;
+      continue;
+    }
+    const field = item.arguments?.[0];
+    if (typeof field !== 'string') return undefined;
+    if (visibility.filter && visibility.filter !== field) return undefined;
+    visibility.filter = field;
+    if (op === 'EQ') visibility.equals = item.arguments?.[1];
+    else if (op === 'NE') visibility.notEquals = item.arguments?.[1];
+    else if (op === 'IS_DEFINED') visibility.exists = true;
+    else return undefined;
+  }
+  return visibility.filter ? visibility : undefined;
 }
 
 export function isWorkflowActionVisible(
@@ -259,8 +331,7 @@ export function canonicalToLegacyCondition(
 ): ReportCondition | undefined {
   const operation = asObject(expr);
   if (!operation || operation.type !== 'operation') return undefined;
-  const op =
-    typeof operation.op === 'string' ? operation.op.toUpperCase() : '';
+  const op = typeof operation.op === 'string' ? operation.op.toUpperCase() : '';
   if (!op) return undefined;
   const args = Array.isArray(operation.arguments) ? operation.arguments : [];
 
@@ -435,11 +506,7 @@ export function formatCellValue(
 ): string {
   if (value === null || value === undefined) return '';
   try {
-    return reportDsl().formatValue(
-      value,
-      format ?? '',
-      defaultRenderContext()
-    );
+    return reportDsl().formatValue(value, format ?? '', defaultRenderContext());
   } catch {
     if (typeof value === 'object') {
       try {

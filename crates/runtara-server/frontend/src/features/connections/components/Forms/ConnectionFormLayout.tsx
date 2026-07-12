@@ -32,6 +32,7 @@ type ConnectionFormLayoutProps = {
   isReconnecting?: boolean;
   /** When true the connection needs re-authorization — shows a banner + emphasis. */
   needsReconnect?: boolean;
+  isSubmitDisabled?: boolean;
 };
 
 export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
@@ -52,6 +53,7 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
     onReconnect,
     isReconnecting,
     needsReconnect,
+    isSubmitDisabled,
   } = props;
 
   const isEditMode = title.toLowerCase().includes('edit');
@@ -145,7 +147,7 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
               <Button
                 type="submit"
                 size="sm"
-                disabled={isLoading}
+                disabled={isLoading || isSubmitDisabled}
                 className="shadow-sm shadow-blue-600/20"
               >
                 {isLoading ? (
@@ -177,8 +179,9 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
                 This connection needs to be reconnected
               </p>
               <p className="text-xs text-amber-700 mt-0.5 dark:text-amber-400">
-                Its access has expired or was revoked. Your saved credentials are
-                kept — click Reconnect to re-authorize without re-entering them.
+                Its access has expired or was revoked. Your saved credentials
+                are kept — click Reconnect to re-authorize without re-entering
+                them.
               </p>
             </div>
             <Button

@@ -413,7 +413,33 @@ pub struct ConnectionDto {
     /// Agent/operator ids this connection is the tenant default for.
     #[serde(default, rename = "defaultFor")]
     pub default_for: Vec<String>,
+    /// Safe edit projection. Present only on the single-connection endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "editProjection")]
+    pub edit_projection: Option<ConnectionEditProjection>,
     // NOTE: connection_parameters is intentionally NOT included for security
+}
+
+/// Safe editable view of connection parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionEditProjection {
+    /// Current values for fields with `read_write` or `read` access.
+    pub values: serde_json::Value,
+    /// Configuration state for secret fields, without their values.
+    pub secret_state: std::collections::HashMap<String, ConnectionSecretState>,
+    /// Optimistic concurrency token. This is the connection's `updatedAt` value.
+    pub version: String,
+}
+
+/// Non-sensitive state for one secret connection field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionSecretState {
+    pub configured: bool,
+    pub clearable: bool,
 }
 
 /// Create connection request
@@ -448,6 +474,24 @@ pub struct CreateConnectionRequest {
 }
 
 /// Update connection request - all fields optional
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionParameterPatch {
+    /// Optimistic concurrency token returned by `editProjection.version`.
+    pub version: String,
+    /// New values for ordinary `read_write` fields.
+    #[serde(default)]
+    pub set: std::collections::HashMap<String, serde_json::Value>,
+    /// Replacement values for write-only secret fields.
+    #[serde(default)]
+    pub replace_secrets: std::collections::HashMap<String, String>,
+    /// Fields to remove explicitly. Blank strings never imply clearing.
+    #[serde(default)]
+    pub clear: Vec<String>,
+}
+
+/// Update connection request - all fields optional.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct UpdateConnectionRequest {
@@ -459,6 +503,10 @@ pub struct UpdateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "connectionParameters")]
     pub connection_parameters: Option<serde_json::Value>,
+    /// Explicit safe parameter patch used by schema-driven connection editors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "connectionParameterPatch")]
+    pub connection_parameter_patch: Option<ConnectionParameterPatch>,
     /// Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "integrationId")]
@@ -906,6 +954,8 @@ pub struct ConnectionTypeDto {
     pub category: Option<String>,
     /// Fields required for this connection type
     pub fields: Vec<ConnectionFieldDto>,
+    /// Canonical schema-driven form generated from the connection descriptor.
+    pub form_definition: runtara_dsl::form::FormDefinition,
     /// Default rate limit configuration for this connection type (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_rate_limit_config: Option<RateLimitConfigDto>,

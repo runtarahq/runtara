@@ -869,6 +869,13 @@ pub struct ConnectionFieldMeta {
     /// independent of the structurally-derived `is_optional`. Used to make a
     /// base URL mandatory for credential-bearing generic HTTP connection types.
     pub is_required: bool,
+    /// Explicit shared-form control. When absent, the renderer uses canonical
+    /// type/enum/secret inference.
+    pub control: Option<crate::form::ControlKind>,
+    /// Optional shared-form section id.
+    pub section: Option<&'static str>,
+    /// Whether clients may read and/or write the value.
+    pub access: crate::form::FieldAccessMode,
 }
 
 /// How client credentials are presented to the OAuth token endpoint.

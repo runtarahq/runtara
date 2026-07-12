@@ -57,7 +57,8 @@ pub struct SftpParams {
     #[field(
         display_name = "Private Key",
         description = "Private key in PEM format (optional if using password)",
-        secret
+        secret,
+        control = "secret_textarea"
     )]
     private_key: Option<String>,
 

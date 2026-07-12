@@ -138,6 +138,145 @@ fn merge_connection_parameters(
     serde_json::Value::Object(merged)
 }
 
+fn build_edit_projection(
+    integration_id: &str,
+    params: Option<&serde_json::Value>,
+    version: String,
+) -> ConnectionEditProjection {
+    let mut values = serde_json::Map::new();
+    let mut secret_state = std::collections::HashMap::new();
+    let params = params.and_then(serde_json::Value::as_object);
+
+    if let Some(meta) = runtara_agents::registry::find_connection_type(integration_id) {
+        for field in meta.fields {
+            let current = params.and_then(|params| params.get(field.name));
+            if field.is_secret {
+                let configured = current.is_some_and(|value| {
+                    !value.is_null() && !value.as_str().is_some_and(|value| value.is_empty())
+                });
+                secret_state.insert(
+                    field.name.to_string(),
+                    ConnectionSecretState {
+                        configured,
+                        clearable: false,
+                    },
+                );
+            } else if field.access != runtara_dsl::form::FieldAccessMode::Write
+                && let Some(value) = current
+            {
+                values.insert(field.name.to_string(), value.clone());
+            }
+        }
+    }
+
+    ConnectionEditProjection {
+        values: serde_json::Value::Object(values),
+        secret_state,
+        version,
+    }
+}
+
+fn apply_connection_parameter_patch(
+    integration_id: &str,
+    existing: &serde_json::Value,
+    patch: &ConnectionParameterPatch,
+) -> Result<serde_json::Value, ServiceError> {
+    let meta = runtara_agents::registry::find_connection_type(integration_id).ok_or_else(|| {
+        ServiceError::ValidationError(format!(
+            "Unknown connection type '{integration_id}' cannot accept a parameter patch"
+        ))
+    })?;
+    let fields: std::collections::HashMap<_, _> = meta
+        .fields
+        .iter()
+        .map(|field| (field.name, field))
+        .collect();
+    let mut values = existing.as_object().cloned().unwrap_or_default();
+    let mut touched = std::collections::HashSet::new();
+
+    for (name, value) in &patch.set {
+        let field = fields.get(name.as_str()).ok_or_else(|| {
+            ServiceError::ValidationError(format!("Unknown connection field '{name}'"))
+        })?;
+        if !touched.insert(name.as_str()) {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' appears in multiple patch operations"
+            )));
+        }
+        if field.is_secret || field.access != runtara_dsl::form::FieldAccessMode::ReadWrite {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' cannot be set"
+            )));
+        }
+        values.insert(name.clone(), value.clone());
+    }
+
+    for (name, value) in &patch.replace_secrets {
+        let field = fields.get(name.as_str()).ok_or_else(|| {
+            ServiceError::ValidationError(format!("Unknown connection field '{name}'"))
+        })?;
+        if !touched.insert(name.as_str()) {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' appears in multiple patch operations"
+            )));
+        }
+        if !field.is_secret || field.access != runtara_dsl::form::FieldAccessMode::Write {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' is not a replaceable secret"
+            )));
+        }
+        if value.is_empty() {
+            return Err(ServiceError::ValidationError(format!(
+                "Replacement secret '{name}' cannot be blank"
+            )));
+        }
+        values.insert(name.clone(), serde_json::Value::String(value.clone()));
+    }
+
+    for name in &patch.clear {
+        let field = fields.get(name.as_str()).ok_or_else(|| {
+            ServiceError::ValidationError(format!("Unknown connection field '{name}'"))
+        })?;
+        if !touched.insert(name.as_str()) {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' appears in multiple patch operations"
+            )));
+        }
+        if field.is_secret || field.access != runtara_dsl::form::FieldAccessMode::ReadWrite {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' cannot be cleared"
+            )));
+        }
+        values.remove(name);
+    }
+
+    let merged = serde_json::Value::Object(values);
+    let definition = runtara_dsl::form::connection_form_definition(meta);
+    let form_values = serde_json::Value::Object(
+        meta.fields
+            .iter()
+            .filter_map(|field| {
+                merged
+                    .get(field.name)
+                    .cloned()
+                    .map(|value| (field.name.to_string(), value))
+            })
+            .collect(),
+    );
+    let analysis = runtara_dsl::form::analyze_form(&definition, &form_values);
+    if !analysis.valid {
+        return Err(ServiceError::ValidationError(
+            analysis
+                .issues
+                .into_iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    Ok(merged)
+}
+
 /// Validate a single `is_url` / `is_required` field value.
 fn validate_url_field(
     field_display: &str,
@@ -414,11 +553,26 @@ impl ConnectionService {
         id: &str,
         tenant_id: &str,
     ) -> Result<ConnectionDto, ServiceError> {
-        self.repository
+        let mut connection = self
+            .repository
             .get_by_id(id, tenant_id)
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| ServiceError::NotFound("Connection not found".to_string()))
+            .ok_or_else(|| ServiceError::NotFound("Connection not found".to_string()))?;
+        let parameters = self
+            .repository
+            .get_with_parameters(id, tenant_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+            .and_then(|connection| connection.connection_parameters);
+        if let Some(integration_id) = connection.integration_id.as_deref() {
+            connection.edit_projection = Some(build_edit_projection(
+                integration_id,
+                parameters.as_ref(),
+                connection.updated_at.clone(),
+            ));
+        }
+        Ok(connection)
     }
 
     /// Update a connection
@@ -463,6 +617,7 @@ impl ConnectionService {
         let current_connection = if request.integration_id.is_some()
             || default_for.is_some()
             || request.connection_parameters.is_some()
+            || request.connection_parameter_patch.is_some()
         {
             Some(self.get_connection(id, tenant_id).await?)
         } else {
@@ -480,6 +635,22 @@ impl ConnectionService {
             .unwrap_or_default();
 
         let mut request = request;
+        if request.connection_parameters.is_some() && request.connection_parameter_patch.is_some() {
+            return Err(ServiceError::ValidationError(
+                "Use connectionParameterPatch or legacy connectionParameters, not both".to_string(),
+            ));
+        }
+        let expected_version = request
+            .connection_parameter_patch
+            .as_ref()
+            .map(|patch| patch.version.clone());
+        if let (Some(expected), Some(current)) = (&expected_version, &current_connection)
+            && expected != &current.updated_at
+        {
+            return Err(ServiceError::Conflict(
+                "Connection changed since it was opened; reload before saving".to_string(),
+            ));
+        }
         if let Some(ref default_for) = default_for {
             request.is_default_file_storage = Some(
                 default_for
@@ -491,7 +662,9 @@ impl ConnectionService {
         // When this PATCH touches connection_parameters, merge the submitted fields
         // over the stored set instead of replacing wholesale. `old_params` is read
         // once and reused for the merge and for SSRF rule E below.
-        let old_params = if request.connection_parameters.is_some() {
+        let old_params = if request.connection_parameters.is_some()
+            || request.connection_parameter_patch.is_some()
+        {
             self.repository
                 .get_with_parameters(id, tenant_id)
                 .await
@@ -504,6 +677,13 @@ impl ConnectionService {
         if let Some(submitted) = request.connection_parameters.take() {
             request.connection_parameters =
                 Some(merge_connection_parameters(&old_params, &submitted));
+        }
+        if let Some(patch) = request.connection_parameter_patch.take() {
+            request.connection_parameters = Some(apply_connection_parameter_patch(
+                &integration_id,
+                &old_params,
+                &patch,
+            )?);
         }
 
         // Validate the EFFECTIVE (merged) parameters against the type schema — a
@@ -578,7 +758,7 @@ impl ConnectionService {
         // Execute update
         let rows_affected = self
             .repository
-            .update(id, tenant_id, &request)
+            .update(id, tenant_id, &request, expected_version.as_deref())
             .await
             .map_err(|e| {
                 // Check for unique constraint violation on title
@@ -589,6 +769,11 @@ impl ConnectionService {
                 }
             })?;
 
+        if rows_affected == 0 && expected_version.is_some() {
+            return Err(ServiceError::Conflict(
+                "Connection changed since it was opened; reload before saving".to_string(),
+            ));
+        }
         if rows_affected == 0 {
             return Err(ServiceError::NotFound("Connection not found".to_string()));
         }
@@ -777,16 +962,84 @@ pub enum ServiceError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServiceError, params_have_oauth_tokens, requires_interactive_oauth,
-        validate_connection_parameters, validate_rate_limit_config, validate_url_field,
+        ServiceError, apply_connection_parameter_patch, build_edit_projection,
+        params_have_oauth_tokens, requires_interactive_oauth, validate_connection_parameters,
+        validate_rate_limit_config, validate_url_field,
     };
-    use crate::types::RateLimitConfigDto;
+    use crate::types::{ConnectionParameterPatch, RateLimitConfigDto};
     use serde_json::json;
+    use std::collections::HashMap;
 
     // ── base-URL validation (F1 creation side) ───────────────────────────────
 
     fn is_validation_err(r: Result<(), ServiceError>) -> bool {
         matches!(r, Err(ServiceError::ValidationError(_)))
+    }
+
+    #[test]
+    fn edit_projection_returns_readable_values_without_secrets() {
+        let projection = build_edit_projection(
+            "quickbooks_online",
+            Some(&json!({
+                "client_id": "client-id",
+                "client_secret": "never-return-me",
+                "environment": "production",
+                "realm_id": "12345",
+                "access_token": "server-only-token"
+            })),
+            "2026-07-12T08:00:00Z".to_string(),
+        );
+
+        assert_eq!(projection.values["client_id"], "client-id");
+        assert_eq!(projection.values["environment"], "production");
+        assert_eq!(projection.values["realm_id"], "12345");
+        assert!(projection.values.get("client_secret").is_none());
+        assert!(projection.values.get("access_token").is_none());
+        assert!(projection.secret_state["client_secret"].configured);
+        assert_eq!(projection.version, "2026-07-12T08:00:00Z");
+    }
+
+    #[test]
+    fn every_registered_connection_descriptor_produces_a_valid_form() {
+        for meta in runtara_agents::registry::get_all_connection_types() {
+            let definition = runtara_dsl::form::connection_form_definition(meta);
+            let issues = runtara_dsl::form::validate_form_definition(&definition);
+            assert!(issues.is_empty(), "{}: {issues:?}", meta.integration_id);
+        }
+    }
+
+    #[test]
+    fn explicit_patch_preserves_untouched_secrets_and_rejects_read_fields() {
+        let existing = json!({
+            "client_id": "client",
+            "client_secret": "old-secret",
+            "environment": "production",
+            "realm_id": "managed",
+            "scopes": "com.intuit.quickbooks.accounting",
+            "access_token": "server-captured"
+        });
+        let patch = ConnectionParameterPatch {
+            version: "v1".to_string(),
+            set: HashMap::from([("environment".to_string(), json!("sandbox"))]),
+            replace_secrets: HashMap::new(),
+            clear: Vec::new(),
+        };
+        let merged =
+            apply_connection_parameter_patch("quickbooks_online", &existing, &patch).unwrap();
+        assert_eq!(merged["environment"], "sandbox");
+        assert_eq!(merged["client_secret"], "old-secret");
+        assert_eq!(merged["access_token"], "server-captured");
+
+        let read_patch = ConnectionParameterPatch {
+            version: "v1".to_string(),
+            set: HashMap::from([("realm_id".to_string(), json!("hijack"))]),
+            replace_secrets: HashMap::new(),
+            clear: Vec::new(),
+        };
+        assert!(matches!(
+            apply_connection_parameter_patch("quickbooks_online", &existing, &read_patch),
+            Err(ServiceError::ValidationError(_))
+        ));
     }
 
     #[test]

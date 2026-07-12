@@ -32,6 +32,13 @@ export type VariableType =
  * - `number` for floating point
  * - `boolean` for true/false
  * - `json` for pass-through JSON (distinct from `object`/`array` in VariableType)
+ *
+ * Coercion policy: `string`/`boolean` are total (any value has a
+ * representation), and `json`/`file` pass through untouched. `integer`/`number`
+ * are partial — `null` stays `null`, but a present value that cannot be parsed
+ * as the requested type fails the step rather than silently coercing to `0`.
+ * The reference's `default` (see [`ReferenceValue`]) supplies an explicit
+ * fallback for such values.
  */
 export type ValueType =
   | "string"
@@ -227,6 +234,8 @@ export type IssueCategory =
   | "invalid_reference_path"
   | "missing_connection";
 
+export type FieldAccessMode = "read_write" | "read" | "write";
+
 export type FeatureKey = "reports" | "database" | "api" | "mcp";
 
 /** Execution status representing the current state of a workflow execution */
@@ -256,6 +265,25 @@ export type ErrorSeverity = "info" | "warning" | "error" | "critical";
  * - `severity`: `error` for technical, `warning` for expected business outcomes
  */
 export type ErrorCategory = "transient" | "permanent";
+
+export type ControlKind =
+  | "text"
+  | "textarea"
+  | "secret_textarea"
+  | "password"
+  | "number"
+  | "toggle"
+  | "select"
+  | "multi_select"
+  | "radio"
+  | "date"
+  | "datetime"
+  | "date_range"
+  | "number_range"
+  | "tags"
+  | "key_value"
+  | "lookup"
+  | "file";
 
 export type ConnectionStatus =
   | "UNKNOWN"
@@ -1448,6 +1476,8 @@ export interface ConnectionDto {
   createdAt: string;
   /** Agent/operator ids this connection is the tenant default for. */
   defaultFor?: string[];
+  /** Safe edit projection. Present only on the single-connection endpoint. */
+  editProjection?: null | ConnectionEditProjection;
   id: string;
   /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
@@ -1461,6 +1491,16 @@ export interface ConnectionDto {
   title: string;
   updatedAt: string;
   validUntil?: string | null;
+}
+
+/** Safe editable view of connection parameters. */
+export interface ConnectionEditProjection {
+  /** Configuration state for secret fields, without their values. */
+  secretState: Partial<Record<string, ConnectionSecretState>>;
+  /** Current values for fields with `read_write` or `read` access. */
+  values: any;
+  /** Optimistic concurrency token. This is the connection's `updatedAt` value. */
+  version: string;
 }
 
 /** A field in a connection type's parameter schema */
@@ -1499,6 +1539,18 @@ export interface ConnectionFieldDto {
   typeName: string;
 }
 
+/** Update connection request - all fields optional */
+export interface ConnectionParameterPatch {
+  /** Fields to remove explicitly. Blank strings never imply clearing. */
+  clear?: string[];
+  /** Replacement values for write-only secret fields. */
+  replaceSecrets?: Partial<Record<string, string>>;
+  /** New values for ordinary `read_write` fields. */
+  set?: Partial<Record<string, any>>;
+  /** Optimistic concurrency token returned by `editProjection.version`. */
+  version: string;
+}
+
 /** Response for single connection operations */
 export interface ConnectionResponse {
   /**
@@ -1507,6 +1559,12 @@ export interface ConnectionResponse {
    */
   connection: ConnectionDto;
   success: boolean;
+}
+
+/** Non-sensitive state for one secret connection field. */
+export interface ConnectionSecretState {
+  clearable: boolean;
+  configured: boolean;
 }
 
 /** A connection type with its parameter schema */
@@ -1521,6 +1579,8 @@ export interface ConnectionTypeDto {
   displayName: string;
   /** Fields required for this connection type */
   fields: ConnectionFieldDto[];
+  /** Canonical schema-driven form generated from the connection descriptor. */
+  formDefinition: FormDefinition;
   /** Unique identifier for this connection type */
   integrationId: string;
   /** OAuth2 configuration (only for auth_type = oauth2_authorization_code) */
@@ -2285,6 +2345,51 @@ export interface FinishStep {
 export interface FoldersResponse {
   /** List of distinct folder paths */
   folders: string[];
+}
+
+export interface FormConditions {
+  enabled?: null | ConditionExpression;
+  required?: null | ConditionExpression;
+  visible?: null | ConditionExpression;
+}
+
+export interface FormControl {
+  kind: ControlKind;
+  options?: FormOption[];
+}
+
+export interface FormDefinition {
+  allowUnknownFields?: boolean;
+  fields?: Partial<Record<string, FormField>>;
+  /**
+   * @format int32
+   * @min 0
+   */
+  schemaVersion?: number;
+  sections?: FormSection[];
+}
+
+export type FormField = SchemaField & {
+  access?: FieldAccessMode;
+  conditions?: FormConditions;
+  control?: null | FormControl;
+  secret?: boolean;
+  section?: string | null;
+};
+
+export interface FormOption {
+  label: string;
+  value: any;
+}
+
+export interface FormSection {
+  advanced?: boolean;
+  conditions?: FormConditions;
+  description?: string | null;
+  id: string;
+  label: string;
+  /** @format int32 */
+  order?: number;
 }
 
 export interface GetInstanceResponse {
@@ -3124,18 +3229,28 @@ export interface RateLimitTimelineResponse {
  * - `variables._tenant_id` - Tenant identifier
  *
  * Example: `{ "valueType": "reference", "value": "data.user.name" }`
- * With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`
+ * With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "integer" }`
  */
 export interface ReferenceValue {
   /**
-   * Default value to use when the reference path returns null or doesn't exist.
-   * This allows graceful handling of optional fields while providing fallback values.
+   * Default value to use when the reference path is null/absent, when its
+   * shape does not match, or when a `type` hint cannot coerce the resolved
+   * value. This allows graceful handling of optional or malformed fields
+   * while providing an explicit fallback. The default is itself coerced
+   * through the `type` hint.
    */
   default?: any;
   /**
    * Expected type hint for the referenced value.
    * Used when the source type is unknown (e.g., HTTP response body).
    * If omitted, the value is passed through as-is (typically as JSON).
+   *
+   * The hint must be a known [`ValueType`] — an unrecognized name is rejected
+   * when the workflow is parsed. At runtime an `integer`/`number` hint coerces
+   * the resolved value; a `null` passes through, but a present value that
+   * cannot be parsed as the requested type fails the step rather than
+   * silently becoming `0`. Declare a `default` to supply an explicit fallback
+   * for such values.
    */
   type?: null | ValueType;
   /** Path to the data using dot notation (e.g., "data.user.name") */
@@ -3224,7 +3339,7 @@ export interface ReportBlockDefinition {
   lazy?: boolean;
   markdown?: null | ReportMarkdownConfig;
   metric?: null | ReportMetricConfig;
-  showWhen?: any;
+  showWhen?: null | ReportVisibilityCondition;
   source?: ReportSource;
   table?: null | ReportTableConfig;
   title?: string | null;
@@ -3240,7 +3355,7 @@ export interface ReportBlockError {
 export interface ReportBlockLayoutNode {
   blockId: string;
   id: string;
-  showWhen?: any;
+  showWhen?: null | ReportVisibilityCondition;
 }
 
 export interface ReportBlockOnlyDataRequest {
@@ -3791,7 +3906,7 @@ export interface ReportGridLayoutNode {
    * @format int64
    */
   rows?: number | null;
-  showWhen?: any;
+  showWhen?: null | ReportVisibilityCondition;
   /** Optional section-style heading rendered above the grid contents. */
   title?: string | null;
 }
@@ -4212,6 +4327,27 @@ export interface ReportViewDefinition {
    * otherwise from the block column flagged `descriptive: true`.
    */
   titleFromBlock?: null | ReportTitleFromBlock;
+}
+
+/**
+ * Visibility condition for a report block or layout node. Evaluated
+ * against the current filter values: the node is shown only when the
+ * referenced filter satisfies every present clause. Mirrors the viewer's
+ * `isVisibleByShowWhen` evaluator and its `ReportVisibilityCondition`
+ * type.
+ */
+export interface ReportVisibilityCondition {
+  /** When set, require the filter value to equal this. */
+  equals?: any;
+  /**
+   * When set, require the filter to have (`true`) / not have (`false`) a
+   * value.
+   */
+  exists?: boolean | null;
+  /** Id of the filter whose current value gates visibility. */
+  filter: string;
+  /** When set, require the filter value to differ from this. */
+  notEquals?: any;
 }
 
 export interface ReportWorkflowActionConfig {
@@ -4957,8 +5093,10 @@ export interface TestAgentResponse {
   success: boolean;
 }
 
-/** Update connection request - all fields optional */
+/** Update connection request - all fields optional. */
 export interface UpdateConnectionRequest {
+  /** Explicit safe parameter patch used by schema-driven connection editors. */
+  connectionParameterPatch?: null | ConnectionParameterPatch;
   connectionParameters?: any;
   connectionSubtype?: string | null;
   defaultFor?: string[] | null;
