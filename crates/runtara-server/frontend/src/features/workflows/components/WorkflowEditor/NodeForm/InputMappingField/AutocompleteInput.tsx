@@ -26,7 +26,14 @@ export function AutocompleteInput({
   className,
   typeHint,
 }: AutocompleteInputProps) {
-  const { previousSteps } = useContext(NodeFormContext);
+  const {
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+  } = useContext(NodeFormContext);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
 
   // Autocomplete state
@@ -116,8 +123,16 @@ export function AutocompleteInput({
     }, 0);
   };
 
-  // Generate and filter suggestions
-  const allSuggestions = composeVariableSuggestions(previousSteps);
+  // Generate and filter suggestions with the same context the variable
+  // picker uses — workflow inputs, variables, and scope built-ins included.
+  const allSuggestions = composeVariableSuggestions(
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope
+  );
   const filteredSuggestions = filterSuggestions(
     allSuggestions,
     autocompleteQuery
@@ -159,57 +174,34 @@ export function AutocompleteInput({
               </div>
             ) : (
               <>
-                {groupedSuggestions['Workflow Inputs'].length > 0 && (
-                  <div className="mb-2">
-                    <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
-                      Workflow Inputs
-                    </div>
-                    {groupedSuggestions['Workflow Inputs'].map((suggestion) => (
-                      <div
-                        key={suggestion.value}
-                        onClick={() => handleAutocompleteSelect(suggestion)}
-                        className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground transition-colors"
-                      >
-                        <div className="flex flex-col">
-                          <span className="font-mono text-sm">
-                            {suggestion.label}
-                          </span>
-                          {suggestion.description && (
-                            <span className="text-xs text-muted-foreground">
-                              {suggestion.description}
-                            </span>
-                          )}
+                {Object.entries(groupedSuggestions).map(
+                  ([group, suggestions]) =>
+                    suggestions.length > 0 && (
+                      <div key={group} className="mb-2 last:mb-0">
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                          {group}
                         </div>
+                        {suggestions.map((suggestion) => (
+                          <div
+                            key={suggestion.value}
+                            onClick={() => handleAutocompleteSelect(suggestion)}
+                            className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground transition-colors"
+                          >
+                            <div className="flex flex-col">
+                              <span className="font-mono text-sm">
+                                {suggestion.label}
+                              </span>
+                              {(suggestion.description || suggestion.type) && (
+                                <span className="text-xs text-muted-foreground">
+                                  {suggestion.description}
+                                  {suggestion.type && ` • ${suggestion.type}`}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                {groupedSuggestions['Step Outputs'].length > 0 && (
-                  <div>
-                    <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
-                      Step Outputs
-                    </div>
-                    {groupedSuggestions['Step Outputs'].map((suggestion) => (
-                      <div
-                        key={suggestion.value}
-                        onClick={() => handleAutocompleteSelect(suggestion)}
-                        className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground transition-colors"
-                      >
-                        <div className="flex flex-col">
-                          <span className="font-mono text-sm">
-                            {suggestion.label}
-                          </span>
-                          {suggestion.description && (
-                            <span className="text-xs text-muted-foreground">
-                              {suggestion.description}
-                              {suggestion.type && ` • ${suggestion.type}`}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                    )
                 )}
               </>
             )}

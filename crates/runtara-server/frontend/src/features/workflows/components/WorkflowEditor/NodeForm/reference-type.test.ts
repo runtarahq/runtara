@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeStepReference,
+  normalizeTypeName,
   parseStepReference,
+  referenceTypeMismatch,
   resolveReferenceType,
 } from './reference-type';
 import type { StepInfo } from './shared';
@@ -193,5 +195,44 @@ describe('resolveReferenceType', () => {
   it('resolves loop context references', () => {
     expect(resolveReferenceType('loop.index', CONTEXT)).toBe('integer');
     expect(resolveReferenceType('loop.outputs', CONTEXT)).toBeUndefined();
+  });
+});
+
+describe('normalizeTypeName', () => {
+  it('folds editor spellings to canonical JSON types', () => {
+    expect(normalizeTypeName('text')).toBe('string');
+    expect(normalizeTypeName('Int')).toBe('integer');
+    expect(normalizeTypeName('double')).toBe('number');
+    expect(normalizeTypeName('bool')).toBe('boolean');
+    expect(normalizeTypeName('array<string>')).toBe('array');
+    expect(normalizeTypeName('string[]')).toBe('array');
+    expect(normalizeTypeName(undefined)).toBeUndefined();
+  });
+});
+
+describe('referenceTypeMismatch', () => {
+  it('is silent when either side is unknown or the target is a catch-all', () => {
+    expect(referenceTypeMismatch(undefined, 'string')).toBeNull();
+    expect(referenceTypeMismatch('array', undefined)).toBeNull();
+    expect(referenceTypeMismatch('array', 'any')).toBeNull();
+    expect(referenceTypeMismatch('any', 'string')).toBeNull();
+    expect(referenceTypeMismatch('string', 'json')).toBeNull();
+  });
+
+  it('accepts identical and widening-compatible pairs', () => {
+    expect(referenceTypeMismatch('string', 'text')).toBeNull();
+    expect(referenceTypeMismatch('integer', 'number')).toBeNull();
+    expect(referenceTypeMismatch('array', 'array<string>')).toBeNull();
+  });
+
+  it('warns on structural mismatches', () => {
+    expect(referenceTypeMismatch('array', 'string')).toMatch(
+      /Reference is array; this field expects string/
+    );
+    expect(referenceTypeMismatch('object', 'integer')).toMatch(/object/);
+    expect(referenceTypeMismatch('number', 'integer')).toMatch(
+      /expects integer/
+    );
+    expect(referenceTypeMismatch('boolean', 'string')).toMatch(/boolean/);
   });
 });

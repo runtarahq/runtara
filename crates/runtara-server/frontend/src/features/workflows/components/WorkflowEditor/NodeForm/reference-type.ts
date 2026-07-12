@@ -190,6 +190,68 @@ export function resolveReferenceType(
   return undefined;
 }
 
+const TYPE_ALIASES: Record<string, string> = {
+  text: 'string',
+  str: 'string',
+  textarea: 'string',
+  int: 'integer',
+  double: 'number',
+  float: 'number',
+  bool: 'boolean',
+  json: 'any',
+  unknown: 'any',
+};
+
+/** Normalizes editor/schema type spellings to canonical JSON type names. */
+export function normalizeTypeName(type?: string): string | undefined {
+  if (!type) {
+    return undefined;
+  }
+  const lower = type.toLowerCase();
+  if (
+    lower.startsWith('array<') ||
+    lower.startsWith('[') ||
+    lower.includes('[]')
+  ) {
+    return 'array';
+  }
+  return TYPE_ALIASES[lower] ?? lower;
+}
+
+/**
+ * Returns a human-readable warning when a resolved reference type cannot fit
+ * the target field's declared type, or null when compatible / unknowable.
+ * Advisory only — runtime coercion sometimes saves a mismatch, so this warns
+ * rather than blocks (server-side E023 covers immediate values).
+ */
+export function referenceTypeMismatch(
+  referenceType: string | undefined,
+  fieldType: string | undefined
+): string | null {
+  const reference = normalizeTypeName(referenceType);
+  const field = normalizeTypeName(fieldType);
+  if (!reference || !field) {
+    return null;
+  }
+  // Unknowable or catch-all targets accept anything.
+  if (
+    reference === 'any' ||
+    field === 'any' ||
+    field === 'file' ||
+    reference === 'null'
+  ) {
+    return null;
+  }
+  if (reference === field) {
+    return null;
+  }
+  // An integer always fits a number-typed field.
+  if (reference === 'integer' && field === 'number') {
+    return null;
+  }
+  return `Reference is ${reference}; this field expects ${field}`;
+}
+
 /**
  * If `path` is `prefix` or starts with `prefix.`, returns the remainder
  * (possibly ''); otherwise null. Tries prefixes in order.

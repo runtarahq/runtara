@@ -18,6 +18,7 @@ import { VariableSuggestion } from '../InputMappingValueField/VariableSuggestion
 import { NodeFormContext } from '../NodeFormContext';
 import {
   describeStepReference,
+  referenceTypeMismatch,
   resolveReferenceType,
 } from '../reference-type';
 import { cn } from '@/lib/utils';
@@ -207,6 +208,7 @@ export function MappingValueInput({
     // Reference mode - show pill or empty state
     if (isReference) {
       if (stringValue) {
+        const typeMismatch = referenceTypeMismatch(referenceType, fieldType);
         return (
           <div className="flex-1 min-w-0">
             <div className="flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
@@ -219,6 +221,11 @@ export function MappingValueInput({
                 disabled={disabled}
               />
             </div>
+            {typeMismatch && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-0.5">
+                {typeMismatch}
+              </p>
+            )}
             {onDefaultValueChange && (
               <div className="mt-1">
                 <Input
