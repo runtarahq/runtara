@@ -1095,12 +1095,20 @@ fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult
         // Option<T> only affects nullability (tracked separately by the macro);
         // the JSON type is the inner type's. Without this arm every Option<i64>
         // fell through the catch-all and serialized as "string".
+        // strip_prefix/strip_suffix strip exactly one layer — trim_start_matches
+        // would eat repeated prefixes and turn Vec<Vec<Value>> inner into "Value".
         t if t.starts_with("Option<") => {
-            let inner = t.trim_start_matches("Option<").trim_end_matches('>');
+            let inner = t
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or("");
             rust_to_json_schema_type_with_schema(inner)
         }
         t if t.starts_with("Vec<") => {
-            let inner = t.trim_start_matches("Vec<").trim_end_matches('>');
+            let inner = t
+                .strip_prefix("Vec<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or("");
             let inner_result = rust_to_json_schema_type_with_schema(inner);
             let items_json = if let Some(fmt) = inner_result.format {
                 format!(
@@ -1264,6 +1272,19 @@ fn can_descend(type_name: &str, visited: &[String]) -> bool {
     visited.len() < MAX_OUTPUT_TYPE_DEPTH && !visited.iter().any(|v| v == type_name)
 }
 
+/// A bare custom type name ("HttpResponseBody"), as opposed to a primitive,
+/// `String`/`Value`, or a generic like `Vec<...>`.
+fn is_custom_type_name(name: &str) -> bool {
+    name != "String"
+        && name != "Value"
+        && !name.contains('<')
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+}
+
 fn resolve_output_fields(
     meta: &OutputTypeMeta,
     output_types: &OutputTypeRegistry<'_>,
@@ -1285,17 +1306,21 @@ fn resolve_output_field(
     let mut items: Option<Box<FieldTypeInfo>> = None;
 
     if let Some(nested) = field.nested_type_name {
-        // Registered type: definitely a struct — resolve its fields inline.
-        // Unregistered names stay on the type mapper's result: the macro sets
-        // nested_type_name for any custom type, and an enum field serializes
-        // as a string, so flipping unregistered names to "object" would lie.
         if let Some(meta) = output_types.get(nested) {
+            // Registered type: definitely a struct — resolve its fields inline.
             type_name = "object".to_string();
             if can_descend(nested, visited) {
                 visited.push(nested.to_string());
                 fields = Some(Box::new(resolve_output_fields(meta, output_types, visited)));
                 visited.pop();
             }
+        } else {
+            // Unregistered custom type: could be a struct, a unit enum (string
+            // on the wire), or a data enum like http's HttpResponseBody whose
+            // wire form varies per response. The mapper's catch-all "string"
+            // would be a confident lie the editor now surfaces as badges and
+            // mismatch warnings — declare the type unknown instead.
+            type_name = "any".to_string();
         }
     } else if let Some(item_type) = field.items_type_name {
         // Vec<T>: the macro records T for every Vec, primitive or struct.
@@ -1316,10 +1341,21 @@ fn resolve_output_field(
                 items: None,
                 nullable: false,
             }));
+        } else if is_custom_type_name(item_type) {
+            // Vec of an unregistered custom type: the elements' wire shape is
+            // unknown — say so instead of the mapper's catch-all "string".
+            type_name = "array".to_string();
+            items = Some(Box::new(FieldTypeInfo {
+                type_name: "any".to_string(),
+                format: None,
+                display_name: None,
+                description: None,
+                fields: None,
+                items: None,
+                nullable: false,
+            }));
         }
-        // Unregistered item types keep the type mapper's items_json result
-        // below — an unregistered custom name may be an enum (a string on the
-        // wire), so guessing "object" here would lie.
+        // Primitive item types keep the type mapper's items_json result below.
     }
 
     // Vec<primitive>: surface the item type computed by the type mapper.
@@ -1409,8 +1445,9 @@ pub fn capability_to_api_with_types(
         // Vec<T> capability output: resolve the item struct when registered.
         let inner = cap
             .output_type
-            .trim_start_matches("Vec<")
-            .trim_end_matches('>');
+            .strip_prefix("Vec<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or("");
         if let Some(meta) = output_types.get(inner) {
             output_items = Some(Box::new(FieldTypeInfo {
                 type_name: "object".to_string(),
@@ -1425,15 +1462,29 @@ pub fn capability_to_api_with_types(
                 items: None,
                 nullable: false,
             }));
+        } else if is_custom_type_name(inner) {
+            // Vec of an unregistered custom type: element shape unknown.
+            output_items = Some(Box::new(FieldTypeInfo {
+                type_name: "any".to_string(),
+                format: None,
+                display_name: None,
+                description: None,
+                fields: None,
+                items: None,
+                nullable: false,
+            }));
         } else if let Some(items_str) = output_items_json {
             output_items = serde_json::from_str::<FieldTypeInfo>(&items_str)
                 .ok()
                 .map(Box::new);
         }
+    } else if output_type == "string" && is_custom_type_name(cap.output_type) {
+        // Unregistered custom output type (e.g. shopify's CommerceProduct):
+        // could be a struct or an enum — the mapper's catch-all "string" is a
+        // guess the editor would present as authoritative. Declare it unknown;
+        // registering the struct is the real fix.
+        output_type = "any".to_string();
     }
-    // Unregistered custom output types keep the type mapper's result: an
-    // unregistered name may be an enum (a string on the wire), so guessing
-    // "object" would lie. Registering the struct is the fix.
 
     // Convert compensation hint if present
     let compensation_hint = cap
@@ -2107,16 +2158,57 @@ mod output_schema_tests {
     }
 
     #[test]
-    fn without_registry_scalar_types_still_exact() {
+    fn without_registry_custom_types_are_unknown_not_string() {
         let f = CUSTOMER
             .fields
             .iter()
             .find(|f| f.name == "address")
             .unwrap();
         let converted = output_field_to_api(f);
-        // Unregistered custom type: no fields, and the type stays whatever the
-        // mapper says (an unregistered name may be an enum).
+        // Unregistered custom type: no fields, and no confident type claim —
+        // the name may be a struct or a data enum (e.g. http's
+        // HttpResponseBody), and the old catch-all "string" fed false
+        // type-mismatch warnings in the editor.
         assert!(converted.fields.is_none());
+        assert_eq!(converted.type_name, "any");
+    }
+
+    #[test]
+    fn vec_of_unregistered_custom_type_has_unknown_items() {
+        let f = OutputFieldMeta {
+            name: "errors",
+            type_name: "Vec<AgentBulkRowError>",
+            display_name: None,
+            description: None,
+            example: None,
+            nullable: false,
+            items_type_name: Some("AgentBulkRowError"),
+            nested_type_name: None,
+        };
+        let converted = output_field_to_api(&f);
+        assert_eq!(converted.type_name, "array");
+        // Elements are objects at runtime; claiming "string" (the old
+        // fallback) misled MCP/API consumers. Unknown is honest.
+        assert_eq!(converted.items.expect("items").type_name, "any");
+    }
+
+    #[test]
+    fn nested_vec_items_stay_arrays() {
+        // Vec<Vec<Value>>: trim_start_matches stripped repeated "Vec<"
+        // prefixes and produced items "any" instead of "array".
+        let f = OutputFieldMeta {
+            name: "rows",
+            type_name: "Vec<Vec<Value>>",
+            display_name: None,
+            description: None,
+            example: None,
+            nullable: false,
+            items_type_name: Some("Vec<Value>"),
+            nested_type_name: None,
+        };
+        let converted = output_field_to_api(&f);
+        assert_eq!(converted.type_name, "array");
+        assert_eq!(converted.items.expect("items").type_name, "array");
     }
 
     fn capability(output_type: &'static str) -> CapabilityMeta {
@@ -2159,10 +2251,17 @@ mod output_schema_tests {
     }
 
     #[test]
-    fn unregistered_output_type_is_unchanged() {
-        let cap = capability("MysteryEnum");
+    fn unregistered_output_type_is_unknown() {
+        let cap = capability("MysteryType");
         let info = capability_to_api_with_types(&cap, None, None, &registry());
-        // Not registered: may be an enum, keep the mapper's result.
+        // Not registered: may be a struct or an enum — no confident claim.
+        assert_eq!(info.output.type_name, "any");
+    }
+
+    #[test]
+    fn plain_string_output_type_stays_string() {
+        let cap = capability("String");
+        let info = capability_to_api_with_types(&cap, None, None, &registry());
         assert_eq!(info.output.type_name, "string");
     }
 }
