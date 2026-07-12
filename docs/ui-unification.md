@@ -2,7 +2,10 @@
 
 ## Status
 
-Implemented and verified on 2026-07-12.
+Core architecture and primary migrations implemented and verified on
+2026-07-12. The initiative remains **in progress** because the conditional
+connection authoring, renderer ergonomics, connection lifecycle, compatibility
+gates, and cleanup work listed below are not complete.
 
 ### Implementation tracker
 
@@ -21,7 +24,7 @@ Implemented and verified on 2026-07-12.
 - [x] Build the shared controlled React field/control registry.
 - [x] Implement the safe connection edit projection and explicit patch contract.
 - [x] Generate canonical forms from every connection descriptor and migrate the
-  connection editor.
+  connection editor. Connection-auth conditional authoring remains pending.
 - [x] Adopt shared form validation/rendering in workflow UI surfaces without
   changing the workflow DSL. Workflow execution, human-action, and chat signal
   forms now use the shared renderer; persisted graph/schema shapes are unchanged.
@@ -29,14 +32,40 @@ Implemented and verified on 2026-07-12.
   Persisted `showWhen` uses a lossless canonical adapter and the shared WASM
   evaluator; report filters and inline editors map to shared fields/controls
   while retaining report-owned lookup and commit behavior.
-- [x] Remove superseded TypeScript validators, condition evaluators, and legacy
-  renderers. Connection field heuristics and workflow `SchemaFormFields` are
-  removed. Compatibility schema parsers remain only at persisted legacy wire
-  boundaries and normalize into the canonical model; they do not implement a
-  second validation or condition engine.
-- [x] Complete unit, integration, browser E2E, and local-server verification.
+- [ ] **In progress:** Remove superseded TypeScript validators, condition
+  evaluators, and legacy renderers. Connection field heuristics and workflow
+  `SchemaFormFields` are removed, but `SchemaInputForm`, compatibility DTOs and
+  adapters, and the report condition compatibility export remain.
+- [x] Complete unit, integration, browser E2E, and local-server verification for
+  the implemented scope.
 
-Verification completed:
+### Remaining implementation work
+
+- [ ] Extend `ConnectionParams` field annotations to author canonical
+  `visible`, `enabled`, and conditional `required` expressions.
+- [ ] Apply those conditions to the MCP authentication-mode fields and the SFTP
+  password/private-key alternatives, then add browser coverage for both paths.
+- [ ] Add first-invalid-field focus behavior to the shared renderer without
+  focusing fields merely because users are still typing.
+- [ ] Add the shared domain-frame contracts and dynamic `OptionResolver` hook;
+  keep report, workflow, and connection retrieval semantics domain-owned.
+- [ ] Implement `ConnectionFieldBehavior`, including
+  `requires_reauthorization` and per-secret `clearable` metadata.
+- [ ] Add an explicit clear-secret UI operation that populates the existing
+  patch contract's `clear` list and verify authorization/health lifecycle
+  transitions.
+- [ ] Add stable snapshots for normalized connection forms and complete the
+  stored workflow/report definition audit required to remove compatibility
+  boundaries safely.
+- [ ] Migrate the remaining `SchemaInputForm` consumer to the shared renderer
+  and remove the duplicate renderer.
+- [ ] Remove compatibility DTOs/adapters and the report-specific condition WASM
+  export only after the stored-definition gates pass.
+- [ ] Rename the historical `runtara-workflow-validation-wasm` crate/generated
+  bundle to its domain-neutral name, or explicitly waive the physical rename in
+  a separate architecture decision.
+
+Verification completed for the implemented scope:
 
 - `cargo test -p runtara-dsl` — 199 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
@@ -83,7 +112,7 @@ Verification completed:
   reopened again to prove the secret remained configured, and cleaned up the
   connection. The final run passed in 2.2 seconds.
 
-### Final implementation notes
+### Implemented-scope notes
 
 - Local-server verification found and fixed a boundary defect that component
   tests could not expose: generic form validation was unnecessarily waiting for
@@ -97,16 +126,16 @@ Verification completed:
 - The Rust crate and generated bundle retain the historical
   `runtara-workflow-validation-wasm` name as a build-compatibility detail. Its
   public frontend boundary is domain-neutral and serves connections, workflows,
-  and shared forms. A physical package rename would add churn without changing
-  the architecture.
+  and shared forms. The physical rename specified by Phase 2 has not been done.
 - Persisted workflow and report compatibility adapters remain intentionally.
   They are normalization boundaries required by the non-goals; the workflow
-  execution DSL and report persisted wire formats were not migrated.
+  execution DSL and report persisted wire formats were not migrated. Their
+  eventual removal remains gated on the fixture and stored-definition audits.
 
-This document defines the implemented architecture that unifies schema-driven
+This document defines the architecture being implemented to unify schema-driven
 form rendering across connections, workflows, and reports without adding a
-third-party form or schema framework. The canonical implementation lives in
-Rust and is shared with the browser through WebAssembly.
+third-party form or schema framework. Its canonical foundation lives in Rust
+and is shared with the browser through WebAssembly.
 
 ## Decision summary
 
@@ -801,6 +830,10 @@ Do not reproduce validation semantics in TypeScript tests or implementation.
 
 ### Phase 0: Contract and fixtures
 
+**Status: partially complete.** The contract and representative tests exist;
+the comprehensive normalized-form snapshot corpus and stored-definition audit
+remain pending.
+
 1. Add an architecture decision record or link this document from the relevant
    implementation plans.
 2. Capture representative existing workflow, report, and connection schemas as
@@ -813,6 +846,8 @@ five pilot connection types.
 
 ### Phase 1: Shared Rust engine
 
+**Status: complete.**
+
 1. Add `FormDefinition`, `FormField`, sections, controls, access modes,
    conditions, field state, and structured issues to `runtara-dsl::form`.
 2. Move generic condition evaluation into `runtara-dsl`.
@@ -823,6 +858,10 @@ five pilot connection types.
 Exit gate: native Rust fixture tests pass without frontend changes.
 
 ### Phase 2: General validation WASM
+
+**Status: partially complete.** Form exports, parity tests, and the generalized
+frontend boundary are active. The physical crate/generated-bundle rename is
+still pending or must be explicitly waived.
 
 1. Export form-definition validation and form analysis.
 2. Add native/WASM parity tests.
@@ -835,6 +874,10 @@ Exit gate: all shared fixtures produce equivalent native and WASM results.
 
 ### Phase 3: Shared React controls
 
+**Status: partially complete.** The registry, WASM-produced state rendering,
+and structured issues are active. First-invalid focus, explicit domain-frame
+interfaces, and the dynamic option resolver hook remain pending.
+
 1. Build the controlled field registry from existing Runtara components.
 2. Implement field and section rendering from WASM-produced state.
 3. Implement structured issue rendering and first-invalid-field focus.
@@ -844,6 +887,11 @@ Exit gate: the pilot schema fixture gallery renders every shared control without
 domain-specific field inference.
 
 ### Phase 4: Connection correctness and pilot
+
+**Status: partially complete.** Safe hydration, versioned patching, backend
+access enforcement, form generation, and primary browser coverage are active.
+Conditional MCP/SFTP authoring, explicit secret clearing, and connection field
+lifecycle metadata remain pending.
 
 1. Add safe connection edit hydration.
 2. Add versioned patch semantics.
@@ -857,6 +905,10 @@ correctly through native and browser validation.
 
 ### Phase 5: All connections
 
+**Status: partially complete.** Every registered descriptor produces a
+validated canonical form and field-name grouping heuristics are removed. Stable
+normalized-form snapshots are still pending.
+
 1. Annotate and migrate every registered connection type.
 2. Snapshot normalized form definitions.
 3. Remove connection field-name grouping and validation heuristics.
@@ -866,6 +918,10 @@ Exit gate: every registered connection type has explicit, validated form
 metadata and passes create/edit tests.
 
 ### Phase 6: Workflow form adoption
+
+**Status: complete for workflow-owned surfaces.** Persisted workflow JSON and
+execution semantics remain unchanged. The remaining `SchemaInputForm` consumer
+is trigger-owned and is tracked under cleanup as a duplicate generic renderer.
 
 1. Route workflow input validation through the shared engine.
 2. Replace duplicate workflow schema renderers.
@@ -877,6 +933,10 @@ renderer and validator are active.
 
 ### Phase 7: Reports form adoption
 
+**Status: complete at the planned compatibility-adapter scope.** Persisted
+report migration remains intentionally deferred; removal of its compatibility
+boundary belongs to Phase 8 after stored-definition gates pass.
+
 1. Adapt filters to shared controls.
 2. Adapt inline editors to shared controls.
 3. Move report row conditions to the shared evaluator.
@@ -887,6 +947,10 @@ Exit gate: existing report definitions render and edit without loss, and report
 visibility matches native/WASM evaluation.
 
 ### Phase 8: Cleanup
+
+**Status: in progress.** Some duplicate validators/renderers are removed, but
+the remaining compatibility DTOs/adapters, `SchemaInputForm`, report condition
+export, and authoring documentation cleanup are not complete.
 
 1. Remove legacy TypeScript schema validators and conditional evaluators.
 2. Remove duplicate schema-driven field renderers.
@@ -929,3 +993,8 @@ The initiative is complete when:
 - workflow execution DSL and persisted workflow behavior remain unchanged;
 - report query and layout semantics remain unchanged;
 - no additional external form or validation dependency has been introduced.
+
+**Current assessment:** not complete. The shared foundation and primary domain
+migrations satisfy most architectural criteria, but the initiative cannot be
+closed until the remaining implementation checklist is complete or individual
+items are explicitly waived through an architecture decision.
