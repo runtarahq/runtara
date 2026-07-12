@@ -40,6 +40,12 @@ pub struct ShapeField {
     pub ty: &'static str,
     /// One-line human summary for authoring surfaces (editor panels, MCP).
     pub description: &'static str,
+    /// Step config key (camelCase, as authored) that must be truthy for the
+    /// runtime to actually write this field (e.g. Split's failure siblings
+    /// exist only with `config.dontStopOnFailed`). Referencing the field is
+    /// always *valid*; suggestion surfaces should not offer it when the gate
+    /// is off, or it resolves to null.
+    pub gated_by: Option<&'static str>,
 }
 
 const fn field(name: &'static str, ty: &'static str, description: &'static str) -> ShapeField {
@@ -47,6 +53,21 @@ const fn field(name: &'static str, ty: &'static str, description: &'static str) 
         name,
         ty,
         description,
+        gated_by: None,
+    }
+}
+
+const fn gated_field(
+    name: &'static str,
+    ty: &'static str,
+    description: &'static str,
+    gated_by: &'static str,
+) -> ShapeField {
+    ShapeField {
+        name,
+        ty,
+        description,
+        gated_by: Some(gated_by),
     }
 }
 
@@ -78,16 +99,23 @@ pub struct StepOutputShape {
 }
 
 const SPLIT_SIBLINGS: &[ShapeField] = &[
-    field(
+    gated_field(
         "data",
         "object",
         "Per-outcome item buckets {success, error, aborted, unknown, skipped}; populated with config.dontStopOnFailed",
+        "dontStopOnFailed",
     ),
-    field("stats", "object", "Per-outcome counts plus total"),
-    field(
+    gated_field(
+        "stats",
+        "object",
+        "Per-outcome counts plus total",
+        "dontStopOnFailed",
+    ),
+    gated_field(
         "hasFailures",
         "boolean",
         "True when at least one iteration failed (with config.dontStopOnFailed)",
+        "dontStopOnFailed",
     ),
 ];
 
@@ -205,11 +233,15 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
 }
 
 fn shape_field_json(f: &ShapeField) -> Value {
-    json!({
+    let mut v = json!({
         "name": f.name,
         "type": f.ty,
         "description": f.description,
-    })
+    });
+    if let Some(gate) = f.gated_by {
+        v["gatedBy"] = json!(gate);
+    }
+    v
 }
 
 /// Render a step type's output shape as JSON for the authoring schema (the
@@ -416,6 +448,14 @@ mod tests {
         let siblings = split["siblingFields"].as_array().unwrap();
         assert_eq!(siblings[2]["name"], "hasFailures");
         assert_eq!(siblings[2]["type"], "boolean");
+        // The runtime writes the failure siblings only with dontStopOnFailed;
+        // suggestion surfaces read this gate so they don't offer paths that
+        // resolve to null under the default config.
+        assert_eq!(siblings[2]["gatedBy"], "dontStopOnFailed");
         assert_eq!(split["outputs"]["kind"], "array");
+
+        // Ungated fields carry no gatedBy key at all.
+        let filter = output_shape_json("Filter");
+        assert!(filter["outputs"]["fields"][0].get("gatedBy").is_none());
     }
 }

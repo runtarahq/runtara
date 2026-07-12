@@ -166,7 +166,7 @@ export function CompositeValueItem({
 }: CompositeValueItemProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
-  const { previousSteps, inputSchemaFields, variables } =
+  const { previousSteps, inputSchemaFields, variables, isInsideSplit } =
     useContext(NodeFormContext);
 
   // Get errors for this specific item
@@ -197,9 +197,10 @@ export function CompositeValueItem({
             previousSteps,
             inputSchemaFields,
             variables,
+            insideSplitScope: isInsideSplit,
           })
         : undefined,
-    [value, previousSteps, inputSchemaFields, variables]
+    [value, previousSteps, inputSchemaFields, variables, isInsideSplit]
   );
 
   // Handle value type change

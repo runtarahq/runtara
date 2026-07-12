@@ -113,7 +113,12 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
     );
   }
 
-  const fields = output.fields ?? output.items?.fields ?? [];
+  // Array outputs carry their element shape under items.fields — those are
+  // per-element fields, not directly addressable at steps.<id>.outputs.<name>
+  // (the value is an array; elements are addressed by index). Prefix them so
+  // nobody wires a null-resolving path off the panel.
+  const directFields = output.fields ?? [];
+  const itemFields = directFields.length === 0 ? (output.items?.fields ?? []) : [];
   const containerType = output.type ?? 'unknown';
 
   return (
@@ -124,10 +129,26 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
           {containerType}
         </Badge>
       </div>
-      {fields.length > 0 ? (
+      {directFields.length > 0 ? (
         <div className="space-y-1">
-          {fields.map((field) => (
+          {directFields.map((field) => (
             <FieldRow key={field.name} field={field} />
+          ))}
+        </div>
+      ) : itemFields.length > 0 ? (
+        <div className="space-y-1">
+          <p className="text-[11px] text-muted-foreground">
+            Each element (address by index, e.g.{' '}
+            <span className="font-mono">
+              {referenceHint(stepId, '.outputs.0')}
+            </span>
+            ):
+          </p>
+          {itemFields.map((field) => (
+            <FieldRow
+              key={field.name}
+              field={{ ...field, name: `[item].${field.name}` }}
+            />
           ))}
         </div>
       ) : (

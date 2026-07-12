@@ -28,9 +28,9 @@ const SHAPES: Record<string, OutputShapeJson> = {
   Split: {
     outputs: { kind: 'array' },
     siblingFields: [
-      { name: 'data', type: 'object' },
-      { name: 'stats', type: 'object' },
-      { name: 'hasFailures', type: 'boolean' },
+      { name: 'data', type: 'object', gatedBy: 'dontStopOnFailed' },
+      { name: 'stats', type: 'object', gatedBy: 'dontStopOnFailed' },
+      { name: 'hasFailures', type: 'boolean', gatedBy: 'dontStopOnFailed' },
     ],
   },
   Conditional: {
@@ -59,13 +59,14 @@ const SHAPES: Record<string, OutputShapeJson> = {
 function graphWithUpstream(
   stepId: string,
   stepType: string,
-  name: string
+  name: string,
+  config?: Record<string, unknown>
 ): ExecutionGraph {
   return {
     entryPoint: stepId,
     executionPlan: [{ fromStep: stepId, toStep: 'probe' }],
     steps: {
-      [stepId]: { id: stepId, name, stepType },
+      [stepId]: { id: stepId, name, stepType, config },
       probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
     },
   } as unknown as ExecutionGraph;
@@ -110,9 +111,11 @@ describe('composePreviousSteps control-step output shapes', () => {
     expect(lastOutputs?.type).toBeUndefined();
   });
 
-  it('types Split outputs as an array and suggests its sibling fields', () => {
+  it('types Split outputs as an array and suggests siblings when the gate is on', () => {
     const [split] = previousStepsFor(
-      graphWithUpstream('split', 'Split', 'Split items')
+      graphWithUpstream('split', 'Split', 'Split items', {
+        dontStopOnFailed: true,
+      })
     );
 
     const whole = split.outputs.find(
@@ -126,6 +129,20 @@ describe('composePreviousSteps control-step output shapes', () => {
     expect(byPath["steps['split'].data"]).toBe('object');
     expect(byPath["steps['split'].stats"]).toBe('object');
     expect(byPath["steps['split'].hasFailures"]).toBe('boolean');
+  });
+
+  it('hides config-gated Split siblings when dontStopOnFailed is off', () => {
+    // Without the gate the runtime never writes data/stats/hasFailures —
+    // suggesting them would recreate the silent-null reference class.
+    const [split] = previousStepsFor(
+      graphWithUpstream('split', 'Split', 'Split items')
+    );
+
+    const paths = split.outputs.map((o) => o.path);
+    expect(paths).toContain("steps['split'].outputs");
+    expect(paths).not.toContain("steps['split'].hasFailures");
+    expect(paths).not.toContain("steps['split'].stats");
+    expect(paths).not.toContain("steps['split'].data");
   });
 
   it('suggests Conditional result as boolean', () => {
@@ -273,7 +290,9 @@ describe('composeVariableSuggestions sibling labels', () => {
 
   it('labels sibling fields by name instead of the raw path', () => {
     const previousSteps = previousStepsFor(
-      graphWithUpstream('split', 'Split', 'Split items')
+      graphWithUpstream('split', 'Split', 'Split items', {
+        dontStopOnFailed: true,
+      })
     );
 
     const suggestions = composeVariableSuggestions(previousSteps);

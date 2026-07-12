@@ -459,6 +459,7 @@ function composeVariableSuggestions(
       for (const param of flattenedParams) {
         // Extract field path from full path (e.g., "steps['id'].outputs.field" -> "field")
         const outputsPrefix = `steps['${step.id}'].outputs`;
+        const stepPrefix = `steps['${step.id}'].`;
         let fieldPath = param.path;
         if (param.path.startsWith(outputsPrefix)) {
           fieldPath = param.path.slice(outputsPrefix.length);
@@ -466,6 +467,11 @@ function composeVariableSuggestions(
           if (fieldPath.startsWith('.')) {
             fieldPath = fieldPath.slice(1);
           }
+        } else if (param.path.startsWith(stepPrefix)) {
+          // Sibling fields written directly under steps.<id> (e.g. Split's
+          // hasFailures, Switch's route) — label them by field name, matching
+          // the variable picker's labeling.
+          fieldPath = param.path.slice(stepPrefix.length);
         }
 
         suggestions.push({

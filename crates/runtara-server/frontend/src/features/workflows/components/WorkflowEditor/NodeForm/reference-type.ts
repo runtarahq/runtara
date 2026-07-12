@@ -133,6 +133,13 @@ export interface ReferenceTypeContext {
   previousSteps?: StepInfo[];
   inputSchemaFields?: SchemaField[];
   variables?: SimpleVariable[];
+  /**
+   * Inside a Split body the DSL rebinds bare `data.*` to the current item —
+   * the workflow-level input schema does not apply there, so `data.*`
+   * references resolve to unknown instead of the outer schema's (possibly
+   * wrong) types.
+   */
+  insideSplitScope?: boolean;
 }
 
 /**
@@ -155,6 +162,10 @@ export function resolveReferenceType(
   // Workflow input data: both spellings the editor teaches.
   const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
   if (dataRest !== null) {
+    if (context.insideSplitScope) {
+      // `data.*` is the Split's current item here, not the workflow input.
+      return undefined;
+    }
     if (dataRest === '') {
       return 'object';
     }

@@ -39,6 +39,34 @@ const AGENTS = [
       },
     },
   },
+  {
+    id: 'xlsx',
+    name: 'XLSX',
+    description: '',
+    supportsConnections: false,
+    integrationIds: [],
+    supportedCapabilities: {
+      'get-sheets': {
+        id: 'get-sheets',
+        name: 'get_sheets',
+        inputType: 'GetSheetsInput',
+        inputs: [],
+        output: {
+          type: 'array',
+          items: {
+            type: 'object',
+            fields: [
+              { name: 'name', type: 'string' },
+              { name: 'index', type: 'integer' },
+            ],
+          },
+        },
+        hasSideEffects: false,
+        isIdempotent: true,
+        rateLimited: false,
+      },
+    },
+  },
 ] as unknown as ExtendedAgent[];
 
 function renderPanel(
@@ -117,6 +145,22 @@ describe('StepOutputPanel', () => {
     // Nested fields render indented rows.
     expect(screen.getByText('token')).toBeInTheDocument();
     expect(screen.getByText('steps.fetch.outputs')).toBeInTheDocument();
+  });
+
+  it('marks array-output item fields as per-element, not direct paths', () => {
+    renderPanel({
+      stepType: 'Agent',
+      agentId: 'xlsx',
+      capabilityId: 'get-sheets',
+    });
+    openPanel();
+
+    // Item fields must not read as steps.<id>.outputs.name — the value is an
+    // array and that path resolves to null.
+    expect(screen.getByText('[item].name')).toBeInTheDocument();
+    expect(screen.getByText('[item].index')).toBeInTheDocument();
+    expect(screen.getByText(/address by index/)).toBeInTheDocument();
+    expect(screen.queryByText(/^name$/)).not.toBeInTheDocument();
   });
 
   it('renders the canonical shape for control steps, including siblings', () => {

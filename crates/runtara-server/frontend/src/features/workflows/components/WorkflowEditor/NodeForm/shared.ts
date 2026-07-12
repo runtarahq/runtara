@@ -296,7 +296,12 @@ function buildStepInfoList(
       // shapes here drifted once already: While's iteration count was
       // suggested at steps['id'].iterations, which resolves to null at
       // runtime — the canonical path is steps['id'].outputs.iterations.
-      appendShapeOutputs(step.stepType, prevStepId, outputs);
+      appendShapeOutputs(
+        step.stepType,
+        prevStepId,
+        outputs,
+        (step as { config?: Record<string, unknown> }).config
+      );
     }
 
     // Fallback: if no specific outputs were resolved (unknown step type or the
@@ -370,7 +375,8 @@ function agentOutputFieldToParameter(
 function appendShapeOutputs(
   stepType: string,
   stepId: string,
-  outputs: StepParameter[]
+  outputs: StepParameter[],
+  stepConfig?: Record<string, unknown>
 ): void {
   const shape = getStepOutputShape(stepType);
   if (!shape) {
@@ -404,6 +410,12 @@ function appendShapeOutputs(
   }
 
   for (const sibling of shape.siblingFields ?? []) {
+    // Config-gated siblings (Split's data/stats/hasFailures) only exist at
+    // runtime when the gate is on — offering them otherwise recreates the
+    // silent-null suggestion class this table exists to prevent.
+    if (sibling.gatedBy && !stepConfig?.[sibling.gatedBy]) {
+      continue;
+    }
     outputs.push(shapeSiblingParameter(sibling, stepId));
   }
 }

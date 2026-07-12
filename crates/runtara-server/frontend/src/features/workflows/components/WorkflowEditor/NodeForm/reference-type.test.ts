@@ -196,6 +196,21 @@ describe('resolveReferenceType', () => {
     expect(resolveReferenceType('loop.index', CONTEXT)).toBe('integer');
     expect(resolveReferenceType('loop.outputs', CONTEXT)).toBeUndefined();
   });
+
+  it('treats data.* as unknown inside a Split body (rebound to the item)', () => {
+    const insideSplit = { ...CONTEXT, insideSplitScope: true };
+    expect(resolveReferenceType('data.flag', insideSplit)).toBeUndefined();
+    expect(resolveReferenceType('data', insideSplit)).toBeUndefined();
+    // Explicit workflow-scope spelling also refers to the rebound scope's
+    // runtime resolution rules — stay honest and claim nothing.
+    expect(
+      resolveReferenceType('workflow.inputs.data.flag', insideSplit)
+    ).toBeUndefined();
+    // Step and variable references are unaffected by the data rebinding.
+    expect(
+      resolveReferenceType("steps['filt'].outputs.count", insideSplit)
+    ).toBe('integer');
+  });
 });
 
 describe('normalizeTypeName', () => {

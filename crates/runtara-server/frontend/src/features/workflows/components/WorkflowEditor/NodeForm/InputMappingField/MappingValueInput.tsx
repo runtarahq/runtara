@@ -112,7 +112,7 @@ export function MappingValueInput({
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
-  const { previousSteps, inputSchemaFields, variables } =
+  const { previousSteps, inputSchemaFields, variables, isInsideSplit } =
     useContext(NodeFormContext);
 
   const isReference = valueType === 'reference';
@@ -175,9 +175,17 @@ export function MappingValueInput({
             previousSteps,
             inputSchemaFields,
             variables,
+            insideSplitScope: isInsideSplit,
           })
         : undefined,
-    [isReference, stringValue, previousSteps, inputSchemaFields, variables]
+    [
+      isReference,
+      stringValue,
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideSplit,
+    ]
   );
 
   // Cycle: immediate → template → reference → composite → immediate

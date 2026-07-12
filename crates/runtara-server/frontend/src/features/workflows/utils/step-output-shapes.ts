@@ -24,6 +24,11 @@ export interface ShapeFieldJson {
   /** "string" | "number" | "integer" | "boolean" | "array" | "object" | "dynamic" */
   type: string;
   description?: string;
+  /**
+   * Step config key that must be truthy for the runtime to write this field
+   * (e.g. Split's failure siblings require config.dontStopOnFailed).
+   */
+  gatedBy?: string;
 }
 
 export interface OutputShapeJson {
