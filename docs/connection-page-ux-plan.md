@@ -2,6 +2,22 @@
 
 Date: 2026-07-12. Follow-up to the schema unification (docs/ui-unification.md): the form engine is done; this plans the remaining PAGE FRAME around FormRenderer. Produced from a 6-agent design workflow (2 code scouts + 3 design lenses + synthesis); all file:line references verified against main @ 6b8ef1b2.
 
+## Implementation status (2026-07-12)
+
+**Shipped on main** — each a committed, tested chain (cargo + vitest + Playwright e2e + browser + clippy):
+- ✅ **UX-1.1–1.3, 1.9** (`4e833e8a`): ConnectionPageShell (centered, live title, humanized category), sticky save bar + NavigationBlocker guard, stay-on-page save + toast sweep, rate-limit CollapsedSection.
+- ✅ **UX-1.4–1.5** (`1aa33943`): ConnectionStatusCard replacing both amber banners, shared status util, reconnect dirty-guard dialog + Save & Reconnect.
+- ✅ **UX-1.6** (`8f5e9f93`): danger-zone delete behind a confirmation dialog.
+- ✅ **UX-1.7** (`bd445b2a`): ReconnectPromptNotice post-save handoff + dynamic Save & Reconnect label.
+- ✅ **UX-1.8** (`5d94f207`): useOAuthPopup popup.closed detection + create-abandon routing + "Create & Connect" hint.
+- ✅ **UX-2.1** (`0c42e1fe`): ConnectionGrantState projection (token health, precise never-authorized "Authorization needed") — backend DTO + OpenAPI/TS regen + card fills.
+
+**Remaining follow-ups** (documented below with exact touchpoints):
+- ⬜ **UX-2.2** RedirectUriRow — needs `redirect_uri` on OAuthConfigDto (thread TenantId + public_base_url into the two type handlers).
+- ⬜ **UX-2.3** Delete usage impact ("Used by N workflows") — needs the `/connections/{id}/usage` endpoint (workflows repo query).
+- ⬜ **UX-2.4** TestConnectionButton — needs `POST /connections/{id}/test` + the token-cache force-refresh knob + a per-connection rate limiter.
+- ⬜ **UX-3** polish (doc_url links, list-dialog parity, etc.).
+
 
 Synthesis of three lenses: **page-composition** (component tree / visual system), **lifecycle-flows** (state machines / microcopy), **contract-additions** (backend). Frontend paths relative to `/Users/volodymyrrudyi/work/runtara/crates/runtara-server/frontend/src/`; backend paths relative to `/Users/volodymyrrudyi/work/runtara/`. The real-stack browser e2e harness is `frontend/e2e/tests/e2e/connection-editor.local.e2e.spec.ts` (Playwright against `http://127.0.0.1:7001/api/runtime`, API-created connections + UI assertions — see its `createApiConnection`/`openConnectionEditor` helpers at lines 26–60).
 
