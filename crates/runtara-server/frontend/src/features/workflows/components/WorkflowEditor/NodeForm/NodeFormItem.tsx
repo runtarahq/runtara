@@ -28,6 +28,7 @@ import { NODE_TYPES } from '@/features/workflows/config/workflow';
 import { TestAgentInline } from './TestAgentButton/TestAgentInline';
 import { EmbedWorkflowConfigField } from './EmbedWorkflowConfigField';
 import { NameField } from './NameField';
+import { StepOutputPanel } from './StepOutputPanel';
 import {
   Tabs,
   TabsContent,
@@ -712,6 +713,15 @@ const basicFieldsConfig = [
   },
 ];
 
+// Wrapper for the Output panel that only shows when Main tab is active
+function StepOutputPanelWrapper() {
+  const { activeTab } = useTabContext();
+  if (activeTab !== 'main') {
+    return null;
+  }
+  return <StepOutputPanel />;
+}
+
 // Wrapper for InputMapping that only shows when Main tab is active
 function InputMappingWrapper(config: Record<string, unknown>) {
   const { activeTab } = useTabContext();
@@ -780,6 +790,14 @@ const mainTabFieldsConfig = [
     renderFormField: (config: Record<string, unknown>) => (
       <InputMappingWrapper {...config} />
     ),
+  },
+  {
+    type: 'custom',
+    label: '',
+    name: 'stepOutputPanel',
+    initialValue: undefined,
+    colSpan: 'full',
+    renderComponent: () => <StepOutputPanelWrapper />,
   },
 ];
 
