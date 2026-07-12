@@ -12,6 +12,7 @@ interface KeyValueInputProps {
   valuePlaceholder?: string;
   className?: string;
   id?: string;
+  disabled?: boolean;
 }
 
 type Row = { key: string; value: string };
@@ -33,6 +34,7 @@ export function KeyValueInput({
   valuePlaceholder = 'Value',
   className,
   id,
+  disabled = false,
 }: KeyValueInputProps) {
   // Preserve key order across renders by deriving rows from the object's
   // own iteration order. JS objects preserve insertion order for string
@@ -88,12 +90,14 @@ export function KeyValueInput({
           onKeyChange={(k) => updateRow(index, { key: k })}
           onValueChange={(v) => updateRow(index, { value: v })}
           onRemove={() => removeRow(index)}
+          disabled={disabled}
         />
       ))}
       <AddRow
         keyPlaceholder={keyPlaceholder}
         valuePlaceholder={valuePlaceholder}
         onAdd={addRow}
+        disabled={disabled}
       />
     </div>
   );
@@ -106,6 +110,7 @@ interface KeyValueRowProps {
   onKeyChange: (key: string) => void;
   onValueChange: (value: string) => void;
   onRemove: () => void;
+  disabled: boolean;
 }
 
 function KeyValueRow({
@@ -115,6 +120,7 @@ function KeyValueRow({
   onKeyChange,
   onValueChange,
   onRemove,
+  disabled,
 }: KeyValueRowProps) {
   return (
     <div className="flex items-center gap-2">
@@ -122,6 +128,7 @@ function KeyValueRow({
         type="text"
         value={row.key}
         onChange={(e) => onKeyChange(e.target.value)}
+        disabled={disabled}
         placeholder={keyPlaceholder}
         className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
       />
@@ -129,12 +136,14 @@ function KeyValueRow({
         type="text"
         value={row.value}
         onChange={(e) => onValueChange(e.target.value)}
+        disabled={disabled}
         placeholder={valuePlaceholder}
         className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
       />
       <button
         type="button"
         onClick={onRemove}
+        disabled={disabled}
         aria-label="Remove entry"
         className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10"
       >
@@ -148,9 +157,15 @@ interface AddRowProps {
   keyPlaceholder: string;
   valuePlaceholder: string;
   onAdd: (key: string, value: string) => void;
+  disabled: boolean;
 }
 
-function AddRow({ keyPlaceholder, valuePlaceholder, onAdd }: AddRowProps) {
+function AddRow({
+  keyPlaceholder,
+  valuePlaceholder,
+  onAdd,
+  disabled,
+}: AddRowProps) {
   // Local draft state so half-typed entries don't pollute parent state.
   // Committed on Enter or "Add" click.
   const [draftKey, setDraftKey] = useState('');
@@ -177,6 +192,7 @@ function AddRow({ keyPlaceholder, valuePlaceholder, onAdd }: AddRowProps) {
         value={draftKey}
         onChange={(e) => setDraftKey(e.target.value)}
         onKeyDown={onKeyDown}
+        disabled={disabled}
         placeholder={keyPlaceholder}
         className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
       />
@@ -185,6 +201,7 @@ function AddRow({ keyPlaceholder, valuePlaceholder, onAdd }: AddRowProps) {
         value={draftValue}
         onChange={(e) => setDraftValue(e.target.value)}
         onKeyDown={onKeyDown}
+        disabled={disabled}
         placeholder={valuePlaceholder}
         className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
       />
@@ -192,7 +209,7 @@ function AddRow({ keyPlaceholder, valuePlaceholder, onAdd }: AddRowProps) {
         type="button"
         onClick={commit}
         aria-label="Add entry"
-        disabled={!draftKey.trim()}
+        disabled={disabled || !draftKey.trim()}
         className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Plus className="h-4 w-4" />

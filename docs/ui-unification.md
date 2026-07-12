@@ -17,7 +17,7 @@ Implementation in progress.
   conditional-required validation are implemented; pattern/format validation
   and legacy schema normalization remain.
 - [x] Generalize the validation WASM bridge and add native/WASM parity fixtures.
-- [ ] Build the shared controlled React field/control registry.
+- [x] Build the shared controlled React field/control registry.
 - [ ] Implement the safe connection edit projection and explicit patch contract.
 - [ ] Generate canonical forms from every connection descriptor and migrate the
   connection editor.
@@ -39,6 +39,8 @@ Verification completed so far:
 - `npm test -- --run src/features/workflows/utils/rust-workflow-validation.test.ts`
   — 8 passed against the generated browser WASM bundle.
 - `npx tsc -b --pretty false` — passed.
+- Shared form renderer Vitest suites — 5 passed; targeted ESLint and TypeScript
+  checks passed.
 
 This document defines how Runtara will unify schema-driven form rendering across
 connections, workflows, and reports without adding third-party form or schema

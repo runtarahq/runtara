@@ -8,6 +8,7 @@ interface TagInputProps {
   placeholder?: string;
   className?: string;
   id?: string;
+  disabled?: boolean;
 }
 
 export function TagInput({
@@ -16,6 +17,7 @@ export function TagInput({
   placeholder = 'Type and press Enter',
   className,
   id,
+  disabled = false,
 }: TagInputProps) {
   const [inputValue, setInputValue] = useState('');
 
@@ -51,6 +53,7 @@ export function TagInput({
           <button
             type="button"
             onClick={() => removeTag(tag)}
+            disabled={disabled}
             className="inline-flex h-4 w-4 items-center justify-center rounded-sm hover:bg-muted-foreground/20"
           >
             <X className="h-3 w-3" />
@@ -63,6 +66,7 @@ export function TagInput({
         value={inputValue}
         onChange={(e) => setInputValue(e.target.value)}
         onKeyDown={handleKeyDown}
+        disabled={disabled}
         placeholder={value.length === 0 ? placeholder : ''}
         className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
       />
