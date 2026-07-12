@@ -1,5 +1,10 @@
 # Reports DSL audit — inconsistencies and gaps
 
+> Implementation note (2026-07-12): references below to the report-specific
+> browser row-condition export describe the audited historical state. The
+> frontend now evaluates row conditions through the shared validation WASM
+> `evaluateConditionJson` export; the report-specific export was removed.
+
 Date: 2026-07-03 (completed in two passes). Method: 11 parallel analyzers over distinct DSL dimensions (core types, expression languages, format/templates, validation, edit ops, renderers, provider parity, MCP authoring schema, frontend parity, API/lifecycle, test corpus), cross-analyzer dedupe, one adversarial verifier per finding instructed to refute it against the code, then a completeness-critic round (preview parity, mutation concurrency, workflow-button contract, pagination) with its own find+verify pass.
 
 Stats: 141 raw findings -> 98 deduped (F01-F98) + 34 critic-round findings (X0-X33). **131 confirmed, 1 refuted (F87).** Every confirmed finding below survived an adversarial verification pass with file:line evidence. Note: X findings were deduped only within their cluster, so several restate the same root cause from different angles; duplicates of F findings are marked.
