@@ -712,4 +712,48 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(dialog).not.toContainText('access grant will be revoked');
     await dialog.getByRole('button', { name: 'Cancel' }).click();
   });
+
+  test('creates an OAuth connection without supplying the managed realm_id field', async ({
+    page,
+    context,
+  }) => {
+    const title = `E2E create QBO ${runId}`;
+    // The OAuth authorize popup opens after create; close it immediately so
+    // the flow settles (create-abandon routes to the connection's edit page).
+    context.on('page', (popup) => void popup.close().catch(() => {}));
+
+    let createBody: Record<string, unknown> | undefined;
+    page.on('request', (req) => {
+      if (
+        req.method() === 'POST' &&
+        req.url().endsWith('/api/runtime/connections')
+      ) {
+        createBody = req.postDataJSON() as Record<string, unknown>;
+      }
+    });
+
+    await page.goto('/connections/quickbooks_online/create', {
+      waitUntil: 'domcontentloaded',
+    });
+    await page.getByLabel('Title').fill(title);
+    await page.getByLabel('Client ID').fill('e2e-client-id');
+    await page
+      .locator('[data-field="client_secret"] input')
+      .fill('e2e-client-secret');
+
+    // The managed Realm ID field is left blank (populated only by OAuth).
+    await page.getByRole('button', { name: 'Create & Connect' }).click();
+
+    // Lands on the new connection's edit page after the popup is abandoned.
+    await expect(page).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    // The create payload must not carry the server-managed read field.
+    const params =
+      (createBody?.connectionParameters as Record<string, unknown>) ?? {};
+    expect(params).not.toHaveProperty('realm_id');
+    expect(params).toMatchObject({ client_id: 'e2e-client-id' });
+
+    // Clean up (not created via the API helper, so track it explicitly).
+    const id = page.url().split('/').pop() as string;
+    apiConnectionIds.add(id);
+  });
 });

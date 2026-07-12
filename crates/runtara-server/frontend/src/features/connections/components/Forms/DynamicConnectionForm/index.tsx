@@ -265,6 +265,8 @@ export function DynamicConnectionForm({
   };
 
   const handleSubmit = async (values: Record<string, unknown>) => {
+    const descriptorFields =
+      (connectionType as ConnectionTypeWithForm).formDefinition?.fields ?? {};
     const parameters = buildConnectionCreateParameters(
       (connectionType as ConnectionTypeWithForm).formDefinition ?? {
         fields: {},
@@ -284,19 +286,21 @@ export function DynamicConnectionForm({
       toast.error('Fix the highlighted connection fields before saving.');
       return;
     }
-    onSubmit(
-      {
-        ...values,
-        ...parameters,
-      },
-      {
-        clearSecrets: [...clearedSecrets].sort(),
-        dirtyFields: Object.entries(form.formState.dirtyFields)
-          .filter(([, dirty]) => dirty === true)
-          .map(([name]) => name)
-          .sort(),
-      }
+    // Read-access fields are server-managed (e.g. OAuth-captured realm_id) and
+    // must never be supplied — creation rejects them outright. Strip them from
+    // the submission so the merge below can't reintroduce a displayed default.
+    const submission = Object.fromEntries(
+      Object.entries({ ...values, ...parameters }).filter(
+        ([name]) => descriptorFields[name]?.access !== 'read'
+      )
     );
+    onSubmit(submission, {
+      clearSecrets: [...clearedSecrets].sort(),
+      dirtyFields: Object.entries(form.formState.dirtyFields)
+        .filter(([, dirty]) => dirty === true)
+        .map(([name]) => name)
+        .sort(),
+    });
   };
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
