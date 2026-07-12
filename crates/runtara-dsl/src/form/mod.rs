@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -284,6 +285,15 @@ pub fn validate_form_definition(definition: &FormDefinition) -> Vec<FormIssue> {
             ));
         }
         validate_control(field, &path, &mut issues);
+        if let Some(pattern) = field.schema.pattern.as_deref()
+            && let Err(regex_error) = Regex::new(pattern)
+        {
+            issues.push(error(
+                "FORM_PATTERN_INVALID",
+                format!("{path}.pattern"),
+                format!("Invalid regular expression: {regex_error}"),
+            ));
+        }
         validate_conditions(
             &field.conditions,
             &format!("{path}.conditions"),
@@ -792,6 +802,25 @@ fn validate_field_value(
         Value::String(value) => {
             let length = value.chars().count() as f64;
             validate_min_max(schema, length, "length", path, issues);
+            if let Some(pattern) = schema.pattern.as_deref()
+                && let Ok(pattern) = Regex::new(pattern)
+                && !pattern.is_match(value)
+            {
+                issues.push(error(
+                    "FORM_FIELD_PATTERN_MISMATCH",
+                    path,
+                    "Field does not match the required pattern",
+                ));
+            }
+            if let Some(format) = schema.format.as_deref()
+                && !value_matches_format(value, format)
+            {
+                issues.push(error(
+                    "FORM_FIELD_FORMAT_INVALID",
+                    path,
+                    format!("Field is not a valid {format}"),
+                ));
+            }
         }
         Value::Number(value) => {
             if let Some(number) = value.as_f64() {
@@ -862,6 +891,64 @@ fn value_matches_type(value: &Value, field_type: &SchemaFieldType) -> bool {
         SchemaFieldType::Array => value.is_array(),
         SchemaFieldType::Object | SchemaFieldType::File => value.is_object(),
     }
+}
+
+fn value_matches_format(value: &str, format: &str) -> bool {
+    match format {
+        "email" => Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+            .expect("static email regex")
+            .is_match(value),
+        "url" => Regex::new(r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s/]+(?:/[^\s]*)?$")
+            .expect("static URL regex")
+            .is_match(value),
+        "date" => valid_date(value),
+        "datetime" | "date-time" => valid_datetime(value),
+        // Presentation-only formats do not add value constraints.
+        "text" | "textarea" | "markdown" | "password" | "tel" | "color" => true,
+        // SchemaField documents unknown formats as renderer hints with a text
+        // fallback, so they remain validation-neutral for compatibility.
+        _ => true,
+    }
+}
+
+fn valid_date(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) = (
+        year.parse::<u32>(),
+        month.parse::<u32>(),
+        day.parse::<u32>(),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn valid_datetime(value: &str) -> bool {
+    let Some((date, time)) = value.split_once('T') else {
+        return false;
+    };
+    if !valid_date(date) {
+        return false;
+    }
+    Regex::new(r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-][0-2]\d:[0-5]\d)?$")
+        .expect("static datetime regex")
+        .is_match(time)
 }
 
 fn condition_issue(path: &str, condition_error: ConditionEvaluationError) -> FormIssue {
@@ -1157,5 +1244,62 @@ mod tests {
         assert!(analysis.valid);
         assert!(!analysis.fields["reason"].visible);
         assert!(!analysis.fields["reason"].required);
+    }
+
+    #[test]
+    fn validates_patterns_and_supported_formats() {
+        let mut code = field(SchemaFieldType::String);
+        code.schema.pattern = Some(r"^[A-Z]{3}\d{4}$".to_string());
+        let mut email = field(SchemaFieldType::String);
+        email.schema.format = Some("email".to_string());
+        let mut date = field(SchemaFieldType::String);
+        date.schema.format = Some("date".to_string());
+        let definition = FormDefinition {
+            fields: HashMap::from([
+                ("code".to_string(), code),
+                ("email".to_string(), email),
+                ("date".to_string(), date),
+            ]),
+            ..FormDefinition::default()
+        };
+
+        assert!(
+            analyze_form(
+                &definition,
+                &json!({"code": "ABC1234", "email": "a@b.example", "date": "2024-02-29"})
+            )
+            .valid
+        );
+        let invalid = analyze_form(
+            &definition,
+            &json!({"code": "abc", "email": "not-email", "date": "2023-02-29"}),
+        );
+        assert!(!invalid.valid);
+        assert!(
+            invalid
+                .issues
+                .iter()
+                .any(|issue| issue.code == "FORM_FIELD_PATTERN_MISMATCH")
+        );
+        assert_eq!(
+            invalid
+                .issues
+                .iter()
+                .filter(|issue| issue.code == "FORM_FIELD_FORMAT_INVALID")
+                .count(),
+            2
+        );
+
+        let mut malformed = field(SchemaFieldType::String);
+        malformed.schema.pattern = Some("[".to_string());
+        let issues = validate_form_definition(&FormDefinition {
+            fields: HashMap::from([("bad".to_string(), malformed)]),
+            ..FormDefinition::default()
+        });
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == "FORM_PATTERN_INVALID")
+        );
     }
 }

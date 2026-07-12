@@ -12,10 +12,10 @@ Implementation in progress.
 - [x] Add the canonical Rust form types in `runtara_dsl::form`.
 - [x] Move the generic client-safe `ConditionExpression` evaluator into
   `runtara-dsl` and preserve the reports compatibility facade.
-- [ ] **In progress:** Implement shared form-definition and submitted-value validation. Type,
+- [x] Implement shared form-definition and submitted-value validation. Type,
   enum, nested object/array, min/max, access/secret, section, control, and
-  conditional-required validation are implemented; pattern/format validation
-  remains. Connection and workflow legacy schemas now have canonical Rust
+  conditional-required, pattern, and supported-format validation are
+  implemented. Connection and workflow legacy schemas have canonical Rust
   normalizers; report wire compatibility is adapted at the frontend boundary.
 - [x] Generalize the validation WASM bridge and add native/WASM parity fixtures.
 - [x] Build the shared controlled React field/control registry.
@@ -37,7 +37,7 @@ Implementation in progress.
 
 Verification completed so far:
 
-- `cargo test -p runtara-dsl` — 198 passed.
+- `cargo test -p runtara-dsl` — 199 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
 - `cargo test -p runtara-workflow-validation-wasm` — 17 passed, including
   native/WASM form-analysis parity.

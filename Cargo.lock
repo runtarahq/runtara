@@ -4727,6 +4727,7 @@ dependencies = [
 name = "runtara-dsl"
 version = "8.2.6"
 dependencies = [
+ "regex",
  "schemars 1.2.1",
  "serde",
  "serde_json",
