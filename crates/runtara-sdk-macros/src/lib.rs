@@ -1127,8 +1127,8 @@ mod tests {
             "Should not contain old 'should exit' message"
         );
         assert!(
-            tokens.contains("exiting"),
-            "Should contain new 'exiting' message"
+            tokens.contains("Instance cancelled"),
+            "Should return the canonical cancellation error"
         );
 
         // Verify we return Err, not just log

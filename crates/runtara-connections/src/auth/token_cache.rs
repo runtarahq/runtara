@@ -497,12 +497,6 @@ fn form_urlencoded(fields: &[(String, String)]) -> String {
 }
 
 #[cfg(test)]
-fn clear_token_cache() {
-    token_cache().clear();
-    refresh_errors().clear();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -510,7 +504,6 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_cached_token_uses_cache() {
-        clear_token_cache();
         let call_count = Arc::new(AtomicUsize::new(0));
 
         let first_counter = Arc::clone(&call_count);
@@ -538,7 +531,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_auth_uses_fallback_access_token_when_still_fresh() {
-        clear_token_cache();
         let client = Client::new();
         let auth = DeferredAuth::OAuth2RefreshToken {
             cache_key: "hubspot-cache".to_string(),
@@ -592,7 +584,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_token_grant_emits_token_refreshed_on_actual_refresh() {
-        clear_token_cache();
         let recorder = Arc::new(RecordingSink::default());
         let events: crate::events::ConnectionEvents = Some(recorder.clone());
         let client = Client::new();
@@ -638,7 +629,6 @@ mod tests {
     async fn fresh_fallback_does_not_emit_token_refreshed() {
         // No refresh happens when the fallback token is still fresh, so we must NOT emit —
         // `token_refreshed` fires only on an actual refresh, not on every connection use.
-        clear_token_cache();
         let recorder = Arc::new(RecordingSink::default());
         let events: crate::events::ConnectionEvents = Some(recorder.clone());
         let client = Client::new();
@@ -671,7 +661,6 @@ mod tests {
         // an actual (failing) refresh and emits one event; the second, within the cooldown,
         // inherits the cached error via the negative cache and does NOT re-hit the provider
         // (so no second event fires).
-        clear_token_cache();
         let recorder = Arc::new(RecordingSink::default());
         let events: crate::events::ConnectionEvents = Some(recorder.clone());
         let client = Client::new();

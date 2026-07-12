@@ -139,6 +139,6 @@ fn representative_workflow_form_matches_the_stable_snapshot() {
     let actual =
         serde_json::to_string_pretty(&canonicalize(serde_json::to_value(normalized).unwrap()))
             .unwrap();
-    let expected = include_str!("fixtures/normalized_workflow_form.json").trim();
+    let expected = include_str!("snapshots/normalized_workflow_form.json").trim();
     assert_eq!(actual, expected);
 }
