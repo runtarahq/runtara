@@ -34,7 +34,15 @@ function Harness({
   resolver: OptionResolver;
 }) {
   const state = useResolvedOptions(definition, { company }, resolver);
-  return <div>{JSON.stringify(state.options.resource ?? [])}</div>;
+  return (
+    <div>
+      <span data-testid="loading">
+        {state.loading.has('resource') ? 'loading' : 'idle'}
+      </span>
+      <span data-testid="error">{state.errors.resource ?? ''}</span>
+      <span>{JSON.stringify(state.options.resource ?? [])}</span>
+    </div>
+  );
 }
 
 describe('useResolvedOptions', () => {
@@ -49,9 +57,12 @@ describe('useResolvedOptions', () => {
       <Harness company="first" resolver={resolver} />
     );
     await waitFor(() => expect(resolver).toHaveBeenCalledTimes(1));
+    const firstSignal = resolver.mock.calls[0][0].signal as AbortSignal;
+    expect(screen.getByTestId('loading')).toHaveTextContent('loading');
 
     rerender(<Harness company="second" resolver={resolver} />);
     await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2));
+    expect(firstSignal.aborted).toBe(true);
     second.resolve([{ value: 'new', label: 'New' }]);
     await waitFor(() => expect(screen.getByText(/New/)).toBeInTheDocument());
 
@@ -59,5 +70,30 @@ describe('useResolvedOptions', () => {
     await Promise.resolve();
     expect(screen.queryByText(/Stale/)).not.toBeInTheDocument();
     expect(screen.getByText(/New/)).toBeInTheDocument();
+    expect(screen.getByTestId('loading')).toHaveTextContent('idle');
+  });
+
+  it('surfaces resolver failures and clears the loading state', async () => {
+    const resolver = vi.fn().mockRejectedValue(new Error('Provider unavailable'));
+    render(<Harness company="acme" resolver={resolver} />);
+
+    expect(await screen.findByText('Provider unavailable')).toBeInTheDocument();
+    expect(screen.getByTestId('loading')).toHaveTextContent('idle');
+    expect(screen.queryByText(/loading/)).not.toBeInTheDocument();
+  });
+
+  it('replaces the option set when dependencies invalidate earlier choices', async () => {
+    const resolver = vi
+      .fn()
+      .mockResolvedValueOnce([{ value: 'old', label: 'Old choice' }])
+      .mockResolvedValueOnce([{ value: 'new', label: 'New choice' }]);
+    const { rerender } = render(
+      <Harness company="first" resolver={resolver} />
+    );
+    expect(await screen.findByText(/Old choice/)).toBeInTheDocument();
+
+    rerender(<Harness company="second" resolver={resolver} />);
+    expect(await screen.findByText(/New choice/)).toBeInTheDocument();
+    expect(screen.queryByText(/Old choice/)).not.toBeInTheDocument();
   });
 });

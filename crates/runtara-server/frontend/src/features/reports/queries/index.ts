@@ -179,27 +179,18 @@ export async function getReportBlockData(
   return result.data;
 }
 
-export async function getReportFilterOptions(
+/** Domain-owned supplier used by both React Query and the shared OptionResolver. */
+export async function resolveReportFilterOptions(
   token: string,
-  context: { queryKey: readonly unknown[] }
-): Promise<ReportFilterOptionsResponse | null> {
-  const reportId = context.queryKey[2];
-  const filterId = context.queryKey[4];
-  const request = context.queryKey[5] as ReportFilterOptionsRequest | undefined;
-
-  if (
-    typeof reportId !== 'string' ||
-    reportId.length === 0 ||
-    typeof filterId !== 'string' ||
-    filterId.length === 0
-  ) {
-    return null;
-  }
-
+  reportId: string,
+  filterId: string,
+  request: ReportFilterOptionsRequest,
+  signal?: AbortSignal
+): Promise<ReportFilterOptionsResponse> {
   const result = await RuntimeREST.instance.post(
     `/api/runtime/reports/${encodeURIComponent(reportId)}/filters/${encodeURIComponent(filterId)}/options`,
-    request ?? { filters: {} },
-    createAuthHeaders(token)
+    request,
+    { ...createAuthHeaders(token), signal }
   );
   return result.data;
 }

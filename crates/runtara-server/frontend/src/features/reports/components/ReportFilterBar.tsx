@@ -1,4 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useAuth } from 'react-oidc-context';
+import { useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, Plus, Search, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
@@ -17,9 +19,15 @@ import {
   CommandList,
 } from '@/shared/components/ui/command';
 import { ReportDefinition, ReportFilterDefinition } from '../types';
-import { useReportFilterOptions } from '../hooks/useReports';
 import { getFilterDefaultValue, TIME_RANGE_PRESETS } from '../utils';
-import { FieldControl } from '@/shared/forms';
+import {
+  FieldControl,
+  useResolvedOptions,
+  type FormDefinition,
+  type OptionResolver,
+} from '@/shared/forms';
+import { resolveReportFilterOptions } from '../queries';
+import { queryKeys } from '@/shared/queries/query-keys';
 import {
   controlValueToReportRange,
   reportFilterToFormField,
@@ -145,24 +153,69 @@ function FilterChip({
   onRemove: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const auth = useAuth();
+  const queryClient = useQueryClient();
   const usesDynamicOptions = filter.options?.source === 'object_model';
-  const optionRequest = useMemo(
-    () => ({
-      filters: allValues,
-      limit: 200,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }),
-    [allValues]
+  const optionDefinition = useMemo<FormDefinition>(
+    () => {
+      const field = reportFilterToFormField(filter);
+      return {
+        fields: {
+          [filter.id]: {
+            ...field,
+            control: {
+              ...field.control!,
+              optionResolver:
+                reportId && usesDynamicOptions && open
+                  ? 'reports.filter-options'
+                  : undefined,
+              optionDependencies: Object.keys(allValues).sort(),
+            },
+          },
+        },
+      };
+    },
+    [allValues, filter, open, reportId, usesDynamicOptions]
   );
-  const { data: dynamicOptions, isFetching: isLoadingOptions } =
-    useReportFilterOptions(
-      reportId,
-      filter.id,
-      optionRequest,
-      Boolean(reportId && usesDynamicOptions && open)
-    );
+  const resolveOptions = useCallback<OptionResolver>(
+    async ({ resolverKey, currentData, signal }) => {
+      if (resolverKey !== 'reports.filter-options' || !reportId) return [];
+      const request = {
+        filters: currentData,
+        limit: 200,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      };
+      const response = await queryClient.fetchQuery({
+        queryKey: queryKeys.reports.filterOptions(
+          reportId,
+          filter.id,
+          request
+        ),
+        queryFn: () =>
+          resolveReportFilterOptions(
+            auth.user?.access_token ?? '',
+            reportId,
+            filter.id,
+            request,
+            signal
+          ),
+        staleTime: 30_000,
+      });
+      return response.options;
+    },
+    [auth.user?.access_token, filter.id, queryClient, reportId]
+  );
+  const resolvedOptions = useResolvedOptions(
+    optionDefinition,
+    allValues,
+    resolveOptions
+  );
+  const dynamicOptions = resolvedOptions.options[filter.id] as
+    | FilterOption[]
+    | undefined;
+  const isLoadingOptions = resolvedOptions.loading.has(filter.id);
   const options: FilterOption[] =
-    dynamicOptions?.options ?? filter.options?.values ?? [];
+    dynamicOptions ?? filter.options?.values ?? [];
   const summary = describeFilterValue(filter, value, options);
 
   return (
@@ -179,6 +232,11 @@ function FilterChip({
           </button>
         </PopoverTrigger>
         <PopoverContent className="w-72 p-0" align="start">
+          {resolvedOptions.errors[filter.id] && (
+            <p className="border-b px-3 py-2 text-xs text-destructive" role="alert">
+              {resolvedOptions.errors[filter.id]}
+            </p>
+          )}
           <FilterEditor
             filter={filter}
             value={value}
