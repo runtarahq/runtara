@@ -1,5 +1,9 @@
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { ExtendedAgent } from '@/features/workflows/queries';
+import {
+  getStepOutputShape,
+  ShapeFieldJson,
+} from '@/features/workflows/utils/step-output-shapes';
 import { ExecutionGraph } from '../CustomNodes/utils.tsx';
 
 export type ParameterType =
@@ -282,58 +286,20 @@ function buildStepInfoList(
           });
         }
       }
-    } else if (step.stepType === 'While') {
-      // While steps output the iteration count and last iteration's Finish outputs
-      outputs.push({
-        name: 'iterations',
-        type: 'integer',
-        path: `steps['${prevStepId}'].iterations`,
-        children: undefined,
-      });
-      outputs.push({
-        name: 'outputs',
-        type: 'object',
-        path: `steps['${prevStepId}'].outputs`,
-        children: [],
-      });
-    } else if (step.stepType === 'Filter') {
-      // Filter steps output the filtered array and a count
-      outputs.push({
-        name: 'items',
-        type: 'array',
-        path: `steps['${prevStepId}'].outputs.items`,
-        children: [],
-      });
-      outputs.push({
-        name: 'count',
-        type: 'integer',
-        path: `steps['${prevStepId}'].outputs.count`,
-        children: undefined,
-      });
-    } else if (step.stepType === 'GroupBy') {
-      // GroupBy steps output grouped items, counts per group, and total group count
-      outputs.push({
-        name: 'groups',
-        type: 'object',
-        path: `steps['${prevStepId}'].outputs.groups`,
-        children: [],
-      });
-      outputs.push({
-        name: 'counts',
-        type: 'object',
-        path: `steps['${prevStepId}'].outputs.counts`,
-        children: [],
-      });
-      outputs.push({
-        name: 'total_groups',
-        type: 'integer',
-        path: `steps['${prevStepId}'].outputs.total_groups`,
-        children: undefined,
-      });
+    } else {
+      // Control-flow steps (Split, While, Filter, GroupBy, Conditional,
+      // Switch, …): derive suggestions from the canonical per-step-type
+      // output shape table (runtara-dsl step_output_shape via the validation
+      // WASM) so they cannot drift from the runtime emitters. Hand-copied
+      // shapes here drifted once already: While's iteration count was
+      // suggested at steps['id'].iterations, which resolves to null at
+      // runtime — the canonical path is steps['id'].outputs.iterations.
+      appendShapeOutputs(step.stepType, prevStepId, outputs);
     }
 
-    // Fallback: if no specific outputs were resolved, add a generic outputs reference
-    // so the step still appears in the variable picker
+    // Fallback: if no specific outputs were resolved (unknown step type or the
+    // shape cache is still cold), add a generic outputs reference so the step
+    // still appears in the variable picker
     if (outputs.length === 0) {
       outputs.push({
         name: '',
@@ -352,6 +318,75 @@ function buildStepInfoList(
   }
 
   return result;
+}
+
+/**
+ * Maps a shape-field JSON type ("dynamic" included) to a ParameterType.
+ * "dynamic" deliberately maps to undefined — the value's shape depends on
+ * runtime data, so pretending to know its type would be a wrong badge.
+ */
+function shapeTypeToParameterType(type: string): ParameterType | undefined {
+  return isValidParameterType(type) ? (type as ParameterType) : undefined;
+}
+
+/**
+ * Appends output suggestions for a step type from the canonical output-shape
+ * table (see utils/step-output-shapes.ts). Covers both the `outputs` value and
+ * sibling fields written directly under `steps.<id>` (e.g. Split's
+ * data/stats/hasFailures, Switch's route). No-op when the shape cache has not
+ * been warmed yet — callers keep their generic fallback for that case.
+ */
+function appendShapeOutputs(
+  stepType: string,
+  stepId: string,
+  outputs: StepParameter[]
+): void {
+  const shape = getStepOutputShape(stepType);
+  if (!shape) {
+    return;
+  }
+
+  const kind = shape.outputs?.kind;
+  if (kind === 'object') {
+    for (const field of shape.outputs?.fields ?? []) {
+      outputs.push({
+        name: field.name,
+        type: shapeTypeToParameterType(field.type),
+        path: `steps['${stepId}'].outputs.${field.name}`,
+        children: undefined,
+      });
+    }
+  } else if (kind === 'array') {
+    outputs.push({
+      name: '',
+      type: 'array',
+      path: `steps['${stepId}'].outputs`,
+      children: undefined,
+    });
+  } else if (kind === 'dynamic') {
+    outputs.push({
+      name: '',
+      type: undefined,
+      path: `steps['${stepId}'].outputs`,
+      children: undefined,
+    });
+  }
+
+  for (const sibling of shape.siblingFields ?? []) {
+    outputs.push(shapeSiblingParameter(sibling, stepId));
+  }
+}
+
+function shapeSiblingParameter(
+  sibling: ShapeFieldJson,
+  stepId: string
+): StepParameter {
+  return {
+    name: sibling.name,
+    type: shapeTypeToParameterType(sibling.type),
+    path: `steps['${stepId}'].${sibling.name}`,
+    children: undefined,
+  };
 }
 
 /**

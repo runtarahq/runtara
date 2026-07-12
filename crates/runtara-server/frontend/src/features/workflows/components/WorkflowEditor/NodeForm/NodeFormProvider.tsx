@@ -3,10 +3,11 @@ import { ExtendedAgent } from '@/features/workflows/queries';
 import { StepTypeInfo } from '@/generated/RuntaraRuntimeApi.ts';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
-import { useRef, useMemo } from 'react';
+import { useRef, useMemo, useEffect, useState } from 'react';
 import { composeExecutionGraph } from '../CustomNodes/utils.tsx';
 import { NodeFormContext } from './NodeFormContext.tsx';
 import { composePreviousSteps } from './shared.ts';
+import { warmStepOutputShapes } from '@/features/workflows/utils/step-output-shapes';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import {
   getAgents,
@@ -179,6 +180,22 @@ export const NodeFormProvider = ({
     return newGraph;
   }, [graphSignature]);
 
+  // Warm the canonical step-output-shape cache (validation WASM) so
+  // composePreviousSteps can type control-step outputs synchronously.
+  // The flag re-runs the memo below once shapes become available.
+  const [shapesReady, setShapesReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void warmStepOutputShapes().then(() => {
+      if (!cancelled) {
+        setShapesReady(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const previousSteps = useMemo(
     () =>
       !!nodeId || !!parentNodeId
@@ -190,7 +207,10 @@ export const NodeFormProvider = ({
             workflows,
           })
         : [],
-    [nodeId, parentNodeId, agents, executionGraph, workflows]
+    // shapesReady is an intentional extra trigger: the shape cache feeding
+    // composePreviousSteps is module-level, not a prop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nodeId, parentNodeId, agents, executionGraph, workflows, shapesReady]
   );
 
   // Detect if this step is inside a While loop container

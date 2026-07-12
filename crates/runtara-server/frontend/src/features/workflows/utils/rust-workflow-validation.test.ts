@@ -294,4 +294,44 @@ describe('rust workflow validation WASM', () => {
       })
     );
   });
+
+  it('serves typed output shapes for control steps from WASM', async () => {
+    // The reference-suggestion builder relies on these exact shapes; they are
+    // pinned in runtara-dsl step_output_shape.rs against the runtime emitters.
+    const filter = (await getStaticStepTypeSchemaWithRust('Filter')) as any;
+    expect(filter.outputShape.outputs.kind).toBe('object');
+    expect(filter.outputShape.outputs.fields).toEqual([
+      expect.objectContaining({ name: 'items', type: 'array' }),
+      expect.objectContaining({ name: 'count', type: 'integer' }),
+    ]);
+
+    const split = (await getStaticStepTypeSchemaWithRust('Split')) as any;
+    expect(split.outputShape.outputs.kind).toBe('array');
+    expect(split.outputShape.siblingFields).toEqual([
+      expect.objectContaining({ name: 'data', type: 'object' }),
+      expect.objectContaining({ name: 'stats', type: 'object' }),
+      expect.objectContaining({ name: 'hasFailures', type: 'boolean' }),
+    ]);
+
+    const whileShape = (await getStaticStepTypeSchemaWithRust('While')) as any;
+    expect(whileShape.outputShape.outputs.fields).toEqual([
+      expect.objectContaining({ name: 'iterations', type: 'integer' }),
+      expect.objectContaining({ name: 'outputs', type: 'dynamic' }),
+    ]);
+
+    const conditional = (await getStaticStepTypeSchemaWithRust(
+      'Conditional'
+    )) as any;
+    expect(conditional.outputShape.outputs.fields).toEqual([
+      expect.objectContaining({ name: 'result', type: 'boolean' }),
+    ]);
+
+    const switchShape = (await getStaticStepTypeSchemaWithRust(
+      'Switch'
+    )) as any;
+    expect(switchShape.outputShape.outputs.kind).toBe('dynamic');
+    expect(switchShape.outputShape.siblingFields).toEqual([
+      expect.objectContaining({ name: 'route', type: 'string' }),
+    ]);
+  });
 });
