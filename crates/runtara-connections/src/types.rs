@@ -444,6 +444,7 @@ pub struct ConnectionSecretState {
 /// Create connection request
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CreateConnectionRequest {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,8 +463,6 @@ pub struct CreateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "validUntil")]
     pub valid_until: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<ConnectionStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: Option<bool>,

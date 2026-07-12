@@ -202,16 +202,18 @@ impl ConnectionsFacade {
             integration_id: Some(integration_id),
             rate_limit_config: None,
             valid_until: None,
-            status: Some(ConnectionStatus::Active),
             is_default_file_storage: None,
             default_for: None,
         };
-        repo.create(&request, tenant_id, &connection_id)
-            .await
-            .map_err(ConnectionsError::Database)?;
-        repo.replace_defaults_for_connection(tenant_id, &connection_id, &[default_for.to_string()])
-            .await
-            .map_err(ConnectionsError::Database)?;
+        repo.create(
+            &request,
+            tenant_id,
+            &connection_id,
+            &ConnectionStatus::Active,
+            &[default_for.to_string()],
+        )
+        .await
+        .map_err(ConnectionsError::Database)?;
 
         Ok(connection_id)
     }

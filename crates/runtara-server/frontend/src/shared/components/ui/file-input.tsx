@@ -10,6 +10,8 @@ import {
 import { MAX_FILE_SIZE_DISPLAY } from '@/shared/types/file';
 
 interface FileInputProps {
+  id?: string;
+  labelledBy?: string;
   /** JSON string of FileData or empty string */
   value?: string;
   /** Callback when file is selected or cleared, emits JSON string */
@@ -30,6 +32,8 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
   (
     {
       value,
+      id,
+      labelledBy,
       onChange,
       accept,
       disabled,
@@ -117,6 +121,13 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
       }
     };
 
+    const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleClick();
+      }
+    };
+
     return (
       <div className={cn('relative', className)}>
         <input
@@ -127,6 +138,8 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             if (typeof ref === 'function') ref(node);
             else if (ref) ref.current = node;
           }}
+          id={id}
+          aria-labelledby={labelledBy}
           type="file"
           accept={accept}
           onChange={handleInputChange}
@@ -163,9 +176,14 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
           // Drop zone / upload button
           <div
             onClick={handleClick}
+            onKeyDown={handleKeyDown}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
+            role="button"
+            tabIndex={disabled ? -1 : 0}
+            aria-labelledby={labelledBy}
+            aria-disabled={disabled}
             className={cn(
               'flex items-center gap-2 rounded-md border border-dashed border-input bg-background px-3 py-2 h-8 cursor-pointer transition-colors',
               isDragOver && 'border-primary bg-primary/5',

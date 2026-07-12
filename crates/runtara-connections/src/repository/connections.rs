@@ -128,8 +128,9 @@ impl ConnectionRepository {
         request: &CreateConnectionRequest,
         tenant_id: &str,
         connection_id: &str,
+        status: &ConnectionStatus,
+        default_for: &[String],
     ) -> Result<(), sqlx::Error> {
-        let status = request.status.as_ref().unwrap_or(&ConnectionStatus::Active);
         let rate_limit_json = request
             .rate_limit_config
             .as_ref()
@@ -137,6 +138,24 @@ impl ConnectionRepository {
 
         // Encrypt connection_parameters at rest (no-op if cipher is NoOp).
         let sealed_parameters = self.seal(request.connection_parameters.as_ref())?;
+
+        let mut tx = self.pool.begin().await?;
+        if request.is_default_file_storage == Some(true) {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(tenant_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                UPDATE connection_data_entity
+                SET is_default_file_storage = FALSE, updated_at = NOW()
+                WHERE tenant_id = $1 AND is_default_file_storage = TRUE
+                "#,
+            )
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         sqlx::query(
             r#"
@@ -155,9 +174,26 @@ impl ConnectionRepository {
         .bind(status.as_str())
         .bind(rate_limit_json.as_ref())
         .bind(request.is_default_file_storage.unwrap_or(false))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        for operator_id in default_for {
+            sqlx::query(
+                r#"
+                INSERT INTO connection_defaults (tenant_id, default_for, connection_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tenant_id, default_for)
+                DO UPDATE SET connection_id = EXCLUDED.connection_id, updated_at = NOW()
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(operator_id)
+            .bind(connection_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -993,22 +1029,6 @@ impl ConnectionRepository {
                 },
             )
             .transpose()
-    }
-
-    /// Clear any existing default file storage for the tenant.
-    /// Used before setting a new default to enforce the one-default-per-tenant invariant.
-    pub async fn clear_default_file_storage(&self, tenant_id: &str) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
-            r#"
-            UPDATE connection_data_entity
-            SET is_default_file_storage = FALSE, updated_at = NOW()
-            WHERE tenant_id = $1 AND is_default_file_storage = TRUE
-            "#,
-        )
-        .bind(tenant_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
     }
 
     /// Update connection parameters and status atomically.

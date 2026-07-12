@@ -1,8 +1,8 @@
 // Async-init wrapper around the `runtara-report-dsl` WASM bundle.
 //
-// Phase 2 of the reports refactor: server and FE share one minijinja
-// template engine, one `ConditionExpression` evaluator, and one
-// `FormatSpec` grammar. The bundle is vendored as the wasm-pack
+// Report-owned rendering boundary: server and FE share one minijinja template
+// engine and one `FormatSpec` grammar. Conditions are evaluated by the
+// domain-neutral validation WASM bundle. This bundle is vendored as a wasm-pack
 // `--target web` artifact; loading is async on first call and cached
 // thereafter.
 //

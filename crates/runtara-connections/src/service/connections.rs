@@ -86,6 +86,58 @@ fn validate_connection_parameters(
     Ok(())
 }
 
+/// Validate the complete public create payload against the canonical descriptor.
+/// Unlike updates, creates have no pre-existing internal provider state to preserve:
+/// every supplied key must be a declared writable field and the complete form must
+/// satisfy the same Rust rules used by the browser WASM renderer.
+fn validate_create_connection_parameters(
+    integration_id: &str,
+    params: Option<&serde_json::Value>,
+) -> Result<(), ServiceError> {
+    let meta = runtara_agents::registry::find_connection_type(integration_id).ok_or_else(|| {
+        ServiceError::ValidationError(format!("Unknown connection type '{integration_id}'"))
+    })?;
+    let supplied = match params {
+        None => serde_json::Map::new(),
+        Some(serde_json::Value::Object(values)) => values.clone(),
+        Some(_) => {
+            return Err(ServiceError::ValidationError(
+                "connectionParameters must be a JSON object".to_string(),
+            ));
+        }
+    };
+    let fields: std::collections::HashMap<_, _> = meta
+        .fields
+        .iter()
+        .map(|field| (field.name, field))
+        .collect();
+    for name in supplied.keys() {
+        let field = fields.get(name.as_str()).ok_or_else(|| {
+            ServiceError::ValidationError(format!("Unknown connection field '{name}'"))
+        })?;
+        if field.access == runtara_dsl::form::FieldAccessMode::Read {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' is managed by the server and cannot be supplied"
+            )));
+        }
+    }
+
+    let definition = runtara_dsl::form::connection_form_definition(meta);
+    let analysis =
+        runtara_dsl::form::analyze_form(&definition, &serde_json::Value::Object(supplied));
+    if !analysis.valid {
+        return Err(ServiceError::ValidationError(
+            analysis
+                .issues
+                .into_iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    validate_connection_parameters(integration_id, params)
+}
+
 /// True when the connection type is an *interactive* OAuth authorization-code
 /// type — one that requires the user to complete a consent popup before it is
 /// usable. Only authorization-code types declare an `oauth_config` (via the
@@ -97,19 +149,6 @@ fn validate_connection_parameters(
 fn requires_interactive_oauth(integration_id: &str) -> bool {
     runtara_agents::registry::find_connection_type(integration_id)
         .is_some_and(|m| m.oauth_config.is_some())
-}
-
-/// True when the connection parameters already carry an OAuth token — e.g. a
-/// connection seeded with credentials rather than created for the interactive
-/// popup flow. Such a connection is usable straight away.
-fn params_have_oauth_tokens(params: Option<&serde_json::Value>) -> bool {
-    params.is_some_and(|p| {
-        ["access_token", "refresh_token"].iter().any(|k| {
-            p.get(k)
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.trim().is_empty())
-        })
-    })
 }
 
 fn build_edit_projection(
@@ -472,10 +511,14 @@ impl ConnectionService {
             validate_rate_limit_config(cfg)?;
         }
 
-        // Validate connection parameters (e.g. a required https base URL) against
-        // the connection type schema — closes the F1 creation side.
+        // Public creation accepts only descriptor-declared writable fields and
+        // runs the complete canonical Rust form analysis. Provider-captured OAuth
+        // state is stored later through the dedicated internal repository path.
         if let Some(ref integration_id) = request.integration_id {
-            validate_connection_parameters(integration_id, request.connection_parameters.as_ref())?;
+            validate_create_connection_parameters(
+                integration_id,
+                request.connection_parameters.as_ref(),
+            )?;
         }
 
         let default_for = Self::normalize_default_for(
@@ -492,33 +535,28 @@ impl ConnectionService {
             request.is_default_file_storage = Some(true);
         }
 
-        // If marking as default file storage, clear any existing default first
-        if request.is_default_file_storage == Some(true) {
-            self.repository
-                .clear_default_file_storage(tenant_id)
-                .await
-                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
-        }
-
         // An interactive OAuth (authorization-code) connection is not usable until
         // the consent popup completes and the callback stores tokens + flips it to
-        // ACTIVE. Created without tokens it must start REQUIRES_RECONNECTION, so the
-        // UI surfaces the reconnect affordance (and an honest status) instead of a
-        // misleading "Connected". Callers that pre-seed tokens or an explicit status
-        // are respected; client-credentials OAuth types (no auth_url) stay ACTIVE.
-        if request.status.is_none()
-            && requires_interactive_oauth(&integration_id)
-            && !params_have_oauth_tokens(request.connection_parameters.as_ref())
-        {
-            request.status = Some(ConnectionStatus::RequiresReconnection);
-        }
+        // ACTIVE. Public create cannot seed provider tokens or forge status;
+        // client-credentials and non-interactive types start ACTIVE.
+        let initial_status = if requires_interactive_oauth(&integration_id) {
+            ConnectionStatus::RequiresReconnection
+        } else {
+            ConnectionStatus::Active
+        };
 
         // Generate new connection ID
         let connection_id = Uuid::new_v4().to_string();
 
         // Delegate to repository
         self.repository
-            .create(&request, tenant_id, &connection_id)
+            .create(
+                &request,
+                tenant_id,
+                &connection_id,
+                &initial_status,
+                &default_for,
+            )
             .await
             .map_err(|e| {
                 // Check for unique constraint violation on title
@@ -528,13 +566,6 @@ impl ConnectionService {
                     ServiceError::DatabaseError(e.to_string())
                 }
             })?;
-
-        if !default_for.is_empty() {
-            self.repository
-                .replace_defaults_for_connection(tenant_id, &connection_id, &default_for)
-                .await
-                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
-        }
 
         Ok(connection_id)
     }
@@ -916,8 +947,8 @@ pub enum ServiceError {
 mod tests {
     use super::{
         ServiceError, apply_connection_parameter_patch, apply_connection_parameter_patch_to_meta,
-        build_edit_projection, params_have_oauth_tokens, requires_interactive_oauth,
-        validate_connection_parameters, validate_rate_limit_config, validate_url_field,
+        build_edit_projection, requires_interactive_oauth, validate_connection_parameters,
+        validate_create_connection_parameters, validate_rate_limit_config, validate_url_field,
     };
     use crate::types::{ConnectionParameterPatch, RateLimitConfigDto, UpdateConnectionRequest};
     use serde_json::json;
@@ -953,6 +984,55 @@ mod tests {
             }))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn public_create_enforces_descriptor_access_unknown_fields_and_rust_validation() {
+        assert!(
+            validate_create_connection_parameters(
+                "quickbooks_online",
+                Some(&json!({
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "environment": "sandbox",
+                    "scopes": "com.intuit.quickbooks.accounting"
+                }))
+            )
+            .is_ok()
+        );
+        for forbidden in [
+            json!({
+                "client_id": "client", "client_secret": "secret",
+                "environment": "sandbox", "scopes": "scope",
+                "realm_id": "server-managed"
+            }),
+            json!({
+                "client_id": "client", "client_secret": "secret",
+                "environment": "sandbox", "scopes": "scope",
+                "access_token": "provider-state"
+            }),
+        ] {
+            assert!(matches!(
+                validate_create_connection_parameters("quickbooks_online", Some(&forbidden)),
+                Err(ServiceError::ValidationError(_))
+            ));
+        }
+        assert!(matches!(
+            validate_create_connection_parameters(
+                "quickbooks_online",
+                Some(&json!({
+                    "client_id": "client",
+                    "client_secret": "",
+                    "environment": "not-an-environment",
+                    "scopes": "scope"
+                }))
+            ),
+            Err(ServiceError::ValidationError(_))
+        ));
+        assert!(matches!(
+            validate_create_connection_parameters("not_registered", Some(&json!({}))),
+            Err(ServiceError::ValidationError(_))
+        ));
     }
 
     #[test]
@@ -1384,24 +1464,6 @@ mod tests {
         // Non-OAuth types (no oauth_config) → false.
         assert!(!requires_interactive_oauth("http_bearer"));
         assert!(!requires_interactive_oauth("totally_unknown"));
-    }
-
-    #[test]
-    fn oauth_token_presence_detection() {
-        assert!(params_have_oauth_tokens(Some(
-            &json!({"access_token": "a"})
-        )));
-        assert!(params_have_oauth_tokens(Some(
-            &json!({"refresh_token": "r"})
-        )));
-        // Empty / whitespace tokens don't count as present.
-        assert!(!params_have_oauth_tokens(Some(
-            &json!({"access_token": ""})
-        )));
-        assert!(!params_have_oauth_tokens(Some(
-            &json!({"client_id": "c", "client_secret": "s"})
-        )));
-        assert!(!params_have_oauth_tokens(None));
     }
 
     #[test]

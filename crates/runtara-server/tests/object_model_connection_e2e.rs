@@ -5,8 +5,8 @@ use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::service::connections::ConnectionService;
 use runtara_connections::{
-    ConnectionStatus, ConnectionsConfig, ConnectionsFacade, ConnectionsState,
-    CreateConnectionRequest, IntegrationCompatibility,
+    ConnectionsConfig, ConnectionsFacade, ConnectionsState, CreateConnectionRequest,
+    IntegrationCompatibility,
 };
 use runtara_server::api::dto::object_model::{
     ColumnDefinition, ColumnType, CreateSchemaRequest, TextIndexKind,
@@ -195,7 +195,6 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
                 integration_id: Some("postgres".to_string()),
                 rate_limit_config: None,
                 valid_until: None,
-                status: Some(ConnectionStatus::Active),
                 is_default_file_storage: None,
                 default_for: None,
             },

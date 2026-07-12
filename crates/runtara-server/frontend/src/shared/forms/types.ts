@@ -134,21 +134,13 @@ export interface FormFieldCommitEvent {
   nextData: Record<string, unknown>;
 }
 
-export interface FormFieldClearEvent {
-  fieldName: string;
-  field: FormField;
-  previousData: Readonly<Record<string, unknown>>;
-  nextData: Record<string, unknown>;
-}
-
 /**
- * Optional domain boundary around shared controls. Connections can translate
- * clear into a parameter patch, reports can stage an explicit commit, and
- * workflows can preserve mapping semantics without teaching the renderer any
- * of those protocols.
+ * Optional domain boundary around shared controls. Domains may stage commits
+ * or resolve remote choices without teaching the renderer their protocols.
+ * Explicit secret clearing remains a connection-owned annotation/action, not
+ * a generic field event.
  */
 export interface FormFrameContract {
   commitField?: (event: FormFieldCommitEvent) => void;
-  clearField?: (event: FormFieldClearEvent) => void;
   resolveOptions?: OptionResolver;
 }

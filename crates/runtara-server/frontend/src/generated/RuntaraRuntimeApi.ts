@@ -1608,7 +1608,6 @@ export interface CreateConnectionRequest {
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
   rateLimitConfig?: null | RateLimitConfigDto;
-  status?: null | ConnectionStatus;
   title: string;
   validUntil?: string | null;
 }

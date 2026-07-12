@@ -96,6 +96,20 @@ export function buildConnectionParameterValues(
   );
 }
 
+/** Build the public create payload from descriptor-declared writable fields.
+ * Managed `read` fields may be displayed in the form but are never supplied
+ * back to the server. */
+export function buildConnectionCreateParameters(
+  definition: FormDefinition,
+  values: Record<string, unknown>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(definition.fields)
+      .filter(([, field]) => field.access !== 'read')
+      .map(([name]) => [name, values[name]])
+  );
+}
+
 export function buildConnectionParameterPatch(
   definition: FormDefinition,
   parameters: Record<string, unknown>,

@@ -23,6 +23,7 @@ import { DefaultForSection } from '../DefaultForSection';
 import { RateLimitSection } from '../RateLimitSection';
 import {
   buildConnectionFormDefinition,
+  buildConnectionCreateParameters,
   buildConnectionParameterValues,
   type ConnectionTypeWithForm,
   type EditProjection,
@@ -200,10 +201,11 @@ export function DynamicConnectionForm({
   }, [editProjection?.version]);
 
   const handleSubmit = async (values: Record<string, unknown>) => {
-    const parameters = Object.fromEntries(
-      Object.keys(
-        (connectionType as ConnectionTypeWithForm).formDefinition?.fields ?? {}
-      ).map((name) => [name, values[name]])
+    const parameters = buildConnectionCreateParameters(
+      (connectionType as ConnectionTypeWithForm).formDefinition ?? {
+        fields: {},
+      },
+      values
     );
     const submissionData = Object.fromEntries(
       Object.keys(definition.fields).map((name) => [name, values[name]])

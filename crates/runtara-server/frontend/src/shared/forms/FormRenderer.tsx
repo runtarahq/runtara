@@ -172,11 +172,16 @@ export function FormRenderer({
               };
               const fieldIssues = issuesForField(analysis.issues, name);
               const inputId = `${formId}-${name.replace(/\./g, '-')}`;
+              const labelId = `${inputId}-label`;
               const fieldDisabled =
                 disabled || !state.enabled || field.access === 'read';
               return (
                 <div key={name} className="space-y-1.5" data-field={name}>
-                  <Label htmlFor={inputId} className="text-sm font-medium">
+                  <Label
+                    id={labelId}
+                    htmlFor={inputId}
+                    className="text-sm font-medium"
+                  >
                     {field.label ?? name.replace(/_/g, ' ')}
                     {state.required && (
                       <span className="ml-0.5 text-destructive">*</span>
@@ -190,6 +195,7 @@ export function FormRenderer({
                   {fieldAnnotations?.[name]}
                   <FieldControl
                     id={inputId}
+                    labelledBy={labelId}
                     field={field}
                     value={value[name]}
                     disabled={fieldDisabled}

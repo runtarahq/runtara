@@ -12,6 +12,7 @@ interface KeyValueInputProps {
   valuePlaceholder?: string;
   className?: string;
   id?: string;
+  labelledBy?: string;
   disabled?: boolean;
 }
 
@@ -34,6 +35,7 @@ export function KeyValueInput({
   valuePlaceholder = 'Value',
   className,
   id,
+  labelledBy,
   disabled = false,
 }: KeyValueInputProps) {
   // Preserve key order across renders by deriving rows from the object's
@@ -76,6 +78,8 @@ export function KeyValueInput({
   return (
     <div
       id={id}
+      role="group"
+      aria-labelledby={labelledBy}
       className={cn(
         'flex w-full flex-col gap-2 rounded-lg border border-border/50 bg-background p-3',
         className

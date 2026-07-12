@@ -4,9 +4,7 @@ use std::sync::Arc;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::service::connections::ConnectionService;
-use runtara_connections::{
-    ConnectionStatus, CreateConnectionRequest, IntegrationCompatibility, RateLimitConfigDto,
-};
+use runtara_connections::{CreateConnectionRequest, IntegrationCompatibility, RateLimitConfigDto};
 use serde_json::json;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
@@ -126,16 +124,34 @@ fn create_request(
     integration_id: &str,
     default_for: Option<Vec<&str>>,
 ) -> CreateConnectionRequest {
+    let connection_parameters = match integration_id {
+        "postgres" => json!({
+            "database_url": format!("postgres://example/{title}")
+        }),
+        "stripe_api_key" => json!({ "secret_key": "sk_test_fixture" }),
+        "http_bearer" => json!({
+            "token": "fixture-token",
+            "base_url": "https://api.example.com"
+        }),
+        "s3_compatible" => json!({
+            "endpoint": "https://s3.example.com",
+            "access_key_id": "fixture-access-key",
+            "secret_access_key": "fixture-secret",
+            "region": "us-east-1"
+        }),
+        "azure_blob_storage" => json!({
+            "account_name": "fixtureaccount",
+            "account_key": "Zml4dHVyZS1rZXk="
+        }),
+        other => panic!("missing valid connection fixture for {other}"),
+    };
     CreateConnectionRequest {
         title: title.to_string(),
         connection_subtype: None,
-        connection_parameters: Some(json!({
-            "database_url": format!("postgres://example/{title}")
-        })),
+        connection_parameters: Some(connection_parameters),
         integration_id: Some(integration_id.to_string()),
         rate_limit_config: None,
         valid_until: None,
-        status: Some(ConnectionStatus::Active),
         is_default_file_storage: None,
         default_for: default_for.map(|values| values.into_iter().map(str::to_string).collect()),
     }
@@ -422,5 +438,50 @@ async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
             .unwrap()
             .as_deref(),
         Some(first_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn failed_default_create_rolls_back_singleton_and_mapping_changes() {
+    let fixture = PgFixture::start().await;
+    let tenant_id = "tenant_failed_default_create_e2e";
+    let (repo, service) = service(fixture.pool.clone());
+
+    let existing_id = service
+        .create_connection(
+            create_request(
+                "Existing default storage",
+                "s3_compatible",
+                Some(vec!["object_storage"]),
+            ),
+            tenant_id,
+        )
+        .await
+        .expect("create existing default");
+
+    let duplicate = create_request(
+        "Existing default storage",
+        "azure_blob_storage",
+        Some(vec!["object_storage"]),
+    );
+    assert!(
+        service
+            .create_connection(duplicate, tenant_id)
+            .await
+            .is_err()
+    );
+
+    let existing = service
+        .get_connection(&existing_id, tenant_id)
+        .await
+        .expect("existing default survives failed create");
+    assert!(existing.is_default_file_storage);
+    assert_eq!(existing.default_for, vec!["object_storage".to_string()]);
+    assert_eq!(
+        repo.get_default_connection_id(tenant_id, "object_storage")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(existing_id.as_str())
     );
 }

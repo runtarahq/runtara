@@ -671,6 +671,135 @@ mod tests {
     }
 
     #[test]
+    fn representative_form_and_condition_corpus_matches_native_engine() {
+        let form_fixtures = [
+            (
+                "mcp-bearer",
+                FORM_DEFINITION_JSON,
+                json!({"auth_mode": "bearer"}),
+            ),
+            (
+                "sftp-private-key",
+                r#"{
+                    "fields": {
+                        "auth_mode": {"type":"string","required":true},
+                        "password": {
+                            "type":"string","access":"write","secret":true,
+                            "conditions":{"visible":{"type":"operation","op":"EQ","arguments":[
+                                {"valueType":"reference","value":"auth_mode"},
+                                {"valueType":"immediate","value":"password"}
+                            ]}}
+                        },
+                        "private_key": {
+                            "type":"string","access":"write","secret":true,
+                            "conditions":{
+                                "visible":{"type":"operation","op":"EQ","arguments":[
+                                    {"valueType":"reference","value":"auth_mode"},
+                                    {"valueType":"immediate","value":"private_key"}
+                                ]},
+                                "required":{"type":"operation","op":"EQ","arguments":[
+                                    {"valueType":"reference","value":"auth_mode"},
+                                    {"valueType":"immediate","value":"private_key"}
+                                ]}
+                            }
+                        }
+                    }
+                }"#,
+                json!({"auth_mode": "private_key"}),
+            ),
+            (
+                "quickbooks-managed-field",
+                r#"{
+                    "fields": {
+                        "client_id":{"type":"string","required":true},
+                        "client_secret":{"type":"string","access":"write","secret":true,"required":true},
+                        "realm_id":{"type":"string","access":"read"}
+                    }
+                }"#,
+                json!({"client_id":"client","client_secret":"secret","realm_id":"realm"}),
+            ),
+            (
+                "report-filter-visibility",
+                r#"{
+                    "fields": {
+                        "region":{"type":"string"},
+                        "account":{"type":"string","conditions":{"visible":{
+                            "type":"operation","op":"EQ","arguments":[
+                                {"valueType":"reference","value":"region"},
+                                {"valueType":"immediate","value":"eu"}
+                            ]
+                        }}}
+                    }
+                }"#,
+                json!({"region":"eu"}),
+            ),
+            (
+                "workflow-conditional-input",
+                r#"{
+                    "fields": {
+                        "mode":{"type":"string"},
+                        "endpoint":{"type":"string","conditions":{"enabled":{
+                            "type":"operation","op":"NE","arguments":[
+                                {"valueType":"reference","value":"mode"},
+                                {"valueType":"immediate","value":"automatic"}
+                            ]
+                        }}}
+                    }
+                }"#,
+                json!({"mode":"manual"}),
+            ),
+        ];
+
+        for (name, definition_json, data) in form_fixtures {
+            let definition: runtara_dsl::form::FormDefinition =
+                serde_json::from_str(definition_json).unwrap_or_else(|error| {
+                    panic!("{name}: fixture definition must deserialize: {error}")
+                });
+            let native = runtara_dsl::form::analyze_form(&definition, &data);
+            let wasm: Value =
+                serde_json::from_str(&analyze_form_json(definition_json, &data.to_string()))
+                    .unwrap();
+            assert_eq!(wasm["success"], true, "{name}");
+            assert_eq!(wasm["valid"], native.valid, "{name}");
+            assert_eq!(
+                wasm["fields"],
+                serde_json::to_value(native.fields).unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                wasm["issues"],
+                serde_json::to_value(native.issues).unwrap(),
+                "{name}"
+            );
+        }
+
+        let row_action = json!({
+            "type":"operation",
+            "op":"AND",
+            "arguments":[
+                {"type":"operation","op":"EQ","arguments":[
+                    {"valueType":"reference","value":"status"},
+                    {"valueType":"immediate","value":"ready"}
+                ]},
+                {"type":"operation","op":"GT","arguments":[
+                    {"valueType":"reference","value":"amount"},
+                    {"valueType":"immediate","value":0}
+                ]}
+            ]
+        });
+        let row = json!({"status":"ready","amount":12});
+        let condition: runtara_dsl::ConditionExpression =
+            serde_json::from_value(row_action.clone()).unwrap();
+        let native = runtara_dsl::condition_eval::evaluate_condition(&condition, &row).unwrap();
+        let wasm: Value = serde_json::from_str(&evaluate_condition_json(
+            &row_action.to_string(),
+            &row.to_string(),
+        ))
+        .unwrap();
+        assert_eq!(wasm, json!({"success": true, "value": native}));
+    }
+
+    #[test]
     fn normalizes_workflow_schema_fields_with_shared_rust_adapter() {
         let response: Value = serde_json::from_str(&normalize_schema_fields_form_json(
             r#"{

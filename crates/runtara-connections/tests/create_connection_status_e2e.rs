@@ -5,9 +5,9 @@
 //! An authorization-code connection (QuickBooks, or the generic
 //! `http_oauth2_authorization_code`) created WITHOUT tokens must start
 //! `REQUIRES_RECONNECTION`, so the UI surfaces the reconnect affordance instead of
-//! a misleading "Connected". A connection seeded with tokens, a client-credentials
-//! OAuth type (no interactive consent step), and an explicit caller-supplied status
-//! all stay/settle on their expected value.
+//! a misleading "Connected". Provider state and status are server-managed:
+//! public create rejects them, while the dedicated internal OAuth persistence
+//! operation can atomically install captured tokens and activate the row.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -123,6 +123,18 @@ async fn params_of(pool: &PgPool, id: &str) -> serde_json::Value {
     .expect("fetch params")
 }
 
+async fn seed_provider_state(
+    pool: &PgPool,
+    id: &str,
+    tenant: &str,
+    parameters: &serde_json::Value,
+) {
+    ConnectionRepository::new(pool.clone(), Arc::new(NoOpCipher))
+        .update_parameters_and_status(id, tenant, parameters, "ACTIVE")
+        .await
+        .expect("internal OAuth persistence must succeed");
+}
+
 async fn update(svc: &ConnectionService, id: &str, tenant: &str, mut body: serde_json::Value) {
     if body.get("version").is_none() {
         let version = svc
@@ -156,17 +168,28 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
     .await;
     assert_eq!(status_of(&fx.pool, &a).await, "REQUIRES_RECONNECTION");
 
-    // B. QuickBooks pre-seeded with tokens → ACTIVE (usable straight away).
-    let b = create(
-        &svc,
-        "t",
+    // B. Provider state and caller-forged lifecycle status are not part of the
+    // public create contract.
+    for unsafe_body in [
         json!({
             "title": "qb-seeded", "integrationId": "quickbooks_online",
-            "connectionParameters": {"client_id": "C", "client_secret": "S", "access_token": "at", "refresh_token": "rt"}
+            "connectionParameters": {
+                "client_id": "C", "client_secret": "S",
+                "access_token": "at", "refresh_token": "rt"
+            }
         }),
-    )
-    .await;
-    assert_eq!(status_of(&fx.pool, &b).await, "ACTIVE");
+        json!({
+            "title": "qb-explicit", "integrationId": "quickbooks_online",
+            "status": "ACTIVE",
+            "connectionParameters": {"client_id": "C", "client_secret": "S"}
+        }),
+    ] {
+        let request = serde_json::from_value::<CreateConnectionRequest>(unsafe_body);
+        match request {
+            Err(_) => {}
+            Ok(request) => assert!(svc.create_connection(request, "t").await.is_err()),
+        }
+    }
 
     // C. Generic authorization-code type, no tokens → REQUIRES_RECONNECTION
     //    (params-driven: static auth_url is empty, so oauth_config presence gates it).
@@ -198,18 +221,6 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
     )
     .await;
     assert_eq!(status_of(&fx.pool, &d).await, "ACTIVE");
-
-    // E. An explicit caller-supplied status is respected, never overridden.
-    let e = create(
-        &svc,
-        "t",
-        json!({
-            "title": "qb-explicit", "integrationId": "quickbooks_online", "status": "ACTIVE",
-            "connectionParameters": {"client_id": "C", "client_secret": "S"}
-        }),
-    )
-    .await;
-    assert_eq!(status_of(&fx.pool, &e).await, "ACTIVE");
 }
 
 /// Authorization-sensitive fields are descriptor-owned. Editing one atomically
@@ -226,11 +237,20 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         &svc,
         "t",
         json!({
-            "title": "qb-prod", "integrationId": "quickbooks_online", "status": "ACTIVE",
+            "title": "qb-prod", "integrationId": "quickbooks_online",
             "connectionParameters": {
-                "client_id": "QBCID", "client_secret": "QBSEC", "environment": "production",
-                "realm_id": "123456789", "access_token": "at-live", "refresh_token": "rt-live"
+                "client_id": "QBCID", "client_secret": "QBSEC", "environment": "production"
             }
+        }),
+    )
+    .await;
+    seed_provider_state(
+        &fx.pool,
+        &id,
+        "t",
+        &json!({
+            "client_id": "QBCID", "client_secret": "QBSEC", "environment": "production",
+            "realm_id": "123456789", "access_token": "at-live", "refresh_token": "rt-live"
         }),
     )
     .await;
@@ -295,12 +315,22 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         &svc,
         "t",
         json!({
-            "title": "authcode", "integrationId": "http_oauth2_authorization_code", "status": "ACTIVE",
+            "title": "authcode", "integrationId": "http_oauth2_authorization_code",
             "connectionParameters": {
                 "auth_url": "https://a.example.com/authorize", "token_url": "https://a.example.com/token",
-                "client_id": "c", "client_secret": "s", "base_url": "https://api.example.com",
-                "access_token": "at-g", "refresh_token": "rt-g"
+                "client_id": "c", "client_secret": "s", "base_url": "https://api.example.com"
             }
+        }),
+    )
+    .await;
+    seed_provider_state(
+        &fx.pool,
+        &g,
+        "t",
+        &json!({
+            "auth_url": "https://a.example.com/authorize", "token_url": "https://a.example.com/token",
+            "client_id": "c", "client_secret": "s", "base_url": "https://api.example.com",
+            "access_token": "at-g", "refresh_token": "rt-g"
         }),
     )
     .await;
@@ -346,11 +376,20 @@ async fn title_only_update_preserves_absent_defaults_tokens_and_rejects_stale_ve
         &svc,
         "t",
         json!({
-            "title": "legacy-qb", "integrationId": "quickbooks_online", "status": "ACTIVE",
+            "title": "legacy-qb", "integrationId": "quickbooks_online",
             "connectionParameters": {
-                "client_id": "client", "client_secret": "secret", "realm_id": "realm",
-                "access_token": "access", "refresh_token": "refresh"
+                "client_id": "client", "client_secret": "secret"
             }
+        }),
+    )
+    .await;
+    seed_provider_state(
+        &fx.pool,
+        &id,
+        "t",
+        &json!({
+            "client_id": "client", "client_secret": "secret", "realm_id": "realm",
+            "access_token": "access", "refresh_token": "refresh"
         }),
     )
     .await;

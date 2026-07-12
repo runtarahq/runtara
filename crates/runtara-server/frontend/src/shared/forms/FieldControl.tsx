@@ -21,6 +21,7 @@ function optionKey(value: unknown): string {
 
 interface FieldControlProps {
   id: string;
+  labelledBy?: string;
   field: FormField;
   value: unknown;
   disabled: boolean;
@@ -32,6 +33,7 @@ interface FieldControlProps {
 
 export function FieldControl({
   id,
+  labelledBy,
   field,
   value,
   disabled,
@@ -46,6 +48,7 @@ export function FieldControl({
     id,
     disabled,
     'aria-invalid': invalid || undefined,
+    'aria-labelledby': labelledBy,
   };
 
   if (kind === 'toggle') {
@@ -86,7 +89,11 @@ export function FieldControl({
           )
         }
       >
-        <SelectTrigger id={id} aria-invalid={invalid || undefined}>
+        <SelectTrigger
+          id={id}
+          aria-invalid={invalid || undefined}
+          aria-labelledby={labelledBy}
+        >
           <SelectValue
             placeholder={
               optionsLoading
@@ -112,9 +119,11 @@ export function FieldControl({
   if (kind === 'radio') {
     return (
       <div
+        id={id}
         className="flex flex-wrap gap-3"
         role="radiogroup"
         aria-invalid={invalid}
+        aria-labelledby={labelledBy}
       >
         {options.map((option) => {
           const checked = optionKey(option.value) === optionKey(value);
@@ -222,6 +231,7 @@ export function FieldControl({
     return (
       <KeyValueInput
         id={id}
+        labelledBy={labelledBy}
         disabled={disabled}
         value={entries}
         onChange={onChange}
@@ -232,6 +242,8 @@ export function FieldControl({
   if (kind === 'file') {
     return (
       <FileInput
+        id={id}
+        labelledBy={labelledBy}
         disabled={disabled}
         value={value ? JSON.stringify(value) : ''}
         placeholder={field.placeholder}
@@ -245,7 +257,12 @@ export function FieldControl({
     const range = Array.isArray(value) ? value : ['', ''];
     const inputType = kind === 'date_range' ? 'date' : 'number';
     return (
-      <div className="grid grid-cols-2 gap-2">
+      <div
+        id={id}
+        className="grid grid-cols-2 gap-2"
+        role="group"
+        aria-labelledby={labelledBy}
+      >
         {[0, 1].map((index) => (
           <Input
             key={index}

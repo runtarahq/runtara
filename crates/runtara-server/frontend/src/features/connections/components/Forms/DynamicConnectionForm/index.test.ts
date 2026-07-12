@@ -4,6 +4,7 @@ import type { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
 import type { FormDefinition } from '@/shared/forms';
 
 import {
+  buildConnectionCreateParameters,
   buildConnectionFormDefinition,
   buildConnectionParameterPatch,
   buildConnectionParameterValues,
@@ -107,6 +108,21 @@ describe('connection canonical form adapter', () => {
       client_id: 'client',
       realm_id: 'company-1',
       client_secret: '',
+    });
+  });
+
+  it('never returns managed read fields in a create payload', () => {
+    expect(
+      buildConnectionCreateParameters(descriptor, {
+        client_id: 'client',
+        client_secret: 'secret',
+        realm_id: 'must-not-be-supplied',
+        one_time_number: 42,
+      })
+    ).toEqual({
+      client_id: 'client',
+      client_secret: 'secret',
+      one_time_number: 42,
     });
   });
 

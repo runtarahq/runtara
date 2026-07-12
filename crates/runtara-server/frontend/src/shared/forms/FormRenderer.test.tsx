@@ -289,5 +289,7 @@ describe('FormRenderer', () => {
     expect(details?.querySelector('summary')).toHaveTextContent(
       'Advanced settings'
     );
+    fireEvent.click(screen.getByText('Advanced settings'));
+    expect(screen.getByRole('group', { name: 'Extra Headers' })).toBeVisible();
   });
 });
