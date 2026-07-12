@@ -922,6 +922,8 @@ pub struct ConnectionFieldDto {
     /// `is_optional`.
     #[serde(default)]
     pub is_required: bool,
+    /// Connection-domain clear and authorization lifecycle behavior.
+    pub behavior: runtara_dsl::agent_meta::ConnectionFieldBehavior,
 }
 
 /// OAuth2 configuration for a connection type (authorization code flow)

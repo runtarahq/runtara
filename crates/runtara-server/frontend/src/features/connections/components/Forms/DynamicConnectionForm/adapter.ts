@@ -11,6 +11,16 @@ export type EditProjection = {
   version?: string;
 };
 
+export type ConnectionSecretStateMap = NonNullable<
+  EditProjection['secretState']
+>;
+
+export interface ConnectionParameterPatchValues {
+  set: Record<string, unknown>;
+  replaceSecrets: Record<string, string>;
+  clear: string[];
+}
+
 function defaultForField(field: FormField): unknown {
   if (field.access === 'write') return '';
   if (field.default !== undefined) return field.default;
@@ -22,7 +32,9 @@ function defaultForField(field: FormField): unknown {
 
 export function buildConnectionFormDefinition(
   connectionType: ConnectionTypeWithForm,
-  mode: 'create' | 'edit'
+  mode: 'create' | 'edit',
+  secretState: ConnectionSecretStateMap = {},
+  clearedSecrets: ReadonlySet<string> = new Set()
 ): FormDefinition {
   const descriptor = connectionType.formDefinition ?? {
     schemaVersion: 1,
@@ -33,7 +45,10 @@ export function buildConnectionFormDefinition(
   const fields = Object.fromEntries(
     Object.entries(descriptor.fields).map(([name, field]) => [
       name,
-      mode === 'edit' && field.access === 'write'
+      mode === 'edit' &&
+      field.access === 'write' &&
+      secretState[name]?.configured &&
+      !clearedSecrets.has(name)
         ? {
             ...field,
             required: false,
@@ -79,4 +94,36 @@ export function buildConnectionParameterValues(
       return [name, defaultForField(field)];
     })
   );
+}
+
+export function buildConnectionParameterPatch(
+  definition: FormDefinition,
+  parameters: Record<string, unknown>,
+  projection: EditProjection,
+  explicitSecretClears: readonly string[]
+): ConnectionParameterPatchValues {
+  const set: Record<string, unknown> = {};
+  const replaceSecrets: Record<string, string> = {};
+  const clear = new Set(explicitSecretClears);
+
+  for (const [name, field] of Object.entries(definition.fields)) {
+    const value = parameters[name];
+    if (field.access === 'read') continue;
+    if (field.access === 'write' || field.secret) {
+      if (!clear.has(name) && typeof value === 'string' && value.length > 0) {
+        replaceSecrets[name] = value;
+      }
+      continue;
+    }
+
+    const previous = projection.values?.[name];
+    if (JSON.stringify(value) === JSON.stringify(previous)) continue;
+    if (value === '' || value === null || value === undefined) {
+      if (previous !== undefined) clear.add(name);
+    } else {
+      set[name] = value;
+    }
+  }
+
+  return { set, replaceSecrets, clear: [...clear].sort() };
 }

@@ -59,6 +59,7 @@ pub struct SftpParams {
         display_name = "Password",
         description = "Password for authentication (optional if using private key)",
         secret,
+        clearable,
         visible = sftp_auth_is_password,
         required = sftp_auth_is_password
     )]
@@ -70,6 +71,7 @@ pub struct SftpParams {
         display_name = "Private Key",
         description = "Private key in PEM format (optional if using password)",
         secret,
+        clearable,
         control = "secret_textarea",
         visible = sftp_auth_is_private_key,
         required = sftp_auth_is_private_key
@@ -82,6 +84,7 @@ pub struct SftpParams {
         display_name = "Passphrase",
         description = "Passphrase for the private key (if encrypted)",
         secret,
+        clearable,
         visible = sftp_auth_is_private_key
     )]
     passphrase: Option<String>,
@@ -164,5 +167,12 @@ mod tests {
         assert!(!legacy_private_key.fields["password"].visible);
         assert!(legacy_private_key.fields["private_key"].visible);
         assert!(legacy_private_key.valid);
+        assert!(
+            __CONNECTION_META_SftpParams
+                .fields
+                .iter()
+                .filter(|field| field.is_secret)
+                .all(|field| field.behavior.clearable)
+        );
     }
 }

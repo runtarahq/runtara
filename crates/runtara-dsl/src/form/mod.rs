@@ -1262,7 +1262,8 @@ mod tests {
     #[test]
     fn connection_metadata_normalizes_to_canonical_form() {
         use crate::agent_meta::{
-            ConnectionFieldConditions, ConnectionFieldMeta, ConnectionTypeMeta,
+            ConnectionFieldBehavior, ConnectionFieldConditions, ConnectionFieldMeta,
+            ConnectionTypeMeta,
         };
 
         static FIELDS: &[ConnectionFieldMeta] = &[
@@ -1286,6 +1287,10 @@ mod tests {
                     enabled: None,
                     required: None,
                 },
+                behavior: ConnectionFieldBehavior {
+                    clearable: false,
+                    requires_reauthorization: false,
+                },
             },
             ConnectionFieldMeta {
                 name: "private_key",
@@ -1306,6 +1311,10 @@ mod tests {
                     visible: None,
                     enabled: None,
                     required: None,
+                },
+                behavior: ConnectionFieldBehavior {
+                    clearable: false,
+                    requires_reauthorization: false,
                 },
             },
         ];

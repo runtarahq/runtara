@@ -714,7 +714,8 @@ pub struct HubSpotPrivateAppParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID from your HubSpot app settings",
-        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        requires_reauthorization
     )]
     pub client_id: String,
 
@@ -723,7 +724,8 @@ pub struct HubSpotPrivateAppParams {
         display_name = "Client Secret",
         description = "Client Secret from your HubSpot app settings",
         placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        secret
+        secret,
+        requires_reauthorization
     )]
     pub client_secret: String,
 
@@ -732,7 +734,8 @@ pub struct HubSpotPrivateAppParams {
     #[field(
         display_name = "Scopes",
         description = "Space-separated OAuth2 scopes (e.g. 'crm.objects.contacts.read crm.objects.deals.read')",
-        default = "oauth crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.companies.write crm.objects.deals.read crm.objects.deals.write crm.objects.quotes.read crm.objects.quotes.write crm.objects.line_items.read crm.objects.line_items.write crm.objects.owners.read"
+        default = "oauth crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.companies.write crm.objects.deals.read crm.objects.deals.write crm.objects.quotes.read crm.objects.quotes.write crm.objects.line_items.read crm.objects.line_items.write crm.objects.owners.read",
+        requires_reauthorization
     )]
     pub scopes: String,
 }
@@ -771,7 +774,8 @@ pub struct QuickBooksOnlineParams {
     /// Intuit app Client ID
     #[field(
         display_name = "Client ID",
-        description = "Client ID from your Intuit app's keys"
+        description = "Client ID from your Intuit app's keys",
+        requires_reauthorization
     )]
     pub client_id: String,
 
@@ -779,7 +783,8 @@ pub struct QuickBooksOnlineParams {
     #[field(
         display_name = "Client Secret",
         description = "Client Secret from your Intuit app's keys",
-        secret
+        secret,
+        requires_reauthorization
     )]
     pub client_secret: String,
 
@@ -789,7 +794,8 @@ pub struct QuickBooksOnlineParams {
         display_name = "Environment",
         description = "Target Intuit environment: 'sandbox' or 'production'",
         default = "sandbox",
-        enum_values = "sandbox,production"
+        enum_values = "sandbox,production",
+        requires_reauthorization
     )]
     pub environment: String,
 
@@ -807,7 +813,8 @@ pub struct QuickBooksOnlineParams {
     #[field(
         display_name = "Scopes",
         description = "Space-separated OAuth2 scopes",
-        default = "com.intuit.quickbooks.accounting"
+        default = "com.intuit.quickbooks.accounting",
+        requires_reauthorization
     )]
     pub scopes: String,
 }
@@ -1157,6 +1164,7 @@ pub struct McpConnectionParams {
         display_name = "Bearer Token",
         description = "Bearer token (when auth_mode = \"bearer\").",
         secret,
+        clearable,
         visible = mcp_auth_is_bearer,
         required = mcp_auth_is_bearer
     )]
@@ -1178,6 +1186,7 @@ pub struct McpConnectionParams {
         display_name = "API Key",
         description = "API key value (when auth_mode = \"api_key\").",
         secret,
+        clearable,
         visible = mcp_auth_is_api_key,
         required = mcp_auth_is_api_key
     )]
@@ -1422,7 +1431,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
         description = "OAuth2 authorization endpoint (must be https)",
         placeholder = "https://auth.example.com/oauth/authorize",
         is_url,
-        is_required
+        is_required,
+        requires_reauthorization
     )]
     pub auth_url: String,
 
@@ -1432,19 +1442,25 @@ pub struct HttpOAuth2AuthorizationCodeParams {
         description = "OAuth2 token endpoint for the code exchange and refreshes (must be https)",
         placeholder = "https://auth.example.com/oauth/token",
         is_url,
-        is_required
+        is_required,
+        requires_reauthorization
     )]
     pub token_url: String,
 
     /// OAuth2 client id
-    #[field(display_name = "Client ID", description = "OAuth2 client id")]
+    #[field(
+        display_name = "Client ID",
+        description = "OAuth2 client id",
+        requires_reauthorization
+    )]
     pub client_id: String,
 
     /// OAuth2 client secret
     #[field(
         display_name = "Client Secret",
         description = "OAuth2 client secret",
-        secret
+        secret,
+        requires_reauthorization
     )]
     pub client_secret: String,
 
@@ -1452,7 +1468,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[serde(default)]
     #[field(
         display_name = "Scopes",
-        description = "Space-separated OAuth2 scopes to request at authorization"
+        description = "Space-separated OAuth2 scopes to request at authorization",
+        requires_reauthorization
     )]
     pub scopes: Option<String>,
 
@@ -1463,7 +1480,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
         description = "API base URL — all requests using this connection are pinned to it (must be https)",
         placeholder = "https://api.example.com",
         is_url,
-        is_required
+        is_required,
+        requires_reauthorization
     )]
     pub base_url: Option<String>,
 
@@ -1472,7 +1490,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[field(
         display_name = "Token Endpoint Auth",
         description = "How client credentials are sent to the token endpoint: 'form_body' (default) or 'basic' (HTTP Basic header)",
-        default = "form_body"
+        default = "form_body",
+        requires_reauthorization
     )]
     pub token_auth: String,
 
@@ -1599,5 +1618,48 @@ mod form_condition_tests {
         assert!(api_key_missing.fields["api_key_value"].visible);
         assert!(api_key_missing.fields["api_key_value"].required);
         assert!(!api_key_missing.valid);
+        assert!(
+            __CONNECTION_META_McpConnectionParams
+                .fields
+                .iter()
+                .find(|field| field.name == "bearer_token")
+                .unwrap()
+                .behavior
+                .clearable
+        );
+    }
+
+    #[test]
+    fn interactive_oauth_descriptors_mark_authorization_sensitive_fields() {
+        for (meta, expected) in [
+            (
+                &__CONNECTION_META_HubSpotPrivateAppParams,
+                &["client_id", "client_secret", "scopes"][..],
+            ),
+            (
+                &__CONNECTION_META_QuickBooksOnlineParams,
+                &["client_id", "client_secret", "environment", "scopes"][..],
+            ),
+            (
+                &__CONNECTION_META_HttpOAuth2AuthorizationCodeParams,
+                &[
+                    "auth_url",
+                    "token_url",
+                    "client_id",
+                    "client_secret",
+                    "scopes",
+                    "base_url",
+                    "token_auth",
+                ][..],
+            ),
+        ] {
+            let marked = meta
+                .fields
+                .iter()
+                .filter(|field| field.behavior.requires_reauthorization)
+                .map(|field| field.name)
+                .collect::<Vec<_>>();
+            assert_eq!(marked, expected, "{}", meta.integration_id);
+        }
     }
 }

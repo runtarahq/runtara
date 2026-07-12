@@ -738,6 +738,12 @@ struct ConnectionFieldArgs {
     /// Mark this field as a secret (password, API key, etc.)
     #[darling(default)]
     secret: bool,
+    /// Allow an existing value to be removed through an explicit patch.
+    #[darling(default)]
+    clearable: bool,
+    /// Changing or clearing this field invalidates captured authorization.
+    #[darling(default)]
+    requires_reauthorization: bool,
     /// Comma-separated list of allowed values. When set, the UI renders
     /// the field as a select with these options instead of a text input.
     /// Example: `#[field(enum_values = "none,bearer,api_key")]`.
@@ -894,6 +900,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let placeholder_token = option_to_tokens(&f.placeholder);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
+            let clearable = f.clearable;
+            let requires_reauthorization = f.requires_reauthorization;
             let is_url = f.is_url;
             let is_required = f.is_required;
             let section_token = option_to_tokens(&f.section);
@@ -944,6 +952,15 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     quote! {{ compile_error!(#message); runtara_dsl::form::FieldAccessMode::ReadWrite }}
                 }
             };
+            let behavior_validation = if clearable && !is_secret {
+                quote! { compile_error!("`clearable` is only valid on secret connection fields"); }
+            } else if clearable && matches!(f.access.as_deref(), Some(access) if access != "write") {
+                quote! { compile_error!("a clearable secret connection field must use `access = \"write\"`"); }
+            } else if requires_reauthorization && f.access.as_deref() == Some("read") {
+                quote! { compile_error!("a read-only connection field cannot require reauthorization"); }
+            } else {
+                quote! {}
+            };
             let enum_values_token = match &f.enum_values {
                 Some(raw) => {
                     let values: Vec<String> = raw
@@ -961,7 +978,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                 None => quote! { None },
             };
 
-            quote! {
+            quote! {{
+                #behavior_validation
                 runtara_dsl::agent_meta::ConnectionFieldMeta {
                     name: #name,
                     type_name: #inner_type,
@@ -982,8 +1000,12 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                         enabled: #enabled_token,
                         required: #required_token,
                     },
+                    behavior: runtara_dsl::agent_meta::ConnectionFieldBehavior {
+                        clearable: #clearable,
+                        requires_reauthorization: #requires_reauthorization,
+                    },
                 }
-            }
+            }}
         })
         .collect();
 

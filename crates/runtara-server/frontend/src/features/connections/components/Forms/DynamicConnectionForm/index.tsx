@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -23,14 +23,19 @@ import {
   type ConnectionTypeWithForm,
   type EditProjection,
 } from './adapter';
+import { ConnectionFieldFrame } from './ConnectionFieldFrame';
 
 const FILE_STORAGE_CATEGORIES = new Set(['file_storage', 'storage']);
+const EMPTY_SECRET_STATE: NonNullable<EditProjection['secretState']> = {};
 
 type DynamicConnectionFormProps = {
   connectionType: ConnectionTypeDto;
   initValues?: Record<string, unknown>;
   isLoading?: boolean;
-  onSubmit: (data: Record<string, unknown>) => void;
+  onSubmit: (
+    data: Record<string, unknown>,
+    operations: ConnectionFormOperations
+  ) => void;
   mode?: 'create' | 'edit';
   onDelete?: () => void;
   isDeleting?: boolean;
@@ -40,6 +45,10 @@ type DynamicConnectionFormProps = {
   isReconnecting?: boolean;
   needsReconnect?: boolean;
 };
+
+export interface ConnectionFormOperations {
+  clearSecrets: string[];
+}
 
 const frameSchema = z
   .object({
@@ -113,17 +122,35 @@ export function DynamicConnectionForm({
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
   );
+  const editProjection = initValues?.editProjection as
+    | EditProjection
+    | undefined;
+  const secretState = editProjection?.secretState ?? EMPTY_SECRET_STATE;
+  const [clearedSecrets, setClearedSecrets] = useState<Set<string>>(
+    () => new Set()
+  );
+  const baseDefinition = useMemo(
+    () =>
+      buildConnectionFormDefinition(
+        connectionType as ConnectionTypeWithForm,
+        mode,
+        secretState
+      ),
+    [connectionType, mode, secretState]
+  );
   const definition = useMemo(
     () =>
       buildConnectionFormDefinition(
         connectionType as ConnectionTypeWithForm,
-        mode
+        mode,
+        secretState,
+        clearedSecrets
       ),
-    [connectionType, mode]
+    [clearedSecrets, connectionType, mode, secretState]
   );
   const canonicalDefaults = useMemo(
-    () => buildConnectionParameterValues(definition, initValues, mode),
-    [definition, initValues, mode]
+    () => buildConnectionParameterValues(baseDefinition, initValues, mode),
+    [baseDefinition, initValues, mode]
   );
   const defaultRateLimit = connectionType.defaultRateLimitConfig;
   const existingRateLimit = initValues?.rateLimitConfig as
@@ -157,12 +184,13 @@ export function DynamicConnectionForm({
   const watched = useWatch({ control: form.control });
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
   const [submitAttempt, setSubmitAttempt] = useState(0);
-  const editProjection = initValues?.editProjection as
-    | EditProjection
-    | undefined;
   const formValue = Object.fromEntries(
     Object.keys(definition.fields).map((name) => [name, watched[name]])
   );
+
+  useEffect(() => {
+    setClearedSecrets(new Set());
+  }, [editProjection?.version]);
 
   const handleSubmit = (values: Record<string, unknown>) => {
     setSubmitAttempt((attempt) => attempt + 1);
@@ -175,10 +203,13 @@ export function DynamicConnectionForm({
         (connectionType as ConnectionTypeWithForm).formDefinition?.fields ?? {}
       ).map((name) => [name, values[name]])
     );
-    onSubmit({
-      ...values,
-      ...parameters,
-    });
+    onSubmit(
+      {
+        ...values,
+        ...parameters,
+      },
+      { clearSecrets: [...clearedSecrets].sort() }
+    );
   };
 
   return (
@@ -223,22 +254,55 @@ export function DynamicConnectionForm({
                   form.setValue(name, value, { shouldDirty: true });
                 }
               }}
+              frame={{
+                commitField: ({ fieldName, value }) => {
+                  form.setValue(fieldName, value, { shouldDirty: true });
+                  if (value !== '' && value !== null && value !== undefined) {
+                    setClearedSecrets((current) => {
+                      if (!current.has(fieldName)) return current;
+                      const next = new Set(current);
+                      next.delete(fieldName);
+                      return next;
+                    });
+                  }
+                },
+              }}
               onAnalysisChange={setAnalysis}
               submitAttempt={submitAttempt}
               fieldAnnotations={Object.fromEntries(
-                Object.entries(editProjection?.secretState ?? {}).map(
-                  ([name, state]) => [
+                Object.entries(secretState).map(([name, state]) => {
+                  const field = definition.fields[name];
+                  const behavior = connectionType.fields.find(
+                    (candidate) => candidate.name === name
+                  )?.behavior;
+                  const label = field?.label ?? name.replace(/_/g, ' ');
+                  return [
                     name,
-                    <p
+                    <ConnectionFieldFrame
                       key={name}
-                      className="text-xs text-emerald-700 dark:text-emerald-400"
-                    >
-                      {state.configured
-                        ? 'A secret is configured. Enter a new value only to replace it.'
-                        : 'No secret is configured.'}
-                    </p>,
-                  ]
-                )
+                      label={label}
+                      configured={state.configured}
+                      clearable={state.clearable}
+                      cleared={clearedSecrets.has(name)}
+                      requiresReauthorization={
+                        behavior?.requiresReauthorization
+                      }
+                      onClear={() => {
+                        setClearedSecrets((current) =>
+                          new Set(current).add(name)
+                        );
+                        form.setValue(name, '', { shouldDirty: true });
+                      }}
+                      onUndoClear={() => {
+                        setClearedSecrets((current) => {
+                          const next = new Set(current);
+                          next.delete(name);
+                          return next;
+                        });
+                      }}
+                    />,
+                  ];
+                })
               )}
             />
             {isFileStorage && <DefaultFileStorageSection />}

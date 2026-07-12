@@ -5,7 +5,14 @@ import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Loader2 } from '@/shared/components/loader.tsx';
 import { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
-import { DynamicConnectionForm } from '@/features/connections/components/Forms/DynamicConnectionForm';
+import {
+  DynamicConnectionForm,
+  type ConnectionFormOperations,
+} from '@/features/connections/components/Forms/DynamicConnectionForm';
+import {
+  buildConnectionParameterPatch,
+  type EditProjection,
+} from '@/features/connections/components/Forms/DynamicConnectionForm/adapter';
 import {
   getConnectionById,
   getConnectionTypes,
@@ -81,7 +88,10 @@ export function Connection() {
       : 'Edit Connection'
   );
 
-  const handleSubmit = (data: Record<string, unknown>) => {
+  const handleSubmit = (
+    data: Record<string, unknown>,
+    operations: ConnectionFormOperations
+  ) => {
     const {
       title,
       rateLimitEnabled,
@@ -112,10 +122,7 @@ export function Connection() {
     ).formDefinition;
     const projection = (
       connection.data as unknown as {
-        editProjection?: {
-          values?: Record<string, unknown>;
-          version?: string;
-        };
+        editProjection?: EditProjection;
       }
     ).editProjection;
     if (!descriptor || !projection?.version) {
@@ -124,26 +131,12 @@ export function Connection() {
       );
       return;
     }
-    const set: Record<string, unknown> = {};
-    const replaceSecrets: Record<string, string> = {};
-    const clear: string[] = [];
-    for (const [name, field] of Object.entries(descriptor.fields)) {
-      const value = parameters[name];
-      if (field.access === 'read') continue;
-      if (field.access === 'write' || field.secret) {
-        if (typeof value === 'string' && value.length > 0) {
-          replaceSecrets[name] = value;
-        }
-        continue;
-      }
-      const previous = projection.values?.[name];
-      if (JSON.stringify(value) === JSON.stringify(previous)) continue;
-      if (value === '' || value === null || value === undefined) {
-        if (previous !== undefined) clear.push(name);
-      } else {
-        set[name] = value;
-      }
-    }
+    const { set, replaceSecrets, clear } = buildConnectionParameterPatch(
+      descriptor,
+      parameters,
+      projection,
+      operations.clearSecrets
+    );
 
     mutation.mutate({
       id: id as string,

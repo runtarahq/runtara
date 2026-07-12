@@ -158,7 +158,7 @@ fn build_edit_projection(
                     field.name.to_string(),
                     ConnectionSecretState {
                         configured,
-                        clearable: false,
+                        clearable: field.behavior.clearable,
                     },
                 );
             } else if field.access != runtara_dsl::form::FieldAccessMode::Write
@@ -260,7 +260,12 @@ fn apply_connection_parameter_patch(
                 "Connection field '{name}' appears in multiple patch operations"
             )));
         }
-        if field.is_secret || field.access != runtara_dsl::form::FieldAccessMode::ReadWrite {
+        let can_clear = if field.is_secret {
+            field.access == runtara_dsl::form::FieldAccessMode::Write && field.behavior.clearable
+        } else {
+            field.access == runtara_dsl::form::FieldAccessMode::ReadWrite
+        };
+        if !can_clear {
             return Err(ServiceError::ValidationError(format!(
                 "Connection field '{name}' cannot be cleared"
             )));
@@ -718,52 +723,34 @@ impl ConnectionService {
             self.validate_default_for(&integration_id, default_for)?;
         }
 
-        // SSRF rule E: on a params-driven OAuth type, changing an endpoint param
-        // must invalidate the captured tokens (DB + in-memory cache) and force a
-        // reconnect. Otherwise a captured refresh token could be replayed against
-        // a swapped-in token endpoint, or a still-cached Bearer would flow to the
-        // newly-edited base_url host. Compared against the merged (effective) params,
-        // so a blank submission that kept the old endpoint is correctly a no-change.
-        let endpoint_edit_requires_reauth =
-            if let Some(ref merged_params) = request.connection_parameters {
-                let params_driven = runtara_agents::registry::find_connection_type(&integration_id)
-                    .and_then(|meta| meta.oauth_config)
-                    .map(|cfg| cfg.params_driven)
-                    .unwrap_or(false);
-                const ENDPOINT_KEYS: [&str; 5] = [
-                    "auth_url",
-                    "token_url",
-                    "base_url",
-                    "revocation_url",
-                    "token_auth",
-                ];
-                let changed = ENDPOINT_KEYS
-                    .iter()
-                    .any(|k| old_params.get(k) != merged_params.get(k));
-                if params_driven && changed {
-                    // Strip the merge-preserved captured tokens from what's written.
-                    if let Some(obj) = request
-                        .connection_parameters
-                        .as_mut()
-                        .and_then(|p| p.as_object_mut())
-                    {
-                        obj.remove("access_token");
-                        obj.remove("refresh_token");
-                        obj.remove("token_expires_at");
-                    }
-                    // Evict the in-memory cache under the OLD params' keys.
-                    crate::auth::provider_auth::invalidate_connection_token_caches(
-                        id,
-                        &integration_id,
-                        &old_params,
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+        // Authorization lifecycle is descriptor-owned. Any changed field marked
+        // `requires_reauthorization` invalidates captured grants. The token removal
+        // and REQUIRES_RECONNECTION status are written atomically with the edit;
+        // cache eviction happens only after that guarded write succeeds.
+        let authorization_change_requires_reconnect = request
+            .connection_parameters
+            .as_ref()
+            .and_then(|merged_params| {
+                runtara_agents::registry::find_connection_type(&integration_id).map(|meta| {
+                    meta.fields.iter().any(|field| {
+                        field.behavior.requires_reauthorization
+                            && old_params.get(field.name) != merged_params.get(field.name)
+                    })
+                })
+            })
+            .unwrap_or(false);
+        if authorization_change_requires_reconnect {
+            if let Some(obj) = request
+                .connection_parameters
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                obj.remove("access_token");
+                obj.remove("refresh_token");
+                obj.remove("token_expires_at");
+            }
+            request.status = Some(ConnectionStatus::RequiresReconnection);
+        }
 
         // If marking as default file storage, clear any existing default first
         if request.is_default_file_storage == Some(true) {
@@ -796,17 +783,12 @@ impl ConnectionService {
             return Err(ServiceError::NotFound("Connection not found".to_string()));
         }
 
-        // SSRF rule E (continued): the tokens were stripped above; also force a
-        // fresh interactive consent against the new endpoints.
-        if endpoint_edit_requires_reauth {
-            self.repository
-                .update_status(
-                    id,
-                    tenant_id,
-                    ConnectionStatus::RequiresReconnection.as_str(),
-                )
-                .await
-                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+        if authorization_change_requires_reconnect {
+            crate::auth::provider_auth::invalidate_connection_token_caches(
+                id,
+                &integration_id,
+                &old_params,
+            );
         }
 
         if let Some(default_for) = default_for {
@@ -1028,6 +1010,7 @@ mod tests {
             "v1".to_string(),
         );
         assert_eq!(private_key.values["auth_mode"], "private_key");
+        assert!(private_key.secret_state["private_key"].clearable);
 
         let password = build_edit_projection(
             "sftp",
@@ -1081,6 +1064,93 @@ mod tests {
             apply_connection_parameter_patch("quickbooks_online", &existing, &read_patch),
             Err(ServiceError::ValidationError(_))
         ));
+    }
+
+    #[test]
+    fn explicit_patch_replaces_and_clears_only_authorized_secrets() {
+        let replaced = apply_connection_parameter_patch(
+            "mcp",
+            &json!({
+                "url": "https://mcp.example.com",
+                "auth_mode": "bearer",
+                "bearer_token": "old"
+            }),
+            &ConnectionParameterPatch {
+                version: "v1".to_string(),
+                set: HashMap::new(),
+                replace_secrets: HashMap::from([("bearer_token".to_string(), "new".to_string())]),
+                clear: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(replaced["bearer_token"], "new");
+
+        let cleared = apply_connection_parameter_patch(
+            "mcp",
+            &json!({
+                "url": "https://mcp.example.com",
+                "auth_mode": "none",
+                "bearer_token": "old"
+            }),
+            &ConnectionParameterPatch {
+                version: "v1".to_string(),
+                set: HashMap::new(),
+                replace_secrets: HashMap::new(),
+                clear: vec!["bearer_token".to_string()],
+            },
+        )
+        .unwrap();
+        assert!(cleared.get("bearer_token").is_none());
+
+        let forbidden = apply_connection_parameter_patch(
+            "quickbooks_online",
+            &json!({
+                "client_id": "client",
+                "client_secret": "secret",
+                "environment": "sandbox",
+                "scopes": "com.intuit.quickbooks.accounting"
+            }),
+            &ConnectionParameterPatch {
+                version: "v1".to_string(),
+                set: HashMap::new(),
+                replace_secrets: HashMap::new(),
+                clear: vec!["client_secret".to_string()],
+            },
+        );
+        assert!(matches!(forbidden, Err(ServiceError::ValidationError(_))));
+    }
+
+    #[test]
+    fn connection_field_behaviors_have_valid_domain_combinations() {
+        for meta in runtara_agents::registry::get_all_connection_types() {
+            for field in meta.fields {
+                if field.behavior.clearable {
+                    assert!(field.is_secret, "{}.{}", meta.integration_id, field.name);
+                    assert_eq!(
+                        field.access,
+                        runtara_dsl::form::FieldAccessMode::Write,
+                        "{}.{}",
+                        meta.integration_id,
+                        field.name
+                    );
+                }
+                if field.behavior.requires_reauthorization {
+                    assert!(
+                        requires_interactive_oauth(meta.integration_id),
+                        "{}.{}",
+                        meta.integration_id,
+                        field.name
+                    );
+                    assert_ne!(
+                        field.access,
+                        runtara_dsl::form::FieldAccessMode::Read,
+                        "{}.{}",
+                        meta.integration_id,
+                        field.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]

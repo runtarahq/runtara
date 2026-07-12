@@ -30,6 +30,8 @@ struct ConditionalParams {
     #[field(
         display_name = "Token",
         secret,
+        clearable,
+        requires_reauthorization,
         visible = bearer_mode,
         enabled = not_disabled,
         required = bearer_mode
@@ -45,6 +47,13 @@ fn derive_emits_all_canonical_condition_factories() {
     assert!(token.conditions.visible.is_some());
     assert!(token.conditions.enabled.is_some());
     assert!(token.conditions.required.is_some());
+    let token_meta = __CONNECTION_META_ConditionalParams
+        .fields
+        .iter()
+        .find(|field| field.name == "token")
+        .unwrap();
+    assert!(token_meta.behavior.clearable);
+    assert!(token_meta.behavior.requires_reauthorization);
 
     let none = analyze_form(&definition, &json!({ "auth_mode": "none" }));
     assert!(!none.fields["token"].visible);

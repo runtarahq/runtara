@@ -5,6 +5,7 @@ import type { FormDefinition } from '@/shared/forms';
 
 import {
   buildConnectionFormDefinition,
+  buildConnectionParameterPatch,
   buildConnectionParameterValues,
 } from './adapter';
 
@@ -53,17 +54,33 @@ describe('connection canonical form adapter', () => {
         .client_secret.required
     ).toBe(true);
     expect(
-      buildConnectionFormDefinition(connectionType, 'edit').fields.client_secret
-        .required
+      buildConnectionFormDefinition(connectionType, 'edit', {
+        client_secret: { configured: true, clearable: false },
+      }).fields.client_secret.required
     ).toBe(false);
     expect(
-      buildConnectionFormDefinition(connectionType, 'edit').fields.client_secret
-        .conditions?.required
+      buildConnectionFormDefinition(connectionType, 'edit', {
+        client_secret: { configured: true, clearable: false },
+      }).fields.client_secret.conditions?.required
     ).toBeUndefined();
+    expect(
+      buildConnectionFormDefinition(connectionType, 'edit').fields.client_secret
+        .required
+    ).toBe(true);
+    expect(
+      buildConnectionFormDefinition(
+        connectionType,
+        'edit',
+        { client_secret: { configured: true, clearable: true } },
+        new Set(['client_secret'])
+      ).fields.client_secret.conditions?.required
+    ).toBeDefined();
   });
 
   it('loads safe readable values and never invents secret values', () => {
-    const definition = buildConnectionFormDefinition(connectionType, 'edit');
+    const definition = buildConnectionFormDefinition(connectionType, 'edit', {
+      client_secret: { configured: true, clearable: false },
+    });
     const values = buildConnectionParameterValues(
       definition,
       {
@@ -84,6 +101,49 @@ describe('connection canonical form adapter', () => {
       client_id: 'client',
       realm_id: 'company-1',
       client_secret: '',
+    });
+  });
+
+  it('emits mutually exclusive preserve, replace, and explicit-clear operations', () => {
+    const projection = {
+      values: { client_id: 'client', realm_id: 'managed' },
+      secretState: {
+        client_secret: { configured: true, clearable: true },
+      },
+      version: 'v1',
+    };
+
+    expect(
+      buildConnectionParameterPatch(
+        descriptor,
+        { client_id: 'client', client_secret: '' },
+        projection,
+        []
+      )
+    ).toEqual({ set: {}, replaceSecrets: {}, clear: [] });
+    expect(
+      buildConnectionParameterPatch(
+        descriptor,
+        { client_id: 'changed', client_secret: 'replacement' },
+        projection,
+        []
+      )
+    ).toEqual({
+      set: { client_id: 'changed' },
+      replaceSecrets: { client_secret: 'replacement' },
+      clear: [],
+    });
+    expect(
+      buildConnectionParameterPatch(
+        descriptor,
+        { client_id: 'client', client_secret: '' },
+        projection,
+        ['client_secret']
+      )
+    ).toEqual({
+      set: {},
+      replaceSecrets: {},
+      clear: ['client_secret'],
     });
   });
 });

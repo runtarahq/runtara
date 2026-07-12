@@ -1505,6 +1505,8 @@ export interface ConnectionEditProjection {
 
 /** A field in a connection type's parameter schema */
 export interface ConnectionFieldDto {
+  /** Connection-domain clear and authorization lifecycle behavior. */
+  behavior: ConnectionFieldBehavior;
   /** Default value */
   defaultValue?: string | null;
   /** Description of the field */
@@ -1537,6 +1539,13 @@ export interface ConnectionFieldDto {
   placeholder?: string | null;
   /** Type name (String, u16, bool, etc.) */
   typeName: string;
+}
+
+export interface ConnectionFieldBehavior {
+  /** An existing value may be removed through an explicit patch operation. */
+  clearable?: boolean;
+  /** Changing or clearing this field invalidates captured authorization. */
+  requiresReauthorization?: boolean;
 }
 
 /** Update connection request - all fields optional */

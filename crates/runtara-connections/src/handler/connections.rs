@@ -463,6 +463,7 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
                     .map(|vs| vs.iter().map(|s| s.to_string()).collect()),
                 is_url: f.is_url,
                 is_required: f.is_required,
+                behavior: f.behavior,
             })
             .collect(),
         form_definition: runtara_dsl::form::connection_form_definition(meta),

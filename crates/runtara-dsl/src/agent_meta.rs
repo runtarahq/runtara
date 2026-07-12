@@ -851,6 +851,21 @@ pub struct ConnectionFieldConditions {
     pub required: Option<ConnectionConditionFactory>,
 }
 
+/// Connection-owned persistence and authorization behavior for one field.
+///
+/// This intentionally stays outside the shared form model: it governs secret
+/// storage and provider authorization lifecycle, not presentation/validation.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionFieldBehavior {
+    /// An existing value may be removed through an explicit patch operation.
+    pub clearable: bool,
+    /// Changing or clearing this field invalidates captured authorization.
+    pub requires_reauthorization: bool,
+}
+
 /// Metadata for a connection field parameter
 #[derive(Debug, Clone)]
 pub struct ConnectionFieldMeta {
@@ -894,6 +909,8 @@ pub struct ConnectionFieldMeta {
     pub access: crate::form::FieldAccessMode,
     /// Conditional visible/enabled/required state using canonical expressions.
     pub conditions: ConnectionFieldConditions,
+    /// Connection-domain persistence and authorization lifecycle behavior.
+    pub behavior: ConnectionFieldBehavior,
 }
 
 /// How client credentials are presented to the OAuth token endpoint.

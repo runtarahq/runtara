@@ -196,19 +196,19 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
     assert_eq!(status_of(&fx.pool, &e).await, "ACTIVE");
 }
 
-/// The reported case: editing an authorized QuickBooks connection's `environment`
-/// must persist the change AND keep the server-captured OAuth tokens/realm_id (the
-/// UI can't resend them). Endpoint changes on a params-driven type still strip the
-/// tokens (SSRF rule E).
+/// Authorization-sensitive fields are descriptor-owned. Editing one atomically
+/// strips captured tokens and transitions health to REQUIRES_RECONNECTION;
+/// unrelated edits keep the grant.
 #[tokio::test]
-async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() {
+async fn editing_params_applies_descriptor_owned_reauthorization() {
     let Some(fx) = PgFixture::start().await else {
         eprintln!("Skipping update-merge e2e: Docker/Postgres unavailable");
         return;
     };
     let svc = service(&fx.pool);
 
-    // --- QuickBooks (curated): editing environment keeps the captured tokens ---
+    // --- QuickBooks (curated): environment selects a different API host and
+    // therefore invalidates the captured grant. ---
     let id = create(
         &svc,
         "t",
@@ -256,14 +256,14 @@ async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() 
         after["environment"], "sandbox",
         "environment edit must persist"
     );
-    // Explicit patching preserves server-captured OAuth params + untouched secret.
-    assert_eq!(after["access_token"], "at-live");
-    assert_eq!(after["refresh_token"], "rt-live");
+    assert!(after.get("access_token").is_none());
+    assert!(after.get("refresh_token").is_none());
     assert_eq!(after["realm_id"], "123456789");
     assert_eq!(
         after["client_secret"], "QBSEC",
         "untouched secret keeps existing"
     );
+    assert_eq!(status_of(&fx.pool, &id).await, "REQUIRES_RECONNECTION");
 
     let stale_request = serde_json::from_value(json!({
         "connectionParameterPatch": {
@@ -292,17 +292,17 @@ async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() 
     )
     .await;
 
-    // Editing a non-endpoint field (scopes) keeps the tokens.
+    // Editing an unmarked operational preference keeps the tokens.
     update(
         &svc,
         &g,
         "t",
-        json!({ "connectionParameters": { "scopes": "read write" } }),
+        json!({ "connectionParameters": { "pkce": false } }),
     )
     .await;
     let g1 = params_of(&fx.pool, &g).await;
-    assert_eq!(g1["access_token"], "at-g", "non-endpoint edit keeps tokens");
-    assert_eq!(g1["scopes"], "read write");
+    assert_eq!(g1["access_token"], "at-g", "unmarked edit keeps tokens");
+    assert_eq!(g1["pkce"], false);
 
     // Changing the token_url (an endpoint) strips the captured tokens (rule E).
     update(
@@ -322,5 +322,110 @@ async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() 
         status_of(&fx.pool, &g).await,
         "REQUIRES_RECONNECTION",
         "endpoint change forces reconnect"
+    );
+}
+
+#[tokio::test]
+async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
+    let Some(fx) = PgFixture::start().await else {
+        eprintln!("Skipping secret lifecycle e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let svc = service(&fx.pool);
+
+    let id = create(
+        &svc,
+        "t",
+        json!({
+            "title": "sftp", "integrationId": "sftp",
+            "connectionParameters": {
+                "host": "files.example.com", "port": 22, "username": "alice",
+                "auth_mode": "password", "password": "old-password"
+            }
+        }),
+    )
+    .await;
+    let projection = svc
+        .get_connection(&id, "t")
+        .await
+        .unwrap()
+        .edit_projection
+        .unwrap();
+    assert!(projection.secret_state["password"].configured);
+    assert!(projection.secret_state["password"].clearable);
+
+    update(
+        &svc,
+        &id,
+        "t",
+        json!({
+            "connectionParameterPatch": {
+                "version": projection.version,
+                "replaceSecrets": {"password": "new-password"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(params_of(&fx.pool, &id).await["password"], "new-password");
+
+    let projection = svc
+        .get_connection(&id, "t")
+        .await
+        .unwrap()
+        .edit_projection
+        .unwrap();
+    update(
+        &svc,
+        &id,
+        "t",
+        json!({
+            "connectionParameterPatch": {
+                "version": projection.version,
+                "set": {"auth_mode": "private_key"},
+                "replaceSecrets": {"private_key": "key-material"},
+                "clear": ["password"]
+            }
+        }),
+    )
+    .await;
+    let switched = params_of(&fx.pool, &id).await;
+    assert!(switched.get("password").is_none());
+    assert_eq!(switched["private_key"], "key-material");
+    assert_eq!(status_of(&fx.pool, &id).await, "ACTIVE");
+
+    let qb = create(
+        &svc,
+        "t",
+        json!({
+            "title": "qb", "integrationId": "quickbooks_online",
+            "connectionParameters": {
+                "client_id": "client", "client_secret": "required-secret",
+                "environment": "sandbox", "scopes": "com.intuit.quickbooks.accounting"
+            }
+        }),
+    )
+    .await;
+    let version = svc
+        .get_connection(&qb, "t")
+        .await
+        .unwrap()
+        .edit_projection
+        .unwrap()
+        .version;
+    let forbidden: runtara_connections::types::UpdateConnectionRequest =
+        serde_json::from_value(json!({
+            "connectionParameterPatch": {
+                "version": version,
+                "clear": ["client_secret"]
+            }
+        }))
+        .unwrap();
+    assert!(matches!(
+        svc.update_connection(&qb, "t", forbidden).await,
+        Err(runtara_connections::service::connections::ServiceError::ValidationError(_))
+    ));
+    assert_eq!(
+        params_of(&fx.pool, &qb).await["client_secret"],
+        "required-secret"
     );
 }
