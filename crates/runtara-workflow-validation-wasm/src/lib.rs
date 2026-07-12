@@ -440,6 +440,11 @@ fn step_types() -> Vec<StepTypeInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Tests replace the process-global catalog. Serialize those mutations so
+    // parallel test execution cannot make validation depend on test order.
+    static CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validates_empty_graph_with_backend_validator() {
@@ -643,6 +648,11 @@ mod tests {
 
     #[test]
     fn rejects_connection_required_agent_without_connection_id() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
+        let init_response: Value =
+            serde_json::from_str(&init_agent_catalog(OBJECT_MODEL_CATALOG_JSON)).unwrap();
+        assert_eq!(init_response["success"], true);
+
         let response = validate_execution_graph_json_impl(
             r#"{
                 "steps": {
@@ -711,8 +721,34 @@ mod tests {
         }
     ]"#;
 
+    const OBJECT_MODEL_CATALOG_JSON: &str = r#"[
+        {
+            "id": "object-model",
+            "name": "Object Model",
+            "description": "Query typed business objects",
+            "hasSideEffects": false,
+            "supportsConnections": true,
+            "integrationIds": ["postgres"],
+            "capabilities": [
+                {
+                    "id": "query-instances",
+                    "name": "Query Instances",
+                    "inputType": "QueryInstancesInput",
+                    "inputs": [
+                        {"name": "schema_name", "type": "string", "required": true}
+                    ],
+                    "output": {"type": "QueryInstancesOutput"},
+                    "hasSideEffects": false,
+                    "isIdempotent": true,
+                    "rateLimited": false
+                }
+            ]
+        }
+    ]"#;
+
     #[test]
     fn init_then_returns_pushed_agent_metadata() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
         let init_resp: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON))
             .expect("init response is JSON");
         assert_eq!(init_resp["success"], true);
@@ -737,6 +773,7 @@ mod tests {
 
     #[test]
     fn returns_pushed_capability_metadata() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
         let init_resp: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON))
             .expect("init response is JSON");
         assert_eq!(init_resp["success"], true);
@@ -749,6 +786,7 @@ mod tests {
 
     #[test]
     fn init_with_invalid_json_reports_error() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
         let resp: Value = serde_json::from_str(&init_agent_catalog("not-json"))
             .expect("init returns JSON even on parse failure");
         assert_eq!(resp["success"], false);

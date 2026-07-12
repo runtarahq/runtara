@@ -42,6 +42,12 @@ pub mod spec;
 // DSL flat-map schema → JSON Schema conversion
 pub mod schema_convert;
 
+// Shared deterministic evaluator for UI/report-safe condition expressions.
+pub mod condition_eval;
+
+// Canonical schema-driven form model shared by connections, workflows, and reports.
+pub mod form;
+
 // Step type metadata registry. Gated behind `json-schema` because it
 // generates `schemars::RootSchema` for each step type. WASM consumers
 // of `runtara-dsl` (e.g. `runtara-report-dsl`) opt out of this feature

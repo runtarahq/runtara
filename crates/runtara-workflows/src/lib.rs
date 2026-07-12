@@ -62,14 +62,20 @@
 #![deny(missing_docs)]
 
 /// Compile entry point (direct WebAssembly emitter).
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod compile;
 
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 
 /// Production direct WebAssembly compiler scaffolding.
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod direct_wasm;
 
 /// Workflow start input validation.
@@ -84,7 +90,10 @@ pub mod schema_fields_validation;
 
 /// Server-less child-workflow resolution for standalone compilation
 /// (the `runtara-compile` CLI).
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub mod standalone;
 
 /// Workflow validation for security and correctness.
@@ -94,7 +103,10 @@ pub mod validation;
 pub mod workflow_features;
 
 // Re-export main types
-#[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
 pub use compile::{
     ChildDependency, ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions,
     NativeCompilationResult, TEMPLATE_MAJOR_VERSION, WorkflowCompilerMode, compile_workflow_direct,
