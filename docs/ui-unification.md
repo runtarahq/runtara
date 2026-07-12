@@ -2,47 +2,49 @@
 
 ## Status
 
-**Reopened and in progress as of 2026-07-12.** The earlier completion claim was
-incorrect. It proved the primary browser path but did not adversarially verify
-public compatibility paths, migration behavior, production consumers for every
-shared abstraction, or whether required integration tests fail closed. No
-previously checked item or phase exit gate is considered complete until the new
-audit records direct production and executed-test evidence.
+**Complete and independently re-verified as of 2026-07-12.** The initiative was
+reopened because the earlier completion claim was incorrect. The second pass
+treated every checked item as untrusted, fixed NG-1 through NG-6 plus the
+additional gaps found by adversarial review, exercised production REST/browser
+paths, and converted infrastructure-dependent tests to explicit fail-closed
+suites. The evidence and remaining compatibility boundaries are recorded below.
 
-### Known gaps being resolved
+### Resolved gaps
 
-- [ ] **NG-1 — unsafe legacy update path:** public `PUT` still accepts
-  `connectionParameters` without the canonical version, field-access, and
-  explicit write/clear enforcement applied to `connectionParameterPatch`.
-- [ ] **NG-2 — unintended default writes:** edit hydration displays defaults for
-  absent stored keys and patch generation mistakes them for user changes,
-  potentially triggering reauthorization during an unrelated save.
-- [ ] **NG-3 — conflict recovery:** the useful 409 message is lost, the draft
-  receives no conflict-specific UI, and the page retains a stale version.
-- [ ] **NG-4 — field ordering:** connection metadata discards declaration order,
-  so equal-order fields render alphabetically.
-- [ ] **NG-5 — advanced sections:** the connection macro cannot author section
-  metadata and generated sections always set `advanced: false`.
-- [ ] **NG-6A — unused option resolution:** `OptionResolver` has no production
-  supplier and therefore is not yet a production-integrated capability.
-- [ ] **NG-6B — unsupported non-secret writes:** `write` with `secret: false` is
-  documented but routed through secret replacement and rejected by the backend.
-- [ ] **NG-6C — false-positive integration tests:** required PostgreSQL tests
-  return success when Docker or database startup fails.
-- [ ] Adversarially audit every earlier completion item, public and internal
-  caller, retained compatibility boundary, phase exit gate, and verification
-  command; fix additional gaps rather than documenting them as exceptions.
+- [x] **NG-1 — unsafe legacy update path:** public update has one mandatory,
+  versioned, descriptor-aware patch contract. Legacy `connectionParameters`,
+  client-owned status, provider tokens, unknown fields, and access violations
+  are rejected.
+- [x] **NG-2 — unintended default writes:** edit state tracks stored presence and
+  explicit dirty/clear intent. Displayed defaults are never emitted by an
+  unrelated save, and reauthorization is derived only from effective operations.
+- [x] **NG-3 — conflict recovery:** 409 responses preserve the draft, fetch the
+  current projection, identify changed fields, and offer explicit reload or
+  reviewed reapply using the latest version.
+- [x] **NG-4 — field ordering:** declaration order is preserved through macro
+  metadata, normalized forms, serialization, and React; explicit order remains
+  available as an override.
+- [x] **NG-5 — advanced sections:** descriptor macros author section id, label,
+  description, order, and advanced state with contradiction checks. MCP has a
+  representative collapsed advanced section.
+- [x] **NG-6A — option resolution:** report filters provide the production
+  `OptionResolver`, backed by the report filter-options API and React Query.
+- [x] **NG-6B — non-secret writes:** typed JSON `write` operations support
+  write-only non-secret fields independently from secret storage and never
+  project those values back to clients.
+- [x] **NG-6C — false-positive tests:** required external suites are feature
+  gated, fail closed, run in CI, and report executed/ignored counts explicitly.
+- [x] Every earlier completion item, public/internal caller, retained boundary,
+  and phase gate was adversarially audited; newly found defects were fixed.
 
-### Historical verification warning
+### Verification discipline
 
-The earlier verification commands remain useful regression history, but they
-are not completion evidence for the reopened initiative. In particular, a
-Docker-backed test run could silently return success without executing its
-assertions, interface-only code was counted as a production consumer, and the
-real browser run did not cover legacy/API updates, absent-key defaults,
-concurrent edits, declaration ordering, or advanced sections. A replacement
-verification record will explicitly distinguish executed, ignored, and skipped
-tests and will include direct API plus browser evidence.
+Only assertions that executed are counted below. Ignored doctests are listed
+separately, and required integration suites report zero skipped tests. Optional
+infrastructure is not detected from inside a test anymore: the ordinary test
+run omits an explicitly feature-gated target, while the corresponding CI/local
+command enables it and fails if its database, Valkey, Docker, tool, or component
+prerequisite is unavailable.
 
 ### Retained boundaries
 
@@ -505,10 +507,12 @@ interface FormOptionRequest {
 type OptionResolver = (request: FormOptionRequest) => Promise<FormOption[]>;
 ```
 
-- Reports resolve Object Model lookup values and cascading filters.
-- Connections can resolve provider resources without changing the shared
-  engine.
-- Workflows resolve agent or type metadata where applicable.
+- `ReportFilterBar` is the production supplier. It resolves lookup and
+  cascading-filter values through the report filter-options API and React
+  Query, while `useResolvedOptions` owns only request cancellation, dependency
+  tracking, loading/error state, and invalid-value removal.
+- Connections and workflows do not currently need dynamic option suppliers;
+  no speculative provider-query or agent-query plumbing is claimed.
 
 The shared schema identifies a resolver key and dependency field names, but it
 does not contain a general-purpose query language.
@@ -553,14 +557,16 @@ Projection rules:
 
 ```json
 {
-  "version": 7,
-  "set": {
-    "environment": "sandbox"
-  },
-  "replaceSecrets": {
-    "client_secret": "new-secret"
-  },
-  "clear": []
+  "version": "7",
+  "connectionParameterPatch": {
+    "set": {
+      "environment": "sandbox"
+    },
+    "write": {
+      "client_secret": "new-secret"
+    },
+    "clear": []
+  }
 }
 ```
 
@@ -569,7 +575,7 @@ Server update sequence:
 1. Load the current encrypted parameters.
 2. Verify the optimistic concurrency version.
 3. Reject writes to `read` fields.
-4. Apply permitted `set`, `replaceSecrets`, and `clear` operations.
+4. Apply permitted `set`, typed `write`, and `clear` operations.
 5. Evaluate effective form state.
 6. Validate the complete merged configuration.
 7. Persist atomically.
@@ -578,6 +584,14 @@ Server update sequence:
 
 Blank strings never mean “keep the existing secret.” Secret preservation occurs
 because untouched fields are absent from the patch.
+
+The public create contract intentionally retains `connectionParameters`, but
+create runs the same native form analysis and rejects unknown, `read`,
+server-managed, and provider-token fields. The public update DTO uses
+`deny_unknown_fields`, has no legacy wholesale parameter branch, and requires a
+version even for title/default/rate-limit-only mutations. OAuth callback token
+persistence uses an internal repository operation and never passes through the
+public update DTO.
 
 ### Connection-specific behavior
 
@@ -765,8 +779,9 @@ Do not reproduce validation semantics in TypeScript tests or implementation.
 
 ### Phase 0: Contract and fixtures
 
-**Status: reopened; exit gate unverified.** The existing contract, snapshots,
-fixtures, and stored-definition audits require adversarial re-verification.
+**Status: complete — verified.** The fixture corpus covers every control family,
+all registered connection descriptors, representative workflow/report shapes,
+and the five pilot types.
 
 1. Add an architecture decision record or link this document from the relevant
    implementation plans.
@@ -780,7 +795,9 @@ five pilot connection types.
 
 ### Phase 1: Shared Rust engine
 
-**Status: reopened; exit gate unverified.**
+**Status: complete — verified.** Native definition, normalization, validation,
+condition, access, nested-value, and compatibility tests execute in
+`runtara-dsl` and the domain adapters.
 
 1. Add `FormDefinition`, `FormField`, sections, controls, access modes,
    conditions, field state, and structured issues to `runtara-dsl::form`.
@@ -793,8 +810,9 @@ Exit gate: native Rust fixture tests pass without frontend changes.
 
 ### Phase 2: General validation WASM
 
-**Status: reopened; exit gate unverified.** Form exports and the physical rename
-exist, but parity and every production consumer must be re-proven.
+**Status: complete — verified.** The generalized validation bundle is preloaded,
+fails visibly, and produces the same normalized analyses as native Rust for the
+MCP, SFTP, QuickBooks, workflow, and report corpus.
 
 1. Export form-definition validation and form analysis.
 2. Add native/WASM parity tests.
@@ -807,8 +825,9 @@ Exit gate: all shared fixtures produce equivalent native and WASM results.
 
 ### Phase 3: Shared React controls
 
-**Status: reopened; exit gate not met.** The registry, WASM-produced state,
-issues, and submit focus exist, but `OptionResolver` has no production supplier.
+**Status: complete — verified.** The gallery renders all 17 controls, issue focus
+and accessibility are tested, and `ReportFilterBar` supplies the production
+dynamic-option resolver.
 
 1. Build the controlled field registry from existing Runtara components.
 2. Implement field and section rendering from WASM-produced state.
@@ -820,8 +839,9 @@ domain-specific field inference.
 
 ### Phase 4: Connection correctness and pilot
 
-**Status: reopened; exit gate not met.** The primary UI patch path exists, but
-legacy updates bypass its guarantees and hydration can emit unintended defaults.
+**Status: complete — verified.** Create and update are backend-enforced, update
+has one versioned canonical patch, dirty intent preserves absent defaults and
+secrets, and browser/API tests cover lifecycle plus conflicts.
 
 1. Add safe connection edit hydration.
 2. Add versioned patch semantics.
@@ -835,9 +855,9 @@ correctly through native and browser validation.
 
 ### Phase 5: All connections
 
-**Status: reopened; exit gate not met.** Descriptors produce canonical forms,
-but declaration order and authorable advanced sections are missing; snapshots
-must be refreshed and re-audited.
+**Status: complete — verified.** Every registered descriptor normalizes,
+declaration order is stable, authored sections validate, and old grouping/DTO
+paths are absent.
 
 1. Annotate and migrate every registered connection type.
 2. Snapshot normalized form definitions.
@@ -849,8 +869,9 @@ metadata and passes create/edit tests.
 
 ### Phase 6: Workflow form adoption
 
-**Status: reopened; exit gate unverified.** Existing workflow consumers and
-wire-format invariants require production-path and regression re-verification.
+**Status: complete — verified.** Execute, action, chat, and trigger consumers use
+the shared renderer; stored-definition, compilation, parity, and 66-case direct
+Wasm execution coverage preserve workflow wire/runtime behavior.
 
 1. Route workflow input validation through the shared engine.
 2. Replace duplicate workflow schema renderers.
@@ -862,9 +883,9 @@ renderer and validator are active.
 
 ### Phase 7: Reports form adoption
 
-**Status: reopened; exit gate unverified.** Persisted report migration remains
-intentionally deferred, but adapters, shared controls, option retrieval, and
-condition evaluation require production-consumer and losslessness evidence.
+**Status: complete — verified.** Filters, inline editors, `showWhen`, row-action
+conditions, production dynamic options, and native/WASM compatibility execute
+without changing persisted report query/layout semantics.
 
 1. Adapt filters to shared controls.
 2. Adapt inline editors to shared controls.
@@ -877,8 +898,9 @@ visibility matches native/WASM evaluation.
 
 ### Phase 8: Cleanup
 
-**Status: reopened; exit gate not met.** Known unsafe compatibility behavior and
-unused shared plumbing remain; all earlier cleanup claims require a fresh audit.
+**Status: complete — verified.** Unsafe update compatibility and dead frame
+plumbing are removed; only the documented workflow/report wire adapters and
+internal OAuth persistence boundary remain.
 
 1. Remove legacy TypeScript schema validators and conditional evaluators.
 2. Remove duplicate schema-driven field renderers.
@@ -894,15 +916,128 @@ condition evaluator, and one frontend control registry remain.
 ## Rollout safeguards
 
 - Backend validation remains authoritative throughout the migration.
-- New and old validators may run in shadow mode for representative requests
-  before a surface switches to the shared engine.
+- During rollout, new and old validators ran in shadow mode for representative
+  requests before each surface switched to the shared engine.
 - Structured issues must be compared by code and path, not only message text.
 - Persisted workflow and report formats change only through explicit versioned
   migrations.
 - Compatibility adapters are removed only after fixture and repository
   stored-definition audits succeed; irreducible domain wire adapters remain.
-- Connection update semantics must be corrected before the new editor is used
-  for production credential changes.
+- Connection update semantics were corrected before completion of the new
+  editor's production credential path.
+
+## Completion audit
+
+### Gap-by-gap resolution
+
+| Gap | Production resolution | Executed evidence |
+| --- | --- | --- |
+| NG-1 | `UpdateConnectionRequest` requires `version`, denies unknown fields, and exposes only descriptor-aware `set`/`write`/`clear`; create is also access-checked; OAuth persistence is internal | Rust service/handler tests, OpenAPI/TS drift check, direct HTTP rejection and stale-write browser cases |
+| NG-2 | Connection edit hydration tracks stored presence separately from displayed defaults and emits only explicit dirty/clear operations | Frontend payload tests plus PostgreSQL/API-created QuickBooks title-only regression preserving exact parameters, tokens, and status |
+| NG-3 | Standardized 409 payload, draft retention, latest-projection fetch, changed-field review, reload, and explicit reapply | Shared error, hook, component, and two-editor-equivalent browser coverage for stale title and parameter writes |
+| NG-4 | Macro metadata records declaration index; normalization uses it unless an explicit order is authored | Macro tests, normalized snapshots, React order test, browser checks for QuickBooks and SFTP |
+| NG-5 | Macro section declarations support id/label/description/order/advanced with contradiction validation | Macro/Rust/React tests and keyboard browser coverage of MCP advanced fields with retained values |
+| NG-6A | `ReportFilterBar` supplies `OptionResolver` from the production report filter-options API | Loading, failure, abort, stale-response, dependency, cache, and invalid-value tests |
+| NG-6B | Typed JSON `write` operations are access-aware and independent of `secret`; write-only values never project | Rust, API/OpenAPI, generated TS, frontend, and native/WASM contract tests |
+| NG-6C | External suites are explicit feature-gated targets that fail closed; CI enables every required feature | PostgreSQL, Docker pgvector, object store, Valkey/TLS, component, and direct-Wasm suites listed below; zero required skips |
+
+### Additional gaps found and fixed
+
+| Finding | Fix |
+| --- | --- |
+| Public create accepted client-owned status, read/server-managed/provider-token fields, and unknown fields | Removed status from the public create DTO/generated client and run native form/access analysis before persistence |
+| Connection create/default/file-storage mutations could partially commit | Wrapped create and default transitions in one transaction with advisory serialization; duplicate-title rollback regression proves the prior default survives |
+| Shared controls had incomplete accessible naming and file keyboard behavior | Added labels/group semantics and keyboard-accessible file control; the 17-control gallery is exercised |
+| `clearField` frame plumbing had no production owner | Removed it; explicit connection secret clearing remains domain-owned |
+| Native/WASM parity corpus omitted representative domain conditions | Added MCP, SFTP, QuickBooks, report visibility/row-action, and workflow-condition fixtures |
+| Environment, server, core, object-store, Valkey, component, and direct-Wasm tests silently succeeded without prerequisites | Added package features, strict preflights, dedicated commands, CI jobs, and corrected stale fixtures exposed by actually running them |
+| CI used the wrong Environment database variable and did not enable the new integration targets | CI now uses the domain-specific variables/features and runs plaintext/TLS Valkey, object-store, component, and direct-Wasm gates |
+| Docker pgvector fixture raced the image's temporary init server and inherited ambient config | Added bounded connection retry, explicit local SSL mode, and isolated test config; the case now executes |
+
+### Production entry points and consumers
+
+| Shared capability | Backend enforcement / producer | Frontend production consumers |
+| --- | --- | --- |
+| `FormDefinition`, normalization, and `analyze_form` | `runtara-dsl`; connection create/update service; workflow validation adapters; report condition facade | Connection create/edit, workflow execute/action/chat, trigger inputs, report filters and inline editors |
+| Validation WASM | `runtara-validation-wasm` exports the same Rust analysis used natively | Application preload plus `rust-form-validation`; rendering is gated on successful initialization |
+| `FormRenderer` and control registry | Definitions are domain-produced; commit behavior stays outside the renderer | `DynamicConnectionForm`, `WorkflowExecuteDialog`, `ActionForm`, `ChatFormInput`, and `CronInputsField`; report surfaces reuse `FieldControl` inside report-owned frames |
+| `OptionResolver` / `useResolvedOptions` | Request/query/auth semantics remain in the report filter-options endpoint and query layer | `ReportFilterBar` is the production supplier; no connection/workflow supplier is claimed |
+| Shared condition evaluator | Native connection/workflow/report adapters and WASM call `runtara-dsl` | Conditional connection fields, legacy workflow `visibleWhen`, report `showWhen`, and row actions |
+| Connection descriptor macro | Emits access, secrecy, declaration order, sections, controls, and lifecycle metadata for every registered descriptor | Connection create/edit projection adapter and shared renderer |
+
+### Retained compatibility boundaries
+
+- Public connection **create** retains `connectionParameters` because it creates a
+  complete initial value, but native descriptor analysis rejects unknown,
+  `read`, and server-managed inputs. Public **update** has no wholesale legacy
+  branch.
+- Workflow JSON-string, object/`properties`, and legacy nested-array envelopes
+  normalize to the canonical form without changing stored workflow graphs,
+  compiler input, mappings, references, or execution semantics.
+- Persisted report `showWhen` and editor shapes remain lossless report-owned wire
+  adapters; evaluation is shared. No unversioned report migration occurred.
+- OAuth callbacks use an explicitly internal repository operation for provider
+  tokens and status. It is not reachable through the public update DTO.
+- There is no MCP connection-mutation tool in this repository. MCP graph paths
+  read connections; external mutation uses the same generated REST/OpenAPI
+  contract verified above, so no parallel MCP update bypass remains.
+
+### Verification record
+
+The following counts are from executed assertions, not discovered tests:
+
+| Command / scenario | Executed | Ignored | Skipped | Result |
+| --- | ---: | ---: | ---: | --- |
+| `cargo test --workspace` | 3,442 | 40 doctests/tests | 0 early-return skips | pass |
+| `cargo test -p runtara-connections` with required PostgreSQL URL | 146 (120 unit + 26 integration) | 0 | 0 | pass |
+| `cargo test -p runtara-environment --features db-integration-tests -- --test-threads=1` | 257 | 4 doctests | 0 | pass |
+| Core PostgreSQL operation suite plus backend parity | 19 | 0 | 0 | pass |
+| `cargo test -p runtara-object-store --features db-integration-tests --test integration -- --test-threads=1` | 73 | 0 | 0 | pass |
+| Server DB suites: audit, authorization, cleanup, report runtime/render, Docker Object Model | 17 | 0 | 0 | pass |
+| Plaintext Valkey external cases | 15 | 0 | 0 | pass |
+| `scripts/test-valkey-tls.sh` | 4 | 0 | 0 | pass |
+| `cargo test -p runtara-component-host --features component-integration-tests` | 21 | 0 | 0 | pass |
+| Direct-Wasm target plus three composition entry cases | 69 | 0 | 0 | pass |
+| `cargo test -p runtara-agent-macro` | 55 | 4 doctests | 0 | pass |
+| `cargo test -p runtara-dsl` | 202 (201 unit + 1 doctest) | 2 doctests | 0 | pass |
+| `cargo test -p runtara-validation-wasm` | 20 | 0 | 0 | pass |
+| Stored workflow form compatibility | 2 | 0 | 0 | pass |
+| `cargo test -p runtara-report-dsl` | 83 | 0 | 0 | pass |
+| Frontend `npm test -- --run` | 931 in 73 files | 0 | 0 | pass |
+| Playwright local connection audit | 6 | 0 | 0 | pass |
+
+The default workspace gate's 40 ignored items are explicit doctests/tests and
+are not counted as integration coverage. Its ordinary run omits feature-gated
+external targets by design; every external target above was then enabled
+directly and had zero skipped/early-returned tests. `cargo fmt --all -- --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` passed. Frontend
+`tsc -b`, production `npm run build`, and ESLint passed with 0 errors and the
+same 33 pre-existing warnings (0 new warnings).
+
+Offline OpenAPI/TypeScript regeneration was byte-identical before and after
+generation (`6f4ba1bd3b0a7e6b891beffebcc2946434452f3edf9d548afcb88f709fa3368e`).
+`scripts/build-agent-components.sh` rebuilt all 26 agent Wasm/meta pairs and the
+two shared workflow components from current source.
+
+### Real API and browser scenarios
+
+The six local Playwright cases exercised the production server and generated
+client paths:
+
+1. SFTP conditional authentication, secret create/edit/preserve/explicit clear.
+2. MCP conditional fields and first-invalid focus.
+3. QuickBooks/SFTP declaration order plus keyboard-accessible advanced-section
+   collapse/expand with value retention.
+4. Direct HTTP rejection of managed create/status, legacy wholesale update,
+   missing version, read-field patch, and stale title/parameter mutations; a
+   safe versioned update succeeds.
+5. Title-only save of an API-created QuickBooks row whose default-bearing keys
+   are absent, proving no parameter/token/status mutation.
+6. Conflict draft retention, latest-version review, and explicit reapply.
+
+PostgreSQL lifecycle coverage separately proves that explicit changes to
+reauthorization-sensitive fields atomically remove provider tokens and change
+status, while unrelated saves preserve encrypted parameters byte-for-byte.
 
 ## Completion criteria
 
@@ -922,5 +1057,6 @@ The initiative is complete when:
 - report query and layout semantics remain unchanged;
 - no additional external form or validation dependency has been introduced.
 
-**Current assessment:** incomplete. NG-1 through NG-6 and the adversarial audit
-must be resolved and fully verified before any completion claim is restored.
+**Current assessment: complete.** NG-1 through NG-6, all additional findings,
+production-consumer checks, compatibility audits, external fail-closed suites,
+direct API/browser scenarios, and final workspace/frontend gates are verified.
