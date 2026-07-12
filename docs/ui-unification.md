@@ -2,74 +2,47 @@
 
 ## Status
 
-**Complete and verified on 2026-07-12.** The canonical form engine, domain
-adapters, connection lifecycle behavior, cleanup, physical WASM rename, and
-real-stack verification are implemented. No third-party form or schema runtime
-was added, and workflow/report execution semantics were not changed.
+**Reopened and in progress as of 2026-07-12.** The earlier completion claim was
+incorrect. It proved the primary browser path but did not adversarially verify
+public compatibility paths, migration behavior, production consumers for every
+shared abstraction, or whether required integration tests fail closed. No
+previously checked item or phase exit gate is considered complete until the new
+audit records direct production and executed-test evidence.
 
-### Completion checklist
+### Known gaps being resolved
 
-- [x] Canonical access model: `read_write`, `read`, and `write`.
-- [x] Direct `visible`, `enabled`, and `required` conditions using canonical
-  `ConditionExpression`; inversion is expressed with `NOT`.
-- [x] Canonical Rust form types, normalization, definition validation, submitted
-  value validation, structured issues, and native/WASM parity.
-- [x] Shared controlled React renderer and control registry.
-- [x] Submit-boundary first-invalid focus with no focus stealing while typing.
-- [x] Domain frame contracts and abortable, dependency-aware `OptionResolver`;
-  option retrieval remains domain-owned.
-- [x] Connection descriptor annotations for canonical field conditions.
-- [x] Conditional MCP bearer/API-key fields and SFTP password/private-key fields.
-- [x] Safe connection edit projection, optimistic patching, explicit secret
-  replacement/clear, and descriptor-owned reauthorization behavior.
-- [x] `ConnectionFieldBehavior` with per-field `clearable` and
-  `requires_reauthorization` metadata.
-- [x] Stable snapshots for all registered connection forms plus readable MCP,
-  SFTP, and representative workflow snapshots.
-- [x] Repository workflow/report definition audits and lossless DTO-boundary
-  checks completed before compatibility cleanup.
-- [x] Workflow execution, human-action, chat, and trigger Cron inputs migrated
-  to `FormRenderer`; both duplicate schema renderers were removed.
-- [x] Report row-condition evaluation moved to the shared validation WASM. The
-  report-specific WASM condition export was removed.
-- [x] Superseded connection compatibility DTOs, TypeScript semantic schema
-  normalization, field-name heuristics, and duplicate evaluators removed.
-- [x] Validation crate and generated browser bundle physically renamed to
-  `runtara-validation-wasm` / `runtara_validation`.
-- [x] Runtime OpenAPI and generated TypeScript contracts refreshed.
-- [x] Unit, integration, full-workspace, production-build, isolated-server, and
-  local browser verification completed.
+- [ ] **NG-1 — unsafe legacy update path:** public `PUT` still accepts
+  `connectionParameters` without the canonical version, field-access, and
+  explicit write/clear enforcement applied to `connectionParameterPatch`.
+- [ ] **NG-2 — unintended default writes:** edit hydration displays defaults for
+  absent stored keys and patch generation mistakes them for user changes,
+  potentially triggering reauthorization during an unrelated save.
+- [ ] **NG-3 — conflict recovery:** the useful 409 message is lost, the draft
+  receives no conflict-specific UI, and the page retains a stale version.
+- [ ] **NG-4 — field ordering:** connection metadata discards declaration order,
+  so equal-order fields render alphabetically.
+- [ ] **NG-5 — advanced sections:** the connection macro cannot author section
+  metadata and generated sections always set `advanced: false`.
+- [ ] **NG-6A — unused option resolution:** `OptionResolver` has no production
+  supplier and therefore is not yet a production-integrated capability.
+- [ ] **NG-6B — unsupported non-secret writes:** `write` with `secret: false` is
+  documented but routed through secret replacement and rejected by the backend.
+- [ ] **NG-6C — false-positive integration tests:** required PostgreSQL tests
+  return success when Docker or database startup fails.
+- [ ] Adversarially audit every earlier completion item, public and internal
+  caller, retained compatibility boundary, phase exit gate, and verification
+  command; fix additional gaps rather than documenting them as exceptions.
 
-### Verification record
+### Historical verification warning
 
-- `cargo test --workspace --quiet` — passed across the full workspace,
-  integration tests, and doctests.
-- `cargo fmt --all -- --check` and
-  `cargo clippy --workspace --all-targets -- -D warnings` — passed.
-- `cargo test -p runtara-dsl` — 203 passed.
-- `cargo test -p runtara-report-dsl` — 83 passed.
-- `cargo test -p runtara-validation-wasm` — 19 passed, including native/WASM
-  parity and shared condition evaluation.
-- `cargo test -p runtara-connections --lib -F runtara-agents/native` — 117
-  passed.
-- `create_connection_status_e2e` — 3 PostgreSQL-backed tests passed, covering
-  initial status, reauthorization/stale-version behavior, secret replacement,
-  authorized clear, and forbidden clear.
-- Repository schema audits covered every registered connection descriptor, more
-  than 200 stored workflow fixtures/examples, 84 workflow fields, and the report
-  corpus condition DTO boundary.
-- `npm test` — 70 files and 916 tests passed.
-- `npx tsc --noEmit -p tsconfig.app.json` and `npm run build` — passed; Vite
-  transformed 3,545 modules and emitted both report and validation WASM assets.
-- `npm run lint` — passed with 0 errors. The remaining warnings are pre-existing
-  repository warnings; this work adds none.
-- Isolated real-stack browser E2E — 2 tests passed against a freshly migrated
-  pgvector PostgreSQL database, isolated Valkey, current local-auth backend,
-  Vite, and all 26 staged agent components. Coverage includes SFTP conditional
-  controls, submit focus, secret preservation/clear/mode replacement, and all
-  MCP authentication modes.
-- Temporary PostgreSQL, Valkey, backend, Vite, test data, and browser tabs were
-  cleaned up after verification.
+The earlier verification commands remain useful regression history, but they
+are not completion evidence for the reopened initiative. In particular, a
+Docker-backed test run could silently return success without executing its
+assertions, interface-only code was counted as a production consumer, and the
+real browser run did not cover legacy/API updates, absent-key defaults,
+concurrent edits, declaration ordering, or advanced sections. A replacement
+verification record will explicitly distinguish executed, ignored, and skipped
+tests and will include direct API plus browser evidence.
 
 ### Retained boundaries
 
@@ -792,8 +765,8 @@ Do not reproduce validation semantics in TypeScript tests or implementation.
 
 ### Phase 0: Contract and fixtures
 
-**Status: complete.** The contract, normalized snapshots, representative
-fixtures, and repository stored-definition audits are in place.
+**Status: reopened; exit gate unverified.** The existing contract, snapshots,
+fixtures, and stored-definition audits require adversarial re-verification.
 
 1. Add an architecture decision record or link this document from the relevant
    implementation plans.
@@ -807,7 +780,7 @@ five pilot connection types.
 
 ### Phase 1: Shared Rust engine
 
-**Status: complete.**
+**Status: reopened; exit gate unverified.**
 
 1. Add `FormDefinition`, `FormField`, sections, controls, access modes,
    conditions, field state, and structured issues to `runtara-dsl::form`.
@@ -820,8 +793,8 @@ Exit gate: native Rust fixture tests pass without frontend changes.
 
 ### Phase 2: General validation WASM
 
-**Status: complete.** Form exports, parity tests, the generalized frontend
-boundary, and the physical crate/generated-bundle rename are active.
+**Status: reopened; exit gate unverified.** Form exports and the physical rename
+exist, but parity and every production consumer must be re-proven.
 
 1. Export form-definition validation and form analysis.
 2. Add native/WASM parity tests.
@@ -834,9 +807,8 @@ Exit gate: all shared fixtures produce equivalent native and WASM results.
 
 ### Phase 3: Shared React controls
 
-**Status: complete.** The registry, WASM-produced state rendering, structured
-issues, submit-boundary focus, domain-frame interfaces, and abortable dynamic
-option resolver are active.
+**Status: reopened; exit gate not met.** The registry, WASM-produced state,
+issues, and submit focus exist, but `OptionResolver` has no production supplier.
 
 1. Build the controlled field registry from existing Runtara components.
 2. Implement field and section rendering from WASM-produced state.
@@ -848,9 +820,8 @@ domain-specific field inference.
 
 ### Phase 4: Connection correctness and pilot
 
-**Status: complete.** Safe hydration, versioned patching, backend access
-enforcement, form generation, MCP/SFTP conditions, explicit secret clearing,
-connection field lifecycle metadata, and browser coverage are active.
+**Status: reopened; exit gate not met.** The primary UI patch path exists, but
+legacy updates bypass its guarantees and hydration can emit unintended defaults.
 
 1. Add safe connection edit hydration.
 2. Add versioned patch semantics.
@@ -864,9 +835,9 @@ correctly through native and browser validation.
 
 ### Phase 5: All connections
 
-**Status: complete.** Every registered descriptor produces a validated
-canonical form, stable snapshots cover all descriptors, field-name grouping
-heuristics are removed, and the compatibility DTO is gone.
+**Status: reopened; exit gate not met.** Descriptors produce canonical forms,
+but declaration order and authorable advanced sections are missing; snapshots
+must be refreshed and re-audited.
 
 1. Annotate and migrate every registered connection type.
 2. Snapshot normalized form definitions.
@@ -878,9 +849,8 @@ metadata and passes create/edit tests.
 
 ### Phase 6: Workflow form adoption
 
-**Status: complete.** Workflow-owned surfaces and trigger Cron inputs use the
-shared renderer. Persisted workflow JSON and execution semantics remain
-unchanged.
+**Status: reopened; exit gate unverified.** Existing workflow consumers and
+wire-format invariants require production-path and regression re-verification.
 
 1. Route workflow input validation through the shared engine.
 2. Replace duplicate workflow schema renderers.
@@ -892,10 +862,9 @@ renderer and validator are active.
 
 ### Phase 7: Reports form adoption
 
-**Status: complete at the planned compatibility-adapter scope.** Persisted
-report migration remains intentionally deferred. Stored-definition gates pass,
-row-condition evaluation is shared, and only the irreducible lossless
-`showWhen` wire/editor boundary remains.
+**Status: reopened; exit gate unverified.** Persisted report migration remains
+intentionally deferred, but adapters, shared controls, option retrieval, and
+condition evaluation require production-consumer and losslessness evidence.
 
 1. Adapt filters to shared controls.
 2. Adapt inline editors to shared controls.
@@ -908,9 +877,8 @@ visibility matches native/WASM evaluation.
 
 ### Phase 8: Cleanup
 
-**Status: complete.** Duplicate validators/renderers, connection compatibility
-DTOs, TypeScript semantic form adapters, and the report-specific condition
-export are removed. Audits justify the remaining workflow/report wire adapters.
+**Status: reopened; exit gate not met.** Known unsafe compatibility behavior and
+unused shared plumbing remain; all earlier cleanup claims require a fresh audit.
 
 1. Remove legacy TypeScript schema validators and conditional evaluators.
 2. Remove duplicate schema-driven field renderers.
@@ -954,7 +922,5 @@ The initiative is complete when:
 - report query and layout semantics remain unchanged;
 - no additional external form or validation dependency has been introduced.
 
-**Current assessment:** complete. Every implementation and verification item in
-this plan is satisfied. The retained workflow/report adapters are explicit
-domain wire boundaries covered by the non-goals, not unfinished shared-form
-work.
+**Current assessment:** incomplete. NG-1 through NG-6 and the adversarial audit
+must be resolved and fully verified before any completion claim is restored.
