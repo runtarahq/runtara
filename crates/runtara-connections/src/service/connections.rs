@@ -112,6 +112,32 @@ fn params_have_oauth_tokens(params: Option<&serde_json::Value>) -> bool {
     })
 }
 
+/// PATCH-merge submitted connection parameters over the stored set: a non-empty
+/// submitted value overrides the existing one; an absent, null, or blank-string
+/// value keeps the existing one. This preserves server-captured OAuth params
+/// (`access_token` / `refresh_token` / `token_expires_at` / provider callback
+/// params like `realm_id`) and untouched secrets — none of which the UI ever
+/// receives (the connection DTO omits `connection_parameters`), so it cannot
+/// resend them — and honors the edit form's "leaving fields empty keeps existing
+/// values" contract. Without it, editing any field (e.g. `environment`) on an
+/// authorized OAuth connection would wipe its tokens.
+fn merge_connection_parameters(
+    existing: &serde_json::Value,
+    submitted: &serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    if let Some(obj) = submitted.as_object() {
+        for (k, v) in obj {
+            let blank = v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
+            if blank {
+                continue; // keep the existing value
+            }
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
 /// Validate a single `is_url` / `is_required` field value.
 fn validate_url_field(
     field_display: &str,
@@ -453,9 +479,36 @@ impl ConnectionService {
             })
             .unwrap_or_default();
 
-        // Validate submitted connection parameters against the type schema.
-        // Only when params are part of this PATCH, so unrelated edits (title,
-        // rate limit) to a legacy row aren't retroactively blocked.
+        let mut request = request;
+        if let Some(ref default_for) = default_for {
+            request.is_default_file_storage = Some(
+                default_for
+                    .iter()
+                    .any(|value| value == OBJECT_STORAGE_DEFAULT_FOR),
+            );
+        }
+
+        // When this PATCH touches connection_parameters, merge the submitted fields
+        // over the stored set instead of replacing wholesale. `old_params` is read
+        // once and reused for the merge and for SSRF rule E below.
+        let old_params = if request.connection_parameters.is_some() {
+            self.repository
+                .get_with_parameters(id, tenant_id)
+                .await
+                .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+                .and_then(|c| c.connection_parameters)
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
+        if let Some(submitted) = request.connection_parameters.take() {
+            request.connection_parameters =
+                Some(merge_connection_parameters(&old_params, &submitted));
+        }
+
+        // Validate the EFFECTIVE (merged) parameters against the type schema — a
+        // partial edit (e.g. only `environment`) must still satisfy required fields
+        // that live in the preserved existing params.
         if request.connection_parameters.is_some() {
             validate_connection_parameters(
                 &integration_id,
@@ -467,66 +520,46 @@ impl ConnectionService {
             self.validate_default_for(&integration_id, default_for)?;
         }
 
-        let mut request = request;
-        if let Some(ref default_for) = default_for {
-            request.is_default_file_storage = Some(
-                default_for
-                    .iter()
-                    .any(|value| value == OBJECT_STORAGE_DEFAULT_FOR),
-            );
-        }
-
         // SSRF rule E: on a params-driven OAuth type, changing an endpoint param
         // must invalidate the captured tokens (DB + in-memory cache) and force a
         // reconnect. Otherwise a captured refresh token could be replayed against
         // a swapped-in token endpoint, or a still-cached Bearer would flow to the
-        // newly-edited base_url host.
+        // newly-edited base_url host. Compared against the merged (effective) params,
+        // so a blank submission that kept the old endpoint is correctly a no-change.
         let endpoint_edit_requires_reauth =
-            if let Some(ref new_params) = request.connection_parameters {
+            if let Some(ref merged_params) = request.connection_parameters {
                 let params_driven = runtara_agents::registry::find_connection_type(&integration_id)
                     .and_then(|meta| meta.oauth_config)
                     .map(|cfg| cfg.params_driven)
                     .unwrap_or(false);
-                if params_driven {
-                    let old = self
-                        .repository
-                        .get_with_parameters(id, tenant_id)
-                        .await
-                        .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
-                    let old_params = old
-                        .and_then(|c| c.connection_parameters)
-                        .unwrap_or(serde_json::Value::Null);
-                    const ENDPOINT_KEYS: [&str; 5] = [
-                        "auth_url",
-                        "token_url",
-                        "base_url",
-                        "revocation_url",
-                        "token_auth",
-                    ];
-                    let changed = ENDPOINT_KEYS
-                        .iter()
-                        .any(|k| old_params.get(k) != new_params.get(k));
-                    if changed {
-                        // Strip captured tokens from the params being written.
-                        if let Some(obj) = request
-                            .connection_parameters
-                            .as_mut()
-                            .and_then(|p| p.as_object_mut())
-                        {
-                            obj.remove("access_token");
-                            obj.remove("refresh_token");
-                            obj.remove("token_expires_at");
-                        }
-                        // Evict the in-memory cache under the OLD params' keys.
-                        crate::auth::provider_auth::invalidate_connection_token_caches(
-                            id,
-                            &integration_id,
-                            &old_params,
-                        );
-                        true
-                    } else {
-                        false
+                const ENDPOINT_KEYS: [&str; 5] = [
+                    "auth_url",
+                    "token_url",
+                    "base_url",
+                    "revocation_url",
+                    "token_auth",
+                ];
+                let changed = ENDPOINT_KEYS
+                    .iter()
+                    .any(|k| old_params.get(k) != merged_params.get(k));
+                if params_driven && changed {
+                    // Strip the merge-preserved captured tokens from what's written.
+                    if let Some(obj) = request
+                        .connection_parameters
+                        .as_mut()
+                        .and_then(|p| p.as_object_mut())
+                    {
+                        obj.remove("access_token");
+                        obj.remove("refresh_token");
+                        obj.remove("token_expires_at");
                     }
+                    // Evict the in-memory cache under the OLD params' keys.
+                    crate::auth::provider_auth::invalidate_connection_token_caches(
+                        id,
+                        &integration_id,
+                        &old_params,
+                    );
+                    true
                 } else {
                     false
                 }
