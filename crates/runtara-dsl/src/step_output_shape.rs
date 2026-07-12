@@ -6,13 +6,15 @@
 //! the piece the authoring schema historically omitted, which forced authors to
 //! learn output shapes from failed runs (e.g. discovering that a Split's
 //! `outputs` is the bare collected array, not an object with a `result` field).
-//! Two consumers read this table:
+//! Three consumers read this table:
 //!
-//! * the DSL authoring schema (`spec::dsl_schema`), which now surfaces an
-//!   `outputShape` alongside each step type's input `schema`, and
+//! * the DSL authoring schema (`spec::dsl_schema`), which surfaces an
+//!   `outputShape` alongside each step type's input `schema`,
 //! * reference validation (`runtara-workflows`), which uses it to reject a
 //!   mistyped output tail (e.g. `steps.split.outputs.result`) at preflight
-//!   instead of letting it resolve to null at runtime.
+//!   instead of letting it resolve to null at runtime, and
+//! * the workflow editor's reference suggestions / step output panel, which
+//!   consume the JSON form via the browser validation WASM.
 //!
 //! GROUND TRUTH is the stdlib emitter (`runtara-workflow-stdlib::direct_json`):
 //! `step_output_envelope` / `split_result` / `split_dont_stop_result` /
@@ -27,6 +29,27 @@
 
 use serde_json::{Value, json};
 
+/// A named field with a static JSON type, used for closed `outputs` objects and
+/// for sibling fields under `steps.<id>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShapeField {
+    pub name: &'static str,
+    /// JSON type of the field: `"string" | "number" | "integer" | "boolean" |
+    /// "array" | "object" | "dynamic"` (dynamic = depends on runtime data or
+    /// config, e.g. a While loop's last Finish outputs).
+    pub ty: &'static str,
+    /// One-line human summary for authoring surfaces (editor panels, MCP).
+    pub description: &'static str,
+}
+
+const fn field(name: &'static str, ty: &'static str, description: &'static str) -> ShapeField {
+    ShapeField {
+        name,
+        ty,
+        description,
+    }
+}
+
 /// Shape of the value at `steps.<id>.outputs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputsShape {
@@ -34,7 +57,7 @@ pub enum OutputsShape {
     /// tail such as `.result` is never valid.
     Array,
     /// A fixed object with this closed set of top-level fields.
-    Object(&'static [&'static str]),
+    Object(&'static [ShapeField]),
     /// Shape depends on runtime data or config (agent responses, Finish outputs,
     /// GroupBy/Switch results). Not statically checkable — never flagged.
     Dynamic,
@@ -51,8 +74,55 @@ pub struct StepOutputShape {
     /// (e.g. Split's `data` / `stats` / `hasFailures`, Switch's `route`). Always
     /// permitted references even when their presence is config-gated, so the
     /// preflight check never flags them.
-    pub siblings: &'static [&'static str],
+    pub siblings: &'static [ShapeField],
 }
+
+const SPLIT_SIBLINGS: &[ShapeField] = &[
+    field(
+        "data",
+        "object",
+        "Per-outcome item buckets {success, error, aborted, unknown, skipped}; populated with config.dontStopOnFailed",
+    ),
+    field("stats", "object", "Per-outcome counts plus total"),
+    field(
+        "hasFailures",
+        "boolean",
+        "True when at least one iteration failed (with config.dontStopOnFailed)",
+    ),
+];
+
+const FILTER_FIELDS: &[ShapeField] = &[
+    field("items", "array", "Input items that matched the condition"),
+    field("count", "integer", "Number of items kept"),
+];
+
+const WHILE_FIELDS: &[ShapeField] = &[
+    field("iterations", "integer", "Number of completed iterations"),
+    field(
+        "outputs",
+        "dynamic",
+        "The last iteration's Finish outputs (null when no iteration ran)",
+    ),
+];
+
+const CONDITIONAL_FIELDS: &[ShapeField] =
+    &[field("result", "boolean", "The evaluated branch decision")];
+
+const SWITCH_SIBLINGS: &[ShapeField] = &[field(
+    "route",
+    "string",
+    "Label of the matched case (routing switches)",
+)];
+
+const GROUP_BY_FIELDS: &[ShapeField] = &[
+    field(
+        "groups",
+        "object",
+        "Map of group key to the array of items in that group",
+    ),
+    field("counts", "object", "Map of group key to item count"),
+    field("total_groups", "integer", "Number of distinct groups"),
+];
 
 /// Look up the output shape for a PascalCase step type id (matches
 /// `agent_meta::StepTypeMeta::id` and `Step` variant names). Returns `None` for
@@ -62,31 +132,31 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
         "Split" => StepOutputShape {
             summary: "`outputs` is the array of successful per-item subgraph outputs (the collected results). With `config.dontStopOnFailed` the step also exposes `data.{success,error,aborted,unknown,skipped}`, `stats.{...,total}`, and `hasFailures`.",
             outputs: OutputsShape::Array,
-            siblings: &["data", "stats", "hasFailures"],
+            siblings: SPLIT_SIBLINGS,
         },
         "Filter" => StepOutputShape {
             summary: "`outputs` is `{items: <filtered array>, count: <number kept>}` — the input array narrowed to the items that matched the condition, plus their count.",
-            outputs: OutputsShape::Object(&["items", "count"]),
+            outputs: OutputsShape::Object(FILTER_FIELDS),
             siblings: &[],
         },
         "While" => StepOutputShape {
             summary: "`outputs` is `{iterations: <count>, outputs: <last iteration's output>}`.",
-            outputs: OutputsShape::Object(&["iterations", "outputs"]),
+            outputs: OutputsShape::Object(WHILE_FIELDS),
             siblings: &[],
         },
         "Conditional" => StepOutputShape {
             summary: "`outputs` is `{result: <bool>}` — the evaluated branch decision (materialized under track-events; used for edge routing otherwise).",
-            outputs: OutputsShape::Object(&["result"]),
+            outputs: OutputsShape::Object(CONDITIONAL_FIELDS),
             siblings: &[],
         },
         "Switch" => StepOutputShape {
             summary: "`outputs` is the matched case's output value (shape depends on the case). Routing switches also expose `route`, the matched case label.",
             outputs: OutputsShape::Dynamic,
-            siblings: &["route"],
+            siblings: SWITCH_SIBLINGS,
         },
         "GroupBy" => StepOutputShape {
             summary: "`outputs` is `{groups: {<groupKey>: [items...]}, counts: {<groupKey>: <n>}, total_groups: <n>}`.",
-            outputs: OutputsShape::Object(&["groups", "counts", "total_groups"]),
+            outputs: OutputsShape::Object(GROUP_BY_FIELDS),
             siblings: &[],
         },
         "Agent" => StepOutputShape {
@@ -134,9 +204,20 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
     Some(shape)
 }
 
+fn shape_field_json(f: &ShapeField) -> Value {
+    json!({
+        "name": f.name,
+        "type": f.ty,
+        "description": f.description,
+    })
+}
+
 /// Render a step type's output shape as JSON for the authoring schema (the
 /// `outputShape` key on each step type). Returns `null` for a step type with no
 /// declared shape (e.g. the virtual `Start` step).
+///
+/// Object fields and sibling fields are emitted as `{name, type, description}`
+/// objects so authoring surfaces can show per-field types, not just names.
 pub fn output_shape_json(step_type: &str) -> Value {
     let Some(shape) = step_output_shape(step_type) else {
         return Value::Null;
@@ -146,7 +227,10 @@ pub fn output_shape_json(step_type: &str) -> Value {
             "kind": "array",
             "note": "address elements by numeric index (e.g. `steps.<id>.outputs.0`); a named-key tail like `.result` is invalid and rejected at preflight",
         }),
-        OutputsShape::Object(fields) => json!({ "kind": "object", "fields": fields }),
+        OutputsShape::Object(fields) => json!({
+            "kind": "object",
+            "fields": fields.iter().map(shape_field_json).collect::<Vec<_>>(),
+        }),
         OutputsShape::Dynamic => json!({
             "kind": "dynamic",
             "note": "shape depends on runtime data or config and is not statically validated",
@@ -156,7 +240,7 @@ pub fn output_shape_json(step_type: &str) -> Value {
         "summary": shape.summary,
         "reference": "steps.<id>.outputs",
         "outputs": outputs,
-        "siblingFields": shape.siblings,
+        "siblingFields": shape.siblings.iter().map(shape_field_json).collect::<Vec<_>>(),
     })
 }
 
@@ -184,6 +268,10 @@ mod tests {
         "AiAgent",
         "Delay",
     ];
+
+    fn field_names(fields: &[ShapeField]) -> Vec<&'static str> {
+        fields.iter().map(|f| f.name).collect()
+    }
 
     #[test]
     fn output_shape_covers_all_step_types() {
@@ -216,28 +304,118 @@ mod tests {
         );
         // `apply_filter_compiled` returns `{items, count}` — an object, NOT a
         // bare array. `steps.filter.outputs.items` must stay valid.
+        let OutputsShape::Object(filter_fields) = step_output_shape("Filter").unwrap().outputs
+        else {
+            panic!("Filter outputs must be a closed object");
+        };
+        assert_eq!(field_names(filter_fields), vec!["items", "count"]);
+        let OutputsShape::Object(while_fields) = step_output_shape("While").unwrap().outputs else {
+            panic!("While outputs must be a closed object");
+        };
+        assert_eq!(field_names(while_fields), vec!["iterations", "outputs"]);
+        let OutputsShape::Object(group_fields) = step_output_shape("GroupBy").unwrap().outputs
+        else {
+            panic!("GroupBy outputs must be a closed object");
+        };
         assert_eq!(
-            step_output_shape("Filter").unwrap().outputs,
-            OutputsShape::Object(&["items", "count"])
+            field_names(group_fields),
+            vec!["groups", "counts", "total_groups"]
         );
-        assert_eq!(
-            step_output_shape("While").unwrap().outputs,
-            OutputsShape::Object(&["iterations", "outputs"])
-        );
-        assert_eq!(
-            step_output_shape("GroupBy").unwrap().outputs,
-            OutputsShape::Object(&["groups", "counts", "total_groups"])
-        );
-        assert_eq!(
-            step_output_shape("Conditional").unwrap().outputs,
-            OutputsShape::Object(&["result"])
-        );
+        let OutputsShape::Object(cond_fields) = step_output_shape("Conditional").unwrap().outputs
+        else {
+            panic!("Conditional outputs must be a closed object");
+        };
+        assert_eq!(field_names(cond_fields), vec!["result"]);
         // Split's failure buckets are siblings, not under `outputs`.
         assert!(
             step_output_shape("Split")
                 .unwrap()
                 .siblings
-                .contains(&"data")
+                .iter()
+                .any(|s| s.name == "data")
         );
+    }
+
+    /// Field types feed editor type badges; pin the ones the runtime guarantees.
+    #[test]
+    fn field_types_are_declared() {
+        let OutputsShape::Object(filter_fields) = step_output_shape("Filter").unwrap().outputs
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            filter_fields
+                .iter()
+                .map(|f| (f.name, f.ty))
+                .collect::<Vec<_>>(),
+            vec![("items", "array"), ("count", "integer")]
+        );
+        let OutputsShape::Object(while_fields) = step_output_shape("While").unwrap().outputs else {
+            unreachable!();
+        };
+        assert_eq!(while_fields[0].ty, "integer");
+        let OutputsShape::Object(cond_fields) = step_output_shape("Conditional").unwrap().outputs
+        else {
+            unreachable!();
+        };
+        assert_eq!(cond_fields[0].ty, "boolean");
+        let switch = step_output_shape("Switch").unwrap();
+        assert_eq!(switch.siblings[0].name, "route");
+        assert_eq!(switch.siblings[0].ty, "string");
+        let split = step_output_shape("Split").unwrap();
+        assert_eq!(
+            split
+                .siblings
+                .iter()
+                .map(|s| (s.name, s.ty))
+                .collect::<Vec<_>>(),
+            vec![
+                ("data", "object"),
+                ("stats", "object"),
+                ("hasFailures", "boolean")
+            ]
+        );
+        // Every declared type must be from the closed vocabulary.
+        const TYPES: &[&str] = &[
+            "string", "number", "integer", "boolean", "array", "object", "dynamic",
+        ];
+        for step_type in ALL_STEP_TYPES {
+            let shape = step_output_shape(step_type).unwrap();
+            if let OutputsShape::Object(fields) = shape.outputs {
+                for f in fields {
+                    assert!(
+                        TYPES.contains(&f.ty),
+                        "{step_type}.outputs.{}: bad type {}",
+                        f.name,
+                        f.ty
+                    );
+                }
+            }
+            for s in shape.siblings {
+                assert!(
+                    TYPES.contains(&s.ty),
+                    "{step_type}.{}: bad type {}",
+                    s.name,
+                    s.ty
+                );
+            }
+        }
+    }
+
+    /// The JSON form must carry {name, type, description} per field so the
+    /// editor can render badges without re-parsing prose.
+    #[test]
+    fn json_emits_typed_fields() {
+        let v = output_shape_json("Filter");
+        let fields = v["outputs"]["fields"].as_array().unwrap();
+        assert_eq!(fields[0]["name"], "items");
+        assert_eq!(fields[0]["type"], "array");
+        assert!(fields[0]["description"].as_str().unwrap().len() > 5);
+
+        let split = output_shape_json("Split");
+        let siblings = split["siblingFields"].as_array().unwrap();
+        assert_eq!(siblings[2]["name"], "hasFailures");
+        assert_eq!(siblings[2]["type"], "boolean");
+        assert_eq!(split["outputs"]["kind"], "array");
     }
 }

@@ -2528,7 +2528,7 @@ fn validate_step_output_reference(
 
     let top_field = segments[2];
     // Sibling fields are valid references; only `outputs` has a declared shape.
-    if shape.siblings.contains(&top_field) || top_field != "outputs" {
+    if shape.siblings.iter().any(|s| s.name == top_field) || top_field != "outputs" {
         return;
     }
     // `steps.<id>.outputs` with no further tail references the whole value: fine.
@@ -2552,7 +2552,7 @@ fn validate_step_output_reference(
             }
         }
         OutputsShape::Object(fields) => {
-            if !fields.contains(&after) {
+            if !fields.iter().any(|f| f.name == after) {
                 result
                     .errors
                     .push(ValidationError::UndefinedReferenceField {
@@ -2560,7 +2560,7 @@ fn validate_step_output_reference(
                         reference: ref_path.to_string(),
                         known_prefix: format!("steps.{referenced_step_id}.outputs"),
                         missing_field: after.to_string(),
-                        available_fields: fields.iter().map(|s| s.to_string()).collect(),
+                        available_fields: fields.iter().map(|f| f.name.to_string()).collect(),
                     });
             }
         }
