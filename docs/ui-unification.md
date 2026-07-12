@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation in progress.
+Implemented and verified on 2026-07-12.
 
 ### Implementation tracker
 
@@ -29,13 +29,14 @@ Implementation in progress.
   Persisted `showWhen` uses a lossless canonical adapter and the shared WASM
   evaluator; report filters and inline editors map to shared fields/controls
   while retaining report-owned lookup and commit behavior.
-- [ ] **In progress:** Remove superseded TypeScript validators, condition
-  evaluators, and legacy renderers after compatibility gates pass. Connection
-  field heuristics and workflow `SchemaFormFields` are removed; compatibility
-  schema parsers remain where they still preserve legacy wire formats.
-- [ ] Complete unit, integration, browser E2E, and local-server verification.
+- [x] Remove superseded TypeScript validators, condition evaluators, and legacy
+  renderers. Connection field heuristics and workflow `SchemaFormFields` are
+  removed. Compatibility schema parsers remain only at persisted legacy wire
+  boundaries and normalize into the canonical model; they do not implement a
+  second validation or condition engine.
+- [x] Complete unit, integration, browser E2E, and local-server verification.
 
-Verification completed so far:
+Verification completed:
 
 - `cargo test -p runtara-dsl` — 199 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
@@ -43,11 +44,23 @@ Verification completed so far:
   native/WASM form-analysis parity.
 - `cargo test -p runtara-workflows --no-default-features --features wasm-js --lib`
   — 249 passed.
+- `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D
+  warnings` — passed through the Rust-touching commit hooks.
 - `npm test -- --run src/features/workflows/utils/rust-workflow-validation.test.ts`
   — 8 passed against the generated browser WASM bundle.
-- `npx tsc -b --pretty false` — passed.
-- Shared form renderer Vitest suites — 5 passed; targeted ESLint and TypeScript
-  checks passed.
+- `npm test -- --run` — 67 files and 908 tests passed.
+- Shared validator initialization regression tests — 2 passed. They verify that
+  domain-neutral form validation does not fetch workflow metadata and that the
+  workflow initializer expands the summary API into full agent details before
+  hydrating WASM.
+- Shared form renderer tests — 4 passed, including a regression test proving
+  semantically unchanged inline values do not trigger an analysis loop.
+- `npx tsc --noEmit` and the production build's `tsc -b` — passed.
+- `npm run lint` — passed with 0 errors. The remaining 34 warnings are existing
+  repository warnings; generated `storybook-static` output is now excluded
+  from source linting.
+- `npm run build` — passed; Vite built 3,544 modules and emitted the generated
+  validation WASM bundle.
 - `cargo test -p runtara-connections --lib -F runtara-agents/native` — 114
   passed, including every registered descriptor-to-form conversion.
 - `cargo test -p runtara-connections --test create_connection_status_e2e -F
@@ -59,16 +72,46 @@ Verification completed so far:
   `SchemaFormFields` renderer was removed.
 - Report form-adapter and shared-condition suites — 13 passed; full TypeScript
   and targeted ESLint checks passed.
+- `scripts/build-agent-components.sh` — built 26 agent components and both
+  shared workflow components for the isolated local server.
+- Isolated local server smoke — the current backend started with containerized
+  PostgreSQL and Valkey, loaded all 26 agent components, and returned a healthy
+  status on the non-default test port.
+- Local browser E2E — the schema-generated SFTP form created a connection,
+  rendered `Private Key` as a secret textarea, reopened the edit projection
+  with the password hidden, saved a title change with the password untouched,
+  reopened again to prove the secret remained configured, and cleaned up the
+  connection. The final run passed in 2.2 seconds.
 
-This document defines how Runtara will unify schema-driven form rendering across
-connections, workflows, and reports without adding third-party form or schema
-libraries. The canonical implementation will live in Rust and will be shared
-with the browser through WebAssembly.
+### Final implementation notes
+
+- Local-server verification found and fixed a boundary defect that component
+  tests could not expose: generic form validation was unnecessarily waiting for
+  the workflow agent catalog, while the catalog loader treated the summary
+  endpoint as full agent metadata. Form initialization is now domain-neutral;
+  workflow initialization separately fetches full agent details once.
+- Direct navigation to a connection create route now fetches connection types
+  instead of treating an empty `initialData` value as fresh for five minutes.
+- The shared renderer keys analysis by serialized schema and value, preventing
+  parent analysis callbacks from causing an infinite validation/render loop.
+- The Rust crate and generated bundle retain the historical
+  `runtara-workflow-validation-wasm` name as a build-compatibility detail. Its
+  public frontend boundary is domain-neutral and serves connections, workflows,
+  and shared forms. A physical package rename would add churn without changing
+  the architecture.
+- Persisted workflow and report compatibility adapters remain intentionally.
+  They are normalization boundaries required by the non-goals; the workflow
+  execution DSL and report persisted wire formats were not migrated.
+
+This document defines the implemented architecture that unifies schema-driven
+form rendering across connections, workflows, and reports without adding a
+third-party form or schema framework. The canonical implementation lives in
+Rust and is shared with the browser through WebAssembly.
 
 ## Decision summary
 
-Runtara will have one shared **form schema and evaluation engine**, composed by
-the existing domain DSLs:
+Runtara has one shared **form schema and evaluation engine**, composed by the
+existing domain DSLs:
 
 - The workflow DSL continues to describe graphs, mappings, references, and
   execution behavior.
@@ -79,11 +122,10 @@ the existing domain DSLs:
 - The shared form engine describes fields, controls, sections, access,
   conditional state, and validation.
 
-The form engine will be implemented in Rust. Backend services will call it
-natively, while the frontend will call the same implementation through the
-existing validation WASM pipeline. React will own rendering and interaction but
-will not reimplement schema normalization, conditional evaluation, or
-validation.
+The form engine is implemented in Rust. Backend services call it natively,
+while the frontend calls the same implementation through the existing
+validation WASM pipeline. React owns rendering and interaction but does not
+reimplement schema normalization, conditional evaluation, or validation.
 
 No additional external dependencies are required.
 
