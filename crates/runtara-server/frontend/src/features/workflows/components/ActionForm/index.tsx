@@ -32,9 +32,11 @@ export function ActionForm({
     initialWorkflowFormValues(definition)
   );
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const [submitAttempt, setSubmitAttempt] = useState(0);
   const hasFields = Object.keys(definition.fields).length > 0;
 
   const handleSubmit = () => {
+    setSubmitAttempt((attempt) => attempt + 1);
     if (hasFields && !analysis?.valid) return;
     const payload = Object.fromEntries(
       Object.keys(definition.fields)
@@ -53,6 +55,7 @@ export function ActionForm({
           onChange={setFormValues}
           disabled={disabled}
           onAnalysisChange={setAnalysis}
+          submitAttempt={submitAttempt}
         />
       ) : (
         <p className="text-sm text-muted-foreground">{emptySchemaMessage}</p>
@@ -62,7 +65,7 @@ export function ActionForm({
         size="sm"
         className="w-full"
         onClick={handleSubmit}
-        disabled={disabled || (hasFields && !analysis?.valid)}
+        disabled={disabled || analysis?.wasmAvailable === false}
       >
         {disabled ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
         {submitLabel}

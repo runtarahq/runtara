@@ -142,4 +142,101 @@ describe('FormRenderer', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(analyzeFormWithRust).toHaveBeenCalledTimes(1);
   });
+
+  it('focuses the first invalid field only after an explicit submit attempt', async () => {
+    vi.mocked(analyzeFormWithRust).mockResolvedValue(
+      result({
+        valid: false,
+        status: 'invalid',
+        issues: [
+          {
+            code: 'FORM_FIELD_REQUIRED',
+            path: 'data.token',
+            message: 'Token is required',
+            severity: 'error',
+          },
+        ],
+      })
+    );
+
+    const { rerender } = render(
+      <FormRenderer
+        definition={definition}
+        value={{}}
+        onChange={vi.fn()}
+        submitAttempt={0}
+      />
+    );
+    const mode = await screen.findByLabelText('Mode');
+    const token = screen.getByLabelText('Token*');
+
+    mode.focus();
+    rerender(
+      <FormRenderer
+        definition={definition}
+        value={{ mode: 'advanced' }}
+        onChange={vi.fn()}
+        submitAttempt={0}
+      />
+    );
+    await waitFor(() => expect(mode).toHaveFocus());
+
+    rerender(
+      <FormRenderer
+        definition={definition}
+        value={{ mode: 'advanced' }}
+        onChange={vi.fn()}
+        submitAttempt={1}
+      />
+    );
+    await waitFor(() => expect(token).toHaveFocus());
+  });
+
+  it('delegates dynamic option retrieval to the domain frame', async () => {
+    const resolveOptions = vi.fn().mockResolvedValue([
+      { value: 'invoice', label: 'Invoice' },
+      { value: 'payment', label: 'Payment' },
+    ]);
+    const dynamicDefinition: FormDefinition = {
+      fields: {
+        company: { type: 'string' },
+        resource: {
+          type: 'string',
+          label: 'Resource',
+          control: {
+            kind: 'lookup',
+            optionResolver: 'object-model.resources',
+            optionDependencies: ['company'],
+          },
+        },
+      },
+    };
+    vi.mocked(analyzeFormWithRust).mockResolvedValue(
+      result({
+        fields: {
+          company: { visible: true, enabled: true, required: false },
+          resource: { visible: true, enabled: true, required: false },
+        },
+      })
+    );
+
+    render(
+      <FormRenderer
+        definition={dynamicDefinition}
+        value={{ company: 'acme' }}
+        onChange={vi.fn()}
+        frame={{ resolveOptions }}
+      />
+    );
+
+    await waitFor(() => expect(resolveOptions).toHaveBeenCalledTimes(1));
+    expect(resolveOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolverKey: 'object-model.resources',
+        fieldName: 'resource',
+        currentData: { company: 'acme' },
+      })
+    );
+    expect(await screen.findByText('Select a value')).toBeInTheDocument();
+  });
 });

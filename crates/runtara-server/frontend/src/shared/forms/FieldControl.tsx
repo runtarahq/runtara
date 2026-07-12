@@ -13,7 +13,7 @@ import { TagInput } from '@/shared/components/ui/tag-input';
 import { Textarea } from '@/shared/components/ui/textarea';
 
 import { inferControlKind, optionsFor } from './control-registry';
-import type { FormField } from './types';
+import type { FormField, FormOption } from './types';
 
 function optionKey(value: unknown): string {
   return JSON.stringify(value);
@@ -25,6 +25,8 @@ interface FieldControlProps {
   value: unknown;
   disabled: boolean;
   invalid?: boolean;
+  options?: FormOption[];
+  optionsLoading?: boolean;
   onChange: (value: unknown) => void;
 }
 
@@ -34,10 +36,12 @@ export function FieldControl({
   value,
   disabled,
   invalid,
+  options: resolvedOptions,
+  optionsLoading = false,
   onChange,
 }: FieldControlProps) {
   const kind = inferControlKind(field);
-  const options = optionsFor(field);
+  const options = resolvedOptions ?? optionsFor(field);
   const common = {
     id,
     disabled,
@@ -67,10 +71,14 @@ export function FieldControl({
     );
   }
 
-  if (kind === 'select' || (kind === 'lookup' && options.length > 0)) {
+  if (
+    kind === 'select' ||
+    (kind === 'lookup' &&
+      (options.length > 0 || optionsLoading || field.control?.optionResolver))
+  ) {
     return (
       <Select
-        disabled={disabled}
+        disabled={disabled || optionsLoading}
         value={value === undefined || value === null ? '' : optionKey(value)}
         onValueChange={(next) =>
           onChange(
@@ -79,7 +87,13 @@ export function FieldControl({
         }
       >
         <SelectTrigger id={id} aria-invalid={invalid || undefined}>
-          <SelectValue placeholder={field.placeholder ?? 'Select a value'} />
+          <SelectValue
+            placeholder={
+              optionsLoading
+                ? 'Loading options…'
+                : (field.placeholder ?? 'Select a value')
+            }
+          />
         </SelectTrigger>
         <SelectContent>
           {options.map((option) => (
@@ -178,14 +192,18 @@ export function FieldControl({
               <div key={name} className="space-y-1.5">
                 <label htmlFor={propertyId} className="text-xs font-medium">
                   {property.label ?? name.replace(/_/g, ' ')}
-                  {property.required && <span className="ml-0.5 text-destructive">*</span>}
+                  {property.required && (
+                    <span className="ml-0.5 text-destructive">*</span>
+                  )}
                 </label>
                 <FieldControl
                   id={propertyId}
                   field={property}
                   value={objectValue[name]}
                   disabled={disabled}
-                  onChange={(next) => onChange({ ...objectValue, [name]: next })}
+                  onChange={(next) =>
+                    onChange({ ...objectValue, [name]: next })
+                  }
                 />
               </div>
             );

@@ -51,6 +51,7 @@ export function WorkflowExecuteDialog({
     null
   );
   const [isRustValidating, setIsRustValidating] = useState(false);
+  const [submitAttempt, setSubmitAttempt] = useState(0);
 
   // Reset input data and validation errors when input schema changes
   useEffect(() => {
@@ -69,6 +70,7 @@ export function WorkflowExecuteDialog({
   }, [open, definition]);
 
   const handleExecute = async () => {
+    setSubmitAttempt((attempt) => attempt + 1);
     setRustValidationError(null);
     if (fields.length > 0 && !formAnalysis?.valid) {
       return;
@@ -139,6 +141,7 @@ export function WorkflowExecuteDialog({
               }}
               disabled={isSubmitting || isRustValidating}
               onAnalysisChange={setFormAnalysis}
+              submitAttempt={submitAttempt}
             />
           )}
           {serverError && (
@@ -166,7 +169,7 @@ export function WorkflowExecuteDialog({
             disabled={
               isSubmitting ||
               isRustValidating ||
-              (fields.length > 0 && !formAnalysis?.valid)
+              formAnalysis?.wasmAvailable === false
             }
           >
             {isSubmitting || isRustValidating ? 'Executing...' : 'Execute'}

@@ -43,9 +43,11 @@ export function ChatFormInput({
     initialWorkflowFormValues(definition)
   );
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const [submitAttempt, setSubmitAttempt] = useState(0);
   const isValid = analysis?.valid === true;
 
   const handleSubmit = useCallback(async () => {
+    setSubmitAttempt((attempt) => attempt + 1);
     if (!isValid || isSubmitting) return;
 
     // Build payload, coercing types
@@ -119,12 +121,13 @@ export function ChatFormInput({
           onChange={setFormValues}
           disabled={isSubmitting}
           onAnalysisChange={setAnalysis}
+          submitAttempt={submitAttempt}
         />
       </div>
 
       <Button
         onClick={handleSubmit}
-        disabled={!isValid || isSubmitting}
+        disabled={analysis?.wasmAvailable === false || isSubmitting}
         className="w-full"
         size="sm"
       >

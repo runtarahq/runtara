@@ -104,6 +104,13 @@ pub struct FormControl {
     pub kind: ControlKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<FormOption>,
+    /// Domain-owned key used to resolve dynamic choices. The shared engine
+    /// deliberately does not interpret the key or define a query language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_resolver: Option<String>,
+    /// Sibling fields whose values affect `option_resolver` results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_dependencies: Vec<String>,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -440,7 +447,12 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
                     visible_when: None,
                     nullable: None,
                 },
-                control: control_kind.map(|kind| FormControl { kind, options }),
+                control: control_kind.map(|kind| FormControl {
+                    kind,
+                    options,
+                    option_resolver: None,
+                    option_dependencies: Vec::new(),
+                }),
                 section: Some(section),
                 conditions: FormConditions {
                     visible: field.conditions.visible.map(|factory| factory()),
@@ -1107,6 +1119,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(FieldAccessMode::Write).unwrap(),
             json!("write")
+        );
+    }
+
+    #[test]
+    fn dynamic_option_metadata_is_domain_neutral_and_round_trips() {
+        let control: FormControl = serde_json::from_value(json!({
+            "kind": "lookup",
+            "optionResolver": "object-model.resources",
+            "optionDependencies": ["company_id"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            control.option_resolver.as_deref(),
+            Some("object-model.resources")
+        );
+        assert_eq!(control.option_dependencies, ["company_id"]);
+        assert_eq!(
+            serde_json::to_value(control).unwrap(),
+            json!({
+                "kind": "lookup",
+                "optionResolver": "object-model.resources",
+                "optionDependencies": ["company_id"]
+            })
         );
     }
 

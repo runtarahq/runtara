@@ -156,6 +156,7 @@ export function DynamicConnectionForm({
   });
   const watched = useWatch({ control: form.control });
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const [submitAttempt, setSubmitAttempt] = useState(0);
   const editProjection = initValues?.editProjection as
     | EditProjection
     | undefined;
@@ -164,6 +165,7 @@ export function DynamicConnectionForm({
   );
 
   const handleSubmit = (values: Record<string, unknown>) => {
+    setSubmitAttempt((attempt) => attempt + 1);
     if (!analysis?.wasmAvailable || !analysis.valid) {
       toast.error('Fix the highlighted connection fields before saving.');
       return;
@@ -189,7 +191,7 @@ export function DynamicConnectionForm({
         <ConnectionFormLayout
           title={mode === 'edit' ? 'Edit connection' : 'Create connection'}
           isLoading={isLoading}
-          isSubmitDisabled={!analysis?.wasmAvailable || !analysis.valid}
+          isSubmitDisabled={analysis?.wasmAvailable === false}
           submitLabel={mode === 'edit' ? 'Save changes' : 'Create connection'}
           loadingLabel={mode === 'edit' ? 'Saving...' : 'Creating...'}
           editNotice={
@@ -222,6 +224,7 @@ export function DynamicConnectionForm({
                 }
               }}
               onAnalysisChange={setAnalysis}
+              submitAttempt={submitAttempt}
               fieldAnnotations={Object.fromEntries(
                 Object.entries(editProjection?.secretState ?? {}).map(
                   ([name, state]) => [

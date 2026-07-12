@@ -11,15 +11,17 @@ import { Label } from '@/shared/components/ui/label';
 import { FieldControl } from './FieldControl';
 import { FormSection } from './FormSection';
 import { analyzeFormWithRust } from './rust-form-validation';
+import { useResolvedOptions } from './use-resolved-options';
 import type {
   FormAnalysisResult,
   FormDefinition,
   FormField,
+  FormFrameContract,
   FormIssue,
   FormSectionDefinition,
 } from './types';
 
-interface FormRendererProps {
+export interface FormRendererProps {
   definition: FormDefinition;
   value: Record<string, unknown>;
   onChange: (value: Record<string, unknown>) => void;
@@ -27,6 +29,10 @@ interface FormRendererProps {
   className?: string;
   onAnalysisChange?: (analysis: FormAnalysisResult) => void;
   fieldAnnotations?: Record<string, ReactNode>;
+  /** Increment only at an explicit submit boundary to focus the first issue. */
+  submitAttempt?: number;
+  /** Domain-owned commit, clear, and option-resolution behavior. */
+  frame?: FormFrameContract;
 }
 
 function orderedFields(definition: FormDefinition): [string, FormField][] {
@@ -65,13 +71,22 @@ export function FormRenderer({
   className,
   onAnalysisChange,
   fieldAnnotations,
+  submitAttempt = 0,
+  frame,
 }: FormRendererProps) {
   const formId = useId().replace(/:/g, '');
+  const root = useRef<HTMLDivElement>(null);
   const request = useRef(0);
+  const focusedAttempt = useRef(0);
   const analysisCallback = useRef(onAnalysisChange);
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
   const definitionJson = JSON.stringify(definition);
   const valueJson = JSON.stringify(value);
+  const resolvedOptions = useResolvedOptions(
+    definition,
+    value,
+    frame?.resolveOptions
+  );
 
   useEffect(() => {
     analysisCallback.current = onAnalysisChange;
@@ -87,6 +102,28 @@ export function FormRenderer({
       analysisCallback.current?.(next);
     });
   }, [definitionJson, valueJson]);
+
+  useEffect(() => {
+    if (
+      submitAttempt <= focusedAttempt.current ||
+      !analysis ||
+      analysis.valid
+    ) {
+      return;
+    }
+    focusedAttempt.current = submitAttempt;
+    const invalid = root.current?.querySelector<HTMLElement>(
+      '[data-field] [aria-invalid="true"]'
+    );
+    const focusTarget = invalid?.matches(
+      'input, button, select, textarea, [tabindex]'
+    )
+      ? invalid
+      : invalid?.querySelector<HTMLElement>(
+          'input, button, select, textarea, [tabindex]'
+        );
+    focusTarget?.focus();
+  }, [analysis, submitAttempt]);
 
   if (!analysis) {
     return (
@@ -115,7 +152,7 @@ export function FormRenderer({
 
   const fields = orderedFields(definition);
   return (
-    <div className={className ?? 'space-y-4'}>
+    <div ref={root} className={className ?? 'space-y-4'}>
       {orderedSections(definition).map((section) => {
         const sectionFields = fields.filter(
           ([, field]) => field.section === section?.id
@@ -157,8 +194,28 @@ export function FormRenderer({
                     value={value[name]}
                     disabled={fieldDisabled}
                     invalid={fieldIssues.length > 0}
-                    onChange={(next) => onChange({ ...value, [name]: next })}
+                    options={resolvedOptions.options[name]}
+                    optionsLoading={resolvedOptions.loading.has(name)}
+                    onChange={(next) => {
+                      const nextData = { ...value, [name]: next };
+                      if (frame?.commitField) {
+                        frame.commitField({
+                          fieldName: name,
+                          field,
+                          value: next,
+                          previousData: value,
+                          nextData,
+                        });
+                      } else {
+                        onChange(nextData);
+                      }
+                    }}
                   />
+                  {resolvedOptions.errors[name] && (
+                    <p className="text-xs text-destructive" role="alert">
+                      {resolvedOptions.errors[name]}
+                    </p>
+                  )}
                   {fieldIssues.map((issue) => (
                     <p
                       key={`${issue.code}-${issue.path}`}

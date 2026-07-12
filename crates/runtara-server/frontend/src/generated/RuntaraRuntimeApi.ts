@@ -2355,6 +2355,8 @@ export interface FormConditions {
 
 export interface FormControl {
   kind: ControlKind;
+  optionDependencies?: string[];
+  optionResolver?: string | null;
   options?: FormOption[];
 }
 
