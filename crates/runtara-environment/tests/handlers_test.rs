@@ -24,29 +24,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Helper macro to skip tests if database URL is not set.
+/// Required preflight for the explicitly feature-gated database suite.
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
+        );
     };
 }
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Get a database pool for testing
 async fn get_test_pool() -> Option<PgPool> {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&database_url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
+        .expect("db-integration-tests requires an environment database URL");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
     Some(pool)
 }
 
@@ -652,7 +651,7 @@ async fn test_resume_instance_wrong_status() {
 }
 
 #[tokio::test]
-async fn test_resume_instance_no_checkpoint() {
+async fn test_resume_instance_without_checkpoint_replays_from_start() {
     skip_if_no_db!();
     let Some(pool) = get_test_pool().await else {
         eprintln!("Skipping test: could not connect to database");
@@ -688,8 +687,8 @@ async fn test_resume_instance_no_checkpoint() {
 
     let response = handle_resume_instance(&state, request).await.unwrap();
 
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("no checkpoint"));
+    assert!(response.success, "resume should replay from start");
+    assert!(response.error.is_none());
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -875,7 +874,7 @@ async fn test_start_instance_same_tenant_allowed() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_list_agents_returns_valid_json() {
+async fn test_removed_list_agents_handler_fails_with_runtime_route_guidance() {
     skip_if_no_db!();
     let Some(pool) = get_test_pool().await else {
         eprintln!("Skipping test: could not connect to database");
@@ -885,43 +884,14 @@ async fn test_list_agents_returns_valid_json() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
 
-    let response = handle_list_agents(&state)
-        .await
-        .expect("List agents should succeed");
-
-    // Should return valid JSON
-    let agents: serde_json::Value =
-        serde_json::from_slice(&response.agents_json).expect("Should be valid JSON");
-
-    // Should be an array
-    assert!(
-        agents.is_array(),
-        "Agents response should be an array, got: {:?}",
-        agents
-    );
-
-    // Note: In reduced test builds the full agent feature set may not be linked,
-    // so the list may be smaller than production.
-
-    // If agents are present (e.g., in an integration test with full dependencies),
-    // verify they have required fields
-    let agents_arr = agents.as_array().unwrap();
-    for agent in agents_arr {
-        assert!(
-            agent.get("id").is_some(),
-            "Agent should have 'id' field: {:?}",
-            agent
-        );
-        assert!(
-            agent.get("name").is_some(),
-            "Agent should have 'name' field: {:?}",
-            agent
-        );
-    }
+    let Err(error) = handle_list_agents(&state).await else {
+        panic!("removed environment agent-list handler unexpectedly succeeded");
+    };
+    assert!(error.to_string().contains("GET /api/runtime/agents"));
 }
 
 #[tokio::test]
-async fn test_get_capability_handler_returns_response() {
+async fn test_removed_get_capability_handler_fails_with_runtime_route_guidance() {
     skip_if_no_db!();
     let Some(pool) = get_test_pool().await else {
         eprintln!("Skipping test: could not connect to database");
@@ -939,16 +909,10 @@ async fn test_get_capability_handler_returns_response() {
         capability_id: "random-double".to_string(),
     };
 
-    let response = handle_get_capability(&state, request)
-        .await
-        .expect("Get capability should succeed");
-
-    // The handler should return a valid response (even if not found in unit test context)
-    // If found, inputs_json should be valid JSON
-    if response.found && !response.inputs_json.is_empty() {
-        let _inputs: serde_json::Value = serde_json::from_slice(&response.inputs_json)
-            .expect("inputs_json should be valid JSON");
-    }
+    let Err(error) = handle_get_capability(&state, request).await else {
+        panic!("removed environment capability handler unexpectedly succeeded");
+    };
+    assert!(error.to_string().contains("GET /api/runtime/agents/"));
 }
 
 #[tokio::test]
@@ -967,18 +931,10 @@ async fn test_get_capability_not_found() {
         capability_id: "nonexistent-capability".to_string(),
     };
 
-    let response = handle_get_capability(&state, request)
-        .await
-        .expect("Get capability should not error");
-
-    assert!(
-        !response.found,
-        "Nonexistent capability should not be found"
-    );
-    assert!(
-        response.inputs_json.is_empty(),
-        "inputs_json should be empty for not found"
-    );
+    let Err(error) = handle_get_capability(&state, request).await else {
+        panic!("removed environment capability handler unexpectedly succeeded");
+    };
+    assert!(error.to_string().contains("GET /api/runtime/agents/"));
 }
 
 #[tokio::test]
@@ -998,14 +954,10 @@ async fn test_get_capability_wrong_agent() {
         capability_id: "random-double".to_string(), // This belongs to utils
     };
 
-    let response = handle_get_capability(&state, request)
-        .await
-        .expect("Get capability should not error");
-
-    assert!(
-        !response.found,
-        "Capability with wrong agent should not be found"
-    );
+    let Err(error) = handle_get_capability(&state, request).await else {
+        panic!("removed environment capability handler unexpectedly succeeded");
+    };
+    assert!(error.to_string().contains("GET /api/runtime/agents/"));
 }
 
 #[tokio::test]

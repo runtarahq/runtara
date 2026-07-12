@@ -12,29 +12,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Helper macro to skip tests if database URL is not set.
+/// Required preflight for the explicitly feature-gated database suite.
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
+        );
     };
 }
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Get a database pool for testing
 async fn get_test_pool() -> Option<PgPool> {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&database_url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
+        .expect("db-integration-tests requires an environment database URL");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
     Some(pool)
 }
 
@@ -62,19 +61,18 @@ async fn create_test_instance(
     pool: &PgPool,
     instance_id: &str,
     tenant_id: &str,
-    image_id: &str,
+    _image_id: &str,
     status: &str,
     finished_at: Option<chrono::DateTime<Utc>>,
 ) {
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, image_id, status, created_at, started_at, finished_at)
-        VALUES ($1, $2, $3, $4, NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days', $5)
+        INSERT INTO instances (instance_id, tenant_id, status, created_at, started_at, finished_at)
+        VALUES ($1, $2, $3::instance_status, NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days', $4)
         "#,
     )
     .bind(instance_id)
     .bind(tenant_id)
-    .bind(image_id)
     .bind(status)
     .bind(finished_at)
     .execute(pool)
@@ -103,9 +101,9 @@ async fn create_instance_image(pool: &PgPool, instance_id: &str, image_id: &str,
 async fn create_container_registry(pool: &PgPool, instance_id: &str, tenant_id: &str) {
     sqlx::query(
         r#"
-        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path)
-        VALUES ($1, $2, $3, '/usr/bin/test')
-        ON CONFLICT (instance_id) DO UPDATE SET updated_at = NOW()
+        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+        ON CONFLICT (instance_id) DO NOTHING
         "#,
     )
     .bind(format!("container-{}", instance_id))
@@ -118,7 +116,7 @@ async fn create_container_registry(pool: &PgPool, instance_id: &str, tenant_id: 
 
 /// Check if an instance exists in the database
 async fn instance_exists(pool: &PgPool, instance_id: &str) -> bool {
-    let result: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM instances WHERE instance_id = $1")
+    let result: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM instances WHERE instance_id = $1")
         .bind(instance_id)
         .fetch_optional(pool)
         .await
@@ -128,7 +126,7 @@ async fn instance_exists(pool: &PgPool, instance_id: &str) -> bool {
 
 /// Check if an instance_images entry exists
 async fn instance_image_exists(pool: &PgPool, instance_id: &str) -> bool {
-    let result: Option<(i64,)> =
+    let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM instance_images WHERE instance_id = $1")
             .bind(instance_id)
             .fetch_optional(pool)
@@ -139,7 +137,7 @@ async fn instance_image_exists(pool: &PgPool, instance_id: &str) -> bool {
 
 /// Check if a container_registry entry exists
 async fn container_registry_exists(pool: &PgPool, instance_id: &str) -> bool {
-    let result: Option<(i64,)> =
+    let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM container_registry WHERE instance_id = $1")
             .bind(instance_id)
             .fetch_optional(pool)
@@ -389,7 +387,7 @@ async fn create_event(pool: &PgPool, instance_id: &str, event_type: &str) {
     sqlx::query(
         r#"
         INSERT INTO instance_events (instance_id, event_type, created_at)
-        VALUES ($1, $2, NOW())
+        VALUES ($1, $2::instance_event_type, NOW())
         "#,
     )
     .bind(instance_id)
@@ -401,7 +399,7 @@ async fn create_event(pool: &PgPool, instance_id: &str, event_type: &str) {
 
 /// Check if checkpoints exist for an instance
 async fn checkpoints_exist(pool: &PgPool, instance_id: &str) -> bool {
-    let result: Option<(i64,)> =
+    let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM checkpoints WHERE instance_id = $1 LIMIT 1")
             .bind(instance_id)
             .fetch_optional(pool)
@@ -412,7 +410,7 @@ async fn checkpoints_exist(pool: &PgPool, instance_id: &str) -> bool {
 
 /// Check if events exist for an instance
 async fn events_exist(pool: &PgPool, instance_id: &str) -> bool {
-    let result: Option<(i64,)> =
+    let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM instance_events WHERE instance_id = $1 LIMIT 1")
             .bind(instance_id)
             .fetch_optional(pool)
@@ -640,13 +638,12 @@ async fn test_e2e_suspended_instances_not_deleted() {
     // Create old suspended instance (should NOT be deleted - not terminal)
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, image_id, status, created_at, started_at, sleep_until)
-        VALUES ($1, $2, $3, 'suspended', NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days', NOW() + INTERVAL '1 day')
+        INSERT INTO instances (instance_id, tenant_id, status, created_at, started_at, sleep_until)
+        VALUES ($1, $2, 'suspended', NOW() - INTERVAL '40 days', NOW() - INTERVAL '40 days', NOW() + INTERVAL '1 day')
         "#,
     )
     .bind(&old_suspended)
     .bind(&tenant_id)
-    .bind(&image_id)
     .execute(&pool)
     .await
     .expect("Failed to create suspended instance");
@@ -696,13 +693,12 @@ async fn test_e2e_pending_instances_not_deleted() {
     // Create old pending instance (should NOT be deleted - not terminal)
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, image_id, status, created_at)
-        VALUES ($1, $2, $3, 'pending', NOW() - INTERVAL '40 days')
+        INSERT INTO instances (instance_id, tenant_id, status, created_at)
+        VALUES ($1, $2, 'pending', NOW() - INTERVAL '40 days')
         "#,
     )
     .bind(&old_pending)
     .bind(&tenant_id)
-    .bind(&image_id)
     .execute(&pool)
     .await
     .expect("Failed to create pending instance");

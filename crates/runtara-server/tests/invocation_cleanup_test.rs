@@ -4,9 +4,8 @@
 //! against a real Postgres database seeded with executions, events,
 //! side-effect rows, and metrics.
 //!
-//! Skips if neither `TEST_RUNTARA_SERVER_DATABASE_URL` nor
-//! `RUNTARA_SERVER_DATABASE_URL` is set. Mirrors the skip-behavior in
-//! `runtara-environment/tests/db_cleanup_worker_test.rs`.
+//! This suite is explicitly gated by the `db-integration-tests` feature and
+//! fails closed when its required database is unavailable.
 
 use std::time::Duration;
 
@@ -21,14 +20,11 @@ use uuid::Uuid;
 
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_SERVER_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_SERVER_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL"
+        );
     };
 }
 
@@ -37,9 +33,14 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 async fn get_test_pool() -> Option<PgPool> {
     let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_SERVER_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
+        .expect("db-integration-tests requires a server database URL");
+    let pool = PgPool::connect(&url)
+        .await
+        .expect("required server test database must accept connections");
+    MIGRATOR
+        .run(&pool)
+        .await
+        .expect("required server migrations must succeed");
     Some(pool)
 }
 

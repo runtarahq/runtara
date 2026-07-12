@@ -8,22 +8,25 @@ use uuid::Uuid;
 /// Skip test if database URL is not set
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
+        );
     };
 }
 
 async fn get_pool() -> Option<PgPool> {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .ok()?;
-    PgPool::connect(&database_url).await.ok()
+        .expect("db-integration-tests requires an environment database URL");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
+    Some(pool)
 }
 
 use runtara_environment::image_registry::{ImageBuilder, ImageRegistry, RunnerType};

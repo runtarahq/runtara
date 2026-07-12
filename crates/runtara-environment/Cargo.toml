@@ -12,6 +12,9 @@ categories = ["asynchronous", "development-tools"]
 name = "runtara_environment"
 path = "src/lib.rs"
 
+[features]
+db-integration-tests = []
+
 [[bin]]
 name = "runtara-environment"
 path = "src/main.rs"
@@ -71,3 +74,38 @@ wat = "1"
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+[[test]]
+name = "container_registry_test"
+path = "tests/container_registry_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "db_cleanup_worker_test"
+path = "tests/db_cleanup_worker_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "db_test"
+path = "tests/db_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "handlers_test"
+path = "tests/handlers_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "heartbeat_monitor_test"
+path = "tests/heartbeat_monitor_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "image_registry_test"
+path = "tests/image_registry_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "wake_scheduler_test"
+path = "tests/wake_scheduler_test.rs"
+required-features = ["db-integration-tests"]

@@ -27,6 +27,12 @@ path = "src/bin/dump_openapi.rs"
 # Embed the pre-built frontend (frontend/dist/) and serve it at the UI mount prefix.
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
+db-integration-tests = []
+
+[[test]]
+name = "invocation_cleanup_test"
+path = "tests/invocation_cleanup_test.rs"
+required-features = ["db-integration-tests"]
 
 [dependencies]
 # Runtara crates

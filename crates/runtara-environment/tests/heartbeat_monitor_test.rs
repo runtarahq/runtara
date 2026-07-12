@@ -65,29 +65,28 @@ impl Runner for MockRunner {
     }
 }
 
-/// Helper macro to skip tests if database URL is not set.
+/// Required preflight for the explicitly feature-gated database suite.
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
+        );
     };
 }
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Get a database pool for testing
 async fn get_test_pool() -> Option<PgPool> {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&database_url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
+        .expect("db-integration-tests requires an environment database URL");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
     Some(pool)
 }
 
@@ -115,18 +114,17 @@ async fn create_env_instance(
     pool: &PgPool,
     instance_id: &str,
     tenant_id: &str,
-    image_id: &str,
+    _image_id: &str,
     status: &str,
 ) {
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, image_id, status, created_at, started_at)
-        VALUES ($1, $2, $3, $4, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')
+        INSERT INTO instances (instance_id, tenant_id, status, created_at, started_at)
+        VALUES ($1, $2, $3::instance_status, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')
         "#,
     )
     .bind(instance_id)
     .bind(tenant_id)
-    .bind(image_id)
     .bind(status)
     .execute(pool)
     .await
@@ -154,20 +152,17 @@ async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, _
 async fn record_instance_event(
     pool: &PgPool,
     instance_id: &str,
-    tenant_id: &str,
+    _tenant_id: &str,
     minutes_ago: i64,
 ) {
     let event_time = Utc::now() - ChronoDuration::minutes(minutes_ago);
-    let event_id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
-        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
-        VALUES ($1, $2, $3, 'heartbeat', $4, $5)
+        INSERT INTO instance_events (instance_id, event_type, payload, created_at)
+        VALUES ($1, 'heartbeat', $2, $3)
         "#,
     )
-    .bind(&event_id)
     .bind(instance_id)
-    .bind(tenant_id)
     .bind(b"{}".as_slice())
     .bind(event_time)
     .execute(pool)
@@ -790,13 +785,15 @@ async fn test_orphaned_instance_detected() {
     shutdown.notify_one();
     handle.await.ok();
 
-    // The orphaned instance should have been marked as failed
+    // The orphaned instance should have entered the default automatic-recovery
+    // path. The mock's default mark_for_recovery implementation records the
+    // suspended completion without an error.
     let completed = persistence.get_completed_instances();
     assert!(
-        completed.iter().any(|(id, _, err)| {
-            id == &instance_id && err.as_ref().is_some_and(|e| e.contains("orphaned"))
-        }),
-        "Orphaned instance should have been marked as failed. Completed: {:?}",
+        completed
+            .iter()
+            .any(|(id, _, err)| id == &instance_id && err.is_none()),
+        "Orphaned instance should have been marked for recovery. Completed: {:?}",
         completed
     );
 }
@@ -822,6 +819,7 @@ async fn test_tracked_instance_not_orphaned() {
     ));
 
     // Register in container_registry and record fresh activity in instance_events
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 0).await; // Fresh activity
 
@@ -1125,17 +1123,15 @@ async fn test_checkpoint_event_counts_as_activity() {
     create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
 
-    // Record a checkpoint event (simulating SDK checkpoint call)
-    let event_id = Uuid::new_v4().to_string();
+    // Record a progress event (the current schema representation of durable
+    // execution progress such as a checkpoint).
     sqlx::query(
         r#"
-        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
-        VALUES ($1, $2, $3, 'checkpoint', $4, NOW())
+        INSERT INTO instance_events (instance_id, event_type, payload, created_at)
+        VALUES ($1, 'progress', $2, NOW())
         "#,
     )
-    .bind(&event_id)
     .bind(&instance_id)
-    .bind(&tenant_id)
     .bind(b"{}".as_slice())
     .execute(&pool)
     .await
@@ -1189,17 +1185,14 @@ async fn test_any_event_type_counts_as_activity() {
     create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
 
-    // Record a custom event type (not heartbeat or checkpoint)
-    let event_id = Uuid::new_v4().to_string();
+    // Record a custom event type (not heartbeat or progress).
     sqlx::query(
         r#"
-        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
-        VALUES ($1, $2, $3, 'custom_event', $4, NOW())
+        INSERT INTO instance_events (instance_id, event_type, payload, created_at)
+        VALUES ($1, 'custom', $2, NOW())
         "#,
     )
-    .bind(&event_id)
     .bind(&instance_id)
-    .bind(&tenant_id)
     .bind(b"{}".as_slice())
     .execute(&pool)
     .await

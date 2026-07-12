@@ -11,25 +11,28 @@ use runtara_environment::db;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Skip test if database URL is not set
+/// Required preflight for the explicitly feature-gated database suite.
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
+        );
     };
 }
 
 async fn get_pool() -> Option<sqlx::PgPool> {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .ok()?;
-    sqlx::PgPool::connect(&database_url).await.ok()
+        .expect("db-integration-tests requires an environment database URL");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
+    Some(pool)
 }
 
 /// Helper to create a test instance using the Persistence trait.
@@ -72,8 +75,20 @@ async fn update_test_instance_status(
     checkpoint_id: Option<&str>,
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
+    if matches!(status, "completed" | "failed" | "cancelled") {
+        let mut params = CompleteInstanceParams::new(instance_id, status);
+        if let Some(checkpoint_id) = checkpoint_id {
+            params = params.with_checkpoint(checkpoint_id);
+        }
+        persistence
+            .complete_instance(params)
+            .await
+            .expect("Failed to complete instance");
+        return;
+    }
+    let started_at = (status == "running").then(chrono::Utc::now);
     persistence
-        .update_instance_status(instance_id, status, None)
+        .update_instance_status(instance_id, status, started_at)
         .await
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
