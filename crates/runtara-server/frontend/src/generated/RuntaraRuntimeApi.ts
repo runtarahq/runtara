@@ -1478,6 +1478,11 @@ export interface ConnectionDto {
   defaultFor?: string[];
   /** Safe edit projection. Present only on the single-connection endpoint. */
   editProjection?: null | ConnectionEditProjection;
+  /**
+   * OAuth grant health. Present only for interactive-OAuth types on the
+   * single-connection endpoint. Booleans + timestamps only — never secrets.
+   */
+  grantState?: null | ConnectionGrantState;
   id: string;
   integrationId?: string | null;
   /** When true, this connection is the default S3 storage for webhook attachments */
@@ -1513,6 +1518,21 @@ export interface ConnectionFieldBehavior {
   clearable: boolean;
   /** Changing or clearing this field invalidates captured authorization. */
   requiresReauthorization: boolean;
+}
+
+/**
+ * Non-sensitive OAuth authorization state for a connection. Derived from the
+ * stored parameters without exposing token values.
+ */
+export interface ConnectionGrantState {
+  /** RFC3339 timestamp of the last successful authorization, if known. */
+  authorizedAt?: string | null;
+  /** An access token is currently stored. */
+  hasAccessToken: boolean;
+  /** A refresh token is stored (the grant can renew itself). */
+  hasRefreshToken: boolean;
+  /** RFC3339 expiry of the current access token, if known. */
+  tokenExpiresAt?: string | null;
 }
 
 /** Explicit descriptor-aware connection parameter operations. */

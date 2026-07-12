@@ -151,6 +151,24 @@ fn requires_interactive_oauth(integration_id: &str) -> bool {
         .is_some_and(|m| m.oauth_config.is_some())
 }
 
+/// Derive non-sensitive OAuth grant health from stored parameters. Reports
+/// only token presence and timestamps — never the token values themselves.
+fn build_grant_state(params: Option<&serde_json::Value>) -> ConnectionGrantState {
+    let obj = params.and_then(serde_json::Value::as_object);
+    let non_empty_str = |key: &str| {
+        obj.and_then(|o| o.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    ConnectionGrantState {
+        has_access_token: non_empty_str("access_token").is_some(),
+        has_refresh_token: non_empty_str("refresh_token").is_some(),
+        token_expires_at: non_empty_str("token_expires_at").map(str::to_string),
+        authorized_at: non_empty_str("authorized_at").map(str::to_string),
+    }
+}
+
 fn build_edit_projection(
     integration_id: &str,
     params: Option<&serde_json::Value>,
@@ -607,6 +625,11 @@ impl ConnectionService {
                 parameters.as_ref(),
                 connection.updated_at.clone(),
             ));
+            // Grant health is meaningful only for interactive-OAuth types; other
+            // types carry no provider authorization to report on.
+            if requires_interactive_oauth(integration_id) {
+                connection.grant_state = Some(build_grant_state(parameters.as_ref()));
+            }
         }
         Ok(connection)
     }
@@ -741,6 +764,7 @@ impl ConnectionService {
             obj.remove("access_token");
             obj.remove("refresh_token");
             obj.remove("token_expires_at");
+            obj.remove("authorized_at");
         }
 
         // Execute update
@@ -947,8 +971,9 @@ pub enum ServiceError {
 mod tests {
     use super::{
         ServiceError, apply_connection_parameter_patch, apply_connection_parameter_patch_to_meta,
-        build_edit_projection, requires_interactive_oauth, validate_connection_parameters,
-        validate_create_connection_parameters, validate_rate_limit_config, validate_url_field,
+        build_edit_projection, build_grant_state, requires_interactive_oauth,
+        validate_connection_parameters, validate_create_connection_parameters,
+        validate_rate_limit_config, validate_url_field,
     };
     use crate::types::{ConnectionParameterPatch, RateLimitConfigDto, UpdateConnectionRequest};
     use serde_json::json;
@@ -1056,6 +1081,36 @@ mod tests {
         assert!(projection.values.get("access_token").is_none());
         assert!(projection.secret_state["client_secret"].configured);
         assert_eq!(projection.version, "2026-07-12T08:00:00Z");
+    }
+
+    #[test]
+    fn grant_state_reports_token_health_without_values() {
+        let authorized = build_grant_state(Some(&json!({
+            "access_token": "server-only-token",
+            "refresh_token": "server-only-refresh",
+            "token_expires_at": "2026-07-12T09:00:00Z",
+            "authorized_at": "2026-07-12T08:00:00Z"
+        })));
+        assert!(authorized.has_access_token);
+        assert!(authorized.has_refresh_token);
+        assert_eq!(
+            authorized.token_expires_at.as_deref(),
+            Some("2026-07-12T09:00:00Z")
+        );
+        assert_eq!(
+            authorized.authorized_at.as_deref(),
+            Some("2026-07-12T08:00:00Z")
+        );
+
+        // A never-authorized (or reset) connection carries no tokens.
+        let never = build_grant_state(Some(&json!({
+            "client_id": "id",
+            "access_token": ""
+        })));
+        assert!(!never.has_access_token);
+        assert!(!never.has_refresh_token);
+        assert!(never.token_expires_at.is_none());
+        assert!(never.authorized_at.is_none());
     }
 
     #[test]

@@ -234,6 +234,11 @@ impl OAuthService {
                     Value::String(expires_at.to_rfc3339()),
                 );
             }
+            // Stamp the successful authorization time for the grant-health card.
+            obj.insert(
+                "authorized_at".to_string(),
+                Value::String(chrono::Utc::now().to_rfc3339()),
+            );
             // Capture provider-specific callback params declared by the descriptor
             // (e.g. Intuit returns `realmId`, needed for every QuickBooks API path).
             merge_extra_callback_params(obj, oauth_config, callback_params)?;

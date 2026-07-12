@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Loader2, RefreshCw } from 'lucide-react';
 
 import type {
+  ConnectionGrantState,
   ConnectionStatus,
   ConnectionTypeDto,
 } from '@/generated/RuntaraRuntimeApi';
@@ -36,6 +37,8 @@ type ConnectionStatusCardProps = {
   /** Count of stored secrets, for the non-OAuth compact strip. */
   configuredSecretCount: number;
   updatedAt?: string;
+  /** OAuth grant health (token presence + timestamps), when loaded. */
+  grantState?: ConnectionGrantState | null;
   /** Interactive-OAuth type: shows the Connect/Reconnect action. */
   isOAuth: boolean;
   onReconnect?: () => void;
@@ -62,11 +65,35 @@ function relativeTime(iso?: string): string | null {
   return new Date(iso).toLocaleDateString();
 }
 
+/** A never-authorized OAuth connection: reconnect-required with no grant yet. */
+function isNeverAuthorized(
+  status: ConnectionStatus,
+  grantState?: ConnectionGrantState | null
+): boolean {
+  return (
+    status === 'REQUIRES_RECONNECTION' &&
+    !!grantState &&
+    !grantState.hasAccessToken &&
+    !grantState.authorizedAt
+  );
+}
+
 /** Message shown under the pill for the current status (OAuth types). */
-function statusDetail(status: ConnectionStatus, provider: string): string {
+function statusDetail(
+  status: ConnectionStatus,
+  provider: string,
+  grantState?: ConnectionGrantState | null
+): string {
   switch (status) {
-    case 'REQUIRES_RECONNECTION':
-      return "This connection isn't authorized. Your saved credentials are kept — authorize without re-entering them.";
+    case 'REQUIRES_RECONNECTION': {
+      if (isNeverAuthorized(status, grantState)) {
+        return `This connection hasn't been authorized with ${provider} yet. Sign in once to activate it — your saved credentials are used automatically.`;
+      }
+      const last = relativeTime(grantState?.authorizedAt ?? undefined);
+      return `Access expired or was revoked${
+        last ? `, last authorized ${last}` : ''
+      }. Your saved credentials are kept — reconnect without re-entering them.`;
+    }
     case 'INVALID_CREDENTIALS':
       return `${provider} rejected the stored credentials. Update them below and save.`;
     case 'UNKNOWN':
@@ -74,6 +101,23 @@ function statusDetail(status: ConnectionStatus, provider: string): string {
     default:
       return '';
   }
+}
+
+/** Token-health line shown for a connected OAuth grant. */
+function grantHealthLine(grantState?: ConnectionGrantState | null): string | null {
+  if (!grantState || !grantState.hasAccessToken) return null;
+  const authorized = relativeTime(grantState.authorizedAt ?? undefined);
+  const expires = grantState.tokenExpiresAt
+    ? new Date(grantState.tokenExpiresAt).toLocaleString()
+    : null;
+  const parts: string[] = [];
+  if (authorized) parts.push(`Authorized ${authorized}`);
+  if (grantState.hasRefreshToken) {
+    parts.push('access token renews automatically');
+  } else if (expires) {
+    parts.push(`token expires ${expires} — reconnect before then`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 /**
@@ -88,6 +132,7 @@ export function ConnectionStatusCard({
   values,
   configuredSecretCount,
   updatedAt,
+  grantState,
   isOAuth,
   onReconnect,
   onSaveAndReconnect,
@@ -96,11 +141,15 @@ export function ConnectionStatusCard({
   hasReauthChanges,
 }: ConnectionStatusCardProps) {
   const [guardOpen, setGuardOpen] = useState(false);
-  const pill = connectionStatusPill(status);
+  const neverAuthorized = isNeverAuthorized(status, grantState);
+  const pill = neverAuthorized
+    ? { tone: 'warning' as const, label: 'Authorization needed' }
+    : connectionStatusPill(status);
   const provider = connectionType.displayName || 'the provider';
   const identity = connectionIdentity(connectionType, values);
   const isConnected = status === 'ACTIVE';
-  const reconnectLabel = status === 'REQUIRES_RECONNECTION' ? 'Connect' : 'Reconnect';
+  const reconnectLabel =
+    status === 'REQUIRES_RECONNECTION' ? 'Connect' : 'Reconnect';
 
   const handleReconnectClick = () => {
     if (hasParamChanges) {
@@ -128,7 +177,8 @@ export function ConnectionStatusCard({
     </Button>
   );
 
-  const detail = isOAuth ? statusDetail(status, provider) : '';
+  const detail = isOAuth ? statusDetail(status, provider, grantState) : '';
+  const healthLine = isOAuth ? grantHealthLine(grantState) : null;
   const updated = relativeTime(updatedAt);
 
   return (
@@ -149,6 +199,9 @@ export function ConnectionStatusCard({
           </div>
           {detail && (
             <p className="text-xs text-muted-foreground">{detail}</p>
+          )}
+          {healthLine && (
+            <p className="text-xs text-muted-foreground">{healthLine}</p>
           )}
           {!isOAuth && (
             <p className="text-xs text-muted-foreground">

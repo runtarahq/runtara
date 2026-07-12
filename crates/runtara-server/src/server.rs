@@ -296,6 +296,7 @@ use runtime_client::RuntimeClient;
             // Connection DTOs (re-exported from runtara-connections crate)
             runtara_connections::types::ErrorResponse,
             runtara_connections::types::ConnectionDto,
+            runtara_connections::types::ConnectionGrantState,
             runtara_connections::types::ConnectionStatus,
             runtara_connections::types::ConnectionResponse,
             runtara_connections::types::ListConnectionsResponse,

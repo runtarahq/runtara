@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { toast } from 'sonner';
 
 import type {
+  ConnectionGrantState,
   ConnectionStatus,
   ConnectionTypeDto,
   RateLimitConfigDto,
@@ -388,6 +389,10 @@ export function DynamicConnectionForm({
                 values={editProjection?.values as Record<string, unknown>}
                 configuredSecretCount={configuredSecretCount}
                 updatedAt={(initValues as { updatedAt?: string })?.updatedAt}
+                grantState={
+                  (initValues as { grantState?: ConnectionGrantState | null })
+                    ?.grantState
+                }
                 isOAuth={Boolean(showReconnect)}
                 onReconnect={onReconnect}
                 onSaveAndReconnect={() => form.handleSubmit(handleSubmit)()}

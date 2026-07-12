@@ -397,14 +397,17 @@ test.describe.serial('Connection schema form local UI', () => {
       'com.intuit.quickbooks.accounting'
     );
 
-    // The status card replaces the amber reconnect banner: an unauthorized
-    // OAuth row shows the "Reconnect required" pill + never-authorized copy
-    // and a Connect action, and no role="alert" banner remains.
-    await expect(page.getByText('Reconnect required')).toBeVisible();
+    // The status card replaces the amber reconnect banner. A never-authorized
+    // OAuth row (grant state has no tokens) shows the precise "Authorization
+    // needed" pill + never-authorized copy and a Connect action, and no
+    // role="alert" banner remains.
+    await expect(page.getByText('Authorization needed')).toBeVisible();
     await expect(
-      page.getByText("This connection isn't authorized", { exact: false })
+      page.getByText("hasn't been authorized with", { exact: false })
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Connect', exact: true })
+    ).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
 
     let submittedBody: Record<string, unknown> | undefined;

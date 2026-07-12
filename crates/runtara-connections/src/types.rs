@@ -416,7 +416,30 @@ pub struct ConnectionDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "editProjection")]
     pub edit_projection: Option<ConnectionEditProjection>,
+    /// OAuth grant health. Present only for interactive-OAuth types on the
+    /// single-connection endpoint. Booleans + timestamps only — never secrets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "grantState")]
+    pub grant_state: Option<ConnectionGrantState>,
     // NOTE: connection_parameters is intentionally NOT included for security
+}
+
+/// Non-sensitive OAuth authorization state for a connection. Derived from the
+/// stored parameters without exposing token values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionGrantState {
+    /// An access token is currently stored.
+    pub has_access_token: bool,
+    /// A refresh token is stored (the grant can renew itself).
+    pub has_refresh_token: bool,
+    /// RFC3339 expiry of the current access token, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_expires_at: Option<String>,
+    /// RFC3339 timestamp of the last successful authorization, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorized_at: Option<String>,
 }
 
 /// Safe editable view of connection parameters.

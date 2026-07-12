@@ -10,7 +10,7 @@ function mockPopup(): FakePopup {
 }
 
 describe('useOAuthPopup', () => {
-  let openSpy: ReturnType<typeof vi.spyOn>;
+  let openSpy: { mockRestore: () => void } | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();

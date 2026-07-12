@@ -353,6 +353,7 @@ impl ConnectionRepository {
                         is_default_file_storage,
                         default_for: Vec::new(),
                         edit_projection: None,
+                        grant_state: None,
                     }
                 },
             )
@@ -428,6 +429,7 @@ impl ConnectionRepository {
                     is_default_file_storage,
                     default_for: Vec::new(),
                     edit_projection: None,
+                    grant_state: None,
                 }
             },
         );
@@ -733,6 +735,7 @@ impl ConnectionRepository {
                         is_default_file_storage,
                         default_for: Vec::new(),
                         edit_projection: None,
+                        grant_state: None,
                     }
                 },
             )
