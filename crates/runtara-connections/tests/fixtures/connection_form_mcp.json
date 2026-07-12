@@ -1,0 +1,231 @@
+{
+  "fieldBehavior": {
+    "api_key_header": {
+      "clearable": false,
+      "requiresReauthorization": false
+    },
+    "api_key_value": {
+      "clearable": true,
+      "requiresReauthorization": false
+    },
+    "auth_mode": {
+      "clearable": false,
+      "requiresReauthorization": false
+    },
+    "bearer_token": {
+      "clearable": true,
+      "requiresReauthorization": false
+    },
+    "extra_headers": {
+      "clearable": false,
+      "requiresReauthorization": false
+    },
+    "tool_hints": {
+      "clearable": false,
+      "requiresReauthorization": false
+    },
+    "tool_scope": {
+      "clearable": false,
+      "requiresReauthorization": false
+    },
+    "url": {
+      "clearable": false,
+      "requiresReauthorization": false
+    }
+  },
+  "form": {
+    "allowUnknownFields": false,
+    "fields": {
+      "api_key_header": {
+        "access": "read_write",
+        "conditions": {
+          "visible": {
+            "arguments": [
+              {
+                "value": "auth_mode",
+                "valueType": "reference"
+              },
+              {
+                "value": "api_key",
+                "valueType": "immediate"
+              }
+            ],
+            "op": "EQ",
+            "type": "operation"
+          }
+        },
+        "description": "Header name for the API key (when auth_mode = \"api_key\"). Defaults to X-API-Key.",
+        "label": "API Key Header",
+        "placeholder": "X-API-Key",
+        "required": false,
+        "section": "configuration",
+        "type": "string"
+      },
+      "api_key_value": {
+        "access": "write",
+        "conditions": {
+          "required": {
+            "arguments": [
+              {
+                "value": "auth_mode",
+                "valueType": "reference"
+              },
+              {
+                "value": "api_key",
+                "valueType": "immediate"
+              }
+            ],
+            "op": "EQ",
+            "type": "operation"
+          },
+          "visible": {
+            "arguments": [
+              {
+                "value": "auth_mode",
+                "valueType": "reference"
+              },
+              {
+                "value": "api_key",
+                "valueType": "immediate"
+              }
+            ],
+            "op": "EQ",
+            "type": "operation"
+          }
+        },
+        "control": {
+          "kind": "password"
+        },
+        "description": "API key value (when auth_mode = \"api_key\").",
+        "label": "API Key",
+        "required": false,
+        "secret": true,
+        "section": "credentials",
+        "type": "string"
+      },
+      "auth_mode": {
+        "access": "read_write",
+        "control": {
+          "kind": "select",
+          "options": [
+            {
+              "label": "None",
+              "value": "none"
+            },
+            {
+              "label": "Bearer",
+              "value": "bearer"
+            },
+            {
+              "label": "Api Key",
+              "value": "api_key"
+            }
+          ]
+        },
+        "default": "none",
+        "description": "Authentication mode: none, bearer, or api_key.",
+        "enum": [
+          "none",
+          "bearer",
+          "api_key"
+        ],
+        "label": "Auth Mode",
+        "required": false,
+        "section": "configuration",
+        "type": "string"
+      },
+      "bearer_token": {
+        "access": "write",
+        "conditions": {
+          "required": {
+            "arguments": [
+              {
+                "value": "auth_mode",
+                "valueType": "reference"
+              },
+              {
+                "value": "bearer",
+                "valueType": "immediate"
+              }
+            ],
+            "op": "EQ",
+            "type": "operation"
+          },
+          "visible": {
+            "arguments": [
+              {
+                "value": "auth_mode",
+                "valueType": "reference"
+              },
+              {
+                "value": "bearer",
+                "valueType": "immediate"
+              }
+            ],
+            "op": "EQ",
+            "type": "operation"
+          }
+        },
+        "control": {
+          "kind": "password"
+        },
+        "description": "Bearer token (when auth_mode = \"bearer\").",
+        "label": "Bearer Token",
+        "required": false,
+        "secret": true,
+        "section": "credentials",
+        "type": "string"
+      },
+      "extra_headers": {
+        "access": "read_write",
+        "description": "Extra static headers to forward on every request (header_name → value).",
+        "label": "Extra Headers",
+        "required": false,
+        "section": "configuration",
+        "type": "object"
+      },
+      "tool_hints": {
+        "access": "read_write",
+        "description": "Optional per-tool hint strings (tool_name → extra description) used by the search ranker.",
+        "label": "Tool Hints",
+        "required": false,
+        "section": "configuration",
+        "type": "object"
+      },
+      "tool_scope": {
+        "access": "read_write",
+        "description": "Optional allowlist of tool names. Empty = allow all tools advertised by the MCP server.",
+        "items": {
+          "required": false,
+          "type": "string"
+        },
+        "label": "Tool Scope",
+        "required": false,
+        "section": "configuration",
+        "type": "array"
+      },
+      "url": {
+        "access": "read_write",
+        "description": "Streamable-HTTP endpoint URL of the MCP server (e.g. https://mcp.example.com/jsonrpc).",
+        "label": "Server URL",
+        "placeholder": "https://mcp.example.com/jsonrpc",
+        "required": true,
+        "section": "configuration",
+        "type": "string"
+      }
+    },
+    "schemaVersion": 1,
+    "sections": [
+      {
+        "id": "configuration",
+        "label": "Connection details",
+        "order": 0
+      },
+      {
+        "id": "credentials",
+        "label": "Credentials",
+        "order": 100
+      }
+    ]
+  }
+}

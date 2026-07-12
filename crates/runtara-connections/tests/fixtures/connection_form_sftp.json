@@ -1,0 +1,98 @@
+{
+  "authMode": {
+    "access": "read_write",
+    "control": {
+      "kind": "select",
+      "options": [
+        {
+          "label": "Password",
+          "value": "password"
+        },
+        {
+          "label": "Private Key",
+          "value": "private_key"
+        }
+      ]
+    },
+    "default": "password",
+    "description": "Choose password or private-key authentication.",
+    "enum": [
+      "password",
+      "private_key"
+    ],
+    "label": "Authentication Mode",
+    "required": false,
+    "section": "configuration",
+    "type": "string"
+  },
+  "scenarios": {
+    "legacyPrivateKey": {
+      "passphrase": {
+        "enabled": true,
+        "required": false,
+        "visible": true
+      },
+      "password": {
+        "enabled": true,
+        "required": false,
+        "visible": false
+      },
+      "privateKey": {
+        "enabled": true,
+        "required": true,
+        "visible": true
+      },
+      "valid": true
+    },
+    "passwordMissing": {
+      "passphrase": {
+        "enabled": true,
+        "required": false,
+        "visible": false
+      },
+      "password": {
+        "enabled": true,
+        "required": true,
+        "visible": true
+      },
+      "privateKey": {
+        "enabled": true,
+        "required": false,
+        "visible": false
+      },
+      "valid": false
+    },
+    "privateKeyConfigured": {
+      "passphrase": {
+        "enabled": true,
+        "required": false,
+        "visible": true
+      },
+      "password": {
+        "enabled": true,
+        "required": false,
+        "visible": false
+      },
+      "privateKey": {
+        "enabled": true,
+        "required": true,
+        "visible": true
+      },
+      "valid": true
+    }
+  },
+  "secretBehavior": {
+    "passphrase": {
+      "clearable": true,
+      "requiresReauthorization": false
+    },
+    "password": {
+      "clearable": true,
+      "requiresReauthorization": false
+    },
+    "private_key": {
+      "clearable": true,
+      "requiresReauthorization": false
+    }
+  }
+}

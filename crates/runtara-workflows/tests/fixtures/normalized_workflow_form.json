@@ -1,0 +1,57 @@
+{
+  "allowUnknownFields": false,
+  "fields": {
+    "company_name": {
+      "access": "read_write",
+      "conditions": {
+        "visible": {
+          "arguments": [
+            {
+              "value": "kind",
+              "valueType": "reference"
+            },
+            {
+              "value": "company",
+              "valueType": "immediate"
+            }
+          ],
+          "op": "EQ",
+          "type": "operation"
+        }
+      },
+      "label": "Company name",
+      "max": 80.0,
+      "min": 2.0,
+      "order": 2,
+      "pattern": "^[A-Za-z]",
+      "placeholder": "Acme",
+      "required": false,
+      "type": "string"
+    },
+    "kind": {
+      "access": "read_write",
+      "enum": [
+        "person",
+        "company"
+      ],
+      "label": "Kind",
+      "order": 1,
+      "required": true,
+      "type": "string"
+    },
+    "tags": {
+      "access": "read_write",
+      "format": "tags",
+      "items": {
+        "required": false,
+        "type": "string"
+      },
+      "nullable": true,
+      "order": 3,
+      "required": false,
+      "type": "array"
+    }
+  },
+  "schemaVersion": 1,
+  "sections": []
+}

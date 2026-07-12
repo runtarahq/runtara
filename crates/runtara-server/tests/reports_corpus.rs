@@ -21,6 +21,30 @@ use runtara_server::api::dto::reports::ReportDefinition;
 use runtara_server::api::services::reports::ReportService;
 use serde_json::Value;
 
+fn collect_condition_shapes(
+    value: &Value,
+    path: &str,
+    conditions: &mut std::collections::BTreeMap<String, Value>,
+) {
+    match value {
+        Value::Object(values) => {
+            for (key, child) in values {
+                let child_path = format!("{path}.{key}");
+                if matches!(key.as_str(), "showWhen" | "visibleWhen" | "disabledWhen") {
+                    conditions.insert(child_path.clone(), child.clone());
+                }
+                collect_condition_shapes(child, &child_path, conditions);
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_condition_shapes(child, &format!("{path}[{index}]"), conditions);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reports")
 }
@@ -101,4 +125,21 @@ fn fixtures_have_no_lint_warnings() {
             "{name}: expected no lint issues, got: {issues:?}"
         );
     }
+}
+
+#[test]
+fn stored_report_condition_shapes_survive_the_dto_boundary_losslessly() {
+    let mut audited = 0usize;
+    for (name, value) in collect_fixtures() {
+        let mut before = std::collections::BTreeMap::new();
+        collect_condition_shapes(&value, "$", &mut before);
+        let dto: ReportDefinition = serde_json::from_value(value)
+            .unwrap_or_else(|error| panic!("{name}: deserialize: {error}"));
+        let serialized = serde_json::to_value(dto).unwrap();
+        let mut after = std::collections::BTreeMap::new();
+        collect_condition_shapes(&serialized, "$", &mut after);
+        assert_eq!(before, after, "{name}: condition wire shape changed");
+        audited += before.len();
+    }
+    assert!(audited >= 2, "expected representative stored conditions");
 }
