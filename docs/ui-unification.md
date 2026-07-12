@@ -21,8 +21,9 @@ Implementation in progress.
 - [x] Implement the safe connection edit projection and explicit patch contract.
 - [x] Generate canonical forms from every connection descriptor and migrate the
   connection editor.
-- [ ] Adopt shared form validation/rendering in workflow UI surfaces without
-  changing the workflow DSL.
+- [x] Adopt shared form validation/rendering in workflow UI surfaces without
+  changing the workflow DSL. Workflow execution, human-action, and chat signal
+  forms now use the shared renderer; persisted graph/schema shapes are unchanged.
 - [ ] **In progress:** Adapt report filters, inline editors, and visibility to the
   shared engine. Persisted `showWhen` now has a lossless canonical-condition
   adapter; filter controls and inline editors remain.
@@ -49,6 +50,9 @@ Verification completed so far:
   runtara-agents/native` — 2 passed against local containerized PostgreSQL,
   including safe projection, explicit patching, secret preservation, and stale
   version rejection.
+- Workflow form adapter, renderer, schema, and generated-WASM Vitest suites —
+  16 passed; full TypeScript and targeted ESLint checks passed. The superseded
+  `SchemaFormFields` renderer was removed.
 
 This document defines how Runtara will unify schema-driven form rendering across
 connections, workflows, and reports without adding third-party form or schema

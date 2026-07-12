@@ -1,13 +1,13 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { WaitingForInputData } from '@/features/workflows/types/chat';
 import { parseSchema } from '@/features/workflows/utils/schema';
-import { SchemaFormFields } from '@/features/workflows/components/SchemaFormFields';
+import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
 import {
-  isFieldVisible,
-  humanizeKey,
-} from '@/features/workflows/components/SchemaFormFields/utils';
+  initialWorkflowFormValues,
+  workflowSchemaToFormDefinition,
+} from '@/features/workflows/utils/form-schema-adapter';
 import { deliverSignal } from '@/features/workflows/queries';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
 
@@ -17,47 +17,41 @@ interface ChatFormInputProps {
   token: string;
 }
 
+function humanizeKey(value: string): string {
+  return value
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 export function ChatFormInput({
   waitingForInput,
   instanceId,
   token,
 }: ChatFormInputProps) {
-  const schemaFields = parseSchema(waitingForInput.responseSchema);
+  const schemaFields = useMemo(
+    () => parseSchema(waitingForInput.responseSchema),
+    [waitingForInput.responseSchema]
+  );
+  const definition = useMemo(
+    () => workflowSchemaToFormDefinition(schemaFields),
+    [schemaFields]
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formValues, setFormValues] = useState<Record<string, any>>(() => {
-    const defaults: Record<string, any> = {};
-    for (const field of schemaFields) {
-      if (field.defaultValue !== undefined) {
-        defaults[field.name] = field.defaultValue;
-      } else if (field.type === 'boolean') {
-        defaults[field.name] = false;
-      } else {
-        defaults[field.name] = '';
-      }
-    }
-    return defaults;
-  });
-
-  const updateField = useCallback((name: string, value: any) => {
-    setFormValues((prev) => ({ ...prev, [name]: value }));
-  }, []);
-
-  // Check if all required visible fields are filled
-  const isValid = schemaFields
-    .filter((f) => f.required !== false && isFieldVisible(f, formValues))
-    .every((f) => {
-      const val = formValues[f.name];
-      if (f.type === 'boolean') return true;
-      return val !== '' && val !== undefined && val !== null;
-    });
+  const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
+    initialWorkflowFormValues(definition)
+  );
+  const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const isValid = analysis?.valid === true;
 
   const handleSubmit = useCallback(async () => {
     if (!isValid || isSubmitting) return;
 
     // Build payload, coercing types
-    const payload: Record<string, any> = {};
+    const payload: Record<string, unknown> = {};
     for (const field of schemaFields) {
-      if (!isFieldVisible(field, formValues)) continue;
+      if (analysis?.fields[field.name]?.visible === false) continue;
       const val = formValues[field.name];
       if (field.type === 'number' || field.type === 'integer') {
         payload[field.name] = val !== '' ? Number(val) : undefined;
@@ -104,6 +98,7 @@ export function ChatFormInput({
     isSubmitting,
     schemaFields,
     formValues,
+    analysis,
     token,
     instanceId,
     waitingForInput.signalId,
@@ -118,14 +113,12 @@ export function ChatFormInput({
       )}
 
       <div className="mb-3">
-        <SchemaFormFields
-          fields={schemaFields}
-          rawSchema={
-            waitingForInput.responseSchema as Record<string, any> | undefined
-          }
-          formValues={formValues}
-          onChange={updateField}
+        <FormRenderer
+          definition={definition}
+          value={formValues}
+          onChange={setFormValues}
           disabled={isSubmitting}
+          onAnalysisChange={setAnalysis}
         />
       </div>
 

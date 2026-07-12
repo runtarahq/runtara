@@ -8,12 +8,13 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { Button } from '@/shared/components/ui/button';
-import { parseSchema, SchemaField } from '@/features/workflows/utils/schema';
-import {
-  SchemaInputForm,
-  SchemaInputFormChangeAction,
-} from '@/shared/components/SchemaInputForm';
+import { parseSchema } from '@/features/workflows/utils/schema';
 import { validateWorkflowStartInputsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
+import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
+import {
+  initialWorkflowFormValues,
+  workflowSchemaToFormDefinition,
+} from '@/features/workflows/utils/form-schema-adapter';
 
 type WorkflowExecuteDialogProps = {
   open: boolean;
@@ -35,29 +36,17 @@ export function WorkflowExecuteDialog({
   serverError,
 }: WorkflowExecuteDialogProps) {
   const fields = useMemo(() => parseSchema(inputSchema), [inputSchema]);
-
-  // Fields with defaults (and booleans, which render as checkboxes) start
-  // "set"; key presence in inputData marks a field as touched.
-  const getInitialData = (schemaFields: SchemaField[]) => {
-    const initial: Record<string, any> = {};
-    schemaFields.forEach((field) => {
-      if (field.defaultValue !== undefined) {
-        initial[field.name] = field.defaultValue;
-      } else if (field.type === 'boolean') {
-        initial[field.name] = false;
-      }
-      // All other types without defaults start as undefined (not in the record)
-    });
-    return initial;
-  };
-
-  const [inputData, setInputData] = useState<Record<string, any>>(() =>
-    getInitialData(fields)
+  const definition = useMemo(
+    () => workflowSchemaToFormDefinition(fields),
+    [fields]
   );
 
-  const [validationErrors, setValidationErrors] = useState<
-    Record<string, string>
-  >({});
+  const [inputData, setInputData] = useState<Record<string, any>>(() =>
+    initialWorkflowFormValues(definition)
+  );
+  const [formAnalysis, setFormAnalysis] = useState<FormAnalysisResult | null>(
+    null
+  );
   const [rustValidationError, setRustValidationError] = useState<string | null>(
     null
   );
@@ -65,67 +54,34 @@ export function WorkflowExecuteDialog({
 
   // Reset input data and validation errors when input schema changes
   useEffect(() => {
-    setInputData(getInitialData(fields));
-    setValidationErrors({});
+    setInputData(initialWorkflowFormValues(definition));
+    setFormAnalysis(null);
     setRustValidationError(null);
-  }, [fields]);
+  }, [definition]);
 
   // Reset input data and validation errors when dialog opens
   useEffect(() => {
     if (open) {
-      setInputData(getInitialData(fields));
-      setValidationErrors({});
+      setInputData(initialWorkflowFormValues(definition));
+      setFormAnalysis(null);
       setRustValidationError(null);
     }
-  }, [open, fields]);
-
-  const handleDataChange = (
-    next: Record<string, any>,
-    changedField: string,
-    action: SchemaInputFormChangeAction
-  ) => {
-    setInputData(next);
-    if (action === 'set') {
-      setRustValidationError(null);
-    }
-    // Clear validation error for this field when user makes changes
-    if (validationErrors[changedField]) {
-      setValidationErrors((prev) => {
-        const { [changedField]: _removed, ...rest } = prev;
-        void _removed;
-        return rest;
-      });
-    }
-  };
-
-  const getValidationErrors = (): Record<string, string> => {
-    const errors: Record<string, string> = {};
-    fields.forEach((field) => {
-      if (field.required) {
-        const value = inputData[field.name];
-        if (
-          !(field.name in inputData) ||
-          value === undefined ||
-          value === null
-        ) {
-          errors[field.name] = `${field.name} is required`;
-        }
-      }
-    });
-    return errors;
-  };
+  }, [open, definition]);
 
   const handleExecute = async () => {
-    const errors = getValidationErrors();
-    setValidationErrors(errors);
     setRustValidationError(null);
-    if (Object.keys(errors).length > 0) {
+    if (fields.length > 0 && !formAnalysis?.valid) {
       return;
     }
     // Only include fields that are set and defined
     const filteredData: Record<string, any> = {};
     for (const [key, value] of Object.entries(inputData)) {
-      if (value !== undefined) {
+      const field = definition.fields[key];
+      if (
+        value !== undefined &&
+        formAnalysis?.fields[key]?.visible !== false &&
+        !(value === '' && field?.required === false)
+      ) {
         filteredData[key] = value;
       }
     }
@@ -174,11 +130,15 @@ export function WorkflowExecuteDialog({
               No input fields required.
             </p>
           ) : (
-            <SchemaInputForm
-              inputSchema={inputSchema}
+            <FormRenderer
+              definition={definition}
               value={inputData}
-              onChange={handleDataChange}
-              errors={validationErrors}
+              onChange={(next) => {
+                setInputData(next);
+                setRustValidationError(null);
+              }}
+              disabled={isSubmitting || isRustValidating}
+              onAnalysisChange={setFormAnalysis}
             />
           )}
           {serverError && (
@@ -203,7 +163,11 @@ export function WorkflowExecuteDialog({
           </Button>
           <Button
             onClick={handleExecute}
-            disabled={isSubmitting || isRustValidating}
+            disabled={
+              isSubmitting ||
+              isRustValidating ||
+              (fields.length > 0 && !formAnalysis?.valid)
+            }
           >
             {isSubmitting || isRustValidating ? 'Executing...' : 'Execute'}
           </Button>
