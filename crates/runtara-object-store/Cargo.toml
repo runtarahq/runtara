@@ -10,6 +10,14 @@ keywords = ["postgresql", "schema", "dynamic", "object-store", "database"]
 categories = ["database"]
 publish = false
 
+[features]
+db-integration-tests = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["db-integration-tests"]
+
 [dependencies]
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "rust_decimal", "uuid", "tls-rustls"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

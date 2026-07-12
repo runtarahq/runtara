@@ -826,18 +826,24 @@ impl Persistence for PostgresPersistence {
 // op_delete_instances_batch / op_list_instances
 // (crate::persistence::common::ops::{retention, instances}).
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
     use super::*;
 
     use crate::migrations::POSTGRES as MIGRATOR;
 
     // Helper to get a test database pool
-    async fn test_pool() -> Option<PgPool> {
-        let url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
-        let pool = PgPool::connect(&url).await.ok()?;
-        MIGRATOR.run(&pool).await.ok()?;
-        Some(pool)
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("TEST_RUNTARA_DATABASE_URL")
+            .expect("db-integration-tests requires TEST_RUNTARA_DATABASE_URL");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required core test database must accept connections");
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("required core migrations must succeed");
+        pool
     }
 
     // Helper to create a test instance
@@ -866,10 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_get_instance() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -887,10 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_instance_status() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -916,10 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_instance_checkpoint() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -943,10 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_instance_success() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -973,10 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_instance_failure() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1002,10 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_checkpoint_new() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1028,10 +1016,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_checkpoint_duplicate() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1068,10 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_checkpoint_by_id() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1110,10 +1092,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_checkpoint_latest() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1158,10 +1137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_checkpoint_not_found() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1180,10 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_event() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1215,10 +1188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_signal() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1239,10 +1209,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_pending_signal() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1262,10 +1229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_pending_signal_none() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1280,10 +1244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acknowledge_signal() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1306,10 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_take_custom_signal() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
@@ -1345,10 +1303,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_active_instances() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let instance1 = Uuid::new_v4();
         let instance2 = Uuid::new_v4();
@@ -1384,10 +1339,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_db() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
+        let pool = test_pool().await;
 
         let result = PostgresPersistence::op_health_check_db(&pool).await;
         assert!(result.is_ok());

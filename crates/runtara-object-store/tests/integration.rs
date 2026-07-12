@@ -25,13 +25,13 @@ fn test_prefix() -> String {
 }
 
 /// Get the database URL from environment
-fn get_database_url() -> Option<String> {
-    std::env::var("TEST_DATABASE_URL").ok()
+fn get_database_url() -> String {
+    std::env::var("TEST_DATABASE_URL").expect("db-integration-tests requires TEST_DATABASE_URL")
 }
 
 /// Create a test store with a unique metadata table
-async fn create_test_store() -> Option<(ObjectStore, String)> {
-    let db_url = get_database_url()?;
+async fn create_test_store() -> (ObjectStore, String) {
+    let db_url = get_database_url();
     let prefix = test_prefix();
     let metadata_table = format!("{}__schema", prefix);
 
@@ -39,8 +39,10 @@ async fn create_test_store() -> Option<(ObjectStore, String)> {
         .metadata_table(&metadata_table)
         .build();
 
-    let store = ObjectStore::new(config).await.ok()?;
-    Some((store, prefix))
+    let store = ObjectStore::new(config)
+        .await
+        .expect("required object-store test database must initialize");
+    (store, prefix)
 }
 
 /// Clean up test tables
@@ -76,10 +78,7 @@ async fn index_definition(
 
 #[tokio::test]
 async fn test_create_schema() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_products", prefix);
     let request = CreateSchemaRequest {
@@ -115,10 +114,7 @@ async fn test_create_schema() {
 
 #[tokio::test]
 async fn test_get_schema_by_name() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_items", prefix);
     let request = CreateSchemaRequest {
@@ -156,10 +152,7 @@ async fn test_get_schema_by_name() {
 
 #[tokio::test]
 async fn test_update_schema_reconciles_physical_indexes() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_index_updates", prefix);
     let request = CreateSchemaRequest {
@@ -250,10 +243,7 @@ async fn test_update_schema_reconciles_physical_indexes() {
 
 #[tokio::test]
 async fn test_unique_index_can_be_added_with_soft_deleted_duplicates() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_unique_after_delete", prefix);
     let request = CreateSchemaRequest {
@@ -321,10 +311,7 @@ async fn test_unique_index_can_be_added_with_soft_deleted_duplicates() {
 
 #[tokio::test]
 async fn test_get_schema_by_id() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_widgets", prefix);
     let request = CreateSchemaRequest {
@@ -355,10 +342,7 @@ async fn test_get_schema_by_id() {
 
 #[tokio::test]
 async fn test_list_schemas() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create multiple schemas
     for i in 1..=3 {
@@ -384,10 +368,7 @@ async fn test_list_schemas() {
 
 #[tokio::test]
 async fn test_delete_schema() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let request = CreateSchemaRequest {
         name: "to_delete".to_string(),
@@ -421,10 +402,7 @@ async fn test_delete_schema() {
 
 #[tokio::test]
 async fn test_duplicate_schema_name_error() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let request = CreateSchemaRequest {
         name: "unique_name".to_string(),
@@ -460,10 +438,7 @@ async fn test_duplicate_schema_name_error() {
 async fn test_update_schema_rename_preserves_data() {
     // SYN-485: a declared column rename must preserve the column's data instead
     // of dropping it and adding an empty replacement.
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let request = CreateSchemaRequest {
         name: "renamable".to_string(),
@@ -524,10 +499,7 @@ async fn test_update_schema_rename_preserves_data() {
 async fn test_update_schema_undeclared_drop_is_rejected() {
     // SYN-485: dropping a column (e.g. an undeclared rename) without
     // acknowledgement must be rejected so data isn't silently destroyed.
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let request = CreateSchemaRequest {
         name: "guarded".to_string(),
@@ -592,10 +564,7 @@ async fn test_update_schema_undeclared_drop_is_rejected() {
 
 #[tokio::test]
 async fn test_create_and_get_instance() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -645,10 +614,7 @@ async fn test_create_and_get_instance() {
 
 #[tokio::test]
 async fn test_update_instance() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -707,10 +673,7 @@ async fn test_update_instance() {
 
 #[tokio::test]
 async fn test_delete_instance() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -751,10 +714,7 @@ async fn test_delete_instance() {
 
 #[tokio::test]
 async fn test_unique_column_allows_reuse_after_soft_delete() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_unique_live", prefix);
     let request = CreateSchemaRequest {
@@ -817,10 +777,7 @@ async fn test_unique_column_allows_reuse_after_soft_delete() {
 
 #[tokio::test]
 async fn test_vector_distance_score_expression_returns_computed_distance() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_vector_score", prefix);
     store
@@ -904,10 +861,7 @@ async fn test_vector_distance_score_expression_returns_computed_distance() {
 
 #[tokio::test]
 async fn test_query_instances_simple() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -967,10 +921,7 @@ async fn test_query_instances_simple() {
 
 #[tokio::test]
 async fn test_filter_instances_with_condition() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -1042,10 +993,7 @@ async fn test_filter_instances_with_condition() {
 
 #[tokio::test]
 async fn test_instance_exists() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -1093,10 +1041,7 @@ async fn test_instance_exists() {
 
 #[tokio::test]
 async fn test_type_validation() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema with strict types
     let request = CreateSchemaRequest {
@@ -1146,10 +1091,7 @@ async fn test_type_validation() {
 
 #[tokio::test]
 async fn test_required_column_validation() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema with required column
     let request = CreateSchemaRequest {
@@ -1187,10 +1129,7 @@ async fn test_required_column_validation() {
 
 #[tokio::test]
 async fn test_store_without_soft_delete() {
-    let Some(db_url) = get_database_url() else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let db_url = get_database_url();
 
     let prefix = test_prefix();
     let metadata_table = format!("{}__schema", prefix);
@@ -1238,10 +1177,7 @@ async fn test_store_without_soft_delete() {
 
 #[tokio::test]
 async fn test_custom_metadata_table() {
-    let Some(db_url) = get_database_url() else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let db_url = get_database_url();
 
     let prefix = test_prefix();
     let custom_metadata = format!("{}_custom_meta", prefix);
@@ -1276,10 +1212,7 @@ async fn test_custom_metadata_table() {
 
 #[tokio::test]
 async fn test_all_column_types() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema with all column types
     let request = CreateSchemaRequest {
@@ -1341,10 +1274,7 @@ async fn test_all_column_types() {
 
 #[tokio::test]
 async fn test_sorting() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -1426,10 +1356,7 @@ async fn test_sorting() {
 
 #[tokio::test]
 async fn test_pagination() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Create schema
     let request = CreateSchemaRequest {
@@ -1497,10 +1424,7 @@ async fn test_pagination() {
 
 #[tokio::test]
 async fn test_filter_limit_is_clamped() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let request = CreateSchemaRequest {
         name: "clamped".to_string(),
@@ -1553,10 +1477,7 @@ async fn test_filter_limit_is_clamped() {
 
 #[tokio::test]
 async fn test_update_instances_with_condition() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_update", prefix);
     let request = CreateSchemaRequest {
@@ -1631,10 +1552,7 @@ async fn test_update_instances_with_condition() {
 
 #[tokio::test]
 async fn test_update_instances_no_matches() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_update_empty", prefix);
     let request = CreateSchemaRequest {
@@ -1678,10 +1596,7 @@ async fn test_update_instances_no_matches() {
 
 #[tokio::test]
 async fn test_delete_instances_soft_delete() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_delete_soft", prefix);
     let request = CreateSchemaRequest {
@@ -1737,13 +1652,7 @@ async fn test_delete_instances_soft_delete() {
 
 #[tokio::test]
 async fn test_delete_instances_hard_delete() {
-    let db_url = match get_database_url() {
-        Some(url) => url,
-        None => {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        }
-    };
+    let db_url = get_database_url();
 
     let prefix = test_prefix();
     let metadata_table = format!("{}__schema", prefix);
@@ -1810,10 +1719,7 @@ async fn test_delete_instances_hard_delete() {
 
 #[tokio::test]
 async fn test_create_instances_batch() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_create", prefix);
     let request = CreateSchemaRequest {
@@ -1865,10 +1771,7 @@ async fn test_create_instances_batch() {
 
 #[tokio::test]
 async fn test_create_instances_validation_rollback() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_create_fail", prefix);
     let request = CreateSchemaRequest {
@@ -1914,10 +1817,7 @@ async fn test_create_instances_validation_rollback() {
 
 #[tokio::test]
 async fn test_create_instances_empty() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_create_empty", prefix);
     let request = CreateSchemaRequest {
@@ -1946,10 +1846,7 @@ async fn test_create_instances_empty() {
 
 #[tokio::test]
 async fn test_upsert_instances_insert_only() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_insert", prefix);
     let request = CreateSchemaRequest {
@@ -1999,10 +1896,7 @@ async fn test_upsert_instances_insert_only() {
 
 #[tokio::test]
 async fn test_upsert_instances_update_only() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_update", prefix);
     let request = CreateSchemaRequest {
@@ -2070,10 +1964,7 @@ async fn test_upsert_instances_update_only() {
 
 #[tokio::test]
 async fn test_upsert_instances_mixed() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_mixed", prefix);
     let request = CreateSchemaRequest {
@@ -2147,10 +2038,7 @@ async fn test_upsert_instances_mixed() {
 
 #[tokio::test]
 async fn test_upsert_instances_multi_column_conflict() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_multi", prefix);
     let request = CreateSchemaRequest {
@@ -2238,10 +2126,7 @@ async fn test_upsert_instances_multi_column_conflict() {
 
 #[tokio::test]
 async fn test_upsert_instances_empty_conflict_columns() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_empty_conflict", prefix);
     let request = CreateSchemaRequest {
@@ -2273,10 +2158,7 @@ async fn test_upsert_instances_empty_conflict_columns() {
 
 #[tokio::test]
 async fn test_update_instances_by_ids_mixed_values() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_update_by_ids", prefix);
     store
@@ -2360,10 +2242,7 @@ async fn test_update_instances_by_ids_mixed_values() {
 
 #[tokio::test]
 async fn test_update_instances_by_ids_validation_rolls_back() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_update_by_ids_rb", prefix);
     store
@@ -2417,10 +2296,7 @@ async fn test_update_instances_by_ids_validation_rolls_back() {
 
 #[tokio::test]
 async fn test_create_instances_extended_skip_conflict() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_skip", prefix);
     store
@@ -2496,10 +2372,7 @@ async fn test_create_instances_extended_skip_conflict() {
 
 #[tokio::test]
 async fn test_create_instances_extended_upsert_conflict() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_upsert", prefix);
     store
@@ -2572,10 +2445,7 @@ async fn test_create_instances_extended_upsert_conflict() {
 
 #[tokio::test]
 async fn test_create_instances_extended_skip_validation() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_skip_invalid", prefix);
     store
@@ -2620,10 +2490,7 @@ async fn test_create_instances_extended_skip_validation() {
 
 #[tokio::test]
 async fn test_create_instances_extended_requires_conflict_columns() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_missing_cols", prefix);
     store
@@ -2659,10 +2526,7 @@ async fn test_create_instances_extended_requires_conflict_columns() {
 
 #[tokio::test]
 async fn test_create_instances_extended_partial_columns_typed_null() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_bulk_partial", prefix);
     store
@@ -2795,10 +2659,7 @@ async fn assert_json_null_semantics(store: &ObjectStore, table_name: &str) {
 
 #[tokio::test]
 async fn test_create_instances_json_absent_vs_explicit_null() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_json_null", prefix);
     setup_json_null_schema(&store, "json_null", &table_name).await;
@@ -2822,10 +2683,7 @@ async fn test_create_instances_json_absent_vs_explicit_null() {
 
 #[tokio::test]
 async fn test_upsert_instances_json_absent_vs_explicit_null() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_json_null_up", prefix);
     setup_json_null_schema(&store, "json_null_up", &table_name).await;
@@ -2850,10 +2708,7 @@ async fn test_upsert_instances_json_absent_vs_explicit_null() {
 
 #[tokio::test]
 async fn test_create_instances_extended_json_absent_vs_explicit_null() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_json_null_ext", prefix);
     setup_json_null_schema(&store, "json_null_ext", &table_name).await;
@@ -2888,10 +2743,7 @@ async fn test_create_instances_extended_json_absent_vs_explicit_null() {
 
 #[tokio::test]
 async fn test_create_instances_fires_db_default_when_column_absent() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_default_ts", prefix);
     store
@@ -2966,10 +2818,7 @@ async fn test_create_instances_fires_db_default_when_column_absent() {
 
 #[tokio::test]
 async fn test_upsert_instances_default_on_insert_and_update() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_default_up", prefix);
     store
@@ -3040,10 +2889,7 @@ async fn test_upsert_instances_default_on_insert_and_update() {
 
 #[tokio::test]
 async fn test_upsert_instances_leaves_absent_columns_untouched() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_preserve", prefix);
     store
@@ -3109,10 +2955,7 @@ async fn test_upsert_instances_leaves_absent_columns_untouched() {
 
 #[tokio::test]
 async fn test_upsert_instances_does_not_restamp_defaulted_absent_column() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_default_stable", prefix);
     store
@@ -3181,10 +3024,7 @@ async fn test_upsert_instances_does_not_restamp_defaulted_absent_column() {
 
 #[tokio::test]
 async fn test_upsert_instances_mixed_signatures_single_batch() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_upsert_multi_sig", prefix);
     store
@@ -3257,10 +3097,7 @@ async fn test_upsert_instances_mixed_signatures_single_batch() {
 
 #[tokio::test]
 async fn test_create_instances_extended_upsert_preserves_absent_columns() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let table_name = format!("{}_ext_upsert_preserve", prefix);
     store
@@ -3377,10 +3214,7 @@ async fn seed_stock_snapshot(
 
 #[tokio::test]
 async fn test_aggregate_first_last_value_per_group() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let expected = seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3460,10 +3294,7 @@ async fn test_aggregate_first_last_value_per_group() {
 
 #[tokio::test]
 async fn test_aggregate_count_sum_grouped() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3527,10 +3358,7 @@ async fn test_aggregate_count_sum_grouped() {
 
 #[tokio::test]
 async fn test_aggregate_count_star_no_group_by() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3566,10 +3394,7 @@ async fn test_aggregate_count_star_no_group_by() {
 
 #[tokio::test]
 async fn test_aggregate_with_condition_filter() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3612,10 +3437,7 @@ async fn test_aggregate_with_condition_filter() {
 
 #[tokio::test]
 async fn test_aggregate_unknown_column_rejected_at_store() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3704,10 +3526,7 @@ fn make_expr_spec(alias: &str, expression: serde_json::Value) -> AggregateSpec {
 /// we expect delta_abs order: C(50), A(10), B(4).
 #[tokio::test]
 async fn test_aggregate_expr_delta_end_to_end() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3789,10 +3608,7 @@ async fn test_aggregate_expr_delta_end_to_end() {
 /// `last / first` is valid for A (=0) but `first / last` divides by zero.
 #[tokio::test]
 async fn test_aggregate_expr_div_by_zero_returns_null() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3848,10 +3664,7 @@ async fn test_aggregate_expr_div_by_zero_returns_null() {
 /// Boolean EXPR column should surface as JSON `true`/`false`.
 #[tokio::test]
 async fn test_aggregate_expr_boolean_column() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
@@ -3899,10 +3712,7 @@ async fn test_aggregate_expr_boolean_column() {
 
 #[tokio::test]
 async fn test_aggregate_percentile_cont_per_sku() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
     // Median (p=0.5) of qty per SKU. Sorted qtys per SKU:
@@ -3959,10 +3769,7 @@ async fn test_aggregate_percentile_cont_per_sku() {
 
 #[tokio::test]
 async fn test_aggregate_percentile_disc_no_group() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
     // P95 over all qtys: sorted = [0, 5, 7, 9, 10, 15, 50, 100, 100].
@@ -4004,10 +3811,7 @@ async fn test_aggregate_percentile_disc_no_group() {
 
 #[tokio::test]
 async fn test_aggregate_stddev_samp_with_condition() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
 
     // Filter qty > 0, group by sku. Sample stddev:
@@ -4100,10 +3904,7 @@ async fn drop_raw_sql_table(store: &ObjectStore, table: &str) {
 
 #[tokio::test]
 async fn test_query_guarded_rejects_writes_via_read_only_txn() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     let table = create_raw_sql_table(&store, &prefix).await;
 
     // A write spelled as a query must be rejected by Postgres itself
@@ -4128,10 +3929,7 @@ async fn test_query_guarded_rejects_writes_via_read_only_txn() {
 
 #[tokio::test]
 async fn test_query_guarded_statement_timeout_fires() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let guardrails = runtara_object_store::SqlGuardrails {
         statement_timeout_ms: 200,
@@ -4151,10 +3949,7 @@ async fn test_query_guarded_statement_timeout_fires() {
 
 #[tokio::test]
 async fn test_query_guarded_row_cap_errors_never_truncates() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let guardrails = runtara_object_store::SqlGuardrails {
         max_rows: 5,
@@ -4181,10 +3976,7 @@ async fn test_query_guarded_row_cap_errors_never_truncates() {
 
 #[tokio::test]
 async fn test_query_guarded_byte_cap_bounds_fat_rows() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // A row cap alone does not bound memory: one row, many bytes.
     let guardrails = runtara_object_store::SqlGuardrails {
@@ -4205,10 +3997,7 @@ async fn test_query_guarded_byte_cap_bounds_fat_rows() {
 
 #[tokio::test]
 async fn test_execute_guarded_rejects_multi_statement_at_protocol() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     let table = create_raw_sql_table(&store, &prefix).await;
 
     // The extended protocol prepares exactly one statement per call — this
@@ -4242,10 +4031,7 @@ async fn test_execute_guarded_rejects_multi_statement_at_protocol() {
 
 #[tokio::test]
 async fn test_execute_guarded_rows_affected_for_dml_and_truncate() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
     let table = create_raw_sql_table(&store, &prefix).await;
 
     let inserted = store
@@ -4298,10 +4084,7 @@ async fn test_execute_guarded_rows_affected_for_dml_and_truncate() {
 
 #[tokio::test]
 async fn test_query_guarded_typed_params_roundtrip() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     let params = vec![
         runtara_object_store::SqlParam {
@@ -4382,10 +4165,7 @@ async fn test_query_guarded_typed_params_roundtrip() {
 
 #[tokio::test]
 async fn test_query_guarded_raw_unsupported_type_points_at_result_schema() {
-    let Some((store, prefix)) = create_test_store().await else {
-        eprintln!("Skipping test: TEST_DATABASE_URL not set");
-        return;
-    };
+    let (store, prefix) = create_test_store().await;
 
     // Raw decoding rejects PG arrays — the error must point the author at
     // result_schema (the typed escape hatch the workflow capability exposes).

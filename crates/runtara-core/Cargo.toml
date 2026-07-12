@@ -19,6 +19,7 @@ required-features = ["server"]
 
 [features]
 default = ["server"]
+db-integration-tests = []
 
 # Full server mode with HTTP transport (for running runtara-core as a service)
 server = ["dep:dotenvy", "dep:axum"]
