@@ -760,6 +760,15 @@ struct ConnectionFieldArgs {
     /// Shared form access mode: read_write, read, or write.
     #[darling(default)]
     access: Option<String>,
+    /// Rust function returning the canonical visibility condition.
+    #[darling(default)]
+    visible: Option<syn::Path>,
+    /// Rust function returning the canonical enabled condition.
+    #[darling(default)]
+    enabled: Option<syn::Path>,
+    /// Rust function returning the canonical conditional-required expression.
+    #[darling(default)]
+    required: Option<syn::Path>,
 }
 
 /// Container attributes for ConnectionParams derive
@@ -888,6 +897,18 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let is_url = f.is_url;
             let is_required = f.is_required;
             let section_token = option_to_tokens(&f.section);
+            let visible_token = f
+                .visible
+                .as_ref()
+                .map_or_else(|| quote! { None }, |path| quote! { Some(#path) });
+            let enabled_token = f
+                .enabled
+                .as_ref()
+                .map_or_else(|| quote! { None }, |path| quote! { Some(#path) });
+            let required_token = f
+                .required
+                .as_ref()
+                .map_or_else(|| quote! { None }, |path| quote! { Some(#path) });
             let control_token = match f.control.as_deref() {
                 None => quote! { None },
                 Some("text") => quote! { Some(runtara_dsl::form::ControlKind::Text) },
@@ -956,6 +977,11 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     control: #control_token,
                     section: #section_token,
                     access: #access_token,
+                    conditions: runtara_dsl::agent_meta::ConnectionFieldConditions {
+                        visible: #visible_token,
+                        enabled: #enabled_token,
+                        required: #required_token,
+                    },
                 }
             }
         })

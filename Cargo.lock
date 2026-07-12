@@ -4389,6 +4389,8 @@ dependencies = [
  "darling 0.20.11",
  "proc-macro2",
  "quote",
+ "runtara-dsl",
+ "serde_json",
  "syn 2.0.117",
 ]
 

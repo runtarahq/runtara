@@ -1156,7 +1156,9 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "Bearer Token",
         description = "Bearer token (when auth_mode = \"bearer\").",
-        secret
+        secret,
+        visible = mcp_auth_is_bearer,
+        required = mcp_auth_is_bearer
     )]
     pub bearer_token: Option<String>,
 
@@ -1165,7 +1167,8 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "API Key Header",
         description = "Header name for the API key (when auth_mode = \"api_key\"). Defaults to X-API-Key.",
-        placeholder = "X-API-Key"
+        placeholder = "X-API-Key",
+        visible = mcp_auth_is_api_key
     )]
     pub api_key_header: Option<String>,
 
@@ -1174,7 +1177,9 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "API Key",
         description = "API key value (when auth_mode = \"api_key\").",
-        secret
+        secret,
+        visible = mcp_auth_is_api_key,
+        required = mcp_auth_is_api_key
     )]
     pub api_key_value: Option<String>,
 
@@ -1201,6 +1206,14 @@ pub struct McpConnectionParams {
         description = "Optional allowlist of tool names. Empty = allow all tools advertised by the MCP server."
     )]
     pub tool_scope: Vec<String>,
+}
+
+fn mcp_auth_is_bearer() -> runtara_dsl::ConditionExpression {
+    runtara_dsl::form::field_equals("auth_mode", "bearer")
+}
+
+fn mcp_auth_is_api_key() -> runtara_dsl::ConditionExpression {
+    runtara_dsl::form::field_equals("auth_mode", "api_key")
 }
 
 fn default_mcp_auth_mode() -> String {
@@ -1527,5 +1540,64 @@ impl HttpConnectionExtractor for HttpOAuth2AuthorizationCodeExtractor {
             url_prefix: base_url.trim_end_matches('/').to_string(),
             rate_limit_config: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod form_condition_tests {
+    use super::*;
+    use runtara_dsl::form::{analyze_form, connection_form_definition};
+    use serde_json::json;
+
+    #[test]
+    fn mcp_generated_form_uses_auth_mode_conditions() {
+        let definition = connection_form_definition(&__CONNECTION_META_McpConnectionParams);
+
+        let none = analyze_form(
+            &definition,
+            &json!({
+                "url": "https://mcp.example.com/jsonrpc",
+                "auth_mode": "none",
+                "extra_headers": {},
+                "tool_hints": {},
+                "tool_scope": []
+            }),
+        );
+        assert!(!none.fields["bearer_token"].visible);
+        assert!(!none.fields["api_key_header"].visible);
+        assert!(!none.fields["api_key_value"].visible);
+        assert!(none.valid);
+
+        let bearer = analyze_form(
+            &definition,
+            &json!({
+                "url": "https://mcp.example.com/jsonrpc",
+                "auth_mode": "bearer",
+                "bearer_token": "secret",
+                "extra_headers": {},
+                "tool_hints": {},
+                "tool_scope": []
+            }),
+        );
+        assert!(bearer.fields["bearer_token"].visible);
+        assert!(bearer.fields["bearer_token"].required);
+        assert!(!bearer.fields["api_key_value"].visible);
+        assert!(bearer.valid);
+
+        let api_key_missing = analyze_form(
+            &definition,
+            &json!({
+                "url": "https://mcp.example.com/jsonrpc",
+                "auth_mode": "api_key",
+                "extra_headers": {},
+                "tool_hints": {},
+                "tool_scope": []
+            }),
+        );
+        assert!(!api_key_missing.fields["bearer_token"].visible);
+        assert!(api_key_missing.fields["api_key_header"].visible);
+        assert!(api_key_missing.fields["api_key_value"].visible);
+        assert!(api_key_missing.fields["api_key_value"].required);
+        assert!(!api_key_missing.valid);
     }
 }

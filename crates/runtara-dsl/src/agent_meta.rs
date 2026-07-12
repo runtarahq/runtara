@@ -835,6 +835,22 @@ impl std::fmt::Display for ConnectionAuthType {
 // Connection Metadata Types
 // ============================================================================
 
+/// Factory for a canonical condition attached to connection-form metadata.
+///
+/// A function pointer keeps the static descriptor const-friendly while letting
+/// connection authors construct the same owned [`crate::ConditionExpression`]
+/// used by workflows, reports, native validation, and browser WASM. It avoids
+/// introducing a second string condition language in the derive macro.
+pub type ConnectionConditionFactory = fn() -> crate::ConditionExpression;
+
+/// Canonical conditional state factories emitted by `ConnectionParams`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConnectionFieldConditions {
+    pub visible: Option<ConnectionConditionFactory>,
+    pub enabled: Option<ConnectionConditionFactory>,
+    pub required: Option<ConnectionConditionFactory>,
+}
+
 /// Metadata for a connection field parameter
 #[derive(Debug, Clone)]
 pub struct ConnectionFieldMeta {
@@ -876,6 +892,8 @@ pub struct ConnectionFieldMeta {
     pub section: Option<&'static str>,
     /// Whether clients may read and/or write the value.
     pub access: crate::form::FieldAccessMode,
+    /// Conditional visible/enabled/required state using canonical expressions.
+    pub conditions: ConnectionFieldConditions,
 }
 
 /// How client credentials are presented to the OAuth token endpoint.

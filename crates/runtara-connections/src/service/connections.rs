@@ -169,6 +169,24 @@ fn build_edit_projection(
         }
     }
 
+    // `auth_mode` was added after SFTP connections already existed. Preserve
+    // old key-only records by projecting the mode their stored credentials
+    // imply; new saves persist the explicit field normally.
+    if integration_id == "sftp" && params.is_none_or(|params| !params.contains_key("auth_mode")) {
+        let inferred = if params
+            .and_then(|params| params.get("private_key"))
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(|s| !s.is_empty()))
+        {
+            "private_key"
+        } else {
+            "password"
+        };
+        values.insert(
+            "auth_mode".to_string(),
+            serde_json::Value::String(inferred.to_string()),
+        );
+    }
+
     ConnectionEditProjection {
         values: serde_json::Value::Object(values),
         secret_state,
@@ -997,6 +1015,29 @@ mod tests {
         assert!(projection.values.get("access_token").is_none());
         assert!(projection.secret_state["client_secret"].configured);
         assert_eq!(projection.version, "2026-07-12T08:00:00Z");
+    }
+
+    #[test]
+    fn sftp_legacy_projection_infers_auth_mode() {
+        let private_key = build_edit_projection(
+            "sftp",
+            Some(&json!({
+                "host": "files.example.com",
+                "private_key": "-----BEGIN PRIVATE KEY-----"
+            })),
+            "v1".to_string(),
+        );
+        assert_eq!(private_key.values["auth_mode"], "private_key");
+
+        let password = build_edit_projection(
+            "sftp",
+            Some(&json!({
+                "host": "files.example.com",
+                "password": "stored-secret"
+            })),
+            "v1".to_string(),
+        );
+        assert_eq!(password.values["auth_mode"], "password");
     }
 
     #[test]

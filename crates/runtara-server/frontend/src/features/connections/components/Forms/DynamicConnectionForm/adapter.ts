@@ -34,7 +34,13 @@ export function buildConnectionFormDefinition(
     Object.entries(descriptor.fields).map(([name, field]) => [
       name,
       mode === 'edit' && field.access === 'write'
-        ? { ...field, required: false }
+        ? {
+            ...field,
+            required: false,
+            conditions: field.conditions
+              ? { ...field.conditions, required: undefined }
+              : undefined,
+          }
         : field,
     ])
   );

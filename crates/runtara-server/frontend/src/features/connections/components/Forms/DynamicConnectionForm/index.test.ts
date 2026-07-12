@@ -24,6 +24,16 @@ const descriptor: FormDefinition = {
       secret: true,
       control: { kind: 'password' },
       section: 'credentials',
+      conditions: {
+        required: {
+          type: 'operation',
+          op: 'EQ',
+          arguments: [
+            { valueType: 'reference', value: 'client_id' },
+            { valueType: 'immediate', value: 'client' },
+          ],
+        },
+      },
     },
     realm_id: { type: 'string', access: 'read', section: 'configuration' },
   },
@@ -46,6 +56,10 @@ describe('connection canonical form adapter', () => {
       buildConnectionFormDefinition(connectionType, 'edit').fields.client_secret
         .required
     ).toBe(false);
+    expect(
+      buildConnectionFormDefinition(connectionType, 'edit').fields.client_secret
+        .conditions?.required
+    ).toBeUndefined();
   });
 
   it('loads safe readable values and never invents secret values', () => {

@@ -442,7 +442,11 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
                 },
                 control: control_kind.map(|kind| FormControl { kind, options }),
                 section: Some(section),
-                conditions: FormConditions::default(),
+                conditions: FormConditions {
+                    visible: field.conditions.visible.map(|factory| factory()),
+                    enabled: field.conditions.enabled.map(|factory| factory()),
+                    required: field.conditions.required.map(|factory| factory()),
+                },
                 access: field.access,
                 secret: field.is_secret,
             },
@@ -472,6 +476,74 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
         allow_unknown_fields: false,
         ..FormDefinition::default()
     }
+}
+
+/// Build a canonical equality condition against a sibling form field.
+///
+/// Connection condition factories use this helper so descriptor code remains
+/// readable while still producing the exact shared `ConditionExpression` AST.
+pub fn field_equals(field: impl Into<String>, value: impl Into<Value>) -> ConditionExpression {
+    ConditionExpression::Operation(crate::ConditionOperation {
+        op: crate::ConditionOperator::Eq,
+        arguments: vec![
+            crate::ConditionArgument::Value(crate::MappingValue::Reference(
+                crate::ReferenceValue {
+                    value: field.into(),
+                    type_hint: None,
+                    default: None,
+                },
+            )),
+            crate::ConditionArgument::Value(crate::MappingValue::Immediate(
+                crate::ImmediateValue {
+                    value: value.into(),
+                },
+            )),
+        ],
+    })
+}
+
+/// Invert a canonical form condition without adding an inverse UI effect.
+pub fn not(condition: ConditionExpression) -> ConditionExpression {
+    ConditionExpression::Operation(crate::ConditionOperation {
+        op: crate::ConditionOperator::Not,
+        arguments: vec![crate::ConditionArgument::Expression(Box::new(condition))],
+    })
+}
+
+/// Build a canonical condition that is true when a sibling field is present.
+pub fn field_is_defined(field: impl Into<String>) -> ConditionExpression {
+    ConditionExpression::Operation(crate::ConditionOperation {
+        op: crate::ConditionOperator::IsDefined,
+        arguments: vec![crate::ConditionArgument::Value(
+            crate::MappingValue::Reference(crate::ReferenceValue {
+                value: field.into(),
+                type_hint: None,
+                default: None,
+            }),
+        )],
+    })
+}
+
+/// Compose canonical conditions with `AND`.
+pub fn all(conditions: impl IntoIterator<Item = ConditionExpression>) -> ConditionExpression {
+    ConditionExpression::Operation(crate::ConditionOperation {
+        op: crate::ConditionOperator::And,
+        arguments: conditions
+            .into_iter()
+            .map(|condition| crate::ConditionArgument::Expression(Box::new(condition)))
+            .collect(),
+    })
+}
+
+/// Compose canonical conditions with `OR`.
+pub fn any(conditions: impl IntoIterator<Item = ConditionExpression>) -> ConditionExpression {
+    ConditionExpression::Operation(crate::ConditionOperation {
+        op: crate::ConditionOperator::Or,
+        arguments: conditions
+            .into_iter()
+            .map(|condition| crate::ConditionArgument::Expression(Box::new(condition)))
+            .collect(),
+    })
 }
 
 /// Normalize the workflow DSL's existing flat schema map into a transient
@@ -981,6 +1053,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn production_only() -> ConditionExpression {
+        field_equals("environment", "production")
+    }
+
     fn schema(field_type: SchemaFieldType) -> SchemaField {
         SchemaField {
             field_type,
@@ -1149,7 +1225,9 @@ mod tests {
 
     #[test]
     fn connection_metadata_normalizes_to_canonical_form() {
-        use crate::agent_meta::{ConnectionFieldMeta, ConnectionTypeMeta};
+        use crate::agent_meta::{
+            ConnectionFieldConditions, ConnectionFieldMeta, ConnectionTypeMeta,
+        };
 
         static FIELDS: &[ConnectionFieldMeta] = &[
             ConnectionFieldMeta {
@@ -1167,6 +1245,11 @@ mod tests {
                 control: None,
                 section: None,
                 access: FieldAccessMode::ReadWrite,
+                conditions: ConnectionFieldConditions {
+                    visible: Some(production_only),
+                    enabled: None,
+                    required: None,
+                },
             },
             ConnectionFieldMeta {
                 name: "private_key",
@@ -1183,6 +1266,11 @@ mod tests {
                 control: Some(ControlKind::SecretTextarea),
                 section: None,
                 access: FieldAccessMode::Write,
+                conditions: ConnectionFieldConditions {
+                    visible: None,
+                    enabled: None,
+                    required: None,
+                },
             },
         ];
         let meta = ConnectionTypeMeta {
@@ -1208,6 +1296,21 @@ mod tests {
                 .map(|control| control.kind),
             Some(ControlKind::Select)
         ));
+        assert!(
+            definition.fields["environment"]
+                .conditions
+                .visible
+                .is_some()
+        );
+        assert!(
+            !analyze_form(&definition, &json!({ "environment": "sandbox" })).fields["environment"]
+                .visible
+        );
+        assert!(
+            analyze_form(&definition, &json!({ "environment": "production" })).fields
+                ["environment"]
+                .visible
+        );
         assert_eq!(
             definition.fields["private_key"].access,
             FieldAccessMode::Write

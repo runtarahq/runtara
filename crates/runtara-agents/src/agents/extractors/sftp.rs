@@ -43,12 +43,24 @@ pub struct SftpParams {
     )]
     username: String,
 
+    /// Authentication mode used by the schema-driven editor.
+    #[serde(default = "default_auth_mode")]
+    #[field(
+        display_name = "Authentication Mode",
+        description = "Choose password or private-key authentication.",
+        default = "password",
+        enum_values = "password,private_key"
+    )]
+    auth_mode: String,
+
     /// Password for authentication (optional if using private key)
     #[serde(default)]
     #[field(
         display_name = "Password",
         description = "Password for authentication (optional if using private key)",
-        secret
+        secret,
+        visible = sftp_auth_is_password,
+        required = sftp_auth_is_password
     )]
     password: Option<String>,
 
@@ -58,7 +70,9 @@ pub struct SftpParams {
         display_name = "Private Key",
         description = "Private key in PEM format (optional if using password)",
         secret,
-        control = "secret_textarea"
+        control = "secret_textarea",
+        visible = sftp_auth_is_private_key,
+        required = sftp_auth_is_private_key
     )]
     private_key: Option<String>,
 
@@ -67,7 +81,8 @@ pub struct SftpParams {
     #[field(
         display_name = "Passphrase",
         description = "Passphrase for the private key (if encrypted)",
-        secret
+        secret,
+        visible = sftp_auth_is_private_key
     )]
     passphrase: Option<String>,
 }
@@ -75,4 +90,79 @@ pub struct SftpParams {
 #[allow(dead_code)]
 fn default_port() -> u16 {
     22
+}
+
+#[allow(dead_code)]
+fn default_auth_mode() -> String {
+    "password".to_string()
+}
+
+fn sftp_auth_is_password() -> runtara_dsl::ConditionExpression {
+    runtara_dsl::form::not(sftp_auth_is_private_key())
+}
+
+fn sftp_auth_is_private_key() -> runtara_dsl::ConditionExpression {
+    runtara_dsl::form::any([
+        runtara_dsl::form::field_equals("auth_mode", "private_key"),
+        runtara_dsl::form::all([
+            runtara_dsl::form::not(runtara_dsl::form::field_is_defined("auth_mode")),
+            runtara_dsl::form::field_is_defined("private_key"),
+        ]),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::form::{analyze_form, connection_form_definition};
+    use serde_json::json;
+
+    #[test]
+    fn generated_form_switches_password_and_private_key_fields() {
+        let definition = connection_form_definition(&__CONNECTION_META_SftpParams);
+
+        let password = analyze_form(
+            &definition,
+            &json!({
+                "host": "sftp.example.com",
+                "port": 22,
+                "username": "demo",
+                "auth_mode": "password"
+            }),
+        );
+        assert!(password.fields["password"].visible);
+        assert!(password.fields["password"].required);
+        assert!(!password.fields["private_key"].visible);
+        assert!(!password.fields["passphrase"].visible);
+        assert!(!password.valid);
+
+        let private_key = analyze_form(
+            &definition,
+            &json!({
+                "host": "sftp.example.com",
+                "port": 22,
+                "username": "demo",
+                "auth_mode": "private_key",
+                "private_key": "-----BEGIN PRIVATE KEY-----"
+            }),
+        );
+        assert!(!private_key.fields["password"].visible);
+        assert!(private_key.fields["private_key"].visible);
+        assert!(private_key.fields["private_key"].required);
+        assert!(private_key.fields["passphrase"].visible);
+        assert!(private_key.valid);
+
+        let legacy_private_key = analyze_form(
+            &definition,
+            &json!({
+                "host": "sftp.example.com",
+                "port": 22,
+                "username": "demo",
+                "private_key": "-----BEGIN PRIVATE KEY-----"
+            }),
+        );
+        assert!(!legacy_private_key.fields["password"].visible);
+        assert!(legacy_private_key.fields["private_key"].visible);
+        assert!(legacy_private_key.valid);
+    }
 }
