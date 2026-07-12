@@ -1,11 +1,11 @@
 [package]
-name = "runtara-workflow-validation-wasm"
+name = "runtara-validation-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Browser WASM bindings for runtara workflow validation"
-keywords = ["workflow", "validation", "wasm"]
+description = "Browser WASM bindings for shared Runtara validation and form evaluation"
+keywords = ["validation", "forms", "wasm"]
 categories = ["development-tools", "wasm"]
 
 [lib]

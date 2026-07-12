@@ -15,8 +15,8 @@ import initRustValidation, {
   validateFormDefinitionJson,
   validateSchemaFieldsJson,
   validateWorkflowStartInputsJson,
-} from '@/wasm/workflow-validation/runtara_workflow_validation.js';
-import rustValidationWasmUrl from '@/wasm/workflow-validation/runtara_workflow_validation_bg.wasm?url';
+} from '@/wasm/validation/runtara_validation.js';
+import rustValidationWasmUrl from '@/wasm/validation/runtara_validation_bg.wasm?url';
 import { config } from '@/shared/config/runtimeConfig';
 import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 

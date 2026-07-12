@@ -1,6 +1,7 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Browser WASM bindings for workflow validation.
+//! Browser WASM bindings for shared form/condition validation plus
+//! workflow-specific validation compatibility exports.
 //!
 //! Agent metadata is no longer baked into the WASM bundle. The host page
 //! fetches `GET /api/runtime/agents` once at boot and pushes the JSON

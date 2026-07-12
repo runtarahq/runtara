@@ -17,37 +17,31 @@ const FINGERPRINT_VERSION = 'runtara-validation-wasm-v1';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptDir, '../../../..');
-const wasmCrate = path.join(
-  workspaceRoot,
-  'crates/runtara-workflow-validation-wasm'
-);
+const wasmCrate = path.join(workspaceRoot, 'crates/runtara-validation-wasm');
 const outputDir = path.join(
   workspaceRoot,
-  'crates/runtara-server/frontend/src/wasm/workflow-validation'
+  'crates/runtara-server/frontend/src/wasm/validation'
 );
-const fingerprintFile = path.join(
-  outputDir,
-  'runtara_workflow_validation.fingerprint'
-);
+const fingerprintFile = path.join(outputDir, 'runtara_validation.fingerprint');
 
 const requiredOutputs = [
   'package.json',
-  'runtara_workflow_validation.d.ts',
-  'runtara_workflow_validation.js',
-  'runtara_workflow_validation_bg.wasm',
-  'runtara_workflow_validation_bg.wasm.d.ts',
+  'runtara_validation.d.ts',
+  'runtara_validation.js',
+  'runtara_validation_bg.wasm',
+  'runtara_validation_bg.wasm.d.ts',
 ];
 
 const generatedOutputNames = new Set([
   ...requiredOutputs,
-  'runtara_workflow_validation.fingerprint',
+  'runtara_validation.fingerprint',
 ]);
 
 const inputs = [
   'Cargo.toml',
   'Cargo.lock',
-  'crates/runtara-workflow-validation-wasm/Cargo.toml',
-  'crates/runtara-workflow-validation-wasm/src',
+  'crates/runtara-validation-wasm/Cargo.toml',
+  'crates/runtara-validation-wasm/src',
   'crates/runtara-workflows/Cargo.toml',
   'crates/runtara-workflows/src',
   'crates/runtara-dsl/Cargo.toml',
@@ -159,7 +153,7 @@ const result = spawnSync(
     '--out-dir',
     outputDir,
     '--out-name',
-    'runtara_workflow_validation',
+    'runtara_validation',
   ],
   {
     cwd: workspaceRoot,

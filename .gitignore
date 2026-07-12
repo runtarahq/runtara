@@ -81,7 +81,7 @@ src/operators_lib/target/
 specs/
 
 # Generated browser validation WASM package (created by frontend prebuild/build.rs)
-crates/runtara-server/frontend/src/wasm/workflow-validation/
+crates/runtara-server/frontend/src/wasm/validation/
 
 # Claude Code — ignore user-specific state, track team-shared files
 .claude/settings.local.json

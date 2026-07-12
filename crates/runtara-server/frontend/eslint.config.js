@@ -15,7 +15,7 @@ export default tseslint.config(
       'playwright-report',
       'storybook-static',
       'coverage',
-      'src/wasm/workflow-validation',
+      'src/wasm/validation',
     ],
   },
   {

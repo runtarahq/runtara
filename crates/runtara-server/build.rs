@@ -60,8 +60,7 @@ fn main() {
     // When the `embed-ui` feature is on, rust_embed needs frontend/dist to exist at
     // compile time. Surface a helpful error up-front if it's missing.
     if std::env::var("CARGO_FEATURE_EMBED_UI").is_ok() {
-        let validation_wasm_rebuilt =
-            build_workflow_validation_wasm_if_needed(workspace_root, crate_dir);
+        let validation_wasm_rebuilt = build_validation_wasm_if_needed(workspace_root, crate_dir);
         if validation_wasm_rebuilt {
             rebuild_frontend_dist(crate_dir);
         }
@@ -81,16 +80,16 @@ fn main() {
     }
 }
 
-fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &Path) -> bool {
-    let wasm_crate = workspace_root.join("crates/runtara-workflow-validation-wasm");
-    let output_dir = crate_dir.join("frontend/src/wasm/workflow-validation");
-    let fingerprint_file = output_dir.join("runtara_workflow_validation.fingerprint");
+fn build_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &Path) -> bool {
+    let wasm_crate = workspace_root.join("crates/runtara-validation-wasm");
+    let output_dir = crate_dir.join("frontend/src/wasm/validation");
+    let fingerprint_file = output_dir.join("runtara_validation.fingerprint");
     let required_outputs = [
         "package.json",
-        "runtara_workflow_validation.d.ts",
-        "runtara_workflow_validation.js",
-        "runtara_workflow_validation_bg.wasm",
-        "runtara_workflow_validation_bg.wasm.d.ts",
+        "runtara_validation.d.ts",
+        "runtara_validation.js",
+        "runtara_validation_bg.wasm",
+        "runtara_validation_bg.wasm.d.ts",
     ];
 
     let inputs = validation_wasm_inputs(workspace_root);
@@ -109,7 +108,7 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
         .unwrap_or(false);
 
     if outputs_exist && current_fingerprint {
-        clean_workflow_validation_wasm_output(&output_dir, &required_outputs, true);
+        clean_validation_wasm_output(&output_dir, &required_outputs, true);
         println!("cargo:warning=   ✓ Browser validation WASM is up-to-date");
         return false;
     }
@@ -125,11 +124,11 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
 
     println!("cargo:warning=");
     println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
-    println!("cargo:warning=║  🧩 BUILDING BROWSER WORKFLOW VALIDATION WASM                  ║");
+    println!("cargo:warning=║  🧩 BUILDING BROWSER VALIDATION WASM                           ║");
     println!("cargo:warning=╚════════════════════════════════════════════════════════════════╝");
 
     fs::create_dir_all(&output_dir).expect("Failed to create validation WASM output directory");
-    clean_workflow_validation_wasm_output(&output_dir, &required_outputs, false);
+    clean_validation_wasm_output(&output_dir, &required_outputs, false);
 
     let mut cmd = Command::new("wasm-pack");
     cmd.args(["build"])
@@ -137,7 +136,7 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
         .args(["--target", "web"])
         .arg("--out-dir")
         .arg(&output_dir)
-        .args(["--out-name", "runtara_workflow_validation"])
+        .args(["--out-name", "runtara_validation"])
         .env(
             "CARGO_TARGET_DIR",
             workspace_root.join("target/validation-wasm-pack"),
@@ -169,11 +168,7 @@ fn build_workflow_validation_wasm_if_needed(workspace_root: &Path, crate_dir: &P
     true
 }
 
-fn clean_workflow_validation_wasm_output(
-    output_dir: &Path,
-    required_outputs: &[&str],
-    keep_current: bool,
-) {
+fn clean_validation_wasm_output(output_dir: &Path, required_outputs: &[&str], keep_current: bool) {
     if !output_dir.exists() {
         return;
     }
@@ -184,7 +179,7 @@ fn clean_workflow_validation_wasm_output(
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let should_keep = keep_current
-            && (name == "runtara_workflow_validation.fingerprint"
+            && (name == "runtara_validation.fingerprint"
                 || required_outputs
                     .iter()
                     .any(|required| *required == name.as_ref()));
@@ -234,8 +229,8 @@ fn validation_wasm_inputs(workspace_root: &Path) -> Vec<PathBuf> {
     [
         "Cargo.toml",
         "Cargo.lock",
-        "crates/runtara-workflow-validation-wasm/Cargo.toml",
-        "crates/runtara-workflow-validation-wasm/src",
+        "crates/runtara-validation-wasm/Cargo.toml",
+        "crates/runtara-validation-wasm/src",
         "crates/runtara-workflows/Cargo.toml",
         "crates/runtara-workflows/src",
         "crates/runtara-dsl/Cargo.toml",

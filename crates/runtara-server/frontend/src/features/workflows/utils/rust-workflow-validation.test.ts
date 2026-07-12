@@ -22,10 +22,7 @@ import {
 import { analyzeFormWithRust } from '@/shared/forms';
 
 const wasmBytes = readFileSync(
-  path.resolve(
-    process.cwd(),
-    'src/wasm/workflow-validation/runtara_workflow_validation_bg.wasm'
-  )
+  path.resolve(process.cwd(), 'src/wasm/validation/runtara_validation_bg.wasm')
 );
 const originalFetch = globalThis.fetch.bind(globalThis);
 let agentsFetchCount = 0;
@@ -71,7 +68,7 @@ function stubWasmFetch() {
             ? input.href
             : input.url;
 
-      if (target.endsWith('runtara_workflow_validation_bg.wasm')) {
+      if (target.endsWith('runtara_validation_bg.wasm')) {
         return new Response(wasmBytes, {
           headers: { 'Content-Type': 'application/wasm' },
         });

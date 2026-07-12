@@ -9,7 +9,7 @@ const wasm = vi.hoisted(() => ({
   ),
 }));
 
-vi.mock('@/wasm/workflow-validation/runtara_workflow_validation.js', () => ({
+vi.mock('@/wasm/validation/runtara_validation.js', () => ({
   default: wasm.init,
   agentCatalogLoaded: wasm.agentCatalogLoaded,
   initAgentCatalog: wasm.initAgentCatalog,
@@ -27,10 +27,9 @@ vi.mock('@/wasm/workflow-validation/runtara_workflow_validation.js', () => ({
   validateWorkflowStartInputsJson: vi.fn(),
 }));
 
-vi.mock(
-  '@/wasm/workflow-validation/runtara_workflow_validation_bg.wasm?url',
-  () => ({ default: '/validation.wasm' })
-);
+vi.mock('@/wasm/validation/runtara_validation_bg.wasm?url', () => ({
+  default: '/validation.wasm',
+}));
 vi.mock('@/shared/config/runtimeConfig', () => ({
   config: { oidc: { authority: '', clientId: '' } },
 }));
@@ -95,5 +94,4 @@ describe('shared Rust validation initialization', () => {
     );
     expect(wasm.initAgentCatalog).toHaveBeenCalledWith(JSON.stringify(details));
   });
-
 });

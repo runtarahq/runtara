@@ -4944,6 +4944,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-validation-wasm"
+version = "8.2.6"
+dependencies = [
+ "runtara-dsl",
+ "runtara-workflows",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "runtara-workflow-runtime"
 version = "8.2.6"
 dependencies = [
@@ -4962,17 +4973,6 @@ dependencies = [
  "serde",
  "serde_json",
  "wit-bindgen-rt 0.44.0",
-]
-
-[[package]]
-name = "runtara-workflow-validation-wasm"
-version = "8.2.6"
-dependencies = [
- "runtara-dsl",
- "runtara-workflows",
- "serde",
- "serde_json",
- "wasm-bindgen",
 ]
 
 [[package]]
