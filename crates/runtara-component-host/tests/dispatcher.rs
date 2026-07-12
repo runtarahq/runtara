@@ -2,7 +2,8 @@
 //!
 //! Builds a tmp `bundles/` directory by copying the freshly-built
 //! `runtara_agent_crypto.wasm` and the source `meta.json` together, then runs
-//! the dispatcher against it. Skipped if the .wasm is missing — run
+//! the dispatcher against it. The explicit component integration suite fails
+//! closed if the .wasm is missing — run
 //! `cargo component build --release --target wasm32-wasip2 -p
 //! runtara-agent-crypto` first.
 
@@ -19,9 +20,14 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn crypto_wasm_path() -> Option<PathBuf> {
+fn crypto_wasm_path() -> PathBuf {
     let p = workspace_root().join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
-    p.exists().then_some(p)
+    assert!(
+        p.exists(),
+        "component-integration-tests requires {}; run scripts/build-agent-components.sh",
+        p.display()
+    );
+    p
 }
 
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
@@ -29,15 +35,15 @@ fn crypto_wasm_path() -> Option<PathBuf> {
 /// `meta.json` sidecar is emitted on the fly by calling the agent crate's
 /// host-only `agent_info()` and serializing — same source-of-truth the
 /// production `runtara-agent-bundle-emit` binary uses.
-fn build_test_bundle() -> Option<tempfile::TempDir> {
-    let wasm = crypto_wasm_path()?;
+fn build_test_bundle() -> tempfile::TempDir {
+    let wasm = crypto_wasm_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::copy(&wasm, tmp.path().join("runtara_agent_crypto.wasm")).expect("copy crypto.wasm");
     let info = runtara_agent_crypto::agent_info();
     let json = serde_json::to_vec_pretty(&info).expect("serialize crypto agent_info");
     std::fs::write(tmp.path().join("runtara_agent_crypto.meta.json"), json)
         .expect("write crypto.meta.json");
-    Some(tmp)
+    tmp
 }
 
 fn env() -> DispatcherEnv {
@@ -51,10 +57,7 @@ fn env() -> DispatcherEnv {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_lists_agents_and_capabilities() -> anyhow::Result<()> {
-    let Some(bundle) = build_test_bundle() else {
-        eprintln!("SKIP: crypto wasm not built");
-        return Ok(());
-    };
+    let bundle = build_test_bundle();
 
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
     assert!(
@@ -73,10 +76,7 @@ async fn dispatcher_lists_agents_and_capabilities() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
-    let Some(bundle) = build_test_bundle() else {
-        eprintln!("SKIP: crypto wasm not built");
-        return Ok(());
-    };
+    let bundle = build_test_bundle();
 
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
     let result = dispatcher
@@ -113,10 +113,7 @@ async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
 /// reporting it missing.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_matches_agent_ids_canonically() -> anyhow::Result<()> {
-    let Some(bundle) = build_test_bundle() else {
-        eprintln!("SKIP: crypto wasm not built");
-        return Ok(());
-    };
+    let bundle = build_test_bundle();
 
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
     assert!(
@@ -148,10 +145,7 @@ async fn dispatcher_matches_agent_ids_canonically() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_returns_guest_error_for_unknown_capability() -> anyhow::Result<()> {
-    let Some(bundle) = build_test_bundle() else {
-        eprintln!("SKIP: crypto wasm not built");
-        return Ok(());
-    };
+    let bundle = build_test_bundle();
 
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
     let result = dispatcher
@@ -182,10 +176,7 @@ async fn dispatcher_returns_guest_error_for_unknown_capability() -> anyhow::Resu
 /// means the cap_id was routed correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Result<()> {
-    let Some(bundle) = build_test_bundle() else {
-        eprintln!("SKIP: crypto wasm not built");
-        return Ok(());
-    };
+    let bundle = build_test_bundle();
 
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
 
@@ -224,17 +215,17 @@ async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Res
 /// Production bundle-shaped load: point the dispatcher at
 /// `target/wasm32-wasip2/release/` (where the bundle script stages all 23
 /// `.wasm` + `.meta.json` pairs), verify every loaded capability is routed,
-/// and assert the count matches expectations. Skipped if the bundle hasn't
-/// been built — run `scripts/build-agent-components.sh` first.
+/// and assert the count matches expectations. The explicit suite fails if the
+/// bundle has not been built.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
     let bundle_dir = workspace_root().join("target/wasm32-wasip2/release");
     let crypto_wasm = bundle_dir.join("runtara_agent_crypto.wasm");
     let crypto_meta = bundle_dir.join("runtara_agent_crypto.meta.json");
-    if !crypto_wasm.exists() || !crypto_meta.exists() {
-        eprintln!("SKIP: bundle not built — run scripts/build-agent-components.sh first");
-        return Ok(());
-    }
+    assert!(
+        crypto_wasm.exists() && crypto_meta.exists(),
+        "component-integration-tests requires the production bundle; run scripts/build-agent-components.sh"
+    );
 
     let dispatcher = ComponentDispatcherService::from_dir(&bundle_dir, env()).await?;
     let loaded: Vec<String> = dispatcher

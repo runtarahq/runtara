@@ -1,6 +1,6 @@
 //! End-to-end smoke test: load `runtara_agent_crypto.wasm` directly into
-//! wasmtime and call the (now-only) `invoke` export. Skipped if the .wasm is
-//! missing — `cargo component build --release --target wasm32-wasip2 -p
+//! wasmtime and call the (now-only) `invoke` export. The explicit suite fails
+//! if the .wasm is missing — `cargo component build --release --target wasm32-wasip2 -p
 //! runtara-agent-crypto` first.
 
 use std::path::PathBuf;
@@ -26,13 +26,11 @@ fn agent_wasm_path() -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 async fn crypto_invoke_hash() -> anyhow::Result<()> {
     let wasm = agent_wasm_path();
-    if !wasm.exists() {
-        eprintln!(
-            "SKIP: {} not found. Run `cargo component build --release --target wasm32-wasip2 -p runtara-agent-crypto` first.",
-            wasm.display()
-        );
-        return Ok(());
-    }
+    assert!(
+        wasm.exists(),
+        "component-integration-tests requires {}; run scripts/build-agent-components.sh",
+        wasm.display()
+    );
 
     let engine = build_engine(&EngineConfig::default())?;
     let linker = build_linker(&engine)?;

@@ -399,10 +399,6 @@ struct ServerState {
     sql_requests: Mutex<Vec<String>>,
 }
 
-fn e2e_enabled() -> bool {
-    std::env::var("RUNTARA_RUN_DIRECT_WASM_E2E").as_deref() == Ok("1")
-}
-
 fn tool_installed(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
@@ -418,7 +414,7 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn shared_components_dir() -> Option<PathBuf> {
+fn shared_components_dir() -> PathBuf {
     let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"));
@@ -429,42 +425,30 @@ fn shared_components_dir() -> Option<PathBuf> {
             (!wasm.exists()).then_some(wasm)
         })
         .collect();
-    if missing.is_empty() {
-        let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
-        let Ok(stdlib_bytes) = std::fs::read(&stdlib_wasm) else {
-            eprintln!(
-                "SKIP: direct shared workflow stdlib component is not readable: {:?}",
-                stdlib_wasm
-            );
-            return None;
-        };
-        let required_stdlib_markers: &[&[u8]] = &[
-            b"split-cache-key",
-            b"embed-workflow-cache-key",
-            b"embed-workflow-variables",
-            b"embed-workflow-result",
-            b"embed-workflow-output-from-result",
-            b"embed-workflow-error",
-        ];
-        if !required_stdlib_markers.iter().all(|marker| {
+    assert!(
+        missing.is_empty(),
+        "direct-wasm-integration-tests requires staged shared components: {missing:?}; run scripts/build-agent-components.sh"
+    );
+    let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
+    let stdlib_bytes = std::fs::read(&stdlib_wasm)
+        .unwrap_or_else(|error| panic!("read required {stdlib_wasm:?}: {error}"));
+    let required_stdlib_markers: &[&[u8]] = &[
+        b"split-cache-key",
+        b"embed-workflow-cache-key",
+        b"embed-workflow-variables",
+        b"embed-workflow-result",
+        b"embed-workflow-output-from-result",
+        b"embed-workflow-error",
+    ];
+    assert!(
+        required_stdlib_markers.iter().all(|marker| {
             stdlib_bytes
                 .windows(marker.len())
                 .any(|window| window == *marker)
-        }) {
-            eprintln!(
-                "SKIP: direct shared workflow stdlib component is stale: {:?}",
-                stdlib_wasm
-            );
-            return None;
-        }
-        Some(dir)
-    } else {
-        eprintln!(
-            "SKIP: direct shared workflow components are not staged: {:?}",
-            missing
-        );
-        None
-    }
+        }),
+        "required shared workflow stdlib is stale: {stdlib_wasm:?}; run scripts/build-agent-components.sh"
+    );
+    dir
 }
 
 /// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
@@ -862,25 +846,16 @@ fn serve(
     }
 }
 
-fn direct_e2e_components_dir() -> Option<PathBuf> {
-    if !e2e_enabled() {
-        eprintln!(
-            "SKIP: direct_wasm_execute — set RUNTARA_RUN_DIRECT_WASM_E2E=1 to run \
-             (needs wac, wasmtime, and staged direct workflow components)."
-        );
-        return None;
-    }
-    if !tool_installed("wac") {
-        eprintln!("SKIP: wac not installed.");
-        return None;
-    }
-    if !embedded_executor_mode() && !wasmtime_installed() {
-        eprintln!("SKIP: RUNTARA_DIRECT_WASM_EXECUTOR=cli but wasmtime is not installed.");
-        return None;
-    }
-    let components_dir = shared_components_dir()?;
-
-    Some(components_dir)
+fn direct_e2e_components_dir() -> PathBuf {
+    assert!(
+        tool_installed("wac"),
+        "direct-wasm-integration-tests requires wac"
+    );
+    assert!(
+        embedded_executor_mode() || wasmtime_installed(),
+        "direct-wasm-integration-tests in CLI mode requires wasmtime"
+    );
+    shared_components_dir()
 }
 
 fn run_direct_workflow(
@@ -1319,9 +1294,7 @@ fn non_durable_graph_json(graph_json: &str) -> String {
 
 #[test]
 fn direct_compile_entry_returns_native_result_shape_when_components_available() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
@@ -1372,9 +1345,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
 
 #[test]
 fn direct_compile_measures_json_to_ready_bundle_latency() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Time the full direct-emitter path split into its two phases:
     //   1. emit   — JSON string -> parsed graph -> emitted workflow-logic.wasm
@@ -1431,9 +1402,7 @@ fn direct_compile_measures_json_to_ready_bundle_latency() {
 
 #[test]
 fn direct_wasm_execute_finish_passthrough_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let output = run_direct_workflow(
         &components_dir,
@@ -1477,9 +1446,7 @@ fn integer_hint_graph(default: Option<Value>) -> String {
 
 #[test]
 fn direct_wasm_execute_integer_hint_fails_loudly_on_unparseable_value() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // A present, non-null value that will not parse as an integer must fail the
     // run rather than silently becoming `0` and flowing into the output.
@@ -1500,9 +1467,7 @@ fn direct_wasm_execute_integer_hint_fails_loudly_on_unparseable_value() {
 
 #[test]
 fn direct_wasm_execute_integer_hint_default_rescues_unparseable_value() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // The author's `default` is the explicit escape hatch: the unparseable
     // value falls back to it and the run completes.
@@ -1519,9 +1484,7 @@ fn direct_wasm_execute_integer_hint_default_rescues_unparseable_value() {
 
 #[test]
 fn direct_wasm_execute_single_agent_without_finish_returns_null() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // The agent runs (random-double), but with no Finish step the workflow
     // completes with a null output, matching the generated compiler.
@@ -1537,9 +1500,7 @@ fn direct_wasm_execute_single_agent_without_finish_returns_null() {
 
 #[test]
 fn direct_wasm_execute_agent_chain_without_finish_returns_null() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Both agents run in sequence; with no Finish step the workflow completes
     // with a null output via the implicit finish, matching the generated
@@ -1556,9 +1517,7 @@ fn direct_wasm_execute_agent_chain_without_finish_returns_null() {
 
 #[test]
 fn direct_wasm_execute_fanout_diamond_without_finish_returns_null() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // The fan-out re-converges at `join`; all four agents run and the merge
     // completes the workflow with a null output via the implicit finish. Proves
@@ -1576,9 +1535,7 @@ fn direct_wasm_execute_fanout_diamond_without_finish_returns_null() {
 
 #[test]
 fn direct_wasm_execute_fanout_cross_branch_reference_runs_producer_first() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Off-backbone fan-out (inside the Conditional's false branch) where a step
     // downstream of one branch consumes the other branch's output. Both branches
@@ -1628,9 +1585,7 @@ fn direct_wasm_execute_fanout_cross_branch_reference_runs_producer_first() {
 
 #[test]
 fn direct_wasm_execute_finish_passthrough_track_events_emits_step_debug_events() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_with_events_and_tracking(
         &components_dir,
@@ -1702,9 +1657,7 @@ fn direct_wasm_execute_agent_input_mapping_failure_records_step_error() {
     // durationMs: null, error: null. The emitter now attributes the failure to
     // the step: a step_debug_start plus an error-bearing step_debug_end, so the
     // step summary pairs them into a failed record carrying the actual error.
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = r##"{
       "entryPoint": "echo",
@@ -1770,9 +1723,7 @@ fn direct_wasm_execute_finish_input_mapping_failure_records_step_error() {
     // the error to itself. Finish fires its step_debug_start before resolving, so
     // this exercises the generic emit_retptr_error_or_step_fail primitive (the
     // error step_debug_end pairs with the already-fired start).
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = r##"{
       "entryPoint": "finish",
@@ -1830,9 +1781,7 @@ fn direct_wasm_execute_delay_duration_failure_records_step_error() {
     // runtime.fail — an unresolvable config silently exited ("crashed", no
     // reason). A Delay with an unresolvable durationMs must now fail with the
     // error AND attribute it to the step (Delay emits a start before resolving).
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = r##"{
       "entryPoint": "wait",
@@ -1882,9 +1831,7 @@ fn direct_wasm_execute_log_payload_failure_records_step_error() {
     // A Log emits no step-debug events normally, but an unresolvable log payload
     // (broken context template) must fail with the error and be attributed: the
     // failure path emits a start + error pair so the failed Log is visible.
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = r##"{
       "entryPoint": "logit",
@@ -1930,9 +1877,7 @@ fn direct_wasm_execute_log_payload_failure_records_step_error() {
 
 #[test]
 fn direct_wasm_execute_conditional_finish_branches_report_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let true_output = run_direct_workflow(
         &components_dir,
@@ -1958,9 +1903,7 @@ fn direct_wasm_execute_conditional_branches_correctly_with_track_events() {
     // (at offset 4), so the runtime always followed the `true` edge regardless of
     // the result. The earlier branch tests ran with track_events=false, so they
     // never exercised this. Both branches must route by the actual result.
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let true_result = run_direct_workflow_with_events_and_tracking(
         &components_dir,
@@ -1989,9 +1932,7 @@ fn direct_wasm_execute_conditional_branches_correctly_with_track_events() {
 
 #[test]
 fn direct_wasm_execute_nested_conditional_branches_report_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let true_true_output = run_direct_workflow(
         &components_dir,
@@ -2026,9 +1967,7 @@ fn direct_wasm_execute_nested_conditional_branches_report_completion() {
 
 #[test]
 fn direct_wasm_execute_group_by_finish_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let output = run_direct_workflow(
         &components_dir,
@@ -2060,9 +1999,7 @@ fn direct_wasm_execute_group_by_finish_reports_completion() {
 
 #[test]
 fn direct_wasm_execute_while_loop_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_with_events(
         &components_dir,
@@ -2105,9 +2042,7 @@ fn direct_wasm_execute_while_loop_reports_completion() {
 
 #[test]
 fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // The 50ms per-iteration body delay drives the loop past its 10ms timeout, so
     // the While step fails with the static WHILE_TIMEOUT payload. Generated Rust
@@ -2133,9 +2068,7 @@ fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
 
 #[test]
 fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-01: MATCH (like SIMILARITY_GTE / COSINE_DISTANCE_LTE /
     // L2_DISTANCE_LTE) is an object-model query operator with no workflow
@@ -2203,9 +2136,7 @@ fn llm_http_500() -> Value {
 
 #[test]
 fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Baseline for the hermetic LLM stub: a single-shot AiAgent drives one
     // chat-completion through the proxy and finishes with the stubbed text.
@@ -2241,9 +2172,7 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
 
 #[test]
 fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-06: config.maxRetries drives the existing agent retry machinery for
     // the chat-completion invoke. Two stubbed HTTP 500s (transient) are
@@ -2278,9 +2207,7 @@ fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() 
 
 #[test]
 fn direct_wasm_execute_ai_agent_single_shot_default_does_not_retry() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Default stays 0 retries: re-billing an LLM call is opt-in. The first
     // stubbed 500 fails the workflow; the scripted success is never consumed.
@@ -2345,9 +2272,7 @@ fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-08: with debug mode on, a breakpoint on a tool-loop AiAgent pauses
     // BEFORE any loop work - no memory load, no model call. The run exits
@@ -2398,9 +2323,7 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Resume: the breakpoint-hit checkpoint short-circuits the pause and the
     // tool loop runs to completion - one tool-call turn against the echo
@@ -2470,9 +2393,7 @@ const AI_LEAK_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 /// hundreds of HTTP round-trips a 50-turn loop makes.
 #[test]
 fn ai_agent_loop_long_conversation_stays_bounded() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Each turn the model "requests" an echo tool call carrying a large blob; the
     // echo tool returns it, so both the tool-call message and its result grow the
@@ -2535,9 +2456,7 @@ fn ai_agent_tool_only_no_next_graph_json() -> String {
 
 #[test]
 fn direct_wasm_execute_ai_agent_tool_loop_without_next_edge_runs_loop() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Regression: a tool-loop AiAgent whose ONLY outgoing edge is the tool
     // edge (no "next" edge, no Finish step) ran the loop but emitted no step
@@ -2642,9 +2561,7 @@ fn direct_wasm_execute_ai_agent_tool_loop_without_next_edge_runs_loop() {
 
 #[test]
 fn direct_wasm_execute_ai_agent_tool_loop_with_next_edge_emits_debug_events() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Control for the no-next-edge case: same tool loop with a "next" edge
     // and Finish, trackEvents on.
@@ -2724,9 +2641,7 @@ fn ai_agent_memory_graph_json() -> String {
 
 #[test]
 fn direct_wasm_execute_ai_agent_memory_emits_debug_events() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Conversation memory phases must surface as synthetic AiAgentMemory*
     // steps like the generated compiler: load before the loop, sliding-window
@@ -2867,9 +2782,7 @@ fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-04: each completed turn is checkpointed under {step}.turn.{n}.
     // Run 1 completes the tool-call turn (turn 1: LLM + echo tool dispatch)
@@ -2952,9 +2865,7 @@ fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling()
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // durable:false opts the loop out of per-turn checkpoints entirely.
     let result = run_direct_workflow_with_llm_script(
@@ -3015,9 +2926,7 @@ fn ai_agent_tool_loop_on_error_graph_json(tool_capability: &str) -> String {
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_provider_error_routes_to_on_error() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-05: a chat-turn (provider) failure inside the tool loop routes to
     // the step's onError handler instead of failing the workflow. The handler
@@ -3052,9 +2961,7 @@ fn direct_wasm_execute_ai_agent_loop_provider_error_routes_to_on_error() {
 
 #[test]
 fn direct_wasm_execute_ai_agent_loop_tool_error_feeds_back_not_on_error() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Guard the unchanged semantics: an individual TOOL failure (unknown
     // capability here) is fed back to the model as the tool result; the loop
@@ -3092,9 +2999,7 @@ fn direct_wasm_execute_ai_agent_loop_tool_error_feeds_back_not_on_error() {
 
 #[test]
 fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-13: conditioned normal-flow edges from an AGENT source route on the
     // agent's own output (steps.echo.outputs.*), with priority ordering and
@@ -3122,9 +3027,7 @@ fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
 
 #[test]
 fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
     // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
@@ -3155,9 +3058,7 @@ fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
 
 #[test]
 fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // GAP-07: a single-shot AiAgent's onError handler is lowered live, so the
     // support gate must shape-check it. A handler whose Conditional lacks a
@@ -3247,9 +3148,7 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
 
 #[test]
 fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // The 50ms per-item body delay drives the sequential Split past its 10ms
     // timeout, so the Split fails hard with the static SPLIT_TIMEOUT payload
@@ -3274,9 +3173,7 @@ fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
 
 #[test]
 fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_with_events(
         &components_dir,
@@ -3296,9 +3193,7 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
 
 #[test]
 fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     let graph_json = non_durable_graph_json(DELAY_DYNAMIC);
 
     let result = run_direct_workflow_with_events(
@@ -3318,9 +3213,7 @@ fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
 
 #[test]
 fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     let workflow_id = "direct-wasm-execute-agent-fresh-checkpoint";
     let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
 
@@ -3353,9 +3246,7 @@ fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
 
 #[test]
 fn direct_wasm_execute_non_durable_agent_invokes_without_checkpoint() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     let graph_json = non_durable_graph_json(AGENT_CACHED_REPLAY);
 
     let result = run_direct_workflow_with_events(
@@ -3381,9 +3272,7 @@ fn direct_wasm_execute_non_durable_agent_invokes_without_checkpoint() {
 
 #[test]
 fn direct_wasm_execute_resolves_data_reference_from_canonical_envelope() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     // Regression: the workflow start input is the canonical envelope
     // `{"data": {...}, "variables": {...}}`, stored verbatim as the instance
     // input. A `data.*` reference must resolve against the inner `data` payload
@@ -3402,9 +3291,7 @@ fn direct_wasm_execute_resolves_data_reference_from_canonical_envelope() {
 
 #[test]
 fn direct_wasm_execute_resolves_variables_from_envelope_and_defaults() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     // Regression: `variables.*` references must resolve to the declared
     // variable's VALUE (not the `{type, value}` declaration struct), and the
     // canonical envelope's runtime `variables` must override declared defaults.
@@ -3427,9 +3314,7 @@ fn direct_wasm_execute_resolves_variables_from_envelope_and_defaults() {
 
 #[test]
 fn direct_wasm_execute_resolves_negative_array_index() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     // SYN-448 regression: negative array indices must resolve Python-style at
     // runtime (`-1` = last element) instead of silently returning null. The
     // out-of-range negative (`-9`) falls through to the mapping default.
@@ -3453,9 +3338,7 @@ fn direct_wasm_execute_resolves_negative_array_index() {
 
 #[test]
 fn direct_wasm_execute_template_tojson_filter() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     // SYN-449: the `tojson` filter (minijinja `json` feature) must be available in
     // the compiled WASM mapping engine. Output is compact JSON.
     let result = run_direct_workflow(
@@ -3472,9 +3355,7 @@ fn direct_wasm_execute_template_tojson_filter() {
 
 #[test]
 fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
     let workflow_id = "direct-wasm-execute-agent-cached-replay";
     let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
 
@@ -3514,9 +3395,7 @@ fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
 
 #[test]
 fn direct_wasm_execute_filter_finish_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let output = run_direct_workflow(
         &components_dir,
@@ -3545,9 +3424,7 @@ fn direct_wasm_execute_filter_finish_reports_completion() {
 /// unit tests.
 #[test]
 fn direct_wasm_execute_named_key_into_split_array_output_fails_loud() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Same graph as `split_workflow`, but the outer Finish reaches into the
     // Split's collected ARRAY with a field name that does not exist on an array.
@@ -3574,9 +3451,7 @@ fn direct_wasm_execute_named_key_into_split_array_output_fails_loud() {
 
 #[test]
 fn direct_wasm_execute_value_switch_finish_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let output = run_direct_workflow(
         &components_dir,
@@ -3596,9 +3471,7 @@ fn direct_wasm_execute_value_switch_finish_reports_completion() {
 
 #[test]
 fn direct_wasm_execute_routing_switch_finish_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let active_output = run_direct_workflow(
         &components_dir,
@@ -3634,9 +3507,7 @@ fn direct_wasm_execute_routing_switch_finish_reports_completion() {
 
 #[test]
 fn direct_wasm_execute_log_finish_emits_events_and_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_with_events(
         &components_dir,
@@ -3687,9 +3558,7 @@ fn direct_wasm_execute_log_finish_emits_events_and_reports_completion() {
 
 #[test]
 fn direct_wasm_execute_error_entry_emits_event_and_reports_failure() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_expect_failure(
         &components_dir,
@@ -3738,9 +3607,7 @@ fn direct_wasm_execute_error_entry_emits_event_and_reports_failure() {
 
 #[test]
 fn direct_wasm_execute_edge_condition_priority_and_default_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let vip_output = run_direct_workflow(
         &components_dir,
@@ -4053,9 +3920,7 @@ fn stderr_tail(stderr: &str) -> String {
 
 #[test]
 fn fixture_execution_smoke_battery() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let mut failures: Vec<String> = Vec::new();
     for case in EXECUTION_SMOKE_CASES {
@@ -4234,9 +4099,7 @@ fn run_direct_workflow_embedded(
 
 #[test]
 fn embedded_execute_finish_passthrough_reports_completion() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let captured = run_direct_workflow_embedded(
         &components_dir,
@@ -4259,9 +4122,7 @@ fn embedded_execute_finish_passthrough_reports_completion() {
 
 #[test]
 fn embedded_execute_error_workflow_reports_failure() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let captured = run_direct_workflow_embedded(
         &components_dir,
@@ -4297,9 +4158,7 @@ fn embedded_execute_error_workflow_reports_failure() {
 
 #[test]
 fn embedded_execute_is_repeatable_across_runs() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Two full runs back to back: each gets a fresh Store from the shared
     // executor, so state must not leak between instances.
@@ -4436,9 +4295,7 @@ const SPLIT_LEAK_MEM_CAP_BYTES: usize = 64 * 1024 * 1024;
 /// scope, isolating scope size as the cause.
 #[test]
 fn split_large_scope_does_not_exhaust_guest_heap() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = split_scope_leak_graph(SPLIT_LEAK_SCOPE_BYTES);
     let input = split_scope_leak_input(SPLIT_LEAK_ITEMS);
@@ -4488,9 +4345,7 @@ fn split_large_scope_does_not_exhaust_guest_heap() {
 /// not the Split structure or iteration count.
 #[test]
 fn split_small_scope_completes_under_same_cap() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = split_scope_leak_graph(8); // 8-byte scope variable
     let input = split_scope_leak_input(SPLIT_LEAK_ITEMS);
@@ -4523,9 +4378,7 @@ fn split_small_scope_completes_under_same_cap() {
 /// fields, so the same large-scope Split runs to completion with events enabled.
 #[test]
 fn split_large_scope_with_events_does_not_flood_debug() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Few iterations: this exercises the Split's once-per-step debug payload with a
     // large in-scope value, not the per-iteration leak (covered by the test above).
@@ -4714,9 +4567,7 @@ fn while_template_reads_loop_outputs_graph(chunk_bytes: usize) -> String {
 /// template renders against a materialized source and the loop completes.
 #[test]
 fn direct_wasm_execute_while_template_reads_interned_loop_outputs() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // 20 KiB chunk — just over the 16 KiB threshold so the iteration output is
     // interned, three iterations to read it back at least twice.
@@ -4774,9 +4625,7 @@ const WHILE_ACC_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 /// unit tests; this is the end-to-end backstop.
 #[test]
 fn while_growing_accumulator_stays_bounded() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     let graph = while_accumulator_graph(WHILE_ACC_CHUNK_BYTES);
     let input = while_accumulator_input(WHILE_ACC_ITERATIONS);
@@ -4854,9 +4703,7 @@ fn sql_error_body(msg: &str) -> Value {
 
 #[test]
 fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // A 5xx on a write means the statement outcome on the tenant DB is
     // unknown — the agent downgrades check_status's transient classification
@@ -4900,9 +4747,7 @@ fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
 
 #[test]
 fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Reads run in a READ ONLY transaction server-side, so retrying a 5xx is
     // safe — stock transient classification stands and the runtime retries
@@ -4940,9 +4785,7 @@ fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
 
 #[test]
 fn direct_wasm_sql_transport_failure_classification() {
-    let Some(components_dir) = direct_e2e_components_dir() else {
-        return;
-    };
+    let components_dir = direct_e2e_components_dir();
 
     // Point the object-model URL at a port nothing listens on: transport
     // failure on every attempt. query-sql reclassifies transport errors to

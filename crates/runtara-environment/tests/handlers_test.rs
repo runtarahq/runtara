@@ -36,7 +36,7 @@ macro_rules! skip_if_no_db {
 }
 
 /// Get a database pool for testing
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
         .expect("db-integration-tests requires an environment database URL");
@@ -46,7 +46,7 @@ async fn get_test_pool() -> Option<PgPool> {
     runtara_environment::migrations::run(&pool)
         .await
         .expect("required combined core/environment migrations must succeed");
-    Some(pool)
+    pool
 }
 
 /// Create test handler state
@@ -146,10 +146,7 @@ async fn update_test_instance_status(
 #[tokio::test]
 async fn test_handler_state_creation() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -162,10 +159,7 @@ async fn test_handler_state_creation() {
 #[tokio::test]
 async fn test_handler_state_uptime() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -184,10 +178,7 @@ async fn test_handler_state_uptime() {
 #[tokio::test]
 async fn test_health_check_handler() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -208,10 +199,7 @@ async fn test_health_check_handler() {
 #[tokio::test]
 async fn test_register_image_success() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -249,10 +237,7 @@ async fn test_register_image_success() {
 #[tokio::test]
 async fn test_register_image_empty_tenant_id() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -275,10 +260,7 @@ async fn test_register_image_empty_tenant_id() {
 #[tokio::test]
 async fn test_register_image_empty_name() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -301,10 +283,7 @@ async fn test_register_image_empty_name() {
 #[tokio::test]
 async fn test_register_image_empty_binary() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -331,10 +310,7 @@ async fn test_register_image_empty_binary() {
 #[tokio::test]
 async fn test_start_instance_success() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -383,10 +359,7 @@ async fn test_start_instance_success() {
 #[tokio::test]
 async fn test_start_instance_with_custom_id() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -428,10 +401,7 @@ async fn test_start_instance_with_custom_id() {
 #[tokio::test]
 async fn test_start_instance_empty_image_id() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -460,10 +430,7 @@ async fn test_start_instance_empty_image_id() {
 #[tokio::test]
 async fn test_start_instance_image_not_found() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -490,10 +457,7 @@ async fn test_start_instance_image_not_found() {
 #[tokio::test]
 async fn test_stop_instance_not_found() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -513,10 +477,7 @@ async fn test_stop_instance_not_found() {
 #[tokio::test]
 async fn test_stop_instance_with_registered_container() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -583,10 +544,7 @@ async fn test_stop_instance_with_registered_container() {
 #[tokio::test]
 async fn test_resume_instance_not_found() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -604,10 +562,7 @@ async fn test_resume_instance_not_found() {
 #[tokio::test]
 async fn test_resume_instance_wrong_status() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -653,10 +608,7 @@ async fn test_resume_instance_wrong_status() {
 #[tokio::test]
 async fn test_resume_instance_without_checkpoint_replays_from_start() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -696,10 +648,7 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
 #[tokio::test]
 async fn test_resume_instance_success() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -775,10 +724,7 @@ fn test_runner_type_values() {
 #[tokio::test]
 async fn test_start_instance_tenant_isolation() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -827,10 +773,7 @@ async fn test_start_instance_tenant_isolation() {
 #[tokio::test]
 async fn test_start_instance_same_tenant_allowed() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -876,10 +819,7 @@ async fn test_start_instance_same_tenant_allowed() {
 #[tokio::test]
 async fn test_removed_list_agents_handler_fails_with_runtime_route_guidance() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -893,10 +833,7 @@ async fn test_removed_list_agents_handler_fails_with_runtime_route_guidance() {
 #[tokio::test]
 async fn test_removed_get_capability_handler_fails_with_runtime_route_guidance() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -918,10 +855,7 @@ async fn test_removed_get_capability_handler_fails_with_runtime_route_guidance()
 #[tokio::test]
 async fn test_get_capability_not_found() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -940,10 +874,7 @@ async fn test_get_capability_not_found() {
 #[tokio::test]
 async fn test_get_capability_wrong_agent() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
@@ -1017,10 +948,7 @@ async fn test_test_capability_with_connection() {
 #[tokio::test]
 async fn test_test_capability_no_harness_binary() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     // Create a temp dir that doesn't have the test harness binary
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -1059,10 +987,7 @@ async fn test_test_capability_no_harness_binary() {
 #[tokio::test]
 async fn test_start_instance_stores_env() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -1120,10 +1045,7 @@ async fn test_start_instance_stores_env() {
 #[tokio::test]
 async fn test_start_instance_empty_env() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
@@ -1183,10 +1105,7 @@ async fn test_start_instance_empty_env() {
 #[tokio::test]
 async fn test_spawn_container_monitor_timeout_enforcement() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
@@ -1294,10 +1213,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 #[tokio::test]
 async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
@@ -1389,10 +1305,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 #[tokio::test]
 async fn test_spawn_container_monitor_timeout_race_condition() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
@@ -1493,10 +1406,7 @@ fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -
 #[tokio::test]
 async fn test_detect_stale_monitor_registry_cleared() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();

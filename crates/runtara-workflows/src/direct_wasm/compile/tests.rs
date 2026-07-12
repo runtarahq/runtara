@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+#[cfg(feature = "direct-wasm-integration-tests")]
 use std::process::{Command, Stdio};
 
 use super::super::manifest::build_direct_workflow_manifest;
@@ -554,6 +555,7 @@ fn collect_run_plan_ids(
     }
 }
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 fn tool_installed(tool: &str) -> bool {
     Command::new(tool)
         .arg("--version")
@@ -563,7 +565,8 @@ fn tool_installed(tool: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn shared_components_dir() -> Option<PathBuf> {
+#[cfg(feature = "direct-wasm-integration-tests")]
+fn shared_components_dir() -> PathBuf {
     let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -578,42 +581,37 @@ fn shared_components_dir() -> Option<PathBuf> {
             (!wasm.exists()).then_some(wasm)
         })
         .collect();
-    if missing.is_empty() {
-        let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
-        let stdlib_bytes = fs::read(&stdlib_wasm).ok()?;
-        for marker in [
-            b"agent-error-info".as_slice(),
-            b"retry-sleep-key",
-            b"retry-delay-ms",
-            b"workflow-error-retryable",
-            b"workflow-error-rate-limited",
-            b"workflow-error-retry-after-ms",
-            b"agent-retry-sleep-key",
-            b"agent-retry-delay-ms",
-            b"agent-retry-error-info",
-            b"agent-error-from-info",
-            b"delay-duration-ms",
-            b"wait-debug-start",
-        ] {
-            if !stdlib_bytes
-                .windows(marker.len())
-                .any(|window| window == marker)
-            {
-                eprintln!(
-                    "SKIP: direct shared workflow stdlib component is stale: {:?}",
-                    stdlib_wasm
-                );
-                return None;
-            }
+    assert!(
+        missing.is_empty(),
+        "direct-wasm-integration-tests requires staged shared components: {missing:?}; run scripts/build-agent-components.sh"
+    );
+    let stdlib_wasm = dir.join("runtara_workflow_stdlib.wasm");
+    let stdlib_bytes = fs::read(&stdlib_wasm)
+        .unwrap_or_else(|error| panic!("read required {stdlib_wasm:?}: {error}"));
+    for marker in [
+        b"agent-error-info".as_slice(),
+        b"retry-sleep-key",
+        b"retry-delay-ms",
+        b"workflow-error-retryable",
+        b"workflow-error-rate-limited",
+        b"workflow-error-retry-after-ms",
+        b"agent-retry-sleep-key",
+        b"agent-retry-delay-ms",
+        b"agent-retry-error-info",
+        b"agent-error-from-info",
+        b"delay-duration-ms",
+        b"wait-debug-start",
+    ] {
+        if !stdlib_bytes
+            .windows(marker.len())
+            .any(|window| window == marker)
+        {
+            panic!(
+                "required shared workflow stdlib is stale: {stdlib_wasm:?}; run scripts/build-agent-components.sh"
+            );
         }
-        Some(dir)
-    } else {
-        eprintln!(
-            "SKIP: direct shared workflow components are not staged: {:?}",
-            missing
-        );
-        None
     }
+    dir
 }
 
 #[test]
@@ -9986,15 +9984,14 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert!(wac.contains("export wf...;"));
 }
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 #[test]
 fn direct_compile_composes_finish_with_shared_components_when_available() {
-    if !tool_installed("wac") {
-        eprintln!("SKIP: wac not installed. `cargo install wac-cli --locked` first.");
-        return;
-    }
-    let Some(components_dir) = shared_components_dir() else {
-        return;
-    };
+    assert!(
+        tool_installed("wac"),
+        "direct-wasm-integration-tests requires wac"
+    );
+    let components_dir = shared_components_dir();
 
     let temp = tempfile::tempdir().expect("tempdir");
     let mut result = compile_direct_workflow(DirectCompilationInput {
@@ -10139,15 +10136,14 @@ fn direct_compile_composition_reports_missing_agent_component() {
     assert!(message.contains("runtara_agent_utils.wasm"));
 }
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 #[test]
 fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
-    if !tool_installed("wac") {
-        eprintln!("SKIP: wac not installed. `cargo install wac-cli --locked` first.");
-        return;
-    }
-    let Some(components_dir) = shared_components_dir() else {
-        return;
-    };
+    assert!(
+        tool_installed("wac"),
+        "direct-wasm-integration-tests requires wac"
+    );
+    let components_dir = shared_components_dir();
 
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow_composed(

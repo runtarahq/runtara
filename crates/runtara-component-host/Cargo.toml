@@ -8,6 +8,29 @@ description = "Embedded wasmtime host for loading and invoking runtara agent com
 keywords = ["wasm", "component-model", "wasmtime", "agent"]
 categories = ["wasm"]
 
+[features]
+component-integration-tests = []
+
+[[test]]
+name = "capability_fixtures"
+path = "tests/capability_fixtures.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
+name = "crypto_agent"
+path = "tests/crypto_agent.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
+name = "dispatcher"
+path = "tests/dispatcher.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
+name = "sqs_agent"
+path = "tests/sqs_agent.rs"
+required-features = ["component-integration-tests"]
+
 [dependencies]
 runtara-agent-wit = { path = "../runtara-agent-wit" }
 # Used as the canonical AgentInfo shape for sidecar meta.json files. The host

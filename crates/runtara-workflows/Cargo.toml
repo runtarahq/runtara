@@ -23,6 +23,12 @@ compiler = [
 ]
 native-agents = ["runtara-agents/native"]
 wasm-js = ["runtara-agents/wasm-js"]
+direct-wasm-integration-tests = []
+
+[[test]]
+name = "direct_wasm_execute"
+path = "tests/direct_wasm_execute.rs"
+required-features = ["direct-wasm-integration-tests"]
 
 # Standalone compiler CLI: workflow JSON (+ --child graphs) → composed
 # workflow.wasm, no server or database. See src/bin/compile.rs.

@@ -200,15 +200,11 @@ fn assert_output_matches(output: &Value, expect: &Expect, fixture_path: &Path) {
 #[tokio::test(flavor = "multi_thread")]
 async fn capability_fixtures_drive_production_bundle() -> anyhow::Result<()> {
     let bundle = bundle_dir();
-    // Use any one of the wasm files as a probe — if it's missing the bundle
-    // hasn't been built and the test is skipped.
-    if !bundle.join("runtara_agent_crypto.wasm").exists() {
-        eprintln!(
-            "SKIP: bundle not built at {} — run scripts/build-agent-components.sh first",
-            bundle.display()
-        );
-        return Ok(());
-    }
+    assert!(
+        bundle.join("runtara_agent_crypto.wasm").exists(),
+        "component-integration-tests requires the bundle at {}; run scripts/build-agent-components.sh",
+        bundle.display()
+    );
 
     let fixtures = load_all_fixtures(&agents_crates_dir(), &bundle);
     assert!(

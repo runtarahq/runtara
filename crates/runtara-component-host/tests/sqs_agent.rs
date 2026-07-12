@@ -9,7 +9,7 @@
 //!   - an unknown capability id returns `UNKNOWN_CAPABILITY` (so the dispatcher
 //!     genuinely distinguishes wired from unknown, unlike a bare success flag).
 //!
-//! Skipped if the .wasm is missing — build it first with
+//! The explicit suite fails if the .wasm is missing — build it first with
 //! `cargo component build --release --target wasm32-wasip2 -p runtara-agent-sqs`.
 
 use std::path::PathBuf;
@@ -43,13 +43,11 @@ type InvokeFunc = wasmtime::component::TypedFunc<
 #[tokio::test(flavor = "multi_thread")]
 async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
     let wasm = agent_wasm_path();
-    if !wasm.exists() {
-        eprintln!(
-            "SKIP: {} not found. Run `cargo component build --release --target wasm32-wasip2 -p runtara-agent-sqs` first.",
-            wasm.display()
-        );
-        return Ok(());
-    }
+    assert!(
+        wasm.exists(),
+        "component-integration-tests requires {}; run scripts/build-agent-components.sh",
+        wasm.display()
+    );
 
     let engine = build_engine(&EngineConfig::default())?;
     let linker = build_linker(&engine)?;

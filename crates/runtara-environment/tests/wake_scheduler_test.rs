@@ -25,7 +25,7 @@ macro_rules! skip_if_no_db {
 }
 
 /// Get a database pool for testing
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
         .expect("db-integration-tests requires an environment database URL");
@@ -35,7 +35,7 @@ async fn get_test_pool() -> Option<PgPool> {
     runtara_environment::migrations::run(&pool)
         .await
         .expect("required combined core/environment migrations must succeed");
-    Some(pool)
+    pool
 }
 
 /// Create a test image in the database with a unique name
@@ -213,10 +213,7 @@ fn test_wake_scheduler_config_debug() {
 #[tokio::test]
 async fn test_create_and_get_instance() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -243,10 +240,7 @@ async fn test_create_and_get_instance() {
 #[tokio::test]
 async fn test_update_instance_status() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -282,10 +276,7 @@ async fn test_update_instance_status() {
 #[tokio::test]
 async fn test_update_instance_result() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -324,10 +315,7 @@ async fn test_update_instance_result() {
 #[tokio::test]
 async fn test_update_instance_result_with_error() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -365,10 +353,7 @@ async fn test_update_instance_result_with_error() {
 #[tokio::test]
 async fn test_list_instances() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     // Clean up first
     sqlx::query("DELETE FROM instances WHERE tenant_id LIKE 'list-test-%'")
@@ -440,10 +425,7 @@ async fn test_list_instances() {
 #[tokio::test]
 async fn test_health_check() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let result = db::health_check(&pool)
         .await

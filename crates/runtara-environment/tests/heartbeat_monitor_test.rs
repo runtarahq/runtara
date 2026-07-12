@@ -77,7 +77,7 @@ macro_rules! skip_if_no_db {
 }
 
 /// Get a database pool for testing
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
         .expect("db-integration-tests requires an environment database URL");
@@ -87,7 +87,7 @@ async fn get_test_pool() -> Option<PgPool> {
     runtara_environment::migrations::run(&pool)
         .await
         .expect("required combined core/environment migrations must succeed");
-    Some(pool)
+    pool
 }
 
 /// Create a test image in the database with a unique name
@@ -522,10 +522,7 @@ fn test_heartbeat_monitor_config_debug() {
 #[tokio::test]
 async fn test_heartbeat_monitor_creation() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig::default();
@@ -538,10 +535,7 @@ async fn test_heartbeat_monitor_creation() {
 #[tokio::test]
 async fn test_heartbeat_monitor_shutdown() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig {
@@ -575,10 +569,7 @@ async fn test_heartbeat_monitor_shutdown() {
 #[tokio::test]
 async fn test_stale_container_no_heartbeat() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-stale-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -630,10 +621,7 @@ async fn test_stale_container_no_heartbeat() {
 #[tokio::test]
 async fn test_stale_container_old_heartbeat() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-old-hb-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -686,10 +674,7 @@ async fn test_stale_container_old_heartbeat() {
 #[tokio::test]
 async fn test_container_with_recent_heartbeat_not_stale() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-fresh-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -744,10 +729,7 @@ async fn test_container_with_recent_heartbeat_not_stale() {
 #[tokio::test]
 async fn test_orphaned_instance_detected() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-orphan-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
@@ -801,10 +783,7 @@ async fn test_orphaned_instance_detected() {
 #[tokio::test]
 async fn test_tracked_instance_not_orphaned() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-tracked-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -862,10 +841,7 @@ async fn test_tracked_instance_not_orphaned() {
 #[tokio::test]
 async fn test_recent_instance_not_immediately_orphaned() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-recent-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
@@ -914,10 +890,7 @@ async fn test_recent_instance_not_immediately_orphaned() {
 #[tokio::test]
 async fn test_multiple_orphaned_instances() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-multi-{}", Uuid::new_v4());
     let instance1 = Uuid::new_v4().to_string();
@@ -988,10 +961,7 @@ async fn test_multiple_orphaned_instances() {
 #[tokio::test]
 async fn test_no_instances_to_check() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     // Empty persistence - no running instances
     let persistence = Arc::new(MockPersistence::new());
@@ -1032,10 +1002,7 @@ async fn test_no_instances_to_check() {
 #[tokio::test]
 async fn test_completed_instance_in_core_not_flagged() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-completed-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
@@ -1110,10 +1077,7 @@ async fn test_completed_instance_in_core_not_flagged() {
 #[tokio::test]
 async fn test_checkpoint_event_counts_as_activity() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-checkpoint-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -1173,10 +1137,7 @@ async fn test_checkpoint_event_counts_as_activity() {
 #[tokio::test]
 async fn test_any_event_type_counts_as_activity() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-anyevent-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -1234,10 +1195,7 @@ async fn test_any_event_type_counts_as_activity() {
 #[tokio::test]
 async fn test_multiple_events_uses_most_recent() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-multi-events-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;

@@ -3,13 +3,16 @@
 //! End-to-end tests for the `runtara-compile` CLI binary.
 //!
 //! Validation and child-resolution behavior runs unconditionally. The full
-//! compile test composes against real stdlib/runtime components, so it skips
-//! (with a note) when no components directory is available — point
+//! compile test composes against real stdlib/runtime components behind the
+//! explicit integration feature and fails if they are unavailable — point
 //! `RUNTARA_AGENT_COMPONENTS_DIR` at a built components dir or build
 //! `target/wasm32-wasip2/release` first.
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "direct-wasm-integration-tests")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
@@ -22,6 +25,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -30,8 +34,9 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Components dir with real stdlib/runtime components, or `None` to skip.
-fn shared_components_dir() -> Option<PathBuf> {
+/// Components dir with real stdlib/runtime components.
+#[cfg(feature = "direct-wasm-integration-tests")]
+fn shared_components_dir() -> PathBuf {
     let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"));
@@ -39,10 +44,12 @@ fn shared_components_dir() -> Option<PathBuf> {
         "runtara_workflow_stdlib.wasm",
         "runtara_workflow_runtime.wasm",
     ];
-    required
-        .iter()
-        .all(|f| dir.join(f).is_file())
-        .then_some(dir)
+    assert!(
+        required.iter().all(|f| dir.join(f).is_file()),
+        "direct-wasm-integration-tests requires staged shared components at {}; run scripts/build-agent-components.sh",
+        dir.display()
+    );
+    dir
 }
 
 fn run(cli_args: &[&str]) -> Output {
@@ -187,12 +194,10 @@ fn missing_grandchild_workflow_is_detected_through_the_child() {
     assert!(stderr.contains("call_grandchild"), "stderr: {stderr}");
 }
 
+#[cfg(feature = "direct-wasm-integration-tests")]
 #[test]
 fn compiles_deeply_nested_child_workflows_to_composed_wasm() {
-    let Some(components_dir) = shared_components_dir() else {
-        eprintln!("skipping: no components dir with stdlib/runtime wasm available");
-        return;
-    };
+    let components_dir = shared_components_dir();
     let temp = tempfile::tempdir().expect("tempdir");
     let output_wasm = temp.path().join("parent.wasm");
     let build_dir = temp.path().join("builds");

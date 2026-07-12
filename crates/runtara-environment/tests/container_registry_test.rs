@@ -22,7 +22,7 @@ macro_rules! skip_if_no_db {
 }
 
 /// Get a database pool for testing
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
         .expect("db-integration-tests requires an environment database URL");
@@ -32,7 +32,7 @@ async fn get_test_pool() -> Option<PgPool> {
     runtara_environment::migrations::run(&pool)
         .await
         .expect("required combined core/environment migrations must succeed");
-    Some(pool)
+    pool
 }
 
 /// Create a test ContainerInfo
@@ -273,10 +273,7 @@ fn test_container_info_serialization() {
 #[tokio::test]
 async fn test_register_and_get() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -302,10 +299,7 @@ async fn test_register_and_get() {
 #[tokio::test]
 async fn test_register_upsert() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -333,10 +327,7 @@ async fn test_register_upsert() {
 #[tokio::test]
 async fn test_unregister() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -354,10 +345,7 @@ async fn test_unregister() {
 #[tokio::test]
 async fn test_list_registered_by_tenant() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
 
@@ -397,10 +385,7 @@ async fn test_list_registered_by_tenant() {
 #[tokio::test]
 async fn test_list_all_registered() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
 
@@ -443,10 +428,7 @@ async fn test_list_all_registered() {
 #[tokio::test]
 async fn test_get_nonexistent() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let result = registry
@@ -459,10 +441,7 @@ async fn test_get_nonexistent() {
 #[tokio::test]
 async fn test_update_pid() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -491,10 +470,7 @@ async fn test_update_pid() {
 #[tokio::test]
 async fn test_request_cancellation() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -522,10 +498,7 @@ async fn test_request_cancellation() {
 #[tokio::test]
 async fn test_cancellation_upsert() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -557,10 +530,7 @@ async fn test_cancellation_upsert() {
 #[tokio::test]
 async fn test_check_cancellation_none() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let result = registry
@@ -573,10 +543,7 @@ async fn test_check_cancellation_none() {
 #[tokio::test]
 async fn test_clear_cancellation() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -614,10 +581,7 @@ async fn test_clear_cancellation() {
 #[tokio::test]
 async fn test_report_and_get_status_running() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -643,10 +607,7 @@ async fn test_report_and_get_status_running() {
 #[tokio::test]
 async fn test_report_and_get_status_completed() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -675,10 +636,7 @@ async fn test_report_and_get_status_completed() {
 #[tokio::test]
 async fn test_report_and_get_status_failed() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -704,10 +662,7 @@ async fn test_report_and_get_status_failed() {
 #[tokio::test]
 async fn test_report_and_get_status_cancelled() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -727,10 +682,7 @@ async fn test_report_and_get_status_cancelled() {
 #[tokio::test]
 async fn test_status_upsert() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -764,10 +716,7 @@ async fn test_status_upsert() {
 #[tokio::test]
 async fn test_get_status_none() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let result = registry
@@ -780,10 +729,7 @@ async fn test_get_status_none() {
 #[tokio::test]
 async fn test_clear_status() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -809,10 +755,7 @@ async fn test_clear_status() {
 #[tokio::test]
 async fn test_send_heartbeat() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -846,10 +789,7 @@ async fn test_send_heartbeat() {
 #[tokio::test]
 async fn test_heartbeat_upsert() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -874,10 +814,7 @@ async fn test_heartbeat_upsert() {
 #[tokio::test]
 async fn test_has_heartbeat_recent() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -894,10 +831,7 @@ async fn test_has_heartbeat_recent() {
 #[tokio::test]
 async fn test_clear_heartbeat() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -918,10 +852,7 @@ async fn test_clear_heartbeat() {
 #[tokio::test]
 async fn test_cleanup_single_container() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
@@ -990,10 +921,7 @@ async fn test_cleanup_single_container() {
 #[tokio::test]
 async fn test_cleanup_stale() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
 
@@ -1053,10 +981,7 @@ async fn test_cleanup_stale() {
 #[tokio::test]
 async fn test_operations_on_nonexistent_container() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = "nonexistent-instance";
@@ -1073,10 +998,7 @@ async fn test_operations_on_nonexistent_container() {
 #[tokio::test]
 async fn test_container_with_no_optional_fields() {
     skip_if_no_db!();
-    let Some(pool) = get_test_pool().await else {
-        eprintln!("Skipping test: could not connect to database");
-        return;
-    };
+    let pool = get_test_pool().await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
