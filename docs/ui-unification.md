@@ -16,7 +16,7 @@ Implementation in progress.
   enum, nested object/array, min/max, access/secret, section, control, and
   conditional-required validation are implemented; pattern/format validation
   and legacy schema normalization remain.
-- [ ] Generalize the validation WASM bridge and add native/WASM parity fixtures.
+- [x] Generalize the validation WASM bridge and add native/WASM parity fixtures.
 - [ ] Build the shared controlled React field/control registry.
 - [ ] Implement the safe connection edit projection and explicit patch contract.
 - [ ] Generate canonical forms from every connection descriptor and migrate the
@@ -32,9 +32,13 @@ Verification completed so far:
 
 - `cargo test -p runtara-dsl` — 196 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
-- `cargo test -p runtara-workflow-validation-wasm` — 14 passed.
+- `cargo test -p runtara-workflow-validation-wasm` — 17 passed, including
+  native/WASM form-analysis parity.
 - `cargo test -p runtara-workflows --no-default-features --features wasm-js --lib`
   — 249 passed.
+- `npm test -- --run src/features/workflows/utils/rust-workflow-validation.test.ts`
+  — 8 passed against the generated browser WASM bundle.
+- `npx tsc -b --pretty false` — passed.
 
 This document defines how Runtara will unify schema-driven form rendering across
 connections, workflows, and reports without adding third-party form or schema

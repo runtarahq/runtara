@@ -19,6 +19,7 @@ import {
   validateSchemaFieldsWithRust,
   validateWorkflowStartInputsWithRust,
 } from './rust-workflow-validation';
+import { analyzeFormWithRust } from '@/shared/forms';
 
 const wasmBytes = readFileSync(
   path.resolve(
@@ -131,6 +132,48 @@ describe('rust workflow validation WASM', () => {
     expect(result.status).toBe('invalid');
     expect(result.errors.length).toBeGreaterThan(0);
     expect(agentsFetchCount).toBe(1);
+  });
+
+  it('analyzes canonical forms through the same WASM bundle', async () => {
+    const result = await analyzeFormWithRust(
+      {
+        schemaVersion: 1,
+        fields: {
+          mode: { type: 'string', required: true },
+          token: {
+            type: 'string',
+            required: true,
+            access: 'write',
+            secret: true,
+            control: { kind: 'password' },
+            conditions: {
+              visible: {
+                type: 'operation',
+                op: 'EQ',
+                arguments: [
+                  { valueType: 'reference', value: 'mode' },
+                  { valueType: 'immediate', value: 'bearer' },
+                ],
+              },
+            },
+          },
+        },
+      },
+      { mode: 'bearer' }
+    );
+
+    expect(result.wasmAvailable).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.fields.token).toEqual({
+      visible: true,
+      enabled: true,
+      required: true,
+    });
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'REQUIRED_FORM_FIELD_MISSING' }),
+      ])
+    );
   });
 
   it('reports Rust graph parse failures as invalid, not unavailable', async () => {

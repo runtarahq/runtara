@@ -12,7 +12,10 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 use wasm_bindgen::prelude::*;
 
 /// Cached snapshot of the agent catalog, populated by the host via
@@ -70,6 +73,64 @@ struct SchemaFieldsValidationResponse {
     warnings: Vec<String>,
     message: String,
     schema_errors: Vec<SchemaFieldsValidationError>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FormValidationResponse {
+    success: bool,
+    valid: bool,
+    fields: HashMap<String, runtara_dsl::form::FormFieldState>,
+    issues: Vec<runtara_dsl::form::FormIssue>,
+    message: String,
+}
+
+impl FormValidationResponse {
+    fn from_analysis(analysis: runtara_dsl::form::FormAnalysis) -> Self {
+        Self {
+            success: true,
+            valid: analysis.valid,
+            fields: analysis.fields,
+            issues: analysis.issues,
+            message: if analysis.valid {
+                "Form validation passed".to_string()
+            } else {
+                "Form validation failed".to_string()
+            },
+        }
+    }
+
+    fn from_issues(issues: Vec<runtara_dsl::form::FormIssue>) -> Self {
+        let valid = !issues
+            .iter()
+            .any(|issue| issue.severity == runtara_dsl::form::FormIssueSeverity::Error);
+        Self {
+            success: true,
+            valid,
+            fields: HashMap::new(),
+            issues,
+            message: if valid {
+                "Form definition validation passed".to_string()
+            } else {
+                "Form definition validation failed".to_string()
+            },
+        }
+    }
+
+    fn parse_error(path: &str, message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            valid: false,
+            fields: HashMap::new(),
+            issues: vec![runtara_dsl::form::FormIssue {
+                code: "FORM_JSON_INVALID".to_string(),
+                path: path.to_string(),
+                message: message.into(),
+                severity: runtara_dsl::form::FormIssueSeverity::Error,
+            }],
+            message: "Form validation failed: invalid JSON".to_string(),
+        }
+    }
 }
 
 impl ValidationResponse {
@@ -221,6 +282,19 @@ pub fn validate_schema_fields_json(schema_label: &str, schema_fields_json: &str)
     })
 }
 
+/// Validate a canonical form definition using the shared Rust form engine.
+#[wasm_bindgen(js_name = validateFormDefinitionJson)]
+pub fn validate_form_definition_json(definition_json: &str) -> String {
+    to_json_string(&validate_form_definition_json_impl(definition_json))
+}
+
+/// Evaluate conditional field state and validate submitted form data using
+/// the shared Rust form engine.
+#[wasm_bindgen(js_name = analyzeFormJson)]
+pub fn analyze_form_json(definition_json: &str, data_json: &str) -> String {
+    to_json_string(&analyze_form_json_impl(definition_json, data_json))
+}
+
 /// Return statically compiled workflow step type metadata.
 #[wasm_bindgen(js_name = getStepTypesJson)]
 pub fn get_step_types_json() -> String {
@@ -345,6 +419,42 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
     ValidationResponse::ok(errors, warnings)
 }
 
+fn parse_form_definition(
+    definition_json: &str,
+) -> Result<runtara_dsl::form::FormDefinition, FormValidationResponse> {
+    serde_json::from_str(definition_json).map_err(|error| {
+        FormValidationResponse::parse_error(
+            "definition",
+            format!("Failed to parse form definition JSON: {error}"),
+        )
+    })
+}
+
+fn validate_form_definition_json_impl(definition_json: &str) -> FormValidationResponse {
+    let definition = match parse_form_definition(definition_json) {
+        Ok(definition) => definition,
+        Err(response) => return response,
+    };
+    FormValidationResponse::from_issues(runtara_dsl::form::validate_form_definition(&definition))
+}
+
+fn analyze_form_json_impl(definition_json: &str, data_json: &str) -> FormValidationResponse {
+    let definition = match parse_form_definition(definition_json) {
+        Ok(definition) => definition,
+        Err(response) => return response,
+    };
+    let data = match serde_json::from_str(data_json) {
+        Ok(data) => data,
+        Err(error) => {
+            return FormValidationResponse::parse_error(
+                "data",
+                format!("Failed to parse form data JSON: {error}"),
+            );
+        }
+    };
+    FormValidationResponse::from_analysis(runtara_dsl::form::analyze_form(&definition, &data))
+}
+
 fn validate_schema_fields_json_impl(
     schema_label: &str,
     schema_fields_json: &str,
@@ -446,6 +556,31 @@ mod tests {
     // parallel test execution cannot make validation depend on test order.
     static CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    const FORM_DEFINITION_JSON: &str = r#"{
+        "schemaVersion": 1,
+        "allowUnknownFields": false,
+        "fields": {
+            "auth_mode": {"type": "string", "required": true},
+            "token": {
+                "type": "string",
+                "required": true,
+                "access": "write",
+                "secret": true,
+                "control": {"kind": "password"},
+                "conditions": {
+                    "visible": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            {"valueType": "reference", "value": "auth_mode"},
+                            {"valueType": "immediate", "value": "bearer"}
+                        ]
+                    }
+                }
+            }
+        }
+    }"#;
+
     #[test]
     fn validates_empty_graph_with_backend_validator() {
         let response = validate_execution_graph_json_impl("{}");
@@ -465,6 +600,51 @@ mod tests {
         assert!(response.success);
         assert!(response.valid);
         assert!(response.errors.is_empty());
+    }
+
+    #[test]
+    fn validates_form_definition_with_shared_engine() {
+        let response: Value =
+            serde_json::from_str(&validate_form_definition_json(FORM_DEFINITION_JSON)).unwrap();
+
+        assert_eq!(response["success"], true);
+        assert_eq!(response["valid"], true);
+        assert_eq!(response["issues"], json!([]));
+    }
+
+    #[test]
+    fn form_analysis_matches_native_shared_engine() {
+        let definition: runtara_dsl::form::FormDefinition =
+            serde_json::from_str(FORM_DEFINITION_JSON).unwrap();
+        let data = json!({"auth_mode": "bearer"});
+        let native = runtara_dsl::form::analyze_form(&definition, &data);
+        let wasm: Value =
+            serde_json::from_str(&analyze_form_json(FORM_DEFINITION_JSON, &data.to_string()))
+                .unwrap();
+
+        assert_eq!(wasm["success"], true);
+        assert_eq!(wasm["valid"], native.valid);
+        assert_eq!(
+            wasm["fields"],
+            serde_json::to_value(&native.fields).unwrap()
+        );
+        assert_eq!(
+            wasm["issues"],
+            serde_json::to_value(&native.issues).unwrap()
+        );
+        assert_eq!(wasm["fields"]["token"]["visible"], true);
+        assert_eq!(wasm["fields"]["token"]["required"], true);
+    }
+
+    #[test]
+    fn form_json_parse_failures_are_structured() {
+        let response: Value =
+            serde_json::from_str(&analyze_form_json(FORM_DEFINITION_JSON, "not-json")).unwrap();
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["valid"], false);
+        assert_eq!(response["issues"][0]["code"], "FORM_JSON_INVALID");
+        assert_eq!(response["issues"][0]["path"], "data");
     }
 
     #[test]

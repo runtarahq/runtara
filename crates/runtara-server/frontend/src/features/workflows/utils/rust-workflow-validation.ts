@@ -1,25 +1,19 @@
-import { User } from 'oidc-client-ts';
-
-import initRustValidation, {
-  agentCatalogLoaded,
+import {
+  ensureRustValidationInitialized,
   getAgentJson,
   getAgentsJson,
   getCapabilitySchemaJson,
   getStepTypeSchemaJson,
   getStepTypesJson,
-  initAgentCatalog,
   validateExecutionGraphJson,
   validateSchemaFieldsJson,
   validateWorkflowStartInputsJson,
-} from '@/wasm/workflow-validation/runtara_workflow_validation.js';
-import rustValidationWasmUrl from '@/wasm/workflow-validation/runtara_workflow_validation_bg.wasm?url';
+} from '@/shared/lib/rust-validation-wasm';
 import {
   AgentInfo,
   CapabilityInfo,
   ListStepTypesResponse,
 } from '@/generated/RuntaraRuntimeApi';
-import { config } from '@/shared/config/runtimeConfig';
-import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 
 export interface RustWorkflowValidationResult {
   success: boolean;
@@ -44,120 +38,7 @@ export interface RustSchemaFieldsValidationResult
   schemaErrors: RustSchemaFieldsValidationError[];
 }
 
-let initPromise: Promise<unknown> | null = null;
-
-/**
- * Read the current OIDC access token from oidc-client-ts's localStorage user
- * record. Returns undefined for non-OIDC auth modes (server doesn't need a
- * Bearer header), when no user is signed in, or when the stored token is
- * already expired. We can't use `useAuth()` here because this module runs
- * outside React.
- */
-function readAccessTokenFromStorage(): string | undefined {
-  const authority = config.oidc.authority;
-  const clientId = config.oidc.clientId;
-  if (!authority || !clientId) {
-    return undefined;
-  }
-  if (typeof window === 'undefined' || !window.localStorage) {
-    return undefined;
-  }
-  const raw = window.localStorage.getItem(
-    `oidc.user:${authority}:${clientId}`
-  );
-  if (!raw) {
-    return undefined;
-  }
-  try {
-    const user = User.fromStorageString(raw);
-    if (user.expired) {
-      return undefined;
-    }
-    return user.access_token;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * One-shot fetch of `GET /api/runtime/agents` whose response is pushed
- * into the WASM via `initAgentCatalog`. The server returns the catalog
- * from its runtime `ComponentDispatcherService` (which loads each
- * `<agent>.meta.json` from `$RUNTARA_AGENT_COMPONENTS_DIR` at boot) —
- * so the validator + the runtime see the same agent set.
- *
- * Uses a raw `fetch` (not `RuntimeREST`) on purpose:
- *  - URL is built via `getRuntimeBaseUrl()` so the org_id segment is
- *    inserted for multi-tenant deployments — same logic the axios
- *    interceptor applies, just expressed directly.
- *  - We skip the axios pipeline so the shared 401-redirects-to-login
- *    response interceptor doesn't fire. This is a best-effort background
- *    load; if it 401s because the user's token is briefly expired during
- *    silent-renew, we'd otherwise log them out and bounce them off the
- *    workflow editor.
- *
- * Idempotent: skips the fetch if `agentCatalogLoaded()` already returns
- * true (e.g. another caller initialized it).
- */
-async function loadAgentCatalogIntoWasm(): Promise<void> {
-  if (agentCatalogLoaded()) {
-    return;
-  }
-  const url = `${getRuntimeBaseUrl()}/agents`;
-  const token = readAccessTokenFromStorage();
-  const headers: Record<string, string> = { accept: 'application/json' };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      credentials: 'include',
-      headers,
-    });
-  } catch (error) {
-    throw new Error(
-      `Failed to fetch ${url} for validator init: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-  }
-  if (!response.ok) {
-    throw new Error(
-      `${url} returned HTTP ${response.status} ${response.statusText}`
-    );
-  }
-  const body = (await response.json()) as { agents?: unknown };
-  const agentsArray = Array.isArray(body?.agents) ? body.agents : [];
-  const initResultRaw = initAgentCatalog(JSON.stringify(agentsArray));
-  let parsed: { success?: boolean; agentCount?: number; error?: string };
-  try {
-    parsed = JSON.parse(initResultRaw) as typeof parsed;
-  } catch {
-    throw new Error(
-      `Validator returned non-JSON from initAgentCatalog: ${initResultRaw}`
-    );
-  }
-  if (!parsed.success) {
-    throw new Error(
-      `Validator rejected agent catalog payload: ${
-        parsed.error ?? 'unknown error'
-      }`
-    );
-  }
-}
-
-function ensureRustValidatorInitialized(): Promise<unknown> {
-  initPromise ??= initRustValidation({
-    module_or_path: rustValidationWasmUrl,
-  })
-    .then(() => loadAgentCatalogIntoWasm())
-    .catch((error) => {
-      initPromise = null;
-      throw error;
-    });
-  return initPromise;
-}
+const ensureRustValidatorInitialized = ensureRustValidationInitialized;
 
 function normalizeValidationResponse(
   value: unknown
