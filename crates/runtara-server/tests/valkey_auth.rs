@@ -4,25 +4,20 @@
 //! (`valkey::auth::{get_member_role, token_is_revoked}`).
 //!
 //! These need a live Valkey/Redis. They use `VALKEY_HOST` (and friends) in the same shape
-//! as the server boot path and skip cleanly when it is unset, mirroring `redis_isolation.rs`.
-//! Run with:
-//!   `VALKEY_HOST=localhost cargo test -p runtara-server --test valkey_auth`
+//! as the server boot path and fail closed when it is unset. Run with the
+//! explicit `valkey-integration-tests` feature.
 
 use redis::AsyncCommands;
 use runtara_server::authz::Role;
 use runtara_server::valkey::ValkeyConfig;
 use runtara_server::valkey::auth::{get_member_role, revoke_token, token_is_revoked};
 
-/// Skip the test if Valkey is not configured in the environment.
+/// Resolve the required Valkey URL or fail the explicit integration suite.
 macro_rules! redis_url_or_skip {
     () => {
-        match ValkeyConfig::from_env() {
-            Some(cfg) => cfg.connection_url(),
-            None => {
-                eprintln!("Skipping test: VALKEY_HOST not set");
-                return;
-            }
-        }
+        ValkeyConfig::from_env()
+            .expect("valkey-integration-tests requires VALKEY_HOST")
+            .connection_url()
     };
 }
 

@@ -416,6 +416,7 @@ async fn resolve_membership(
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "valkey-integration-tests")]
     use redis::AsyncCommands;
 
     use super::*;
@@ -628,9 +629,10 @@ mod tests {
         assert_eq!(ctx.role, Some(Role::Owner));
     }
 
-    // --- Live Valkey round-trips (skip cleanly without VALKEY_HOST) ---
+    // --- Live Valkey round-trips (explicit, fail-closed feature) ---
 
-    macro_rules! manager_or_skip {
+    #[cfg(feature = "valkey-integration-tests")]
+    macro_rules! manager_required {
         () => {
             match crate::valkey::ValkeyConfig::from_env() {
                 // Build a FRESH ConnectionManager bound to THIS test's runtime rather than the
@@ -648,21 +650,20 @@ mod tests {
                         .await
                         .expect("connect valkey")
                 }
-                None => {
-                    eprintln!("Skipping test: VALKEY_HOST not set");
-                    return;
-                }
+                None => panic!("valkey-integration-tests requires VALKEY_HOST"),
             }
         };
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     fn unique(prefix: &str) -> String {
         format!("{}-{}", prefix, uuid::Uuid::new_v4())
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn required_attaches_role_for_member() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let uid = unique("auth0|member");
         let mut conn = manager.clone();
         let _: () = conn
@@ -681,9 +682,10 @@ mod tests {
         let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn required_denies_non_member_403() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let mut ctx = jwt_ctx(&unique("auth0|ghost"), Some(&unique("jti")));
         let st = state(MembershipPolicy::Required, Some(manager));
         let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
@@ -691,9 +693,10 @@ mod tests {
         assert_eq!(ctx.role, None);
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn required_denies_revoked_token_401() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let uid = unique("auth0|member");
         let jti = unique("jti");
         let mut conn = manager.clone();
@@ -721,9 +724,10 @@ mod tests {
             .expect("cleanup");
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn api_key_required_inherits_role_for_member() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let uid = unique("auth0|keyuser");
         let mut conn = manager.clone();
         let _: () = conn
@@ -744,9 +748,10 @@ mod tests {
         let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn api_key_required_denies_when_issuer_not_member_403() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let key = api_key_row(&unique("auth0|removed"), Some(&unique("jti")));
         let mut ctx = api_key_context(&key);
         let st = state(MembershipPolicy::Required, Some(manager));
@@ -756,9 +761,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn api_key_required_denies_revoked_jti_401() {
-        let manager = manager_or_skip!();
+        let manager = manager_required!();
         let uid = unique("auth0|keyuser");
         let jti = unique("jti");
         let mut conn = manager.clone();

@@ -850,16 +850,15 @@ mod tests {
 
     // ---- drain graceful shutdown (empty batch never touches Valkey) ----
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn drain_exits_on_shutdown_without_touching_valkey() {
         // `ConnectionManager::new` connects eagerly (unlike `PgPool::connect_lazy`), so this
         // needs a live Valkey purely to construct the drain — the empty final flush below never
-        // issues a command against it either way. Skips cleanly without VALKEY_HOST, mirroring
-        // `valkey_auth.rs` / `middleware::auth`'s `manager_or_skip!`.
-        let Some(cfg) = crate::valkey::ValkeyConfig::from_env() else {
-            eprintln!("Skipping test: VALKEY_HOST not set");
-            return;
-        };
+        // issues a command against it either way. The explicit integration
+        // feature requires a live Valkey and fails closed without one.
+        let cfg = crate::valkey::ValkeyConfig::from_env()
+            .expect("valkey-integration-tests requires VALKEY_HOST");
         let client = crate::valkey::open_client(&cfg.connection_url()).expect("open valkey client");
         let manager = ConnectionManager::new(client)
             .await
@@ -879,14 +878,13 @@ mod tests {
 
     // ---- flush actually XADDs the dotted wire JSON (live Valkey round trip) ----
 
+    #[cfg(feature = "valkey-integration-tests")]
     #[tokio::test]
     async fn flush_xadds_dotted_wire_json_to_stream() {
         use redis::AsyncCommands;
 
-        let Some(cfg) = crate::valkey::ValkeyConfig::from_env() else {
-            eprintln!("Skipping test: VALKEY_HOST not set");
-            return;
-        };
+        let cfg = crate::valkey::ValkeyConfig::from_env()
+            .expect("valkey-integration-tests requires VALKEY_HOST");
         let client = crate::valkey::open_client(&cfg.connection_url()).expect("open valkey client");
         let manager = ConnectionManager::new(client)
             .await

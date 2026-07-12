@@ -28,11 +28,53 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
+valkey-integration-tests = []
+valkey-tls-integration-tests = ["valkey-integration-tests"]
+
+[[test]]
+name = "audit_events"
+path = "tests/audit_events.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "authz_ownership"
+path = "tests/authz_ownership.rs"
+required-features = ["db-integration-tests"]
 
 [[test]]
 name = "invocation_cleanup_test"
 path = "tests/invocation_cleanup_test.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "object_model_connection_e2e"
+path = "tests/object_model_connection_e2e.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "reports_runtime_corpus"
+path = "tests/reports_runtime_corpus.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "reports_render_corpus"
+path = "tests/reports_render_corpus.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "redis_isolation"
+path = "tests/redis_isolation.rs"
+required-features = ["valkey-integration-tests"]
+
+[[test]]
+name = "valkey_auth"
+path = "tests/valkey_auth.rs"
+required-features = ["valkey-integration-tests"]
+
+[[test]]
+name = "valkey_tls"
+path = "tests/valkey_tls.rs"
+required-features = ["valkey-tls-integration-tests"]
 
 [dependencies]
 # Runtara crates

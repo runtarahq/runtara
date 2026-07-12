@@ -338,13 +338,19 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "db-integration-tests")]
     use sqlx::PgPool;
     use sqlx::sqlite::SqlitePoolOptions;
+    #[cfg(feature = "db-integration-tests")]
     use testcontainers::ContainerAsync;
+    #[cfg(feature = "db-integration-tests")]
     use testcontainers::runners::AsyncRunner;
+    #[cfg(feature = "db-integration-tests")]
     use testcontainers_modules::postgres::Postgres;
 
-    use crate::persistence::{PostgresPersistence, SqlitePersistence};
+    #[cfg(feature = "db-integration-tests")]
+    use crate::persistence::PostgresPersistence;
+    use crate::persistence::SqlitePersistence;
 
     #[tokio::test]
     async fn sqlite_backend_passes_parity_sequence() {
@@ -367,16 +373,11 @@ mod tests {
     /// Postgres container via testcontainers. Skips gracefully if
     /// neither path is available (no Docker on the host and no env
     /// var), so `cargo test` stays green on machines that can't run
-    /// containers.
+    /// containers. The explicit feature fails closed when neither route works.
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn postgres_backend_passes_parity_sequence() {
-        let Some((pool, _container)) = postgres_test_pool().await else {
-            eprintln!(
-                "Skipping PG parity test: TEST_RUNTARA_DATABASE_URL unset and \
-                 testcontainers failed to start a Postgres container (is Docker running?)"
-            );
-            return;
-        };
+        let (pool, _container) = postgres_test_pool().await;
         let backend = PostgresPersistence::new(pool);
         run_parity_sequence(&backend).await;
     }
@@ -384,33 +385,53 @@ mod tests {
     /// Obtain a Postgres pool for the parity test. Prefers
     /// `TEST_RUNTARA_DATABASE_URL` (for CI / local developer setups
     /// that already have a database running), then falls back to a
-    /// fresh testcontainers-managed container. Returns `None` if
-    /// neither works — callers treat that as "skip".
+    /// fresh testcontainers-managed container. Infrastructure failures are
+    /// test failures, never successful early returns.
     ///
     /// When a container is returned, keeping its handle alive keeps
     /// the container running; callers hold it in a `_container` bind.
-    async fn postgres_test_pool() -> Option<(PgPool, Option<ContainerAsync<Postgres>>)> {
+    #[cfg(feature = "db-integration-tests")]
+    async fn postgres_test_pool() -> (PgPool, Option<ContainerAsync<Postgres>>) {
         if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
-            let pool = PgPool::connect(&url).await.ok()?;
+            let pool = PgPool::connect(&url)
+                .await
+                .expect("required core parity database must accept connections");
             // Ensure pgcrypto for `gen_random_uuid()` used by migrations.
             sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
                 .execute(&pool)
                 .await
-                .ok()?;
-            crate::migrations::POSTGRES.run(&pool).await.ok()?;
-            return Some((pool, None));
+                .expect("pgcrypto extension must be available");
+            crate::migrations::POSTGRES
+                .run(&pool)
+                .await
+                .expect("core Postgres migrations must succeed");
+            return (pool, None);
         }
 
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Postgres test container must start");
+        let host = container
+            .get_host()
+            .await
+            .expect("required Postgres container host must be available");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Postgres container port must be mapped");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Postgres container must accept connections");
         sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             .execute(&pool)
             .await
-            .ok()?;
-        crate::migrations::POSTGRES.run(&pool).await.ok()?;
-        Some((pool, Some(container)))
+            .expect("pgcrypto extension must be available");
+        crate::migrations::POSTGRES
+            .run(&pool)
+            .await
+            .expect("core Postgres migrations must succeed");
+        (pool, Some(container))
     }
 }

@@ -8,9 +8,7 @@
 //! `Allow` for Member (collaborative editing), so the `Own` resource check applies to
 //! `workflow:delete`, not `update`.
 //!
-//! Needs a live Postgres. Skips cleanly when neither `TEST_RUNTARA_SERVER_DATABASE_URL` nor
-//! `RUNTARA_SERVER_DATABASE_URL` is set. Run with:
-//!   `RUNTARA_SERVER_DATABASE_URL=postgres://... cargo test -p runtara-server --test authz_ownership`
+//! Requires the explicit `db-integration-tests` feature and a live Postgres.
 
 use runtara_server::api::repositories::workflows::WorkflowRepository;
 use runtara_server::auth::MembershipPolicy;
@@ -21,26 +19,28 @@ use uuid::Uuid;
 
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_SERVER_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_SERVER_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL"
+        );
     };
 }
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_SERVER_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
-    Some(pool)
+        .expect("db-integration-tests requires a server database URL");
+    let pool = PgPool::connect(&url)
+        .await
+        .expect("required server test database must accept connections");
+    MIGRATOR
+        .run(&pool)
+        .await
+        .expect("required server migrations must succeed");
+    pool
 }
 
 /// Seed a `workflows` row owned by `created_by` and return `(tenant_id, workflow_id)`.
@@ -66,7 +66,7 @@ async fn cleanup(pool: &PgPool, tenant: &str) {
 #[tokio::test]
 async fn member_may_update_any_workflow_but_only_delete_own() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
     let tenant = format!("t-{}", Uuid::new_v4());
 
@@ -127,7 +127,7 @@ async fn member_may_update_any_workflow_but_only_delete_own() {
 #[tokio::test]
 async fn owner_and_admin_bypass_ownership_on_any_workflow() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
     let tenant = format!("t-{}", Uuid::new_v4());
 
@@ -159,7 +159,7 @@ async fn owner_and_admin_bypass_ownership_on_any_workflow() {
 #[tokio::test]
 async fn unowned_legacy_workflow_is_member_denied_but_admin_allowed() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
     let tenant = format!("t-{}", Uuid::new_v4());
 
@@ -205,7 +205,7 @@ async fn unowned_legacy_workflow_is_member_denied_but_admin_allowed() {
 #[tokio::test]
 async fn ownership_is_dormant_unless_membership_is_required() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
     let tenant = format!("t-{}", Uuid::new_v4());
 
@@ -238,7 +238,7 @@ async fn ownership_is_dormant_unless_membership_is_required() {
 #[tokio::test]
 async fn owner_query_returns_none_for_missing_workflow() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
     let tenant = format!("t-{}", Uuid::new_v4());
 

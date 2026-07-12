@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Live TLS round-trip tests for the Valkey connection layer.
 //!
-//! These need a TLS-enabled Valkey/Redis and skip cleanly unless both
+//! These need a TLS-enabled Valkey/Redis and fail closed unless both
 //! `VALKEY_HOST` and `VALKEY_TLS` are set. Trust the server's self-signed
 //! certificate either via `VALKEY_TLS_CA_CERT=/path/to/cert.pem` (verified)
 //! or `VALKEY_TLS_INSECURE=1` (encrypted, unverified). Run with:
@@ -24,16 +24,12 @@ use redis::AsyncCommands;
 use runtara_server::valkey::{ValkeyConfig, open_client};
 use std::time::Duration;
 
-/// Skip the test unless a TLS-enabled Valkey is configured in the environment.
+/// Resolve the required TLS Valkey config or fail the explicit suite.
 macro_rules! tls_config_or_skip {
     () => {
-        match ValkeyConfig::from_env() {
-            Some(cfg) if cfg.tls => cfg,
-            _ => {
-                eprintln!("Skipping test: VALKEY_HOST/VALKEY_TLS not set");
-                return;
-            }
-        }
+        ValkeyConfig::from_env()
+            .filter(|cfg| cfg.tls)
+            .expect("valkey-tls-integration-tests requires VALKEY_HOST and VALKEY_TLS=1")
     };
 }
 
@@ -125,10 +121,8 @@ async fn wrong_ca_fails_verification() {
     // must fail — proof that certificate verification is actually happening
     // (i.e. the CA path is not silently falling back to insecure mode).
     let cfg = tls_config_or_skip!();
-    let Ok(wrong_ca) = std::env::var("VALKEY_TLS_WRONG_CA") else {
-        eprintln!("Skipping test: VALKEY_TLS_WRONG_CA not set");
-        return;
-    };
+    let wrong_ca = std::env::var("VALKEY_TLS_WRONG_CA")
+        .expect("valkey-tls-integration-tests requires VALKEY_TLS_WRONG_CA");
 
     let url = format!("rediss://{}:{}", cfg.host, cfg.port);
     let root_cert = std::fs::read(&wrong_ca).expect("read wrong-CA pem");

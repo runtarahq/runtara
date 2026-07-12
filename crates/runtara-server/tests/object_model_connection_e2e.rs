@@ -13,6 +13,7 @@ use runtara_server::api::dto::object_model::{
 };
 use runtara_server::api::repositories::object_model::ObjectStoreManager;
 use runtara_server::api::services::object_model::SchemaService;
+use runtara_server::config::Config;
 use serde_json::json;
 use sqlx::PgPool;
 use testcontainers::core::{ContainerPort, IntoContainerPort, WaitFor};
@@ -29,7 +30,7 @@ struct PgVectorFixture {
 }
 
 impl PgVectorFixture {
-    async fn start() -> Option<Self> {
+    async fn start() -> Self {
         let container = GenericImage::new("pgvector/pgvector", "pg16")
             .with_exposed_port(ContainerPort::Tcp(POSTGRES_PORT))
             .with_wait_for(WaitFor::message_on_stdout(
@@ -40,36 +41,64 @@ impl PgVectorFixture {
             .with_env_var("POSTGRES_DB", "postgres")
             .start()
             .await
-            .ok()?;
+            .expect("required Docker pgvector container must start");
 
-        let host = container.get_host().await.ok()?;
+        let host = container
+            .get_host()
+            .await
+            .expect("required Docker host must be available");
         let port = container
             .get_host_port_ipv4(POSTGRES_PORT.tcp())
             .await
-            .ok()?;
-        let root_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let server_pool = PgPool::connect(&root_url).await.ok()?;
+            .expect("required Docker pgvector port must be mapped");
+        let root_url =
+            format!("postgres://postgres:postgres@{host}:{port}/postgres?sslmode=disable");
+        // The first readiness message belongs to the image's temporary init
+        // server. Retry through its shutdown until the real server accepts a
+        // complete PostgreSQL handshake.
+        let mut server_pool = None;
+        let mut last_error = None;
+        for _ in 0..150 {
+            match PgPool::connect(&root_url).await {
+                Ok(pool) => {
+                    server_pool = Some(pool);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        let server_pool = server_pool.unwrap_or_else(|| {
+            panic!(
+                "required pgvector database must accept connections: {:?}",
+                last_error
+            )
+        });
 
         sqlx::query(r#"CREATE DATABASE runtara_object_default"#)
             .execute(&server_pool)
             .await
-            .ok()?;
+            .expect("default object database must be created");
         sqlx::query(r#"CREATE DATABASE runtara_object_alternate"#)
             .execute(&server_pool)
             .await
-            .ok()?;
-        create_connection_schema(&server_pool).await.ok()?;
+            .expect("alternate object database must be created");
+        create_connection_schema(&server_pool)
+            .await
+            .expect("connection schema must be created");
 
-        Some(Self {
+        Self {
             server_pool,
             default_object_url: format!(
-                "postgres://postgres:postgres@{host}:{port}/runtara_object_default"
+                "postgres://postgres:postgres@{host}:{port}/runtara_object_default?sslmode=disable"
             ),
             alternate_object_url: format!(
-                "postgres://postgres:postgres@{host}:{port}/runtara_object_alternate"
+                "postgres://postgres:postgres@{host}:{port}/runtara_object_alternate?sslmode=disable"
             ),
             _container: container,
-        })
+        }
     }
 }
 
@@ -161,10 +190,13 @@ fn schema_request(name: &str) -> CreateSchemaRequest {
 
 #[tokio::test]
 async fn object_model_routes_schemas_to_selected_connection_database() {
-    let Some(fixture) = PgVectorFixture::start().await else {
-        eprintln!("Skipping Object Model connection e2e: Docker/pgvector Postgres unavailable");
-        return;
-    };
+    let fixture = PgVectorFixture::start().await;
+    unsafe {
+        std::env::set_var("TENANT_ID", "tenant_object_model_e2e");
+        std::env::set_var("OBJECT_MODEL_DATABASE_URL", &fixture.default_object_url);
+        std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
+    }
+    runtara_server::config::init(Config::from_env().expect("build object-model test Config"));
 
     let tenant_id = "tenant_object_model_e2e";
     let facade = Arc::new(facade(fixture.server_pool.clone()));

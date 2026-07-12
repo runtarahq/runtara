@@ -11,9 +11,8 @@
 //!
 //! These tests need a live Valkey/Redis. They use `VALKEY_HOST` and
 //! related env vars in the same shape as the server boot path and
-//! skip cleanly (no-op) if `VALKEY_HOST` is unset — mirroring the
-//! `skip_if_no_db!` pattern in `invocation_cleanup_test.rs`. Run with:
-//!   `VALKEY_HOST=localhost cargo test -p runtara-server --test redis_isolation`
+//! fail closed if `VALKEY_HOST` is unset. Run with the explicit
+//! `valkey-integration-tests` feature.
 //!
 //! Two cases:
 //!   1. happy path — BLPOP on a dedicated manager does NOT stall a fast
@@ -31,16 +30,12 @@ use runtara_server::valkey::{
     ValkeyConfig, dedicated_manager_for_blocking_consumer, get_or_create_manager,
 };
 
-/// Skip the test if Valkey is not configured in the environment.
+/// Resolve the required Valkey URL or fail the explicit integration suite.
 macro_rules! redis_url_or_skip {
     () => {
-        match ValkeyConfig::from_env() {
-            Some(cfg) => cfg.connection_url(),
-            None => {
-                eprintln!("Skipping test: VALKEY_HOST not set");
-                return;
-            }
-        }
+        ValkeyConfig::from_env()
+            .expect("valkey-integration-tests requires VALKEY_HOST")
+            .connection_url()
     };
 }
 

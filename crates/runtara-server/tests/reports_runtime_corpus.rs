@@ -6,7 +6,8 @@
 //!
 //! Requires a running Postgres with `pgvector` and `pg_trgm` extensions.
 //! Reads `TEST_REPORTS_DATABASE_URL` or falls back to `RUNTARA_DATABASE_URL`
-//! / `RUNTARA_SERVER_DATABASE_URL`. Skips gracefully when none is set or unreachable.
+//! / `RUNTARA_SERVER_DATABASE_URL`. Database-backed cases require the explicit
+//! `db-integration-tests` feature and fail closed when the database is unavailable.
 //!
 //! The test creates a UUID-suffixed throwaway database for each run, applies
 //! server migrations, runs the corpus, and drops the database on success.
@@ -48,7 +49,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 const TENANT_ID: &str = "tenant_reports_corpus";
 
-fn base_database_url() -> Option<String> {
+fn base_database_url() -> String {
     let _ = dotenvy::from_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.env"));
     for var in [
         "TEST_REPORTS_DATABASE_URL",
@@ -58,10 +59,12 @@ fn base_database_url() -> Option<String> {
         if let Ok(value) = std::env::var(var)
             && !value.is_empty()
         {
-            return Some(value);
+            return value;
         }
     }
-    None
+    panic!(
+        "db-integration-tests requires TEST_REPORTS_DATABASE_URL, RUNTARA_DATABASE_URL, or RUNTARA_SERVER_DATABASE_URL"
+    )
 }
 
 struct DbFixture {
@@ -73,15 +76,9 @@ struct DbFixture {
 }
 
 impl DbFixture {
-    async fn start() -> Option<Self> {
-        let base = base_database_url()?;
-        let opts = match PgConnectOptions::from_str(&base) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("invalid base database url: {e}");
-                return None;
-            }
-        };
+    async fn start() -> Self {
+        let base = base_database_url();
+        let opts = PgConnectOptions::from_str(&base).expect("valid reports test database URL");
         let host = opts.get_host().to_string();
         let port = opts.get_port();
         let user = opts.get_username().to_string();
@@ -101,55 +98,38 @@ impl DbFixture {
         let object_db = format!("runtara_reports_corpus_object_{suffix}");
 
         let admin_url = format!("postgres://{auth}@{host}:{port}/{admin_db}");
-        let admin_pool = match PgPool::connect(&admin_url).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("connect to admin Postgres ({admin_url}): {e}");
-                return None;
-            }
-        };
+        let admin_pool = PgPool::connect(&admin_url)
+            .await
+            .expect("required reports admin database must accept connections");
 
-        if let Err(e) = sqlx::query(&format!("CREATE DATABASE \"{server_db}\""))
+        sqlx::query(&format!("CREATE DATABASE \"{server_db}\""))
             .execute(&admin_pool)
             .await
-        {
-            eprintln!("create server db: {e}");
-            return None;
-        }
-        if let Err(e) = sqlx::query(&format!("CREATE DATABASE \"{object_db}\""))
+            .expect("reports server test database must be created");
+        sqlx::query(&format!("CREATE DATABASE \"{object_db}\""))
             .execute(&admin_pool)
             .await
-        {
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{server_db}\""))
-                .execute(&admin_pool)
-                .await;
-            eprintln!("create object db: {e}");
-            return None;
-        }
+            .expect("reports object test database must be created");
         admin_pool.close().await;
 
         let server_url = format!("postgres://{auth}@{host}:{port}/{server_db}");
         let object_url = format!("postgres://{auth}@{host}:{port}/{object_db}");
 
-        let server_pool = match PgPool::connect(&server_url).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("connect to server db: {e}");
-                return None;
-            }
-        };
-        if let Err(e) = MIGRATOR.run(&server_pool).await {
-            eprintln!("apply server migrations: {e}");
-            return None;
-        }
+        let server_pool = PgPool::connect(&server_url)
+            .await
+            .expect("reports server test database must accept connections");
+        MIGRATOR
+            .run(&server_pool)
+            .await
+            .expect("reports server migrations must succeed");
 
-        Some(Self {
+        Self {
             server_pool,
             object_url,
             admin_url,
             server_db,
             object_db,
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -205,12 +185,7 @@ fn collect_fixtures() -> Vec<(String, ReportDefinition)> {
 
 #[tokio::test]
 async fn validate_report_snapshots() {
-    let Some(fixture) = DbFixture::start().await else {
-        eprintln!(
-            "Skipping reports runtime corpus: set TEST_REPORTS_DATABASE_URL or RUNTARA_DATABASE_URL"
-        );
-        return;
-    };
+    let fixture = DbFixture::start().await;
 
     ensure_config(&fixture.object_url);
 
@@ -290,10 +265,7 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
         ReportValidationMode, ValidateReportParams, validate_report as mcp_validate_report,
     };
 
-    let Some(fixture) = DbFixture::start().await else {
-        eprintln!("Skipping MCP validate E2E: no test database configured");
-        return;
-    };
+    let fixture = DbFixture::start().await;
 
     ensure_config(&fixture.object_url);
 
@@ -472,10 +444,7 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
         move_workflow,
     };
 
-    let Some(fixture) = DbFixture::start().await else {
-        eprintln!("Skipping MCP workflow folders E2E: no test database configured");
-        return;
-    };
+    let fixture = DbFixture::start().await;
 
     ensure_config(&fixture.object_url);
 

@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Round-trip tests for the audit emitter (`audit::emit`).
 //!
-//! Need a live Postgres. Skip cleanly when neither `TEST_RUNTARA_SERVER_DATABASE_URL` nor
-//! `RUNTARA_SERVER_DATABASE_URL` is set, mirroring `invocation_cleanup_test.rs`. Run with:
-//!   `RUNTARA_SERVER_DATABASE_URL=postgres://... cargo test -p runtara-server --test audit_events`
+//! Requires the explicit `db-integration-tests` feature and a live Postgres.
 
 use runtara_server::audit::{self, AuditEvent};
 use serde_json::json;
@@ -13,32 +11,34 @@ use uuid::Uuid;
 
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_SERVER_DATABASE_URL").is_err()
-        {
-            eprintln!(
-                "Skipping test: TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL not set"
-            );
-            return;
-        }
+        assert!(
+            std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL").is_ok()
+                || std::env::var("RUNTARA_SERVER_DATABASE_URL").is_ok(),
+            "db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL or RUNTARA_SERVER_DATABASE_URL"
+        );
     };
 }
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-async fn get_test_pool() -> Option<PgPool> {
+async fn get_test_pool() -> PgPool {
     let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_SERVER_DATABASE_URL"))
-        .ok()?;
-    let pool = PgPool::connect(&url).await.ok()?;
-    MIGRATOR.run(&pool).await.ok()?;
-    Some(pool)
+        .expect("db-integration-tests requires a server database URL");
+    let pool = PgPool::connect(&url)
+        .await
+        .expect("required server test database must accept connections");
+    MIGRATOR
+        .run(&pool)
+        .await
+        .expect("required server migrations must succeed");
+    pool
 }
 
 #[tokio::test]
 async fn emit_writes_a_row_with_contract_columns() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let tenant = format!("t-{}", Uuid::new_v4());
     let resource_id = Uuid::new_v4().to_string();
 
@@ -87,7 +87,7 @@ async fn emit_writes_a_row_with_contract_columns() {
 #[tokio::test]
 async fn emit_allows_null_actor_for_system_events() {
     skip_if_no_db!();
-    let pool = get_test_pool().await.expect("test pool");
+    let pool = get_test_pool().await;
     let tenant = format!("t-{}", Uuid::new_v4());
 
     audit::emit(&pool, &tenant, None, AuditEvent::new("system.reconcile")).await;
