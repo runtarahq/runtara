@@ -48,7 +48,22 @@ impl PgFixture {
                 valid_until TIMESTAMPTZ,
                 status VARCHAR(64),
                 rate_limit_config JSONB,
-                is_default_file_storage BOOLEAN DEFAULT FALSE
+                is_default_file_storage BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok()?;
+        sqlx::query(
+            r#"
+            CREATE TABLE connection_defaults (
+                tenant_id VARCHAR(255) NOT NULL,
+                default_for VARCHAR(255) NOT NULL,
+                connection_id VARCHAR(255) NOT NULL,
+                PRIMARY KEY (tenant_id, default_for)
             )
             "#,
         )
@@ -84,6 +99,25 @@ async fn status_of(pool: &PgPool, id: &str) -> String {
         .fetch_one(pool)
         .await
         .expect("fetch status")
+}
+
+/// Raw stored connection_parameters JSON (NoOpCipher = stored as plaintext JSONB).
+async fn params_of(pool: &PgPool, id: &str) -> serde_json::Value {
+    sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch params")
+}
+
+async fn update(svc: &ConnectionService, id: &str, tenant: &str, body: serde_json::Value) {
+    let req: runtara_connections::types::UpdateConnectionRequest =
+        serde_json::from_value(body).expect("valid update request");
+    svc.update_connection(id, tenant, req)
+        .await
+        .expect("update connection");
 }
 
 #[tokio::test]
@@ -160,4 +194,106 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
     )
     .await;
     assert_eq!(status_of(&fx.pool, &e).await, "ACTIVE");
+}
+
+/// The reported case: editing an authorized QuickBooks connection's `environment`
+/// must persist the change AND keep the server-captured OAuth tokens/realm_id (the
+/// UI can't resend them). Endpoint changes on a params-driven type still strip the
+/// tokens (SSRF rule E).
+#[tokio::test]
+async fn editing_params_merges_and_preserves_tokens_except_on_endpoint_change() {
+    let Some(fx) = PgFixture::start().await else {
+        eprintln!("Skipping update-merge e2e: Docker/Postgres unavailable");
+        return;
+    };
+    let svc = service(&fx.pool);
+
+    // --- QuickBooks (curated): editing environment keeps the captured tokens ---
+    let id = create(
+        &svc,
+        "t",
+        json!({
+            "title": "qb-prod", "integrationId": "quickbooks_online", "status": "ACTIVE",
+            "connectionParameters": {
+                "client_id": "QBCID", "client_secret": "QBSEC", "environment": "production",
+                "realm_id": "123456789", "access_token": "at-live", "refresh_token": "rt-live"
+            }
+        }),
+    )
+    .await;
+
+    // Edit exactly what the UI submits: schema fields only, secret left blank, and
+    // no OAuth params (getConnectionById omits connection_parameters).
+    update(
+        &svc,
+        &id,
+        "t",
+        json!({
+            "connectionParameters": {
+                "client_id": "QBCID", "client_secret": "", "environment": "sandbox"
+            }
+        }),
+    )
+    .await;
+
+    let after = params_of(&fx.pool, &id).await;
+    assert_eq!(
+        after["environment"], "sandbox",
+        "environment edit must persist"
+    );
+    // Merge preserves the server-captured OAuth params + the blanked secret.
+    assert_eq!(after["access_token"], "at-live");
+    assert_eq!(after["refresh_token"], "rt-live");
+    assert_eq!(after["realm_id"], "123456789");
+    assert_eq!(
+        after["client_secret"], "QBSEC",
+        "blank secret keeps existing"
+    );
+
+    // --- Generic params-driven authcode: an ENDPOINT change strips tokens ---
+    let g = create(
+        &svc,
+        "t",
+        json!({
+            "title": "authcode", "integrationId": "http_oauth2_authorization_code", "status": "ACTIVE",
+            "connectionParameters": {
+                "auth_url": "https://a.example.com/authorize", "token_url": "https://a.example.com/token",
+                "client_id": "c", "client_secret": "s", "base_url": "https://api.example.com",
+                "access_token": "at-g", "refresh_token": "rt-g"
+            }
+        }),
+    )
+    .await;
+
+    // Editing a non-endpoint field (scopes) keeps the tokens.
+    update(
+        &svc,
+        &g,
+        "t",
+        json!({ "connectionParameters": { "scopes": "read write" } }),
+    )
+    .await;
+    let g1 = params_of(&fx.pool, &g).await;
+    assert_eq!(g1["access_token"], "at-g", "non-endpoint edit keeps tokens");
+    assert_eq!(g1["scopes"], "read write");
+
+    // Changing the token_url (an endpoint) strips the captured tokens (rule E).
+    update(
+        &svc,
+        &g,
+        "t",
+        json!({ "connectionParameters": { "token_url": "https://other.example.com/token" } }),
+    )
+    .await;
+    let g2 = params_of(&fx.pool, &g).await;
+    assert!(
+        g2.get("access_token").is_none(),
+        "endpoint change must strip tokens: {g2}"
+    );
+    assert!(g2.get("refresh_token").is_none());
+    assert_eq!(
+        status_of(&fx.pool, &g).await,
+        "REQUIRES_RECONNECTION",
+        "endpoint change forces reconnect"
+    );
 }
