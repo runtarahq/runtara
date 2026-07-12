@@ -1,0 +1,197 @@
+import { describe, expect, it } from 'vitest';
+import {
+  describeStepReference,
+  parseStepReference,
+  resolveReferenceType,
+} from './reference-type';
+import type { StepInfo } from './shared';
+import type { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
+import type { SimpleVariable } from './NodeFormContext';
+
+const PREVIOUS_STEPS: StepInfo[] = [
+  {
+    id: 'filt',
+    name: 'Filter results',
+    inputs: [],
+    outputs: [
+      {
+        name: 'items',
+        type: 'array',
+        path: "steps['filt'].outputs.items",
+      },
+      {
+        name: 'count',
+        type: 'integer',
+        path: "steps['filt'].outputs.count",
+      },
+    ],
+  },
+  {
+    id: 'fetch',
+    name: 'Fetch page',
+    inputs: [],
+    outputs: [
+      {
+        name: 'body',
+        type: 'object',
+        path: "steps['fetch'].outputs.body",
+        children: [
+          {
+            name: 'body.token',
+            type: 'string',
+            path: "steps['fetch'].outputs.body.token",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'split',
+    name: 'Split items',
+    inputs: [],
+    outputs: [
+      { name: '', type: 'array', path: "steps['split'].outputs" },
+      {
+        name: 'hasFailures',
+        type: 'boolean',
+        path: "steps['split'].hasFailures",
+      },
+    ],
+  },
+];
+
+const INPUT_SCHEMA: SchemaField[] = [
+  { name: 'flag', type: 'string', required: true, description: '' },
+  {
+    name: 'customer',
+    type: 'object',
+    required: false,
+    description: '',
+    properties: [
+      { name: 'email', type: 'string', required: false, description: '' },
+    ],
+  },
+];
+
+const VARIABLES: SimpleVariable[] = [
+  { name: 'region', value: 'eu', type: 'String', description: null },
+];
+
+const CONTEXT = {
+  previousSteps: PREVIOUS_STEPS,
+  inputSchemaFields: INPUT_SCHEMA,
+  variables: VARIABLES,
+};
+
+describe('parseStepReference', () => {
+  it('parses bracket and dot spellings', () => {
+    expect(parseStepReference("steps['filt'].outputs.items")).toEqual({
+      stepId: 'filt',
+      rest: 'outputs.items',
+    });
+    expect(parseStepReference('steps.filt.outputs.items')).toEqual({
+      stepId: 'filt',
+      rest: 'outputs.items',
+    });
+    expect(parseStepReference("steps['split'].hasFailures")).toEqual({
+      stepId: 'split',
+      rest: 'hasFailures',
+    });
+    expect(parseStepReference('data.flag')).toBeNull();
+  });
+});
+
+describe('describeStepReference', () => {
+  it('produces friendly labels for both spellings', () => {
+    expect(
+      describeStepReference("steps['filt'].outputs.items", PREVIOUS_STEPS)
+    ).toEqual({ stepName: 'Filter results', fieldPath: 'items' });
+    // Dot-form paths (hand-written or from imported graphs) used to render as
+    // raw paths in the pill; they resolve the same way now.
+    expect(
+      describeStepReference('steps.filt.outputs.items', PREVIOUS_STEPS)
+    ).toEqual({ stepName: 'Filter results', fieldPath: 'items' });
+    expect(
+      describeStepReference("steps['split'].hasFailures", PREVIOUS_STEPS)
+    ).toEqual({ stepName: 'Split items', fieldPath: 'hasFailures' });
+    expect(
+      describeStepReference("steps['split'].outputs", PREVIOUS_STEPS)
+    ).toEqual({ stepName: 'Split items', fieldPath: 'outputs' });
+  });
+
+  it('returns nothing for unknown steps or non-step paths', () => {
+    expect(describeStepReference("steps['nope'].outputs", PREVIOUS_STEPS)).toEqual(
+      {}
+    );
+    expect(describeStepReference('data.flag', PREVIOUS_STEPS)).toEqual({});
+  });
+});
+
+describe('resolveReferenceType', () => {
+  it('resolves step output fields in both spellings', () => {
+    expect(resolveReferenceType("steps['filt'].outputs.items", CONTEXT)).toBe(
+      'array'
+    );
+    expect(resolveReferenceType('steps.filt.outputs.count', CONTEXT)).toBe(
+      'integer'
+    );
+  });
+
+  it('resolves nested output children and sibling fields', () => {
+    expect(
+      resolveReferenceType("steps['fetch'].outputs.body.token", CONTEXT)
+    ).toBe('string');
+    expect(resolveReferenceType("steps['split'].hasFailures", CONTEXT)).toBe(
+      'boolean'
+    );
+    expect(resolveReferenceType("steps['split'].outputs", CONTEXT)).toBe(
+      'array'
+    );
+  });
+
+  it('never guesses: unknown paths resolve to undefined', () => {
+    expect(
+      resolveReferenceType("steps['filt'].outputs.price", CONTEXT)
+    ).toBeUndefined();
+    expect(
+      resolveReferenceType("steps['nope'].outputs", CONTEXT)
+    ).toBeUndefined();
+    expect(resolveReferenceType('item.email', CONTEXT)).toBeUndefined();
+  });
+
+  it('resolves workflow inputs, including nested properties', () => {
+    expect(resolveReferenceType('data.flag', CONTEXT)).toBe('string');
+    expect(resolveReferenceType('workflow.inputs.data.flag', CONTEXT)).toBe(
+      'string'
+    );
+    expect(resolveReferenceType('data.customer.email', CONTEXT)).toBe(
+      'string'
+    );
+    expect(resolveReferenceType('workflow.inputs.data', CONTEXT)).toBe(
+      'object'
+    );
+    expect(resolveReferenceType('data.unknown', CONTEXT)).toBeUndefined();
+  });
+
+  it('resolves variables: user-declared and built-ins', () => {
+    expect(resolveReferenceType('variables.region', CONTEXT)).toBe('string');
+    expect(
+      resolveReferenceType('workflow.inputs.variables.region', CONTEXT)
+    ).toBe('string');
+    expect(resolveReferenceType('variables._instance_id', CONTEXT)).toBe(
+      'string'
+    );
+    expect(resolveReferenceType('variables._index', CONTEXT)).toBe('integer');
+    expect(resolveReferenceType('variables._loop_indices', CONTEXT)).toBe(
+      'array'
+    );
+    // _item is the runtime-shaped current Split item: honest unknown.
+    expect(resolveReferenceType('variables._item', CONTEXT)).toBeUndefined();
+    expect(resolveReferenceType('variables.unknown', CONTEXT)).toBeUndefined();
+  });
+
+  it('resolves loop context references', () => {
+    expect(resolveReferenceType('loop.index', CONTEXT)).toBe('integer');
+    expect(resolveReferenceType('loop.outputs', CONTEXT)).toBeUndefined();
+  });
+});

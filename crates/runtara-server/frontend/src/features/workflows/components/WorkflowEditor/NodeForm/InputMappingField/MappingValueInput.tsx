@@ -16,24 +16,11 @@ import { VariablePickerModal } from './VariablePickerModal';
 import { TemplateEditorModal } from './TemplateEditorModal';
 import { VariableSuggestion } from '../InputMappingValueField/VariableSuggestions';
 import { NodeFormContext } from '../NodeFormContext';
+import {
+  describeStepReference,
+  resolveReferenceType,
+} from '../reference-type';
 import { cn } from '@/lib/utils';
-
-/**
- * Extract step ID from a reference path like "steps['stepId'].outputs.field"
- */
-function extractStepIdFromPath(path: string): string | null {
-  const match = path.match(/steps\['([^']+)'\]/);
-  return match ? match[1] : null;
-}
-
-/**
- * Extract field path from a reference path like "steps['stepId'].outputs.field"
- * Returns the part after ".outputs" (e.g., "field" or "field.subfield")
- */
-function extractFieldPathFromPath(path: string): string | null {
-  const match = path.match(/\.outputs\.?(.*)$/);
-  return match ? match[1] || 'outputs' : null;
-}
 
 export type ValueMode = 'immediate' | 'reference' | 'template' | 'composite';
 
@@ -117,7 +104,8 @@ export function MappingValueInput({
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
-  const { previousSteps } = useContext(NodeFormContext);
+  const { previousSteps, inputSchemaFields, variables } =
+    useContext(NodeFormContext);
 
   const isReference = valueType === 'reference';
   const lowerFieldType = fieldType?.toLowerCase() || 'text';
@@ -162,21 +150,27 @@ export function MappingValueInput({
     return false;
   }, [lowerFieldType, lowerFieldName, isTemplate]);
 
-  // Look up step info from the reference path
-  const stepInfo = useMemo(() => {
-    if (!isReference || !stringValue)
-      return { stepName: undefined, stepId: undefined, fieldPath: undefined };
-    const stepId = extractStepIdFromPath(stringValue);
-    if (!stepId)
-      return { stepName: undefined, stepId: undefined, fieldPath: undefined };
-    const step = previousSteps.find((s) => s.id === stepId);
-    const fieldPath = extractFieldPathFromPath(stringValue);
-    return {
-      stepName: step?.name,
-      stepId,
-      fieldPath,
-    };
-  }, [isReference, stringValue, previousSteps]);
+  // Look up step info from the reference path (both path spellings)
+  const stepInfo = useMemo(
+    () =>
+      isReference && stringValue
+        ? describeStepReference(stringValue, previousSteps)
+        : {},
+    [isReference, stringValue, previousSteps]
+  );
+
+  // Resolved type of the referenced value, for the pill's badge/icon.
+  const referenceType = useMemo(
+    () =>
+      isReference && stringValue
+        ? resolveReferenceType(stringValue, {
+            previousSteps,
+            inputSchemaFields,
+            variables,
+          })
+        : undefined,
+    [isReference, stringValue, previousSteps, inputSchemaFields, variables]
+  );
 
   // Cycle: immediate → template → reference → composite → immediate
   const handleModeToggle = () => {
@@ -218,6 +212,7 @@ export function MappingValueInput({
             <div className="flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
               <ReferencePill
                 path={stringValue}
+                type={referenceType}
                 stepName={stepInfo.stepName}
                 fieldPath={stepInfo.fieldPath ?? undefined}
                 onRemove={handleRemoveReference}

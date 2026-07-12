@@ -54,6 +54,10 @@ import { VariablePickerModal } from './VariablePickerModal';
 import { VariableSuggestion } from '../InputMappingValueField/VariableSuggestions';
 import { NodeFormContext } from '../NodeFormContext';
 import {
+  describeStepReference,
+  resolveReferenceType,
+} from '../reference-type';
+import {
   VALUE_TYPE_OPTIONS,
   getValueTypeBadgeColor,
 } from '../ValueTypeSelector/constants';
@@ -147,21 +151,6 @@ const IMMEDIATE_TYPE_HINT_OPTIONS: Array<{
   { value: 'json', label: 'JSON', description: 'JSON object/array' },
 ];
 
-/**
- * Extract step ID from a reference path like "steps['stepId'].outputs.field"
- */
-function extractStepIdFromPath(path: string): string | null {
-  const match = path.match(/steps\['([^']+)'\]/);
-  return match ? match[1] : null;
-}
-
-/**
- * Extract field path from a reference path
- */
-function extractFieldPathFromPath(path: string): string | null {
-  const match = path.match(/\.outputs\.?(.*)$/);
-  return match ? match[1] || 'outputs' : null;
-}
 
 export function CompositeValueItem({
   value,
@@ -177,7 +166,8 @@ export function CompositeValueItem({
 }: CompositeValueItemProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
-  const { previousSteps } = useContext(NodeFormContext);
+  const { previousSteps, inputSchemaFields, variables } =
+    useContext(NodeFormContext);
 
   // Get errors for this specific item
   const itemErrors = useMemo(() => {
@@ -190,23 +180,27 @@ export function CompositeValueItem({
   const hasError = itemErrors.length > 0;
   const directError = itemErrors.find((e) => e.path === pathPrefix);
 
-  // For reference values, look up step info
-  const stepInfo = useMemo(() => {
-    if (value.valueType !== 'reference' || !value.value) {
-      return { stepName: undefined, stepId: undefined, fieldPath: undefined };
-    }
-    const stepId = extractStepIdFromPath(value.value as string);
-    if (!stepId) {
-      return { stepName: undefined, stepId: undefined, fieldPath: undefined };
-    }
-    const step = previousSteps.find((s) => s.id === stepId);
-    const fieldPath = extractFieldPathFromPath(value.value as string);
-    return {
-      stepName: step?.name,
-      stepId,
-      fieldPath,
-    };
-  }, [value, previousSteps]);
+  // For reference values, look up step info (both path spellings)
+  const stepInfo = useMemo(
+    () =>
+      value.valueType === 'reference' && value.value
+        ? describeStepReference(value.value as string, previousSteps)
+        : {},
+    [value, previousSteps]
+  );
+
+  // Resolved type of the referenced value, for the pill's badge/icon.
+  const referenceType = useMemo(
+    () =>
+      value.valueType === 'reference' && value.value
+        ? resolveReferenceType(value.value as string, {
+            previousSteps,
+            inputSchemaFields,
+            variables,
+          })
+        : undefined,
+    [value, previousSteps, inputSchemaFields, variables]
+  );
 
   // Handle value type change
   const handleTypeChange = useCallback(
@@ -477,6 +471,7 @@ export function CompositeValueItem({
             <div className="flex-1">
               <ReferencePill
                 path={value.value as string}
+                type={referenceType}
                 stepName={stepInfo.stepName}
                 fieldPath={stepInfo.fieldPath ?? undefined}
                 onRemove={() => onChange({ valueType: 'reference', value: '' })}

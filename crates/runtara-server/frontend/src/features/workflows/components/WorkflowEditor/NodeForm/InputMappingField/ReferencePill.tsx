@@ -3,6 +3,11 @@ import { cn } from '@/lib/utils';
 
 interface ReferencePillProps {
   path: string;
+  /**
+   * Resolved type of the referenced value (see NodeForm/reference-type.ts).
+   * When absent the type is unknown or runtime-dependent — no badge, neutral
+   * icon. Never guessed from the path text.
+   */
   type?: string;
   /** Optional step name to display instead of step ID */
   stepName?: string;
@@ -14,20 +19,18 @@ interface ReferencePillProps {
 }
 
 /**
- * Get icon based on inferred type from path or explicit type
+ * Icon for a resolved type. Unknown types get the neutral reference icon —
+ * an icon guessed from path substrings looks confident but lies.
  */
-function getIconForType(type?: string, path?: string) {
+function getIconForType(type?: string) {
   const lowerType = type?.toLowerCase() || '';
-  const lowerPath = path?.toLowerCase() || '';
 
-  // Check explicit type first
   if (lowerType.includes('string') || lowerType.includes('text')) {
     return <Icons.type className="h-3 w-3" />;
   }
   if (
     lowerType.includes('number') ||
     lowerType.includes('int') ||
-    lowerType.includes('integer') ||
     lowerType.includes('double') ||
     lowerType.includes('float')
   ) {
@@ -42,35 +45,11 @@ function getIconForType(type?: string, path?: string) {
   if (lowerType.includes('object')) {
     return <Icons.braces className="h-3 w-3" />;
   }
-  if (
-    lowerType.includes('date') ||
-    lowerType.includes('time') ||
-    lowerPath.includes('date') ||
-    lowerPath.includes('time')
-  ) {
+  if (lowerType.includes('date') || lowerType.includes('time')) {
     return <Icons.calendar className="h-3 w-3" />;
   }
 
-  // Infer from path
-  if (lowerPath.includes('email')) {
-    return <Icons.mail className="h-3 w-3" />;
-  }
-  if (lowerPath.includes('name')) {
-    return <Icons.user className="h-3 w-3" />;
-  }
-  if (lowerPath.includes('id') || lowerPath.includes('key')) {
-    return <Icons.key className="h-3 w-3" />;
-  }
-  if (
-    lowerPath.includes('price') ||
-    lowerPath.includes('amount') ||
-    lowerPath.includes('total') ||
-    lowerPath.includes('cost')
-  ) {
-    return <Icons.dollarSign className="h-3 w-3" />;
-  }
-
-  // Default icon
+  // Unknown / runtime-dependent
   return <Icons.gitBranch className="h-3 w-3" />;
 }
 
@@ -98,8 +77,9 @@ export function ReferencePill({
         disabled && 'opacity-50',
         className
       )}
+      title={type ? `${path} — ${type}` : path}
     >
-      {getIconForType(type, path)}
+      {getIconForType(type)}
       <span className="truncate max-w-[200px]">
         {hasStepInfo ? (
           <>
@@ -115,6 +95,11 @@ export function ReferencePill({
           <span className="font-mono">{path}</span>
         )}
       </span>
+      {type && (
+        <span className="shrink-0 font-mono text-[10px] leading-none px-1 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+          {type}
+        </span>
+      )}
       {!disabled && (
         <button
           type="button"
