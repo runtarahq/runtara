@@ -569,4 +569,43 @@ test.describe.serial('Connection schema form local UI', () => {
     expect(saved.editProjection.values.client_id).toBe('guard-client-id');
     expect(saved.status).toBe('REQUIRES_RECONNECTION');
   });
+
+  test('deletes from the danger zone behind a confirmation dialog', async ({
+    page,
+    request,
+  }) => {
+    const title = `E2E removable SFTP ${runId}`;
+    const id = await createApiConnection(request, {
+      title,
+      integrationId: 'sftp',
+      connectionParameters: {
+        host: 'delete.example.com',
+        port: 22,
+        username: 'delete-user',
+        auth_mode: 'password',
+        password: 'stored-secret',
+      },
+    });
+
+    await openConnectionEditor(page, title);
+
+    // Delete is not a header click any more; it lives in the danger zone.
+    await expect(
+      page.getByRole('heading', { name: 'Danger zone', exact: true })
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Delete…' }).click();
+
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText(`Delete “${title}”?`);
+    // SFTP is not an OAuth type, so no provider-grant revoke bullet.
+    await expect(dialog).not.toContainText('access grant will be revoked');
+    await dialog.getByRole('button', { name: 'Delete connection' }).click();
+
+    await expect(page).toHaveURL('/connections');
+    await expect(page.getByText(`Connection "${title}" deleted.`)).toBeVisible();
+
+    const response = await request.get(`${apiBase}/connections/${id}`);
+    expect(response.status()).toBe(404);
+    apiConnectionIds.delete(id);
+  });
 });

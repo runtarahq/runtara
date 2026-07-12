@@ -3,7 +3,6 @@ import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
-import { Loader2, Trash2 } from 'lucide-react';
 
 import type {
   ConnectionStatus,
@@ -13,7 +12,6 @@ import type {
 } from '@/generated/RuntaraRuntimeApi';
 import { NextForm } from '@/shared/components/NextForm';
 import { ServiceIcon } from '@/shared/components/service-icon';
-import { Button } from '@/shared/components/ui/button';
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import {
   analyzeFormWithRust,
@@ -24,7 +22,9 @@ import {
 import { ConnectionPageShell } from '../ConnectionPageShell';
 import { ConnectionSaveBar } from '../ConnectionSaveBar';
 import { CollapsedSection } from '../CollapsedSection';
+import { DangerZoneSection } from '../DangerZoneSection';
 import { ConnectionStatusCard } from '../../ConnectionStatusCard';
+import { DeleteConnectionDialog } from '../../DeleteConnectionDialog';
 import { patchStripsAuthorization } from '../../../utils/reauthorization';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
 import { DefaultForSection } from '../DefaultForSection';
@@ -288,32 +288,22 @@ export function DynamicConnectionForm({
     );
   };
 
-  // Interim header action: Delete moves into the danger zone (PR-3).
-  const headerActions =
-    mode === 'edit' && onDelete ? (
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        onClick={onDelete}
-        disabled={isDeleting}
-        className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30"
-      >
-        {isDeleting ? (
-          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-        ) : (
-          <Trash2 className="w-4 h-4 mr-1.5" />
-        )}
-        Delete
-      </Button>
-    ) : undefined;
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const connectionTitle =
+    (typeof watched.title === 'string' && watched.title.trim()) ||
+    (initValues as { title?: string })?.title ||
+    'this connection';
 
   // Descriptor parameter fields (not the title/rate-limit frame) with unsaved
   // edits, plus staged secret clears — the set the status card guards against
-  // a stale-credential reconnect.
+  // a stale-credential reconnect. `title` is injected into definition.fields by
+  // the adapter but is frame chrome, not a credential, so it's excluded.
   const touchedParamFields = new Set<string>([
     ...Object.entries(dirtyFields)
-      .filter(([name, dirty]) => dirty === true && name in definition.fields)
+      .filter(
+        ([name, dirty]) =>
+          dirty === true && name !== 'title' && name in definition.fields
+      )
       .map(([name]) => name),
     ...clearedSecrets,
   ]);
@@ -346,7 +336,6 @@ export function DynamicConnectionForm({
           }
           integrationName={connectionType.displayName || undefined}
           integrationCategory={connectionType.category || undefined}
-          headerActions={headerActions}
           footer={
             showSaveBar ? (
               <ConnectionSaveBar
@@ -453,6 +442,23 @@ export function DynamicConnectionForm({
                 liveStatus={rateLimitStatus}
               />
             </CollapsedSection>
+            {mode === 'edit' && onDelete && (
+              <DangerZoneSection
+                isOAuth={Boolean(showReconnect)}
+                isDeleting={Boolean(isDeleting)}
+                onRequestDelete={() => setDeleteDialogOpen(true)}
+              />
+            )}
+            {mode === 'edit' && onDelete && (
+              <DeleteConnectionDialog
+                open={deleteDialogOpen}
+                onOpenChange={setDeleteDialogOpen}
+                title={connectionTitle}
+                isOAuth={Boolean(showReconnect)}
+                isDeleting={Boolean(isDeleting)}
+                onConfirm={onDelete}
+              />
+            )}
           </div>
         </ConnectionPageShell>
       )}

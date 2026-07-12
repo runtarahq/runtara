@@ -33,10 +33,11 @@ type ConnectionTypeWithForm = ConnectionTypeDto & {
 export type ConnectionIdentityEntry = { label: string; value: string };
 
 /**
- * Human-readable identity of a connection sourced from its readable
- * (`read`/`read_write`) projection values — e.g. the QuickBooks company realm
- * and environment. Secrets are never included because the projection omits
- * write-access values.
+ * Human-readable identity of a connection sourced from its provider-managed
+ * `read`-access projection values — e.g. the QuickBooks company realm captured
+ * at consent. Only read-access (grant-state) fields are surfaced so the line
+ * stays a stable identity rather than echoing editable config; secrets are
+ * never present because the projection omits write-access values.
  */
 export function connectionIdentity(
   connectionType: ConnectionTypeWithForm,
