@@ -370,10 +370,8 @@ mod tests {
 
     /// Run the same parity sequence against Postgres. Uses
     /// `TEST_RUNTARA_DATABASE_URL` if set; otherwise spins up a
-    /// Postgres container via testcontainers. Skips gracefully if
-    /// neither path is available (no Docker on the host and no env
-    /// var), so `cargo test` stays green on machines that can't run
-    /// containers. The explicit feature fails closed when neither route works.
+    /// Postgres container via testcontainers. The explicit feature fails
+    /// closed when neither route works.
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn postgres_backend_passes_parity_sequence() {

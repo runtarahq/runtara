@@ -254,7 +254,7 @@ jobs:
       - name: Run runtara-core tests
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
-        run: cargo test -p runtara-core -- --test-threads=1
+        run: cargo test -p runtara-core --features db-integration-tests -- --test-threads=1
 
   test-server:
     runs-on: ubuntu-latest
@@ -302,18 +302,22 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.sha }}
 
       - name: Run runtara-server tests
-        # TEST_RUNTARA_SERVER_DATABASE_URL opts the Postgres-dependent
-        # integration tests (e.g. invocation_cleanup_test.rs) into running
-        # against a real DB. VALKEY_HOST does the same for the Redis
-        # isolation regression tests (redis_isolation.rs, guarding the
-        # BLPOP head-of-line fix from commit 8c43211). Both env-var
-        # skip cleanly when unset, so a developer running `cargo test`
-        # without infra sees no-ops, not failures.
+        # Explicit features include the Postgres and plaintext-Valkey suites;
+        # both fail closed when their required services are unavailable.
         env:
           TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+          TEST_REPORTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           VALKEY_HOST: localhost
           VALKEY_PORT: "6379"
-        run: cargo test -p runtara-server -- --test-threads=1
+        run: cargo test -p runtara-server --features db-integration-tests,valkey-integration-tests -- --test-threads=1
+
+      - name: Run object-store PostgreSQL integration tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+        run: cargo test -p runtara-object-store --features db-integration-tests --test integration -- --test-threads=1
+
+      - name: Run TLS-only Valkey integration tests
+        run: scripts/test-valkey-tls.sh
 
   test-environment:
     runs-on: ubuntu-latest
@@ -353,8 +357,8 @@ jobs:
 
       - name: Run runtara-environment tests
         env:
-          TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
-        run: cargo test -p runtara-environment -- --test-threads=1
+          TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+        run: cargo test -p runtara-environment --features db-integration-tests -- --test-threads=1
 
   # Per-component-crate unit tests for the agent crates plus the legacy
   # `runtara-agents` parent and the shared agent infrastructure
@@ -556,7 +560,7 @@ jobs:
           test "$meta_count" -eq "$expected"
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
-        run: cargo test -p runtara-component-host --tests
+        run: cargo test -p runtara-component-host --features component-integration-tests --tests
 
       # Direct WASM smoke: use the staged stdlib/runtime/agent component
       # bundle, then compile direct workflow fixtures, compose them in-process
@@ -567,10 +571,10 @@ jobs:
       # composition graph.
       - name: Run direct WASM workflow execution smoke tests
         env:
-          RUNTARA_RUN_DIRECT_WASM_E2E: "1"
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
         run: |
           cargo test -p runtara-workflows \
+            --features direct-wasm-integration-tests \
             --test direct_wasm_execute \
             -- --test-threads=1
 
