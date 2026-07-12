@@ -7,6 +7,7 @@ import { Toaster } from '@/shared/components/ui/sonner';
 import { oidcConfig } from '@/shared/config/oidcConfig';
 import { initAnalytics } from '@/shared/analytics/plausible';
 import { ensureReportDsl } from '@/wasm/runtara-report-dsl';
+import { ensureRustValidationInitialized } from '@/shared/lib/rust-validation-wasm';
 import App from '@/App';
 
 import './index.css';
@@ -16,8 +17,10 @@ initAnalytics();
 // The promise is memoized inside `ensureReportDsl`; failure is non-fatal —
 // individual consumers fall back to passthrough strings.
 ensureReportDsl().catch((err) => {
-  // eslint-disable-next-line no-console
   console.warn('[reportDsl] WASM preload failed', err);
+});
+ensureRustValidationInitialized().catch((err) => {
+  console.warn('[validation] WASM preload failed', err);
 });
 
 export const queryClient = new QueryClient({

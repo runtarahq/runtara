@@ -272,9 +272,7 @@ export function DynamicConnectionForm({
               fieldAnnotations={Object.fromEntries(
                 Object.entries(secretState).map(([name, state]) => {
                   const field = definition.fields[name];
-                  const behavior = connectionType.fields.find(
-                    (candidate) => candidate.name === name
-                  )?.behavior;
+                  const behavior = connectionType.fieldBehaviors[name];
                   const label = field?.label ?? name.replace(/_/g, ' ');
                   return [
                     name,

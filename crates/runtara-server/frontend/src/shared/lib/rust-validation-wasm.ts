@@ -3,12 +3,14 @@ import { User } from 'oidc-client-ts';
 import initRustValidation, {
   agentCatalogLoaded,
   analyzeFormJson,
+  evaluateConditionJson,
   getAgentJson,
   getAgentsJson,
   getCapabilitySchemaJson,
   getStepTypeSchemaJson,
   getStepTypesJson,
   initAgentCatalog,
+  normalizeSchemaFieldsFormJson,
   validateExecutionGraphJson,
   validateFormDefinitionJson,
   validateSchemaFieldsJson,
@@ -20,11 +22,13 @@ import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 
 export {
   analyzeFormJson,
+  evaluateConditionJson,
   getAgentJson,
   getAgentsJson,
   getCapabilitySchemaJson,
   getStepTypeSchemaJson,
   getStepTypesJson,
+  normalizeSchemaFieldsFormJson,
   validateExecutionGraphJson,
   validateFormDefinitionJson,
   validateSchemaFieldsJson,
@@ -118,6 +122,20 @@ export function ensureRustValidationInitialized(): Promise<unknown> {
     throw error;
   });
   return initPromise;
+}
+
+/** Synchronous condition evaluation after the app-level WASM preload. */
+export function evaluateCanonicalCondition(
+  condition: unknown,
+  data: unknown
+): boolean {
+  const response = JSON.parse(
+    evaluateConditionJson(JSON.stringify(condition), JSON.stringify(data))
+  ) as { success?: boolean; value?: boolean; error?: string };
+  if (!response.success || typeof response.value !== 'boolean') {
+    throw new Error(response.error ?? 'Condition evaluation failed');
+  }
+  return response.value;
 }
 
 /** Initialize workflow metadata after the shared validator is available. */

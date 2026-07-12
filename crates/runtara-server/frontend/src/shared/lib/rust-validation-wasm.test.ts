@@ -4,6 +4,9 @@ const wasm = vi.hoisted(() => ({
   init: vi.fn(async () => undefined),
   agentCatalogLoaded: vi.fn(() => false),
   initAgentCatalog: vi.fn(() => JSON.stringify({ success: true })),
+  evaluateConditionJson: vi.fn(() =>
+    JSON.stringify({ success: true, value: true })
+  ),
 }));
 
 vi.mock('@/wasm/workflow-validation/runtara_workflow_validation.js', () => ({
@@ -11,11 +14,13 @@ vi.mock('@/wasm/workflow-validation/runtara_workflow_validation.js', () => ({
   agentCatalogLoaded: wasm.agentCatalogLoaded,
   initAgentCatalog: wasm.initAgentCatalog,
   analyzeFormJson: vi.fn(),
+  evaluateConditionJson: wasm.evaluateConditionJson,
   getAgentJson: vi.fn(),
   getAgentsJson: vi.fn(),
   getCapabilitySchemaJson: vi.fn(),
   getStepTypeSchemaJson: vi.fn(),
   getStepTypesJson: vi.fn(),
+  normalizeSchemaFieldsFormJson: vi.fn(),
   validateExecutionGraphJson: vi.fn(),
   validateFormDefinitionJson: vi.fn(),
   validateSchemaFieldsJson: vi.fn(),
@@ -90,4 +95,5 @@ describe('shared Rust validation initialization', () => {
     );
     expect(wasm.initAgentCatalog).toHaveBeenCalledWith(JSON.stringify(details));
   });
+
 });

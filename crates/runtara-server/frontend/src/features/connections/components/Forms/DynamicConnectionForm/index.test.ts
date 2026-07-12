@@ -43,7 +43,7 @@ const descriptor: FormDefinition = {
 const connectionType = {
   integrationId: 'quickbooks_online',
   displayName: 'QuickBooks Online',
-  fields: [],
+  fieldBehaviors: {},
   formDefinition: descriptor,
 } as unknown as ConnectionTypeDto & { formDefinition: FormDefinition };
 

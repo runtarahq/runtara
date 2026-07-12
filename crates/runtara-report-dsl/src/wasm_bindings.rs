@@ -106,16 +106,3 @@ pub fn js_format_value(value: JsValue, format: &str, ctx: JsValue) -> Result<Str
 pub fn js_validate_template(template: &str) -> Result<(), JsError> {
     crate::validate_template(template).map_err(|e| JsError::new(&e.to_string()))
 }
-
-/// Evaluate a row condition (a `ConditionExpression` shape) against a row.
-/// Returns true/false. Throws on server-only operators or malformed input.
-#[wasm_bindgen(js_name = evaluateRowCondition)]
-pub fn js_evaluate_row_condition(expr: JsValue, row: JsValue) -> Result<bool, JsError> {
-    let expr_value: Value =
-        serde_wasm_bindgen::from_value(expr).map_err(|e| JsError::new(&e.to_string()))?;
-    let row_value: Value =
-        serde_wasm_bindgen::from_value(row).map_err(|e| JsError::new(&e.to_string()))?;
-    let cond: runtara_dsl::ConditionExpression =
-        serde_json::from_value(expr_value).map_err(|e| JsError::new(&e.to_string()))?;
-    crate::evaluate_row_condition(&cond, &row_value).map_err(|e| JsError::new(&e.to_string()))
-}

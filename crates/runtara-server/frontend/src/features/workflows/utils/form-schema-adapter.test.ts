@@ -1,47 +1,60 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   initialWorkflowFormValues,
-  workflowSchemaToFormDefinition,
+  normalizeWorkflowFormDefinition,
+  workflowSchemaWireMap,
 } from './form-schema-adapter';
 
-describe('workflow schema form adapter', () => {
-  it('normalizes legacy visibleWhen without changing workflow schema storage', () => {
-    const definition = workflowSchemaToFormDefinition([
-      { name: 'mode', type: 'string', defaultValue: 'manual' },
-      {
-        name: 'reason',
-        type: 'string',
-        required: true,
-        visibleWhen: { field: 'mode', equals: 'manual' },
+const normalizeSchemaFieldsFormJson = vi.fn(() =>
+  JSON.stringify({
+    success: true,
+    definition: {
+      schemaVersion: 1,
+      fields: {
+        mode: { type: 'string', default: 'manual', access: 'read_write' },
       },
-    ]);
+      sections: [],
+      allowUnknownFields: false,
+    },
+  })
+);
 
-    expect(definition.fields.reason.conditions?.visible).toEqual({
-      type: 'operation',
-      op: 'EQ',
-      arguments: [
-        { type: 'value', valueType: 'reference', value: 'mode' },
-        { type: 'value', valueType: 'immediate', value: 'manual' },
-      ],
-    });
-    expect(initialWorkflowFormValues(definition)).toEqual({
-      mode: 'manual',
-      reason: '',
+vi.mock('@/shared/lib/rust-validation-wasm', () => ({
+  ensureRustValidationInitialized: vi.fn().mockResolvedValue(undefined),
+  normalizeSchemaFieldsFormJson: (...args: unknown[]) =>
+    normalizeSchemaFieldsFormJson(...args),
+}));
+
+describe('workflow schema form adapter boundary', () => {
+  it('keeps only wire-envelope normalization in TypeScript', () => {
+    expect(
+      workflowSchemaWireMap({
+        properties: {
+          profile: {
+            type: 'object',
+            properties: [{ name: 'email', type: 'string', format: 'email' }],
+          },
+        },
+        required: ['profile'],
+      })
+    ).toEqual({
+      profile: {
+        type: 'object',
+        required: true,
+        properties: { email: { type: 'string', format: 'email' } },
+      },
     });
   });
 
-  it('normalizes nested object and array fields', () => {
-    const definition = workflowSchemaToFormDefinition([
-      {
-        name: 'profile',
-        type: 'object',
-        properties: [{ name: 'email', type: 'string', format: 'email' }],
-      },
-      { name: 'tags', type: 'array', items: { type: 'string' } },
-    ]);
+  it('delegates semantic normalization to the Rust WASM engine', async () => {
+    const definition = await normalizeWorkflowFormDefinition({
+      mode: { type: 'string', default: 'manual' },
+    });
 
-    expect(definition.fields.profile.properties?.email.format).toBe('email');
-    expect(definition.fields.tags.items?.type).toBe('string');
+    expect(normalizeSchemaFieldsFormJson).toHaveBeenCalledWith(
+      JSON.stringify({ mode: { type: 'string', default: 'manual' } })
+    );
+    expect(initialWorkflowFormValues(definition)).toEqual({ mode: 'manual' });
   });
 });

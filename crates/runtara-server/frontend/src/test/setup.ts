@@ -1,6 +1,11 @@
 import '@testing-library/jest-dom';
 import { vi } from 'vitest';
 
+let evaluateConditionForTests: (
+  expression: unknown,
+  data: unknown
+) => boolean = () => false;
+
 // Vitest can't load the WASM bundle (jsdom has no fetch resolver for the
 // `?url` import), so we replace `@/wasm/runtara-report-dsl` with a minimal
 // in-memory shim. The shim mirrors the WASM surface for the tests that
@@ -44,16 +49,22 @@ vi.mock('@/wasm/runtara-report-dsl', () => {
     row: Record<string, unknown>,
     _ctx: { locale: string; currency: string; timezone: string }
   ): string => {
-    return template.replace(/\{\{\s*([^}|]+?)(?:\s*\|\s*([^}]+))?\s*\}\}/g, (_, field: string, fmt?: string) => {
-      const path = field.trim().replace(/^row\./, '').split('.');
-      let current: unknown = row;
-      for (const segment of path) {
-        if (current === null || current === undefined) return '';
-        if (typeof current !== 'object') return '';
-        current = (current as Record<string, unknown>)[segment];
+    return template.replace(
+      /\{\{\s*([^}|]+?)(?:\s*\|\s*([^}]+))?\s*\}\}/g,
+      (_, field: string, fmt?: string) => {
+        const path = field
+          .trim()
+          .replace(/^row\./, '')
+          .split('.');
+        let current: unknown = row;
+        for (const segment of path) {
+          if (current === null || current === undefined) return '';
+          if (typeof current !== 'object') return '';
+          current = (current as Record<string, unknown>)[segment];
+        }
+        return formatValue(current, fmt?.trim() ?? '', defaultContext());
       }
-      return formatValue(current, fmt?.trim() ?? '', defaultContext());
-    });
+    );
   };
 
   // Minimal canonical-condition evaluator — mirrors
@@ -161,14 +172,14 @@ vi.mock('@/wasm/runtara-report-dsl', () => {
         throw new Error(`unsupported operator: ${op}`);
     }
   };
+  evaluateConditionForTests = (expression, data) =>
+    evaluate(expression as Cond, (data ?? {}) as Record<string, unknown>);
 
   const dsl = {
     version: () => 'test',
     renderTemplate,
     formatValue,
     validateTemplate: () => {},
-    evaluateRowCondition: (expr: unknown, row: unknown) =>
-      evaluate(expr as Cond, (row ?? {}) as Record<string, unknown>),
   };
 
   return {
@@ -177,3 +188,11 @@ vi.mock('@/wasm/runtara-report-dsl', () => {
     reportDsl: () => dsl,
   };
 });
+
+vi.mock('@/shared/lib/rust-validation-wasm', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('@/shared/lib/rust-validation-wasm')
+  >()),
+  evaluateCanonicalCondition: (expression: unknown, data: unknown) =>
+    evaluateConditionForTests(expression, data),
+}));

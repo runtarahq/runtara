@@ -11,6 +11,7 @@ import {
   ReportWorkflowActionConfig,
 } from './types';
 import { defaultRenderContext, reportDsl } from '@/wasm/runtara-report-dsl';
+import { evaluateCanonicalCondition } from '@/shared/lib/rust-validation-wasm';
 
 export const TIME_RANGE_PRESETS = [
   { label: 'Today', value: 'today' },
@@ -266,7 +267,7 @@ export function isWorkflowActionDisabled(
 
 /**
  * Evaluate a canonical `ConditionExpression` row visibility/disability
- * condition against a row. Delegates to the WASM `evaluateRowCondition`
+ * condition against a row. Delegates to the domain-neutral validation WASM
  * — the same evaluator the server uses. Returns false on any error
  * (e.g. before the bundle has loaded).
  */
@@ -276,7 +277,7 @@ export function matchesReportRowCondition(
 ): boolean {
   if (!condition) return false;
   try {
-    return reportDsl().evaluateRowCondition(condition, row);
+    return evaluateCanonicalCondition(condition, row);
   } catch {
     return false;
   }

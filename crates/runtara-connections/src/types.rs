@@ -884,48 +884,6 @@ pub struct ListConnectionAuthTypesResponse {
 // Connection Type Schema DTOs
 // ============================================================================
 
-/// A field in a connection type's parameter schema
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionFieldDto {
-    /// Field name (used in JSON)
-    pub name: String,
-    /// Type name (String, u16, bool, etc.)
-    pub type_name: String,
-    /// Whether this field is optional
-    pub is_optional: bool,
-    /// Display name for UI
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// Description of the field
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Placeholder text for the input
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
-    /// Default value
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<String>,
-    /// Whether this is a secret field (password, API key, etc.)
-    pub is_secret: bool,
-    /// Allowed values for select-style rendering. `None` means free-form.
-    /// When present, the UI renders a dropdown with these literal values
-    /// (labels are derived client-side from the value).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<String>>,
-    /// Whether this field must be a valid absolute https URL (drives client-side
-    /// URL validation; the server enforces the same rule on create/update).
-    #[serde(default)]
-    pub is_url: bool,
-    /// Whether this field is required (present + non-empty), independent of
-    /// `is_optional`.
-    #[serde(default)]
-    pub is_required: bool,
-    /// Connection-domain clear and authorization lifecycle behavior.
-    pub behavior: runtara_dsl::agent_meta::ConnectionFieldBehavior,
-}
-
 /// OAuth2 configuration for a connection type (authorization code flow)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -954,10 +912,11 @@ pub struct ConnectionTypeDto {
     /// Category for grouping (e.g., "ecommerce", "file_storage", "llm")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
-    /// Fields required for this connection type
-    pub fields: Vec<ConnectionFieldDto>,
     /// Canonical schema-driven form generated from the connection descriptor.
     pub form_definition: runtara_dsl::form::FormDefinition,
+    /// Connection-domain behavior keyed by canonical form field name.
+    pub field_behaviors:
+        std::collections::HashMap<String, runtara_dsl::agent_meta::ConnectionFieldBehavior>,
     /// Default rate limit configuration for this connection type (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_rate_limit_config: Option<RateLimitConfigDto>,

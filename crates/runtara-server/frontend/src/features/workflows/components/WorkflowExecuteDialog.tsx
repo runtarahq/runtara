@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -8,12 +8,11 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { Button } from '@/shared/components/ui/button';
-import { parseSchema } from '@/features/workflows/utils/schema';
 import { validateWorkflowStartInputsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
 import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
 import {
   initialWorkflowFormValues,
-  workflowSchemaToFormDefinition,
+  useWorkflowFormDefinition,
 } from '@/features/workflows/utils/form-schema-adapter';
 
 type WorkflowExecuteDialogProps = {
@@ -35,11 +34,12 @@ export function WorkflowExecuteDialog({
   isSubmitting = false,
   serverError,
 }: WorkflowExecuteDialogProps) {
-  const fields = useMemo(() => parseSchema(inputSchema), [inputSchema]);
-  const definition = useMemo(
-    () => workflowSchemaToFormDefinition(fields),
-    [fields]
-  );
+  const {
+    definition,
+    loading: formLoading,
+    error: formError,
+  } = useWorkflowFormDefinition(inputSchema);
+  const fieldNames = Object.keys(definition.fields);
 
   const [inputData, setInputData] = useState<Record<string, any>>(() =>
     initialWorkflowFormValues(definition)
@@ -72,7 +72,11 @@ export function WorkflowExecuteDialog({
   const handleExecute = async () => {
     setSubmitAttempt((attempt) => attempt + 1);
     setRustValidationError(null);
-    if (fields.length > 0 && !formAnalysis?.valid) {
+    if (
+      formLoading ||
+      formError ||
+      (fieldNames.length > 0 && !formAnalysis?.valid)
+    ) {
       return;
     }
     // Only include fields that are set and defined
@@ -127,7 +131,13 @@ export function WorkflowExecuteDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {fields.length === 0 ? (
+          {formLoading ? (
+            <p className="text-sm text-muted-foreground">Preparing form…</p>
+          ) : formError ? (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              {formError}
+            </div>
+          ) : fieldNames.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               No input fields required.
             </p>
@@ -169,6 +179,8 @@ export function WorkflowExecuteDialog({
             disabled={
               isSubmitting ||
               isRustValidating ||
+              formLoading ||
+              Boolean(formError) ||
               formAnalysis?.wasmAvailable === false
             }
           >

@@ -295,6 +295,39 @@ pub fn analyze_form_json(definition_json: &str, data_json: &str) -> String {
     to_json_string(&analyze_form_json_impl(definition_json, data_json))
 }
 
+/// Normalize an existing workflow flat schema map into the canonical form
+/// model. This keeps browser rendering on the same Rust adapter as the server.
+#[wasm_bindgen(js_name = normalizeSchemaFieldsFormJson)]
+pub fn normalize_schema_fields_form_json(schema_fields_json: &str) -> String {
+    match serde_json::from_str::<HashMap<String, runtara_dsl::SchemaField>>(schema_fields_json) {
+        Ok(fields) => to_json_string(&json!({
+            "success": true,
+            "definition": runtara_dsl::form::schema_fields_form_definition(&fields)
+        })),
+        Err(error) => to_json_string(&json!({
+            "success": false,
+            "error": format!("Failed to parse workflow schema fields: {error}")
+        })),
+    }
+}
+
+/// Evaluate a client-safe canonical condition against JSON data.
+#[wasm_bindgen(js_name = evaluateConditionJson)]
+pub fn evaluate_condition_json(condition_json: &str, data_json: &str) -> String {
+    let result = (|| {
+        let condition = serde_json::from_str::<runtara_dsl::ConditionExpression>(condition_json)
+            .map_err(|error| format!("Failed to parse condition: {error}"))?;
+        let data = serde_json::from_str::<Value>(data_json)
+            .map_err(|error| format!("Failed to parse condition data: {error}"))?;
+        runtara_dsl::condition_eval::evaluate_condition(&condition, &data)
+            .map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(value) => to_json_string(&json!({ "success": true, "value": value })),
+        Err(error) => to_json_string(&json!({ "success": false, "error": error })),
+    }
+}
+
 /// Return statically compiled workflow step type metadata.
 #[wasm_bindgen(js_name = getStepTypesJson)]
 pub fn get_step_types_json() -> String {
@@ -634,6 +667,44 @@ mod tests {
         );
         assert_eq!(wasm["fields"]["token"]["visible"], true);
         assert_eq!(wasm["fields"]["token"]["required"], true);
+    }
+
+    #[test]
+    fn normalizes_workflow_schema_fields_with_shared_rust_adapter() {
+        let response: Value = serde_json::from_str(&normalize_schema_fields_form_json(
+            r#"{
+                "mode":{"type":"string","required":true},
+                "token":{"type":"string","visibleWhen":{"field":"mode","equals":"secure"}}
+            }"#,
+        ))
+        .unwrap();
+        assert_eq!(response["success"], true);
+        assert_eq!(
+            response["definition"]["fields"]["mode"]["access"],
+            "read_write"
+        );
+        assert_eq!(
+            response["definition"]["fields"]["token"]["conditions"]["visible"]["op"],
+            "EQ"
+        );
+    }
+
+    #[test]
+    fn evaluates_canonical_conditions_with_shared_rust_engine() {
+        let condition = json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "reference", "value": "status"},
+                {"valueType": "immediate", "value": "ready"}
+            ]
+        });
+        let response: Value = serde_json::from_str(&evaluate_condition_json(
+            &condition.to_string(),
+            r#"{"status":"ready"}"#,
+        ))
+        .unwrap();
+        assert_eq!(response, json!({"success": true, "value": true}));
     }
 
     #[test]

@@ -310,7 +310,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ConnectionAuthTypeDto,
             runtara_connections::types::ListConnectionAuthTypesResponse,
             runtara_connections::types::ConnectionTypeDto,
-            runtara_connections::types::ConnectionFieldDto,
+            runtara_dsl::agent_meta::ConnectionFieldBehavior,
             runtara_connections::types::OAuthConfigDto,
             runtara_connections::types::ConnectionTypeResponse,
             runtara_connections::types::ListConnectionTypesResponse,

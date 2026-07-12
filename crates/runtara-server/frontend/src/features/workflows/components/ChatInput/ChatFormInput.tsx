@@ -1,12 +1,11 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { WaitingForInputData } from '@/features/workflows/types/chat';
-import { parseSchema } from '@/features/workflows/utils/schema';
 import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
 import {
   initialWorkflowFormValues,
-  workflowSchemaToFormDefinition,
+  useWorkflowFormDefinition,
 } from '@/features/workflows/utils/form-schema-adapter';
 import { deliverSignal } from '@/features/workflows/queries';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
@@ -30,14 +29,11 @@ export function ChatFormInput({
   instanceId,
   token,
 }: ChatFormInputProps) {
-  const schemaFields = useMemo(
-    () => parseSchema(waitingForInput.responseSchema),
-    [waitingForInput.responseSchema]
-  );
-  const definition = useMemo(
-    () => workflowSchemaToFormDefinition(schemaFields),
-    [schemaFields]
-  );
+  const {
+    definition,
+    loading: formLoading,
+    error: formError,
+  } = useWorkflowFormDefinition(waitingForInput.responseSchema);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
     initialWorkflowFormValues(definition)
@@ -46,21 +42,26 @@ export function ChatFormInput({
   const [submitAttempt, setSubmitAttempt] = useState(0);
   const isValid = analysis?.valid === true;
 
+  useEffect(() => {
+    setFormValues(initialWorkflowFormValues(definition));
+    setAnalysis(null);
+  }, [definition]);
+
   const handleSubmit = useCallback(async () => {
     setSubmitAttempt((attempt) => attempt + 1);
-    if (!isValid || isSubmitting) return;
+    if (formLoading || formError || !isValid || isSubmitting) return;
 
     // Build payload, coercing types
     const payload: Record<string, unknown> = {};
-    for (const field of schemaFields) {
-      if (analysis?.fields[field.name]?.visible === false) continue;
-      const val = formValues[field.name];
+    for (const [name, field] of Object.entries(definition.fields)) {
+      if (analysis?.fields[name]?.visible === false) continue;
+      const val = formValues[name];
       if (field.type === 'number' || field.type === 'integer') {
-        payload[field.name] = val !== '' ? Number(val) : undefined;
+        payload[name] = val !== '' ? Number(val) : undefined;
       } else if (field.type === 'boolean') {
-        payload[field.name] = Boolean(val);
+        payload[name] = Boolean(val);
       } else {
-        payload[field.name] = val;
+        payload[name] = val;
       }
     }
 
@@ -76,7 +77,7 @@ export function ChatFormInput({
       // Add a user message summarizing the submitted form
       const summary = Object.entries(payload)
         .map(([key, val]) => {
-          const field = schemaFields.find((f) => f.name === key);
+          const field = definition.fields[key];
           const label = field?.label || humanizeKey(key);
           const displayVal =
             typeof val === 'boolean' ? (val ? 'Yes' : 'No') : String(val ?? '');
@@ -98,12 +99,14 @@ export function ChatFormInput({
   }, [
     isValid,
     isSubmitting,
-    schemaFields,
+    definition,
     formValues,
     analysis,
     token,
     instanceId,
     waitingForInput.signalId,
+    formLoading,
+    formError,
   ]);
 
   return (
@@ -115,19 +118,30 @@ export function ChatFormInput({
       )}
 
       <div className="mb-3">
-        <FormRenderer
-          definition={definition}
-          value={formValues}
-          onChange={setFormValues}
-          disabled={isSubmitting}
-          onAnalysisChange={setAnalysis}
-          submitAttempt={submitAttempt}
-        />
+        {formLoading ? (
+          <p className="text-sm text-muted-foreground">Preparing form…</p>
+        ) : formError ? (
+          <p className="text-sm text-destructive">{formError}</p>
+        ) : (
+          <FormRenderer
+            definition={definition}
+            value={formValues}
+            onChange={setFormValues}
+            disabled={isSubmitting}
+            onAnalysisChange={setAnalysis}
+            submitAttempt={submitAttempt}
+          />
+        )}
       </div>
 
       <Button
         onClick={handleSubmit}
-        disabled={analysis?.wasmAvailable === false || isSubmitting}
+        disabled={
+          formLoading ||
+          Boolean(formError) ||
+          analysis?.wasmAvailable === false ||
+          isSubmitting
+        }
         className="w-full"
         size="sm"
       >

@@ -1503,49 +1503,17 @@ export interface ConnectionEditProjection {
   version: string;
 }
 
-/** A field in a connection type's parameter schema */
-export interface ConnectionFieldDto {
-  /** Connection-domain clear and authorization lifecycle behavior. */
-  behavior: ConnectionFieldBehavior;
-  /** Default value */
-  defaultValue?: string | null;
-  /** Description of the field */
-  description?: string | null;
-  /** Display name for UI */
-  displayName?: string | null;
-  /**
-   * Allowed values for select-style rendering. `None` means free-form.
-   * When present, the UI renders a dropdown with these literal values
-   * (labels are derived client-side from the value).
-   */
-  enumValues?: string[] | null;
-  /** Whether this field is optional */
-  isOptional: boolean;
-  /**
-   * Whether this field is required (present + non-empty), independent of
-   * `is_optional`.
-   */
-  isRequired?: boolean;
-  /** Whether this is a secret field (password, API key, etc.) */
-  isSecret: boolean;
-  /**
-   * Whether this field must be a valid absolute https URL (drives client-side
-   * URL validation; the server enforces the same rule on create/update).
-   */
-  isUrl?: boolean;
-  /** Field name (used in JSON) */
-  name: string;
-  /** Placeholder text for the input */
-  placeholder?: string | null;
-  /** Type name (String, u16, bool, etc.) */
-  typeName: string;
-}
-
+/**
+ * Connection-owned persistence and authorization behavior for one field.
+ *
+ * This intentionally stays outside the shared form model: it governs secret
+ * storage and provider authorization lifecycle, not presentation/validation.
+ */
 export interface ConnectionFieldBehavior {
   /** An existing value may be removed through an explicit patch operation. */
-  clearable?: boolean;
+  clearable: boolean;
   /** Changing or clearing this field invalidates captured authorization. */
-  requiresReauthorization?: boolean;
+  requiresReauthorization: boolean;
 }
 
 /** Update connection request - all fields optional */
@@ -1586,8 +1554,8 @@ export interface ConnectionTypeDto {
   description?: string | null;
   /** Display name for UI */
   displayName: string;
-  /** Fields required for this connection type */
-  fields: ConnectionFieldDto[];
+  /** Connection-domain behavior keyed by canonical form field name. */
+  fieldBehaviors: Partial<Record<string, ConnectionFieldBehavior>>;
   /** Canonical schema-driven form generated from the connection descriptor. */
   formDefinition: FormDefinition;
   /** Unique identifier for this connection type */
@@ -2364,7 +2332,12 @@ export interface FormConditions {
 
 export interface FormControl {
   kind: ControlKind;
+  /** Sibling fields whose values affect `option_resolver` results. */
   optionDependencies?: string[];
+  /**
+   * Domain-owned key used to resolve dynamic choices. The shared engine
+   * deliberately does not interpret the key or define a query language.
+   */
   optionResolver?: string | null;
   options?: FormOption[];
 }

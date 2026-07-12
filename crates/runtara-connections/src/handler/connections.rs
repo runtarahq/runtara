@@ -446,25 +446,10 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
         display_name: meta.display_name.to_string(),
         description: meta.description.map(|s| s.to_string()),
         category: meta.category.map(|s| s.to_string()),
-        fields: meta
+        field_behaviors: meta
             .fields
             .iter()
-            .map(|f| ConnectionFieldDto {
-                name: f.name.to_string(),
-                type_name: f.type_name.to_string(),
-                is_optional: f.is_optional,
-                display_name: f.display_name.map(|s| s.to_string()),
-                description: f.description.map(|s| s.to_string()),
-                placeholder: f.placeholder.map(|s| s.to_string()),
-                default_value: f.default_value.map(|s| s.to_string()),
-                is_secret: f.is_secret,
-                enum_values: f
-                    .enum_values
-                    .map(|vs| vs.iter().map(|s| s.to_string()).collect()),
-                is_url: f.is_url,
-                is_required: f.is_required,
-                behavior: f.behavior,
-            })
+            .map(|field| (field.name.to_string(), field.behavior))
             .collect(),
         form_definition: runtara_dsl::form::connection_form_definition(meta),
         default_rate_limit_config: get_default_rate_limit_config(meta.integration_id),

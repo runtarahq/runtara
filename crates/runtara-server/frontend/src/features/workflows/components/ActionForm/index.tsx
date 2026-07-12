@@ -1,13 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
 import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
 import {
   initialWorkflowFormValues,
-  workflowSchemaToFormDefinition,
+  useWorkflowFormDefinition,
 } from '@/features/workflows/utils/form-schema-adapter';
-import { parseSchema } from '@/features/workflows/utils/schema';
 
 interface ActionFormProps {
   inputSchema?: Record<string, unknown> | null;
@@ -24,16 +23,18 @@ export function ActionForm({
   emptySchemaMessage = 'No response schema defined. Submit an empty response to continue.',
   onSubmit,
 }: ActionFormProps) {
-  const definition = useMemo(
-    () => workflowSchemaToFormDefinition(parseSchema(inputSchema)),
-    [inputSchema]
-  );
+  const { definition, loading, error } = useWorkflowFormDefinition(inputSchema);
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
     initialWorkflowFormValues(definition)
   );
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
   const [submitAttempt, setSubmitAttempt] = useState(0);
   const hasFields = Object.keys(definition.fields).length > 0;
+
+  useEffect(() => {
+    setFormValues(initialWorkflowFormValues(definition));
+    setAnalysis(null);
+  }, [definition]);
 
   const handleSubmit = () => {
     setSubmitAttempt((attempt) => attempt + 1);
@@ -48,7 +49,11 @@ export function ActionForm({
 
   return (
     <div className="space-y-4">
-      {hasFields ? (
+      {loading ? (
+        <p className="text-sm text-muted-foreground">Preparing form…</p>
+      ) : error ? (
+        <p className="text-sm text-destructive">{error}</p>
+      ) : hasFields ? (
         <FormRenderer
           definition={definition}
           value={formValues}
@@ -65,7 +70,12 @@ export function ActionForm({
         size="sm"
         className="w-full"
         onClick={handleSubmit}
-        disabled={disabled || analysis?.wasmAvailable === false}
+        disabled={
+          disabled ||
+          loading ||
+          Boolean(error) ||
+          analysis?.wasmAvailable === false
+        }
       >
         {disabled ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
         {submitLabel}
