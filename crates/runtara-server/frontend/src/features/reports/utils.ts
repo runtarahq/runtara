@@ -160,26 +160,8 @@ export function isVisibleByShowWhen(
   filters: Record<string, unknown>
 ): boolean {
   if (!showWhen) return true;
-
-  const value = filters[showWhen.filter];
-  const hasValue = !isEmptyVisibilityValue(value);
-
-  if (showWhen.exists !== undefined && hasValue !== showWhen.exists) {
-    return false;
-  }
-  if (
-    showWhen.equals !== undefined &&
-    JSON.stringify(value) !== JSON.stringify(showWhen.equals)
-  ) {
-    return false;
-  }
-  if (
-    showWhen.notEquals !== undefined &&
-    JSON.stringify(value) === JSON.stringify(showWhen.notEquals)
-  ) {
-    return false;
-  }
-  return true;
+  const condition = reportVisibilityToCanonicalCondition(showWhen);
+  return condition ? matchesReportRowCondition(condition, filters) : true;
 }
 
 /** Normalize the persisted legacy report visibility shape into the canonical
@@ -485,13 +467,6 @@ export function renderDisplayTemplate(
   } catch {
     return '';
   }
-}
-
-function isEmptyVisibilityValue(value: unknown): boolean {
-  if (value === null || value === undefined) return true;
-  if (typeof value === 'string') return value.trim().length === 0;
-  if (Array.isArray(value)) return value.length === 0;
-  return false;
 }
 
 /**

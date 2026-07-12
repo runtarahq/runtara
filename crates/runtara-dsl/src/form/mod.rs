@@ -464,6 +464,74 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
     }
 }
 
+/// Normalize the workflow DSL's existing flat schema map into a transient
+/// canonical form definition. The workflow schema itself is not mutated or
+/// persisted in a new shape.
+pub fn schema_fields_form_definition(fields: &HashMap<String, SchemaField>) -> FormDefinition {
+    FormDefinition {
+        fields: fields
+            .iter()
+            .map(|(name, source)| {
+                let mut schema = source.clone();
+                let visible = schema
+                    .visible_when
+                    .take()
+                    .and_then(|condition| legacy_visible_condition(&condition));
+                (
+                    name.clone(),
+                    FormField {
+                        schema,
+                        control: None,
+                        section: None,
+                        conditions: FormConditions {
+                            visible,
+                            ..FormConditions::default()
+                        },
+                        access: FieldAccessMode::ReadWrite,
+                        secret: false,
+                    },
+                )
+            })
+            .collect(),
+        allow_unknown_fields: false,
+        ..FormDefinition::default()
+    }
+}
+
+fn legacy_visible_condition(condition: &crate::VisibleWhen) -> Option<ConditionExpression> {
+    let mut clauses = Vec::new();
+    if let Some(value) = &condition.equals {
+        clauses.push(serde_json::json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "reference", "value": condition.field},
+                {"valueType": "immediate", "value": value}
+            ]
+        }));
+    }
+    if let Some(value) = &condition.not_equals {
+        clauses.push(serde_json::json!({
+            "type": "operation",
+            "op": "NE",
+            "arguments": [
+                {"valueType": "reference", "value": condition.field},
+                {"valueType": "immediate", "value": value}
+            ]
+        }));
+    }
+    let value = match clauses.len() {
+        0 => return None,
+        1 => clauses.pop().expect("one condition clause"),
+        _ => serde_json::json!({
+            "type": "operation",
+            "op": "AND",
+            "arguments": clauses
+        }),
+    };
+    serde_json::from_value(value).ok()
+}
+
 fn connection_field_type(type_name: &str) -> SchemaFieldType {
     let normalized = type_name.to_ascii_lowercase().replace(' ', "");
     match normalized.as_str() {
@@ -656,12 +724,15 @@ fn validate_control(field: &FormField, path: &str, issues: &mut Vec<FormIssue>) 
         return;
     };
     let compatible = match control.kind {
-        ControlKind::Number | ControlKind::NumberRange => matches!(
+        ControlKind::Number => matches!(
             field.schema.field_type,
             SchemaFieldType::Integer | SchemaFieldType::Number
         ),
         ControlKind::Toggle => matches!(field.schema.field_type, SchemaFieldType::Boolean),
-        ControlKind::Tags | ControlKind::MultiSelect => {
+        ControlKind::Tags
+        | ControlKind::MultiSelect
+        | ControlKind::DateRange
+        | ControlKind::NumberRange => {
             matches!(field.schema.field_type, SchemaFieldType::Array)
         }
         ControlKind::KeyValue => matches!(field.schema.field_type, SchemaFieldType::Object),
@@ -1063,5 +1134,28 @@ mod tests {
             Some(ControlKind::SecretTextarea)
         ));
         assert!(validate_form_definition(&definition).is_empty());
+    }
+
+    #[test]
+    fn workflow_schema_normalization_preserves_schema_and_upgrades_visibility() {
+        let mut reason = schema(SchemaFieldType::String);
+        reason.required = true;
+        reason.visible_when = Some(crate::VisibleWhen {
+            field: "mode".to_string(),
+            equals: Some(json!("manual")),
+            not_equals: None,
+        });
+        let source = HashMap::from([
+            ("mode".to_string(), schema(SchemaFieldType::String)),
+            ("reason".to_string(), reason),
+        ]);
+
+        let definition = schema_fields_form_definition(&source);
+        assert!(source["reason"].visible_when.is_some());
+        assert!(definition.fields["reason"].schema.visible_when.is_none());
+        let analysis = analyze_form(&definition, &json!({"mode": "automatic"}));
+        assert!(analysis.valid);
+        assert!(!analysis.fields["reason"].visible);
+        assert!(!analysis.fields["reason"].required);
     }
 }

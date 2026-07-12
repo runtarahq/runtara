@@ -165,6 +165,34 @@ export function FieldControl({
   }
 
   if (kind === 'key_value') {
+    if (field.properties && Object.keys(field.properties).length > 0) {
+      const objectValue =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : {};
+      return (
+        <div className="space-y-3 rounded-md border border-border/60 p-3">
+          {Object.entries(field.properties).map(([name, property]) => {
+            const propertyId = `${id}-${name}`;
+            return (
+              <div key={name} className="space-y-1.5">
+                <label htmlFor={propertyId} className="text-xs font-medium">
+                  {property.label ?? name.replace(/_/g, ' ')}
+                  {property.required && <span className="ml-0.5 text-destructive">*</span>}
+                </label>
+                <FieldControl
+                  id={propertyId}
+                  field={property}
+                  value={objectValue[name]}
+                  disabled={disabled}
+                  onChange={(next) => onChange({ ...objectValue, [name]: next })}
+                />
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
     const entries =
       value && typeof value === 'object' && !Array.isArray(value)
         ? Object.fromEntries(

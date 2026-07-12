@@ -1,13 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
-import { Switch } from '@/shared/components/ui/switch';
 import { Input } from '@/shared/components/ui/input';
 import { Textarea } from '@/shared/components/ui/textarea';
 import {
@@ -25,6 +17,8 @@ import {
 } from '@/shared/components/ui/command';
 import { ReportEditorConfig, ReportEditorKind } from '../../../types';
 import { useReportLookupOptions } from '../../../hooks/useReports';
+import { reportEditorToFormField } from '../../../form-adapters';
+import { FieldControl } from '@/shared/forms';
 
 type FieldEditorProps = {
   value: unknown;
@@ -57,7 +51,16 @@ export function FieldEditor({
   onCommit,
   onCancel,
 }: FieldEditorProps) {
-  const inferred = inferEditorKind(value, format, pillVariants, editor);
+  const sharedField = reportEditorToFormField(
+    value,
+    format,
+    pillVariants,
+    editor
+  );
+  const inferred = {
+    kind: sharedField.control!.kind as ReportEditorKind,
+    options: sharedField.control?.options,
+  };
   const initial = stringifyForInput(value, inferred.kind);
   const [draft, setDraft] = useState<string>(initial);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -100,10 +103,13 @@ export function FieldEditor({
 
   if (inferred.kind === 'toggle') {
     return (
-      <Switch
-        checked={draft === 'true'}
-        disabled={busy}
-        onCheckedChange={(checked) => {
+      <FieldControl
+        id="report-inline-toggle"
+        field={sharedField}
+        value={draft === 'true'}
+        disabled={Boolean(busy)}
+        onChange={(next) => {
+          const checked = Boolean(next);
           setDraft(checked ? 'true' : 'false');
           onCommit(checked);
         }}
@@ -112,31 +118,17 @@ export function FieldEditor({
   }
 
   if (inferred.kind === 'select') {
-    const options = inferred.options ?? [];
     return (
-      <Select
-        value={draft}
-        disabled={busy}
-        onValueChange={(next) => {
-          setDraft(next);
-          const opt = options.find((o) => stringifyForInput(o.value, 'select') === next);
-          onCommit(opt ? opt.value : next);
+      <FieldControl
+        id="report-inline-select"
+        field={sharedField}
+        value={value}
+        disabled={Boolean(busy)}
+        onChange={(next) => {
+          setDraft(stringifyForInput(next, 'select'));
+          onCommit(next);
         }}
-      >
-        <SelectTrigger className="h-8 w-full text-sm">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((opt) => {
-            const optValue = stringifyForInput(opt.value, 'select');
-            return (
-              <SelectItem key={optValue} value={optValue}>
-                {opt.label}
-              </SelectItem>
-            );
-          })}
-        </SelectContent>
-      </Select>
+      />
     );
   }
 
@@ -330,52 +322,6 @@ function LookupEditor({
   );
 }
 
-type InferredEditor = {
-  kind: ReportEditorKind;
-  options?: Array<{ label: string; value: unknown }>;
-};
-
-function inferEditorKind(
-  value: unknown,
-  format: string | null | undefined,
-  pillVariants: Partial<Record<string, string>> | null | undefined,
-  editor: ReportEditorConfig | null | undefined
-): InferredEditor {
-  if (editor?.kind) {
-    return {
-      kind: editor.kind,
-      options: editor.options ?? variantsToOptions(pillVariants),
-    };
-  }
-  if (format === 'pill' && pillVariants && Object.keys(pillVariants).length > 0) {
-    return { kind: 'select', options: variantsToOptions(pillVariants) };
-  }
-  if (
-    format === 'currency' ||
-    format === 'currency_compact' ||
-    format === 'decimal' ||
-    format === 'percent' ||
-    format === 'number'
-  ) {
-    return { kind: 'number' };
-  }
-  if (format === 'datetime') return { kind: 'datetime' };
-  if (format === 'date') return { kind: 'date' };
-  if (typeof value === 'boolean') return { kind: 'toggle' };
-  if (typeof value === 'number') return { kind: 'number' };
-  return { kind: 'text' };
-}
-
-function variantsToOptions(
-  pillVariants: Partial<Record<string, string>> | null | undefined
-): Array<{ label: string; value: unknown }> {
-  if (!pillVariants) return [];
-  return Object.keys(pillVariants).map((key) => ({
-    label: key,
-    value: key,
-  }));
-}
-
 function lookupDisplayLabel(value: unknown, displayValue: unknown): string {
   if (!isEmptyLookupValue(displayValue)) return String(displayValue);
   if (!isEmptyLookupValue(value)) return String(value);
@@ -402,7 +348,8 @@ function stringifyForInput(value: unknown, kind: ReportEditorKind): string {
     return iso.slice(0, 10);
   }
   if (kind === 'datetime') {
-    const iso = typeof value === 'string' ? value : new Date(String(value)).toISOString();
+    const iso =
+      typeof value === 'string' ? value : new Date(String(value)).toISOString();
     return iso.slice(0, 16);
   }
   if (typeof value === 'object') return JSON.stringify(value);

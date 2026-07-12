@@ -19,6 +19,12 @@ import {
 import { ReportDefinition, ReportFilterDefinition } from '../types';
 import { useReportFilterOptions } from '../hooks/useReports';
 import { getFilterDefaultValue, TIME_RANGE_PRESETS } from '../utils';
+import { FieldControl } from '@/shared/forms';
+import {
+  controlValueToReportRange,
+  reportFilterToFormField,
+  reportRangeToControlValue,
+} from '../form-adapters';
 
 type ReportFilterBarProps = {
   reportId?: string;
@@ -279,59 +285,35 @@ function FilterEditor({
   isLoadingOptions: boolean;
   onChange: (value: unknown) => void;
 }) {
+  const field = reportFilterToFormField(
+    filter,
+    filter.type === 'time_range' ? TIME_RANGE_PRESETS : options
+  );
+  const kind = field.control?.kind;
+
   if (filter.type === 'time_range') {
     return (
-      <div className="p-2">
-        <Command>
-          <CommandList>
-            <CommandGroup>
-              {TIME_RANGE_PRESETS.map((option) => {
-                const selected =
-                  String(value ?? 'last_30_days') === option.value;
-                return (
-                  <CommandItem
-                    key={option.value}
-                    value={option.label}
-                    onSelect={() => onChange(option.value)}
-                  >
-                    <span className="flex-1">{option.label}</span>
-                    {selected && <Check className="h-4 w-4 opacity-70" />}
-                  </CommandItem>
-                );
-              })}
-            </CommandGroup>
-          </CommandList>
-        </Command>
+      <div className="p-3">
+        <FieldControl
+          id={`report-filter-${filter.id}`}
+          field={field}
+          value={value ?? 'last_30_days'}
+          disabled={false}
+          onChange={onChange}
+        />
       </div>
     );
   }
 
-  if (filter.type === 'number_range') {
-    const range =
-      value && typeof value === 'object' && !Array.isArray(value)
-        ? (value as { min?: unknown; max?: unknown })
-        : {};
-    const updateRange = (key: 'min' | 'max', nextValue: string) => {
-      onChange({
-        ...range,
-        [key]: nextValue.trim().length === 0 ? undefined : Number(nextValue),
-      });
-    };
+  if (kind === 'number_range') {
     return (
-      <div className="grid gap-2 p-3 sm:grid-cols-2">
-        <Input
-          type="number"
-          value={formatRangeInputValue(range.min)}
-          onChange={(event) => updateRange('min', event.target.value)}
-          className="h-9"
-          placeholder="Min"
-        />
-        <Input
-          type="number"
-          value={formatRangeInputValue(range.max)}
-          onChange={(event) => updateRange('max', event.target.value)}
-          className="h-9"
-          placeholder="Max"
+      <div className="p-3">
+        <FieldControl
+          id={`report-filter-${filter.id}`}
+          field={field}
+          value={reportRangeToControlValue(value)}
+          disabled={false}
+          onChange={(next) => onChange(controlValueToReportRange(next))}
         />
       </div>
     );
@@ -419,28 +401,28 @@ function FilterEditor({
     );
   }
 
-  if (filter.type === 'checkbox') {
+  if (kind === 'toggle') {
     return (
       <div className="p-3">
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox
-            checked={Boolean(value)}
-            onCheckedChange={(next) => onChange(Boolean(next))}
-          />
-          {filter.label}
-        </label>
+        <FieldControl
+          id={`report-filter-${filter.id}`}
+          field={field}
+          value={value}
+          disabled={false}
+          onChange={onChange}
+        />
       </div>
     );
   }
 
   return (
     <div className="p-2">
-      <Input
-        autoFocus
-        value={String(value ?? '')}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-9"
-        placeholder={filter.label}
+      <FieldControl
+        id={`report-filter-${filter.id}`}
+        field={field}
+        value={value}
+        disabled={false}
+        onChange={onChange}
       />
     </div>
   );
@@ -503,11 +485,6 @@ function optionKey(value: unknown): string {
   if (value === null || value === undefined) return '__empty__';
   if (typeof value === 'string') return value;
   return JSON.stringify(value);
-}
-
-function formatRangeInputValue(value: unknown): string | number {
-  if (typeof value === 'number' || typeof value === 'string') return value;
-  return '';
 }
 
 function formatOptionLabel(label: string, count?: number): string {

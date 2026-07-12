@@ -15,7 +15,8 @@ Implementation in progress.
 - [ ] **In progress:** Implement shared form-definition and submitted-value validation. Type,
   enum, nested object/array, min/max, access/secret, section, control, and
   conditional-required validation are implemented; pattern/format validation
-  and legacy schema normalization remain.
+  remains. Connection and workflow legacy schemas now have canonical Rust
+  normalizers; report wire compatibility is adapted at the frontend boundary.
 - [x] Generalize the validation WASM bridge and add native/WASM parity fixtures.
 - [x] Build the shared controlled React field/control registry.
 - [x] Implement the safe connection edit projection and explicit patch contract.
@@ -24,16 +25,19 @@ Implementation in progress.
 - [x] Adopt shared form validation/rendering in workflow UI surfaces without
   changing the workflow DSL. Workflow execution, human-action, and chat signal
   forms now use the shared renderer; persisted graph/schema shapes are unchanged.
-- [ ] **In progress:** Adapt report filters, inline editors, and visibility to the
-  shared engine. Persisted `showWhen` now has a lossless canonical-condition
-  adapter; filter controls and inline editors remain.
-- [ ] Remove superseded TypeScript validators, condition evaluators, and legacy
-  renderers after compatibility gates pass.
+- [x] Adapt report filters, inline editors, and visibility to the shared engine.
+  Persisted `showWhen` uses a lossless canonical adapter and the shared WASM
+  evaluator; report filters and inline editors map to shared fields/controls
+  while retaining report-owned lookup and commit behavior.
+- [ ] **In progress:** Remove superseded TypeScript validators, condition
+  evaluators, and legacy renderers after compatibility gates pass. Connection
+  field heuristics and workflow `SchemaFormFields` are removed; compatibility
+  schema parsers remain where they still preserve legacy wire formats.
 - [ ] Complete unit, integration, browser E2E, and local-server verification.
 
 Verification completed so far:
 
-- `cargo test -p runtara-dsl` — 197 passed.
+- `cargo test -p runtara-dsl` — 198 passed.
 - `cargo test -p runtara-report-dsl` — 83 passed.
 - `cargo test -p runtara-workflow-validation-wasm` — 17 passed, including
   native/WASM form-analysis parity.
@@ -53,6 +57,8 @@ Verification completed so far:
 - Workflow form adapter, renderer, schema, and generated-WASM Vitest suites —
   16 passed; full TypeScript and targeted ESLint checks passed. The superseded
   `SchemaFormFields` renderer was removed.
+- Report form-adapter and shared-condition suites — 13 passed; full TypeScript
+  and targeted ESLint checks passed.
 
 This document defines how Runtara will unify schema-driven form rendering across
 connections, workflows, and reports without adding third-party form or schema
