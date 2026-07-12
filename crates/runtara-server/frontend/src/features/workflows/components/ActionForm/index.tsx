@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
-import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
+import {
+  analyzeFormWithRust,
+  FormRenderer,
+  type FormAnalysisResult,
+} from '@/shared/forms';
 import {
   initialWorkflowFormValues,
   useWorkflowFormDefinition,
@@ -36,12 +40,16 @@ export function ActionForm({
     setAnalysis(null);
   }, [definition]);
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    const submissionAnalysis = hasFields
+      ? await analyzeFormWithRust(definition, formValues)
+      : analysis;
+    if (submissionAnalysis) setAnalysis(submissionAnalysis);
     setSubmitAttempt((attempt) => attempt + 1);
-    if (hasFields && !analysis?.valid) return;
+    if (hasFields && !submissionAnalysis?.valid) return;
     const payload = Object.fromEntries(
       Object.keys(definition.fields)
-        .filter((name) => analysis?.fields[name]?.visible !== false)
+        .filter((name) => submissionAnalysis?.fields[name]?.visible !== false)
         .map((name) => [name, formValues[name]])
     );
     onSubmit(payload);

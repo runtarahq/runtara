@@ -6,8 +6,9 @@ import {
   workflowSchemaWireMap,
 } from './form-schema-adapter';
 
-const normalizeSchemaFieldsFormJson = vi.fn(() =>
-  JSON.stringify({
+const normalizeSchemaFieldsFormJson = vi.fn((schemaJson: string) => {
+  void schemaJson;
+  return JSON.stringify({
     success: true,
     definition: {
       schemaVersion: 1,
@@ -17,13 +18,13 @@ const normalizeSchemaFieldsFormJson = vi.fn(() =>
       sections: [],
       allowUnknownFields: false,
     },
-  })
-);
+  });
+});
 
 vi.mock('@/shared/lib/rust-validation-wasm', () => ({
   ensureRustValidationInitialized: vi.fn().mockResolvedValue(undefined),
-  normalizeSchemaFieldsFormJson: (...args: unknown[]) =>
-    normalizeSchemaFieldsFormJson(...args),
+  normalizeSchemaFieldsFormJson: (schemaJson: string) =>
+    normalizeSchemaFieldsFormJson(schemaJson),
 }));
 
 describe('workflow schema form adapter boundary', () => {

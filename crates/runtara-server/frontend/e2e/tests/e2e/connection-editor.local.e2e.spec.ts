@@ -11,12 +11,13 @@ test.describe.serial('Connection schema form local UI', () => {
       page.getByRole('button', { name: 'New connection' })
     ).toBeVisible();
 
-    const row = page.locator('tr').filter({ hasText: updatedTitle });
-    if ((await row.count()) !== 1) return;
-
-    await row.getByTitle('Delete connection').click();
-    await page.getByRole('button', { name: 'Delete connection' }).click();
-    await expect(row).not.toBeVisible();
+    for (const title of [updatedTitle, originalTitle]) {
+      const row = page.locator('tr').filter({ hasText: title });
+      if ((await row.count()) !== 1) continue;
+      await row.getByTitle('Delete connection').click();
+      await page.getByRole('button', { name: 'Delete connection' }).click();
+      await expect(row).not.toBeVisible();
+    }
   });
 
   test('renders, edits, and safely preserves a schema-defined secret', async ({
@@ -33,15 +34,34 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(picker).toBeVisible();
     await picker.getByText('SFTP', { exact: true }).click();
     await expect(page).toHaveURL(/\/connections\/sftp\/create$/);
+    const passwordField = page.locator(
+      '[data-field="password"] input[type="password"]'
+    );
 
     await page.getByLabel('Title').fill(originalTitle);
     await page.getByLabel('Host').fill('sftp.example.com');
     await page.getByLabel('Username').fill('schema-form-user');
-    await page.getByLabel('Password').fill('not-a-real-password');
+    await expect(passwordField).toBeVisible();
+    await expect(page.getByLabel('Private Key')).not.toBeVisible();
+    await expect(page.getByLabel('Passphrase')).not.toBeVisible();
+    await page.getByLabel('Authentication Mode').click();
+    await page.getByRole('option', { name: 'Private Key' }).click();
+    await expect(passwordField).not.toBeVisible();
+    await expect(page.getByLabel('Private Key')).toHaveJSProperty(
+      'tagName',
+      'TEXTAREA'
+    );
+    await expect(page.getByLabel('Passphrase')).toBeVisible();
 
-    const privateKey = page.getByLabel('Private Key');
-    await expect(privateKey).toHaveJSProperty('tagName', 'TEXTAREA');
+    await page.getByLabel('Authentication Mode').click();
+    await page.getByRole('option', { name: 'Password' }).click();
     await expect(page.getByLabel('Port')).toHaveValue('22');
+
+    // A canonical conditional requirement is focusable at the submit boundary;
+    // ordinary typing/validation never steals focus before this click.
+    await page.getByRole('button', { name: 'Create connection' }).click();
+    await expect(passwordField).toBeFocused();
+    await passwordField.fill('not-a-real-password');
 
     await page.getByRole('button', { name: 'Create connection' }).click();
     await expect(page).toHaveURL('/connections');
@@ -55,10 +75,10 @@ test.describe.serial('Connection schema form local UI', () => {
     ).toBeVisible();
 
     await expect(page.getByLabel('Host')).toHaveValue('sftp.example.com');
-    await expect(page.getByLabel('Password')).toHaveValue('');
+    await expect(passwordField).toHaveValue('');
     await expect(
       page.getByText(
-        'A secret is configured. Enter a new value only to replace it.',
+        'A secret is configured. Enter a value only to replace it.',
         { exact: true }
       )
     ).toBeVisible();
@@ -71,12 +91,59 @@ test.describe.serial('Connection schema form local UI', () => {
     const updatedRow = page.locator('tr').filter({ hasText: updatedTitle });
     await expect(updatedRow).toHaveCount(1);
     await updatedRow.getByTitle('Edit connection').click();
-    await expect(page.getByLabel('Password')).toHaveValue('');
+    await expect(passwordField).toHaveValue('');
     await expect(
       page.getByText(
-        'A secret is configured. Enter a new value only to replace it.',
+        'A secret is configured. Enter a value only to replace it.',
         { exact: true }
       )
     ).toBeVisible();
+
+    await page.getByRole('button', { name: 'Clear stored Password' }).click();
+    await expect(
+      page.getByText('The stored secret will be cleared when you save.')
+    ).toBeVisible();
+    await page.getByLabel('Authentication Mode').click();
+    await page.getByRole('option', { name: 'Private Key' }).click();
+    await page.getByLabel('Private Key').fill('not-a-real-private-key');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(page).toHaveURL('/connections');
+
+    await page
+      .locator('tr')
+      .filter({ hasText: updatedTitle })
+      .getByTitle('Edit connection')
+      .click();
+    await expect(page.getByLabel('Authentication Mode')).toContainText(
+      'Private Key'
+    );
+    await page.getByLabel('Authentication Mode').click();
+    await page.getByRole('option', { name: 'Password' }).click();
+    await expect(page.getByText('No secret is configured.')).toBeVisible();
+  });
+
+  test('renders MCP authentication modes from canonical conditions', async ({
+    page,
+  }) => {
+    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'New connection' }).click();
+    const picker = page.getByRole('dialog');
+    await picker.getByText('MCP Server', { exact: true }).click();
+
+    await expect(page.getByLabel('Auth Mode')).toContainText('None');
+    await expect(page.getByLabel('Bearer Token')).not.toBeVisible();
+    await expect(page.getByLabel('API Key Header')).not.toBeVisible();
+    await expect(page.getByLabel('API Key')).not.toBeVisible();
+
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Bearer' }).click();
+    await expect(page.getByLabel('Bearer Token*')).toBeVisible();
+    await expect(page.getByLabel('API Key')).not.toBeVisible();
+
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Api Key' }).click();
+    await expect(page.getByLabel('Bearer Token')).not.toBeVisible();
+    await expect(page.getByLabel('API Key Header')).toBeVisible();
+    await expect(page.getByLabel('API Key*')).toBeVisible();
   });
 });

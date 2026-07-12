@@ -7,11 +7,11 @@ let evaluateConditionForTests: (
 ) => boolean = () => false;
 
 // Vitest can't load the WASM bundle (jsdom has no fetch resolver for the
-// `?url` import), so we replace `@/wasm/runtara-report-dsl` with a minimal
+// `?url` import), so we replace the report DSL loader with a minimal
 // in-memory shim. The shim mirrors the WASM surface for the tests that
 // touch FE formatting; end-to-end template/format behavior is covered by
 // the Rust tests in `runtara-report-dsl/src/{format,template}.rs`.
-vi.mock('@/wasm/runtara-report-dsl', () => {
+vi.mock('@/wasm/runtara-report-dsl/index', () => {
   const defaultContext = () => ({
     locale: 'en-US',
     currency: 'USD',

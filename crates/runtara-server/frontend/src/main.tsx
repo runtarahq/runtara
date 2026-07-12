@@ -6,7 +6,7 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { Toaster } from '@/shared/components/ui/sonner';
 import { oidcConfig } from '@/shared/config/oidcConfig';
 import { initAnalytics } from '@/shared/analytics/plausible';
-import { ensureReportDsl } from '@/wasm/runtara-report-dsl';
+import { ensureReportDsl } from '@/wasm/runtara-report-dsl/index';
 import { ensureRustValidationInitialized } from '@/shared/lib/rust-validation-wasm';
 import App from '@/App';
 

@@ -4,8 +4,8 @@
 // loaded, then returns a synchronous handle. Cell renderers depend on
 // the sync handle so they can format values inline during React render.
 
-import type { ReportDsl } from '@/wasm/runtara-report-dsl';
-import { ensureReportDsl } from '@/wasm/runtara-report-dsl';
+import type { ReportDsl } from '@/wasm/runtara-report-dsl/index';
+import { ensureReportDsl } from '@/wasm/runtara-report-dsl/index';
 
 let cachedHandle: ReportDsl | null = null;
 const loadPromise: Promise<void> = ensureReportDsl().then((dsl) => {

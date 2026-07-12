@@ -11,7 +11,11 @@ import type {
 } from '@/generated/RuntaraRuntimeApi';
 import { NextForm } from '@/shared/components/NextForm';
 import { ServiceIcon } from '@/shared/components/service-icon';
-import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
+import {
+  analyzeFormWithRust,
+  FormRenderer,
+  type FormAnalysisResult,
+} from '@/shared/forms';
 
 import { ConnectionFormLayout } from '../ConnectionFormLayout';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
@@ -192,17 +196,25 @@ export function DynamicConnectionForm({
     setClearedSecrets(new Set());
   }, [editProjection?.version]);
 
-  const handleSubmit = (values: Record<string, unknown>) => {
-    setSubmitAttempt((attempt) => attempt + 1);
-    if (!analysis?.wasmAvailable || !analysis.valid) {
-      toast.error('Fix the highlighted connection fields before saving.');
-      return;
-    }
+  const handleSubmit = async (values: Record<string, unknown>) => {
     const parameters = Object.fromEntries(
       Object.keys(
         (connectionType as ConnectionTypeWithForm).formDefinition?.fields ?? {}
       ).map((name) => [name, values[name]])
     );
+    const submissionData = Object.fromEntries(
+      Object.keys(definition.fields).map((name) => [name, values[name]])
+    );
+    const submissionAnalysis = await analyzeFormWithRust(
+      definition,
+      submissionData
+    );
+    setAnalysis(submissionAnalysis);
+    setSubmitAttempt((attempt) => attempt + 1);
+    if (!submissionAnalysis.wasmAvailable || !submissionAnalysis.valid) {
+      toast.error('Fix the highlighted connection fields before saving.');
+      return;
+    }
     onSubmit(
       {
         ...values,

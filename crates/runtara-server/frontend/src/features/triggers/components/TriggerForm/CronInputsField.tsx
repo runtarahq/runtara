@@ -91,11 +91,15 @@ export function CronInputsField({
         ...analysis.unrepresentedDataKeys.map((key) => `data.${key}`),
       ]
     : [];
-  const structuredValue = Object.fromEntries(
-    schemaFieldNames
-      .filter((name) => Object.hasOwn(analysis.data, name))
-      .map((name) => [name, analysis.data[name]])
-  );
+  const structuredValue = analysis.representable
+    ? Object.fromEntries(
+        schemaFieldNames
+          .filter((name) =>
+            Object.prototype.hasOwnProperty.call(analysis.data, name)
+          )
+          .map((name) => [name, analysis.data[name]])
+      )
+    : {};
 
   return (
     <div className="space-y-2">
@@ -138,7 +142,10 @@ export function CronInputsField({
                   .filter(
                     ([name, formField]) =>
                       !formField.required &&
-                      Object.hasOwn(structuredValue, name)
+                      Object.prototype.hasOwnProperty.call(
+                        structuredValue,
+                        name
+                      )
                   )
                   .map(([name, formField]) => [
                     name,

@@ -13,7 +13,7 @@
 // drop-in replacement on the Rust side; FE callers don't change.
 //
 // Usage:
-//   import { reportDsl, ensureReportDsl } from '@/wasm/runtara-report-dsl';
+//   import { reportDsl, ensureReportDsl } from '@/wasm/runtara-report-dsl/index';
 //   await ensureReportDsl();                  // preload once
 //   const dsl = reportDsl();                  // sync handle thereafter
 //   const out = dsl.renderTemplate('Hello {{ name }}', { name: 'world' }, ctx);

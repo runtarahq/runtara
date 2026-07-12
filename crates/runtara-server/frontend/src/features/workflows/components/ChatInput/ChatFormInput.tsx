@@ -2,7 +2,11 @@ import { useState, useCallback, useEffect } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { WaitingForInputData } from '@/features/workflows/types/chat';
-import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
+import {
+  analyzeFormWithRust,
+  FormRenderer,
+  type FormAnalysisResult,
+} from '@/shared/forms';
 import {
   initialWorkflowFormValues,
   useWorkflowFormDefinition,
@@ -40,7 +44,6 @@ export function ChatFormInput({
   );
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
   const [submitAttempt, setSubmitAttempt] = useState(0);
-  const isValid = analysis?.valid === true;
 
   useEffect(() => {
     setFormValues(initialWorkflowFormValues(definition));
@@ -48,13 +51,19 @@ export function ChatFormInput({
   }, [definition]);
 
   const handleSubmit = useCallback(async () => {
+    const submissionAnalysis = await analyzeFormWithRust(
+      definition,
+      formValues
+    );
+    setAnalysis(submissionAnalysis);
     setSubmitAttempt((attempt) => attempt + 1);
-    if (formLoading || formError || !isValid || isSubmitting) return;
+    if (formLoading || formError || !submissionAnalysis.valid || isSubmitting)
+      return;
 
     // Build payload, coercing types
     const payload: Record<string, unknown> = {};
     for (const [name, field] of Object.entries(definition.fields)) {
-      if (analysis?.fields[name]?.visible === false) continue;
+      if (submissionAnalysis.fields[name]?.visible === false) continue;
       const val = formValues[name];
       if (field.type === 'number' || field.type === 'integer') {
         payload[name] = val !== '' ? Number(val) : undefined;
@@ -97,11 +106,9 @@ export function ChatFormInput({
       setIsSubmitting(false);
     }
   }, [
-    isValid,
     isSubmitting,
     definition,
     formValues,
-    analysis,
     token,
     instanceId,
     waitingForInput.signalId,

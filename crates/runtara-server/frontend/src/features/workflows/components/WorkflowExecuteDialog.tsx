@@ -9,7 +9,11 @@ import {
 } from '@/shared/components/ui/dialog';
 import { Button } from '@/shared/components/ui/button';
 import { validateWorkflowStartInputsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
-import { FormRenderer, type FormAnalysisResult } from '@/shared/forms';
+import {
+  analyzeFormWithRust,
+  FormRenderer,
+  type FormAnalysisResult,
+} from '@/shared/forms';
 import {
   initialWorkflowFormValues,
   useWorkflowFormDefinition,
@@ -70,12 +74,17 @@ export function WorkflowExecuteDialog({
   }, [open, definition]);
 
   const handleExecute = async () => {
+    const submissionAnalysis =
+      fieldNames.length > 0
+        ? await analyzeFormWithRust(definition, inputData)
+        : formAnalysis;
+    if (submissionAnalysis) setFormAnalysis(submissionAnalysis);
     setSubmitAttempt((attempt) => attempt + 1);
     setRustValidationError(null);
     if (
       formLoading ||
       formError ||
-      (fieldNames.length > 0 && !formAnalysis?.valid)
+      (fieldNames.length > 0 && !submissionAnalysis?.valid)
     ) {
       return;
     }
@@ -85,7 +94,7 @@ export function WorkflowExecuteDialog({
       const field = definition.fields[key];
       if (
         value !== undefined &&
-        formAnalysis?.fields[key]?.visible !== false &&
+        submissionAnalysis?.fields[key]?.visible !== false &&
         !(value === '' && field?.required === false)
       ) {
         filteredData[key] = value;

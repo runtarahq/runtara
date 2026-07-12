@@ -10,7 +10,10 @@ import {
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from './types';
-import { defaultRenderContext, reportDsl } from '@/wasm/runtara-report-dsl';
+import {
+  defaultRenderContext,
+  reportDsl,
+} from '@/wasm/runtara-report-dsl/index';
 import { evaluateCanonicalCondition } from '@/shared/lib/rust-validation-wasm';
 
 export const TIME_RANGE_PRESETS = [

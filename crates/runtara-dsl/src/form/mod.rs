@@ -348,6 +348,18 @@ pub fn analyze_form(definition: &FormDefinition, data: &Value) -> FormAnalysis {
             required: false,
         });
         match object.get(name) {
+            Some(Value::String(value))
+                if state.required && field.schema.default.is_none() && value.trim().is_empty() =>
+            {
+                issues.push(error(
+                    "REQUIRED_FORM_FIELD_MISSING",
+                    format!("data.{name}"),
+                    format!(
+                        "{} is required",
+                        field.schema.label.as_deref().unwrap_or(name)
+                    ),
+                ));
+            }
             Some(value) => {
                 validate_field_value(&field.schema, value, &format!("data.{name}"), &mut issues)
             }
@@ -1198,6 +1210,42 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "REQUIRED_FORM_FIELD_MISSING")
         );
+    }
+
+    #[test]
+    fn effective_required_state_rejects_blank_strings() {
+        let mut password = field(SchemaFieldType::String);
+        password.conditions.required = Some(condition(json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                { "valueType": "reference", "value": "auth_mode" },
+                { "valueType": "immediate", "value": "password" }
+            ]
+        })));
+        let definition = FormDefinition {
+            fields: HashMap::from([
+                ("auth_mode".to_string(), field(SchemaFieldType::String)),
+                ("password".to_string(), password),
+            ]),
+            ..FormDefinition::default()
+        };
+
+        let required = analyze_form(
+            &definition,
+            &json!({ "auth_mode": "password", "password": "  " }),
+        );
+        assert!(!required.valid);
+        assert!(required.fields["password"].required);
+        assert!(required.issues.iter().any(|issue| {
+            issue.code == "REQUIRED_FORM_FIELD_MISSING" && issue.path == "data.password"
+        }));
+
+        let optional = analyze_form(
+            &definition,
+            &json!({ "auth_mode": "private_key", "password": "" }),
+        );
+        assert!(optional.valid, "{:?}", optional.issues);
     }
 
     #[test]
