@@ -79,7 +79,32 @@ function stubWasmFetch() {
 
       if (target.endsWith('/api/runtime/agents')) {
         agentsFetchCount += 1;
-        return new Response(JSON.stringify(TEST_AGENT_CATALOG), {
+        return new Response(
+          JSON.stringify({
+            agents: TEST_AGENT_CATALOG.agents.map(
+              ({
+                id,
+                name,
+                description,
+                supportsConnections,
+                integrationIds,
+              }) => ({
+                id,
+                name,
+                description,
+                supportsConnections,
+                integrationIds,
+              })
+            ),
+          }),
+          {
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+
+      if (target.endsWith('/api/runtime/agents/http')) {
+        return new Response(JSON.stringify(TEST_AGENT_CATALOG.agents[0]), {
           headers: { 'Content-Type': 'application/json' },
         });
       }

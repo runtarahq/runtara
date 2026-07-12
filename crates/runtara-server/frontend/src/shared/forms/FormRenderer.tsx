@@ -70,6 +70,8 @@ export function FormRenderer({
   const request = useRef(0);
   const analysisCallback = useRef(onAnalysisChange);
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const definitionJson = JSON.stringify(definition);
+  const valueJson = JSON.stringify(value);
 
   useEffect(() => {
     analysisCallback.current = onAnalysisChange;
@@ -77,12 +79,14 @@ export function FormRenderer({
 
   useEffect(() => {
     const current = ++request.current;
-    void analyzeFormWithRust(definition, value).then((next) => {
+    const definitionSnapshot = JSON.parse(definitionJson) as FormDefinition;
+    const valueSnapshot = JSON.parse(valueJson) as Record<string, unknown>;
+    void analyzeFormWithRust(definitionSnapshot, valueSnapshot).then((next) => {
       if (request.current !== current) return;
       setAnalysis(next);
       analysisCallback.current?.(next);
     });
-  }, [definition, value]);
+  }, [definitionJson, valueJson]);
 
   if (!analysis) {
     return (

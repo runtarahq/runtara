@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FormRenderer } from './FormRenderer';
@@ -42,6 +43,7 @@ function result(patch: Partial<FormAnalysisResult> = {}): FormAnalysisResult {
 
 describe('FormRenderer', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(analyzeFormWithRust).mockResolvedValue(result());
   });
 
@@ -118,5 +120,26 @@ describe('FormRenderer', () => {
 
     expect(await screen.findByText('Form unavailable')).toBeInTheDocument();
     expect(screen.queryByLabelText('Mode')).not.toBeInTheDocument();
+  });
+
+  it('does not reanalyze semantically unchanged inline values', async () => {
+    vi.mocked(analyzeFormWithRust).mockImplementation(async () => result());
+
+    function InlineParent() {
+      const [, setAnalysis] = useState<FormAnalysisResult | null>(null);
+      return (
+        <FormRenderer
+          definition={{ ...definition }}
+          value={{}}
+          onChange={vi.fn()}
+          onAnalysisChange={setAnalysis}
+        />
+      );
+    }
+
+    render(<InlineParent />);
+    expect(await screen.findByLabelText('Mode')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(analyzeFormWithRust).toHaveBeenCalledTimes(1);
   });
 });

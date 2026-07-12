@@ -1,5 +1,5 @@
 import {
-  ensureRustValidationInitialized,
+  ensureWorkflowValidationInitialized,
   getAgentJson,
   getAgentsJson,
   getCapabilitySchemaJson,
@@ -38,7 +38,7 @@ export interface RustSchemaFieldsValidationResult
   schemaErrors: RustSchemaFieldsValidationError[];
 }
 
-const ensureRustValidatorInitialized = ensureRustValidationInitialized;
+const ensureRustValidatorInitialized = ensureWorkflowValidationInitialized;
 
 function normalizeValidationResponse(
   value: unknown

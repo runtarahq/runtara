@@ -13,6 +13,7 @@ export default tseslint.config(
       'e2e-report',
       'e2e-results',
       'playwright-report',
+      'storybook-static',
       'coverage',
       'src/wasm/workflow-validation',
     ],

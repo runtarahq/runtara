@@ -28,7 +28,6 @@ export function CreateConnection() {
   const { data: connectionTypes, isFetching } = useCustomQuery({
     queryKey: queryKeys.connections.types(),
     queryFn: getConnectionTypes,
-    initialData: [],
   });
 
   const isOAuthType = useMemo(() => {
