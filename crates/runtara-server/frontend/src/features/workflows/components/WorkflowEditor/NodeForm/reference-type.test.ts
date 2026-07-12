@@ -235,4 +235,22 @@ describe('referenceTypeMismatch', () => {
     );
     expect(referenceTypeMismatch('boolean', 'string')).toMatch(/boolean/);
   });
+
+  it('treats enum (select) fields as strings, not a distinct type', () => {
+    // getInputComponentType returns 'select' for enum inputs; on the wire
+    // they are strings — referencing a string into one must not warn.
+    expect(referenceTypeMismatch('string', 'select')).toBeNull();
+    expect(referenceTypeMismatch('array', 'select')).toMatch(/array/);
+  });
+
+  it('suppresses scalar→string warnings when the consumer coerces', () => {
+    // Finish outputs with a "string" type hint always stringify scalars.
+    const opts = { scalarsCoerceToString: true };
+    expect(referenceTypeMismatch('integer', 'string', opts)).toBeNull();
+    expect(referenceTypeMismatch('boolean', 'string', opts)).toBeNull();
+    // Arrays/objects are not stringified by the hint — still a mismatch.
+    expect(referenceTypeMismatch('array', 'string', opts)).toMatch(/array/);
+    // Without the option the scalar warning stays (agent inputs don't coerce).
+    expect(referenceTypeMismatch('integer', 'string')).toMatch(/integer/);
+  });
 });

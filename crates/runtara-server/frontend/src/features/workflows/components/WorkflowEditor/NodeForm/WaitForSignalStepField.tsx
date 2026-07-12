@@ -249,7 +249,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                     : vt;
               updateField('timeoutMs', getValue('timeoutMs'), next);
             }}
-            fieldType="string"
+            fieldType="number"
             placeholder="e.g. 86400000 (24 hours)"
           />
         </FormControl>
@@ -301,7 +301,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                       vt
                     )
                   }
-                  fieldType="string"
+                  fieldType="number"
                   placeholder="1000"
                   hideReferenceToggle
                 />

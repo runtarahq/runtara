@@ -428,6 +428,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                       }
                                       fieldType={outputFieldType}
                                       allowNull={allowsNull}
+                                      scalarsCoerceToString
                                       placeholder="Enter value or select reference..."
                                       defaultValue={
                                         fieldArray[index]?.defaultValue

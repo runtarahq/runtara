@@ -194,6 +194,10 @@ const TYPE_ALIASES: Record<string, string> = {
   text: 'string',
   str: 'string',
   textarea: 'string',
+  // Enum inputs surface as the 'select' widget type; on the wire they are
+  // strings. Without this alias every reference into an enum field warned
+  // "expects select".
+  select: 'string',
   int: 'integer',
   double: 'number',
   float: 'number',
@@ -218,6 +222,15 @@ export function normalizeTypeName(type?: string): string | undefined {
   return TYPE_ALIASES[lower] ?? lower;
 }
 
+export interface MismatchOptions {
+  /**
+   * The consumer coerces scalar values into strings at runtime (e.g. Finish
+   * outputs with a "string" type hint always stringify numbers/booleans) —
+   * scalar→string is then a supported pattern, not a mismatch.
+   */
+  scalarsCoerceToString?: boolean;
+}
+
 /**
  * Returns a human-readable warning when a resolved reference type cannot fit
  * the target field's declared type, or null when compatible / unknowable.
@@ -226,7 +239,8 @@ export function normalizeTypeName(type?: string): string | undefined {
  */
 export function referenceTypeMismatch(
   referenceType: string | undefined,
-  fieldType: string | undefined
+  fieldType: string | undefined,
+  options: MismatchOptions = {}
 ): string | null {
   const reference = normalizeTypeName(referenceType);
   const field = normalizeTypeName(fieldType);
@@ -247,6 +261,13 @@ export function referenceTypeMismatch(
   }
   // An integer always fits a number-typed field.
   if (reference === 'integer' && field === 'number') {
+    return null;
+  }
+  if (
+    options.scalarsCoerceToString &&
+    field === 'string' &&
+    (reference === 'integer' || reference === 'number' || reference === 'boolean')
+  ) {
     return null;
   }
   return `Reference is ${reference}; this field expects ${field}`;

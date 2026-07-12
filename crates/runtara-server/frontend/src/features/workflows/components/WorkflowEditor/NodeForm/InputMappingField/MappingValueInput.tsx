@@ -54,6 +54,12 @@ interface MappingValueInputProps {
    * not rendered (for call sites without entry default semantics).
    */
   onDefaultValueChange?: (value: string | undefined) => void;
+  /**
+   * The consumer stringifies scalar reference values at runtime (Finish
+   * outputs with a "string" type hint) — suppress the scalar→string
+   * type-mismatch warning for those call sites.
+   */
+  scalarsCoerceToString?: boolean;
 }
 
 function fieldTypeSupportsNull(fieldType: string): boolean {
@@ -102,6 +108,7 @@ export function MappingValueInput({
   allowNull = false,
   defaultValue,
   onDefaultValueChange,
+  scalarsCoerceToString = false,
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
@@ -208,7 +215,9 @@ export function MappingValueInput({
     // Reference mode - show pill or empty state
     if (isReference) {
       if (stringValue) {
-        const typeMismatch = referenceTypeMismatch(referenceType, fieldType);
+        const typeMismatch = referenceTypeMismatch(referenceType, fieldType, {
+          scalarsCoerceToString,
+        });
         return (
           <div className="flex-1 min-w-0">
             <div className="flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
