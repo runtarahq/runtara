@@ -3,9 +3,10 @@ import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
-import { AlertTriangle, Loader2, RefreshCw, Trash2 } from 'lucide-react';
+import { Loader2, Trash2 } from 'lucide-react';
 
 import type {
+  ConnectionStatus,
   ConnectionTypeDto,
   RateLimitConfigDto,
   RateLimitStatusDto,
@@ -23,6 +24,8 @@ import {
 import { ConnectionPageShell } from '../ConnectionPageShell';
 import { ConnectionSaveBar } from '../ConnectionSaveBar';
 import { CollapsedSection } from '../CollapsedSection';
+import { ConnectionStatusCard } from '../../ConnectionStatusCard';
+import { patchStripsAuthorization } from '../../../utils/reauthorization';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
 import { DefaultForSection } from '../DefaultForSection';
 import { RateLimitSection } from '../RateLimitSection';
@@ -129,7 +132,6 @@ export function DynamicConnectionForm({
   showReconnect,
   onReconnect,
   isReconnecting,
-  needsReconnect,
   conflictNotice,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
@@ -286,49 +288,43 @@ export function DynamicConnectionForm({
     );
   };
 
-  // Interim header actions: Reconnect moves into the status card (PR-2)
-  // and Delete into the danger zone (PR-3).
+  // Interim header action: Delete moves into the danger zone (PR-3).
   const headerActions =
-    mode === 'edit' ? (
-      <>
-        {showReconnect && onReconnect && (
-          <Button
-            type="button"
-            variant={needsReconnect ? 'default' : 'outline'}
-            size="sm"
-            onClick={onReconnect}
-            disabled={isReconnecting}
-            className={
-              needsReconnect ? 'shadow-sm shadow-blue-600/20' : undefined
-            }
-          >
-            {isReconnecting ? (
-              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4 mr-1.5" />
-            )}
-            Reconnect
-          </Button>
+    mode === 'edit' && onDelete ? (
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={onDelete}
+        disabled={isDeleting}
+        className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30"
+      >
+        {isDeleting ? (
+          <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+        ) : (
+          <Trash2 className="w-4 h-4 mr-1.5" />
         )}
-        {onDelete && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={onDelete}
-            disabled={isDeleting}
-            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30"
-          >
-            {isDeleting ? (
-              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-            ) : (
-              <Trash2 className="w-4 h-4 mr-1.5" />
-            )}
-            Delete
-          </Button>
-        )}
-      </>
+        Delete
+      </Button>
     ) : undefined;
+
+  // Descriptor parameter fields (not the title/rate-limit frame) with unsaved
+  // edits, plus staged secret clears — the set the status card guards against
+  // a stale-credential reconnect.
+  const touchedParamFields = new Set<string>([
+    ...Object.entries(dirtyFields)
+      .filter(([name, dirty]) => dirty === true && name in definition.fields)
+      .map(([name]) => name),
+    ...clearedSecrets,
+  ]);
+  const hasParamChanges = touchedParamFields.size > 0;
+  const hasReauthChanges = patchStripsAuthorization(
+    connectionType.fieldBehaviors,
+    touchedParamFields
+  );
+  const configuredSecretCount = Object.values(secretState).filter(
+    (state) => state.configured
+  ).length;
 
   const showSaveBar =
     mode === 'create' || hasPendingChanges || Boolean(isLoading);
@@ -370,40 +366,24 @@ export function DynamicConnectionForm({
         >
           <div className="space-y-6">
             {conflictNotice}
-            {/* Needs-reconnection banner — the stored credentials are kept; a
-                single click re-runs the OAuth consent to mint fresh tokens.
-                Replaced by the status card in PR-2. */}
-            {mode === 'edit' &&
-              needsReconnect &&
-              showReconnect &&
-              onReconnect && (
-                <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200/60 rounded-lg dark:bg-amber-900/20 dark:border-amber-700/40">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5 dark:text-amber-500" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
-                      This connection needs to be reconnected
-                    </p>
-                    <p className="text-xs text-amber-700 mt-0.5 dark:text-amber-400">
-                      Its access has expired or was revoked. Your saved
-                      credentials are kept — click Reconnect to re-authorize
-                      without re-entering them.
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={onReconnect}
-                    disabled={isReconnecting}
-                  >
-                    {isReconnecting ? (
-                      <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4 mr-1.5" />
-                    )}
-                    Reconnect
-                  </Button>
-                </div>
-              )}
+            {mode === 'edit' && (
+              <ConnectionStatusCard
+                status={
+                  ((initValues as { status?: ConnectionStatus })?.status ??
+                    'UNKNOWN') as ConnectionStatus
+                }
+                connectionType={connectionType as ConnectionTypeWithForm}
+                values={editProjection?.values as Record<string, unknown>}
+                configuredSecretCount={configuredSecretCount}
+                updatedAt={(initValues as { updatedAt?: string })?.updatedAt}
+                isOAuth={Boolean(showReconnect)}
+                onReconnect={onReconnect}
+                onSaveAndReconnect={() => form.handleSubmit(handleSubmit)()}
+                isReconnecting={isReconnecting}
+                hasParamChanges={hasParamChanges}
+                hasReauthChanges={hasReauthChanges}
+              />
+            )}
             <FormRenderer
               definition={definition}
               value={formValue}

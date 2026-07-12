@@ -20,7 +20,6 @@ import {
   ConsoleTableShell,
   StatusPill,
   TableStatusFooter,
-  type StatusTone,
 } from '@/shared/components/console';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import {
@@ -30,29 +29,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/shared/components/ui/dialog';
-import { ConnectionStatus } from '@/generated/RuntaraRuntimeApi';
 import { EnrichedConnection } from '@/features/connections/types';
 import {
   getConnections,
   removeConnection,
 } from '@/features/connections/queries';
 import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
-
-function connectionStatusPill(status: ConnectionStatus): {
-  tone: StatusTone;
-  label: string;
-} {
-  switch (status) {
-    case 'ACTIVE':
-      return { tone: 'success', label: 'Connected' };
-    case 'REQUIRES_RECONNECTION':
-      return { tone: 'warning', label: 'Reconnect required' };
-    case 'INVALID_CREDENTIALS':
-      return { tone: 'error', label: 'Invalid credentials' };
-    default:
-      return { tone: 'neutral', label: 'Unknown' };
-  }
-}
+import { connectionStatusPill } from '@/features/connections/utils/status';
 
 function formatNumber(num: number): string {
   if (num >= 1000000) {

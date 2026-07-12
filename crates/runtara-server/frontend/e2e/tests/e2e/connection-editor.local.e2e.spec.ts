@@ -397,6 +397,16 @@ test.describe.serial('Connection schema form local UI', () => {
       'com.intuit.quickbooks.accounting'
     );
 
+    // The status card replaces the amber reconnect banner: an unauthorized
+    // OAuth row shows the "Reconnect required" pill + never-authorized copy
+    // and a Connect action, and no role="alert" banner remains.
+    await expect(page.getByText('Reconnect required')).toBeVisible();
+    await expect(
+      page.getByText("This connection isn't authorized", { exact: false })
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect' })).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+
     let submittedBody: Record<string, unknown> | undefined;
     page.on('request', (outgoing) => {
       if (
@@ -521,5 +531,42 @@ test.describe.serial('Connection schema form local UI', () => {
     // The discarded edit never reached the server.
     const saved = await getApiConnection(request, id);
     expect(saved.editProjection.values.host).toBe('bar.example.com');
+  });
+
+  test('guards reconnect when unsaved credential changes would be ignored', async ({
+    page,
+    request,
+  }) => {
+    const title = `E2E reconnect guard QBO ${runId}`;
+    const id = await createApiConnection(request, {
+      title,
+      integrationId: 'quickbooks_online',
+      connectionParameters: {
+        client_id: 'guard-client-id',
+        client_secret: 'stored-secret',
+      },
+    });
+
+    await openConnectionEditor(page, title);
+
+    // Editing a reauthorization-sensitive field and clicking Connect must not
+    // silently authorize with the old stored value — it intercepts.
+    await page.getByLabel('Client ID').fill('guard-client-id-changed');
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    const guard = page.getByRole('alertdialog');
+    await expect(guard).toContainText('Save before reconnecting?');
+    // A credential change resets authorization, so "Reconnect without saving"
+    // is withheld — only Save & Reconnect or Cancel.
+    await expect(
+      guard.getByRole('button', { name: 'Reconnect without saving' })
+    ).toHaveCount(0);
+    await guard.getByRole('button', { name: 'Cancel' }).click();
+    await expect(guard).toBeHidden();
+
+    // Nothing was authorized or written: the stored client_id is unchanged.
+    const saved = await getApiConnection(request, id);
+    expect(saved.editProjection.values.client_id).toBe('guard-client-id');
+    expect(saved.status).toBe('REQUIRES_RECONNECTION');
   });
 });
