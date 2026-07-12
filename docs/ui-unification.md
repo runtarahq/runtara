@@ -63,6 +63,59 @@ require:
 These are not duplicate form DSLs or evaluators and are not candidates for
 removal without an explicit versioned domain migration.
 
+### Downstream consumer: connection page frame (2026-07-12)
+
+The connection editor's **page frame** — the domain UI around `FormRenderer`
+(status card, sticky save bar, danger zone, reconnect handoff, OAuth popup
+lifecycle) — was rebuilt on top of the unified engine and shipped in seven
+commits (`4e833e8a`..`b785b123`). See
+[connection-page-ux-plan.md](connection-page-ux-plan.md) for that plan and its
+implementation status. This is the first demanding real consumer of the engine
+and it validated the ownership boundary: everything schema-shaped
+(fields, controls, conditions, access, secret state, validation) stayed in the
+shared engine, while everything connection-specific (authorization lifecycle,
+grant health, provider reconnect, deletion) stayed in the page frame. Two
+findings that surfaced while building it are now captured for reuse:
+
+- **Controlled reset with `keepDirtyValues`.** The shared `FormRenderer`
+  controls its inputs from `useWatch`. With react-hook-form
+  `resetOptions: { keepDirtyValues: true }` (required so a background refetch
+  never clobbers an in-progress edit), a bare `form.reset()` does **not**
+  reliably re-emit to those controlled inputs — a discard or post-save
+  re-sync must set each field explicitly. Any page adopting the renderer with
+  the values-prop + keep-dirty pattern needs the same explicit re-set.
+- **Grant state is connection-domain, not form-engine.** `ConnectionGrantState`
+  (`hasAccessToken` / `hasRefreshToken` / `tokenExpiresAt` / `authorizedAt`) was
+  added to `ConnectionDto`, not to `FormField`/`FormDefinition` — booleans and
+  timestamps only, derived server-side, never token values. This is the
+  intended shape for new connection lifecycle metadata: it rides the connection
+  DTO alongside `editProjection`/`secretState`, keeping authorization concerns
+  out of the shared form model.
+
+### Known vocabulary gaps (open)
+
+The engine is complete for the surface Runtara exposes today, but the connection
+page frame wanted three pieces of field/section metadata the canonical model
+does not yet express. None block current UI; each is an additive follow-up:
+
+- **Per-field documentation links (`doc_url`).** Absent from `SchemaField` /
+  `FormField` and the macro. Provider setup links ("where do I find my Intuit
+  keys", the OAuth redirect URI to register) currently have nowhere to live in
+  the descriptor. Adding a `doc_url` field attr → `ConnectionFieldMeta` → DTO
+  (mirroring the recent section-metadata chain) would unblock them.
+- **Authored enum option labels.** `FormOption.label` is produced only by
+  `humanize_identifier(value)` (`form/mod.rs`), so an option value cannot carry
+  a custom display label. Fine for `sandbox`/`production`; limiting for coded
+  values.
+- **Unit / suffix hints.** No way to annotate a numeric field with a unit
+  (ms, req/s, MB) for display.
+
+One correctness caveat worth tracking: `FormDefinition.allow_unknown_fields`
+deserializes to `true` by default (`default_allow_unknown_fields`), so a
+hand-authored definition that omits the key silently accepts unknown fields.
+Both production producers (connection descriptors, workflow/report normalizers)
+set it explicitly to `false`; a hand-written definition should too.
+
 This document records the implemented architecture that unifies schema-driven
 form rendering across connections, workflows, and reports without adding a
 third-party form or schema framework. Its canonical foundation lives in Rust
