@@ -13,7 +13,10 @@ import {
   getOAuthAuthorizeUrl,
 } from '@/features/connections/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { useOAuthPopup } from '@/features/connections/hooks/useOAuthPopup';
+import {
+  useOAuthPopup,
+  OAuthPopupClosedError,
+} from '@/features/connections/hooks/useOAuthPopup';
 import { useAuth } from 'react-oidc-context';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
@@ -43,20 +46,37 @@ export function CreateConnection() {
     async (connectionId: string) => {
       // Only OIDC mode needs a bearer token; local / trust_proxy modes have
       // none and the server accepts unauthenticated calls there.
-      if (isOidcAuth && !token) return;
+      if (isOidcAuth && !token) {
+        navigate('/connections');
+        return;
+      }
       try {
         const authUrl = await getOAuthAuthorizeUrl(token, connectionId);
         await openOAuthPopup(authUrl);
+        // Authorized: nothing left to do here, the list confirms completion.
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
         navigate('/connections');
         toast.success('Connection authorized and ready.');
       } catch (error) {
-        console.error('OAuth flow failed:', error);
-        toast.error(
-          `Authorization failed: ${error instanceof Error ? error.message : 'Unknown error'}. You can re-authorize from the connection page.`
-        );
+        // The connection was created but not authorized. Land on its edit page
+        // where the status card owns the recovery (Connect), rather than
+        // stranding the user or dead-ending on the list.
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
-        navigate('/connections');
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.connections.byId(connectionId),
+        });
+        navigate(`/connections/${connectionId}`);
+        if (error instanceof OAuthPopupClosedError) {
+          toast.info(
+            'Connection saved — authorization still needed. Finish connecting from this page.'
+          );
+        } else {
+          toast.error(
+            `Connection saved, but authorization didn't complete: ${
+              error instanceof Error ? error.message : 'Unknown error'
+            }. You can retry from this page.`
+          );
+        }
       }
     },
     [token, openOAuthPopup, navigate]
@@ -152,6 +172,7 @@ export function CreateConnection() {
       isLoading={isPending}
       onSubmit={handleSubmit}
       mode="create"
+      oauthCreateHint={isOAuthType}
     />
   );
 }

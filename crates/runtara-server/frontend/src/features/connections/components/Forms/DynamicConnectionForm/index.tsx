@@ -59,6 +59,8 @@ type DynamicConnectionFormProps = {
   needsReconnect?: boolean;
   conflictNotice?: ReactNode;
   reconnectNotice?: ReactNode;
+  /** Create mode, interactive-OAuth type: hints the post-create authorize step. */
+  oauthCreateHint?: boolean;
 };
 
 export interface ConnectionFormOperations {
@@ -135,6 +137,7 @@ export function DynamicConnectionForm({
   isReconnecting,
   conflictNotice,
   reconnectNotice,
+  oauthCreateHint,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
@@ -353,7 +356,9 @@ export function DynamicConnectionForm({
                     ? hasReauthChanges
                       ? 'Save & Reconnect'
                       : 'Save changes'
-                    : 'Create connection'
+                    : oauthCreateHint
+                      ? 'Create & Connect'
+                      : 'Create connection'
                 }
                 loadingLabel={mode === 'edit' ? 'Saving...' : 'Creating...'}
                 dirtyCount={dirtyCount}
@@ -367,6 +372,12 @@ export function DynamicConnectionForm({
           <div className="space-y-6">
             {conflictNotice}
             {reconnectNotice}
+            {mode === 'create' && oauthCreateHint && (
+              <div className="rounded-lg border border-blue-200/70 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-800/60 dark:bg-blue-950/30 dark:text-blue-100">
+                After creating, a {connectionType.displayName || 'provider'}{' '}
+                window opens to authorize the connection.
+              </div>
+            )}
             {mode === 'edit' && (
               <ConnectionStatusCard
                 status={
