@@ -1,4 +1,5 @@
 import { useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
@@ -15,6 +16,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useOAuthPopup } from '@/features/connections/hooks/useOAuthPopup';
 import { useAuth } from 'react-oidc-context';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { queryClient } from '@/main.tsx';
 
 export function CreateConnection() {
@@ -47,7 +49,7 @@ export function CreateConnection() {
         await openOAuthPopup(authUrl);
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
         navigate('/connections');
-        toast.success('Connection authorized successfully');
+        toast.success('Connection authorized and ready.');
       } catch (error) {
         console.error('OAuth flow failed:', error);
         toast.error(
@@ -64,11 +66,17 @@ export function CreateConnection() {
     mutationFn: createConnection,
     onSuccess: (connectionId: string) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
+      // The connection exists now: leaving must not trip the
+      // unsaved-changes blocker. flushSync forces useBlocker to re-subscribe
+      // with shouldBlock=false before the navigate below runs.
+      flushSync(() => {
+        useNavigationBlockerStore.getState().setBlocker(false);
+      });
       if (isOAuthType && connectionId) {
         startOAuthFlow(connectionId);
       } else {
         navigate('/connections');
-        toast.info('Connection has been created');
+        toast.success('Connection created.');
       }
     },
   });

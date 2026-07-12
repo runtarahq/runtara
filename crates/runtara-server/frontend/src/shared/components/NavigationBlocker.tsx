@@ -69,21 +69,21 @@ export function NavigationBlocker() {
     >
       <AlertDialogContent className="p-6">
         <AlertDialogHeader className="pb-4">
-          <AlertDialogTitle>Unsaved Changes</AlertDialogTitle>
+          <AlertDialogTitle>Unsaved changes</AlertDialogTitle>
           <AlertDialogDescription className="pt-2">
-            You have unsaved changes that will be lost. Are you sure you want to
-            continue?
+            You have unsaved changes. If you leave now, they&apos;ll be
+            discarded.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter className="pt-4">
           <AlertDialogCancel onClick={cancelNavigation}>
-            Cancel
+            Keep editing
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={confirmNavigation}
             className="bg-orange-600 hover:bg-orange-700"
           >
-            Discard Changes
+            Discard changes
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

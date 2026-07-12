@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router';
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
@@ -21,6 +22,7 @@ import {
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useConnectionRateLimitStatus } from '@/features/analytics/hooks/useRateLimits';
 import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
+import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { queryClient } from '@/main.tsx';
 import type { FormDefinition } from '@/shared/forms';
 import { buildConnectionUpdateInput } from './update-payload';
@@ -100,8 +102,7 @@ export function Connection() {
       queryClient.invalidateQueries({
         queryKey: queryKeys.connections.byId(id ?? ''),
       });
-      navigate('/connections');
-      toast.info('Connection successfully updated');
+      toast.success('Connection saved.');
     },
     onError: (error, variables) => {
       if (error.response?.status !== 409 || !id) return;
@@ -136,8 +137,16 @@ export function Connection() {
     mutationFn: removeConnection,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
+      // The row is gone: leaving must not trip the unsaved-changes blocker.
+      // flushSync forces useBlocker to re-subscribe with shouldBlock=false
+      // before the navigate below runs.
+      flushSync(() => {
+        useNavigationBlockerStore.getState().setBlocker(false);
+      });
       navigate('/connections');
-      toast.info('Connection deleted');
+      toast.success(
+        `Connection "${connection.data?.title ?? 'connection'}" deleted.`
+      );
     },
   });
 

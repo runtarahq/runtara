@@ -79,7 +79,7 @@ test.describe.serial('Connection Create + Delete Flow', () => {
     await expect(page).toHaveURL('/connections', { timeout: 10000 });
 
     // 8. Success toast should appear
-    await expect(page.getByText(/connection has been created/i)).toBeVisible({
+    await expect(page.getByText(/connection created/i)).toBeVisible({
       timeout: 5000,
     });
 

@@ -107,7 +107,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
   const mutation = useCustomMutation({
     mutationFn: removeConnection,
     onSuccess: () => {
-      toast.info('Connection has been removed');
+      toast.success('Connection deleted.');
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
     },
     onSettled: () => {

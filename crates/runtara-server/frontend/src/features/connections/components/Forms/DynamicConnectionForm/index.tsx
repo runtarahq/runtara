@@ -3,6 +3,7 @@ import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
+import { AlertTriangle, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 
 import type {
   ConnectionTypeDto,
@@ -11,13 +12,17 @@ import type {
 } from '@/generated/RuntaraRuntimeApi';
 import { NextForm } from '@/shared/components/NextForm';
 import { ServiceIcon } from '@/shared/components/service-icon';
+import { Button } from '@/shared/components/ui/button';
+import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import {
   analyzeFormWithRust,
   FormRenderer,
   type FormAnalysisResult,
 } from '@/shared/forms';
 
-import { ConnectionFormLayout } from '../ConnectionFormLayout';
+import { ConnectionPageShell } from '../ConnectionPageShell';
+import { ConnectionSaveBar } from '../ConnectionSaveBar';
+import { CollapsedSection } from '../CollapsedSection';
 import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
 import { DefaultForSection } from '../DefaultForSection';
 import { RateLimitSection } from '../RateLimitSection';
@@ -164,9 +169,8 @@ export function DynamicConnectionForm({
   const existingRateLimit = initValues?.rateLimitConfig as
     | RateLimitConfigDto
     | undefined;
-  const form = useForm<Record<string, unknown>>({
-    resolver: zodResolver(frameSchema),
-    values: {
+  const formValues = useMemo(
+    () => ({
       ...canonicalDefaults,
       rateLimitEnabled: Boolean(existingRateLimit),
       requestsPerSecond:
@@ -187,7 +191,15 @@ export function DynamicConnectionForm({
         ? initValues.defaultFor
         : [],
       isDefaultFileStorage: Boolean(initValues?.isDefaultFileStorage),
-    },
+    }),
+    [canonicalDefaults, defaultRateLimit, existingRateLimit, initValues]
+  );
+  const form = useForm<Record<string, unknown>>({
+    resolver: zodResolver(frameSchema),
+    values: formValues,
+    // Background refetches must not clobber in-progress edits; the explicit
+    // reset on version change below handles the post-save clean state.
+    resetOptions: { keepDirtyValues: true },
   });
   const watched = useWatch({ control: form.control });
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
@@ -195,10 +207,49 @@ export function DynamicConnectionForm({
   const formValue = Object.fromEntries(
     Object.keys(definition.fields).map((name) => [name, watched[name]])
   );
+  const { isDirty, dirtyFields } = form.formState;
+  const hasPendingChanges = isDirty || clearedSecrets.size > 0;
+  const dirtyCount = Object.values(dirtyFields).filter(Boolean).length;
+  const setBlocker = useNavigationBlockerStore((state) => state.setBlocker);
 
+  // A version bump means the server accepted a write (ours or someone
+  // else's): re-sync to the fresh projection and drop staged edits so
+  // secret inputs empty out and the save bar collapses.
   useEffect(() => {
     setClearedSecrets(new Set());
+    form.reset(formValues);
+    // formValues is intentionally not a dependency: only a version change
+    // may discard in-progress edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editProjection?.version]);
+
+  useEffect(() => {
+    setBlocker(hasPendingChanges, () => {
+      form.reset();
+      setClearedSecrets(new Set());
+    });
+    return () => setBlocker(false);
+  }, [hasPendingChanges, setBlocker, form]);
+
+  useEffect(() => {
+    if (!hasPendingChanges) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasPendingChanges]);
+
+  const handleDiscard = () => {
+    // The controlled FieldControls read from useWatch, and with
+    // keepDirtyValues a bare reset() doesn't always re-emit; set each field
+    // back explicitly (the same path typing uses) then clear dirty state.
+    for (const [name, value] of Object.entries(formValues)) {
+      form.setValue(name, value, { shouldDirty: false });
+    }
+    form.reset(formValues);
+    setClearedSecrets(new Set());
+  };
 
   const handleSubmit = async (values: Record<string, unknown>) => {
     const parameters = buildConnectionCreateParameters(
@@ -235,6 +286,53 @@ export function DynamicConnectionForm({
     );
   };
 
+  // Interim header actions: Reconnect moves into the status card (PR-2)
+  // and Delete into the danger zone (PR-3).
+  const headerActions =
+    mode === 'edit' ? (
+      <>
+        {showReconnect && onReconnect && (
+          <Button
+            type="button"
+            variant={needsReconnect ? 'default' : 'outline'}
+            size="sm"
+            onClick={onReconnect}
+            disabled={isReconnecting}
+            className={
+              needsReconnect ? 'shadow-sm shadow-blue-600/20' : undefined
+            }
+          >
+            {isReconnecting ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4 mr-1.5" />
+            )}
+            Reconnect
+          </Button>
+        )}
+        {onDelete && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onDelete}
+            disabled={isDeleting}
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30"
+          >
+            {isDeleting ? (
+              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+            ) : (
+              <Trash2 className="w-4 h-4 mr-1.5" />
+            )}
+            Delete
+          </Button>
+        )}
+      </>
+    ) : undefined;
+
+  const showSaveBar =
+    mode === 'create' || hasPendingChanges || Boolean(isLoading);
+
   return (
     <NextForm
       form={form}
@@ -242,17 +340,8 @@ export function DynamicConnectionForm({
       className="w-full"
       renderActions={() => null}
       renderContent={() => (
-        <ConnectionFormLayout
-          title={mode === 'edit' ? 'Edit connection' : 'Create connection'}
-          isLoading={isLoading}
-          isSubmitDisabled={analysis?.wasmAvailable === false}
-          submitLabel={mode === 'edit' ? 'Save changes' : 'Create connection'}
-          loadingLabel={mode === 'edit' ? 'Saving...' : 'Creating...'}
-          editNotice={
-            mode === 'edit'
-              ? 'Stored secrets stay hidden. Enter new values to update them.'
-              : undefined
-          }
+        <ConnectionPageShell
+          mode={mode}
           integrationIcon={
             <ServiceIcon
               serviceId={connectionType.integrationId || undefined}
@@ -261,15 +350,60 @@ export function DynamicConnectionForm({
           }
           integrationName={connectionType.displayName || undefined}
           integrationCategory={connectionType.category || undefined}
-          onDelete={onDelete}
-          isDeleting={isDeleting}
-          showReconnect={showReconnect}
-          onReconnect={onReconnect}
-          isReconnecting={isReconnecting}
-          needsReconnect={needsReconnect}
-          conflictNotice={conflictNotice}
+          headerActions={headerActions}
+          footer={
+            showSaveBar ? (
+              <ConnectionSaveBar
+                isLoading={isLoading}
+                isSubmitDisabled={analysis?.wasmAvailable === false}
+                submitLabel={
+                  mode === 'edit' ? 'Save changes' : 'Create connection'
+                }
+                loadingLabel={mode === 'edit' ? 'Saving...' : 'Creating...'}
+                dirtyCount={dirtyCount}
+                clearedCount={clearedSecrets.size}
+                showDiscard={mode === 'edit' && hasPendingChanges}
+                onDiscard={handleDiscard}
+              />
+            ) : undefined
+          }
         >
           <div className="space-y-6">
+            {conflictNotice}
+            {/* Needs-reconnection banner — the stored credentials are kept; a
+                single click re-runs the OAuth consent to mint fresh tokens.
+                Replaced by the status card in PR-2. */}
+            {mode === 'edit' &&
+              needsReconnect &&
+              showReconnect &&
+              onReconnect && (
+                <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200/60 rounded-lg dark:bg-amber-900/20 dark:border-amber-700/40">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5 dark:text-amber-500" />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+                      This connection needs to be reconnected
+                    </p>
+                    <p className="text-xs text-amber-700 mt-0.5 dark:text-amber-400">
+                      Its access has expired or was revoked. Your saved
+                      credentials are kept — click Reconnect to re-authorize
+                      without re-entering them.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={onReconnect}
+                    disabled={isReconnecting}
+                  >
+                    {isReconnecting ? (
+                      <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4 mr-1.5" />
+                    )}
+                    Reconnect
+                  </Button>
+                </div>
+              )}
             <FormRenderer
               definition={definition}
               value={formValue}
@@ -329,12 +463,18 @@ export function DynamicConnectionForm({
             />
             {isFileStorage && <DefaultFileStorageSection />}
             <DefaultForSection connectionType={connectionType} />
-            <RateLimitSection
-              defaultConfig={connectionType.defaultRateLimitConfig}
-              liveStatus={rateLimitStatus}
-            />
+            <CollapsedSection
+              label="Advanced"
+              description="Rate limiting and retry behavior"
+              forceOpen={Boolean(watched.rateLimitEnabled)}
+            >
+              <RateLimitSection
+                defaultConfig={connectionType.defaultRateLimitConfig}
+                liveStatus={rateLimitStatus}
+              />
+            </CollapsedSection>
           </div>
-        </ConnectionFormLayout>
+        </ConnectionPageShell>
       )}
     />
   );

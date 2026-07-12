@@ -55,9 +55,7 @@ async function openConnectionEditor(page: Page, title: string) {
   const row = page.locator('tr').filter({ hasText: title });
   await expect(row).toHaveCount(1);
   await row.getByTitle('Edit connection').click();
-  await expect(
-    page.getByRole('heading', { name: 'Edit connection' })
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: title })).toBeVisible();
 }
 
 test.describe.serial('Connection schema form local UI', () => {
@@ -133,7 +131,7 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(createdRow).toHaveCount(1);
     await createdRow.getByTitle('Edit connection').click();
     await expect(
-      page.getByRole('heading', { name: 'Edit connection' })
+      page.getByRole('heading', { name: originalTitle })
     ).toBeVisible();
 
     await expect(page.getByLabel('Host')).toHaveValue('sftp.example.com');
@@ -146,10 +144,18 @@ test.describe.serial('Connection schema form local UI', () => {
     ).toBeVisible();
 
     await page.getByLabel('Title').fill(updatedTitle);
+    // The header renames live from the Title field.
+    await expect(
+      page.getByRole('heading', { name: updatedTitle })
+    ).toBeVisible();
     await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(page).toHaveURL('/connections');
-    await expect(page.getByText(updatedTitle, { exact: true })).toBeVisible();
+    // Save stays on the page; the save bar collapses once the write lands.
+    await expect(page.getByText('Connection saved.').first()).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Save changes' })
+    ).toBeHidden();
 
+    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
     const updatedRow = page.locator('tr').filter({ hasText: updatedTitle });
     await expect(updatedRow).toHaveCount(1);
     await updatedRow.getByTitle('Edit connection').click();
@@ -169,8 +175,9 @@ test.describe.serial('Connection schema form local UI', () => {
     await page.getByRole('option', { name: 'Private Key' }).click();
     await page.getByLabel('Private Key').fill('not-a-real-private-key');
     await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(page).toHaveURL('/connections');
+    await expect(page.getByText('Connection saved.').first()).toBeVisible();
 
+    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
     await page
       .locator('tr')
       .filter({ hasText: updatedTitle })
@@ -401,7 +408,7 @@ test.describe.serial('Connection schema form local UI', () => {
     });
     await page.getByLabel('Title').fill(renamed);
     await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(page).toHaveURL('/connections');
+    await expect(page.getByText('Connection saved.').first()).toBeVisible();
 
     expect(submittedBody).toMatchObject({ title: renamed });
     expect(submittedBody).not.toHaveProperty('connectionParameterPatch');
@@ -452,10 +459,67 @@ test.describe.serial('Connection schema form local UI', () => {
     await notice
       .getByRole('button', { name: 'Apply my submitted changes' })
       .click();
-    await expect(page).toHaveURL('/connections');
+    await expect(page.getByText('Connection saved.').first()).toBeVisible();
     const reapplied = await getApiConnection(request, id);
     expect(reapplied.title).toBe(serverTitle);
     expect(reapplied.editProjection.values.host).toBe('draft.example.com');
     expect(reapplied.editProjection.secretState.password.configured).toBe(true);
+  });
+
+  test('save bar tracks dirty state, discards edits, and guards navigation', async ({
+    page,
+    request,
+  }) => {
+    const title = `E2E save bar SFTP ${runId}`;
+    const id = await createApiConnection(request, {
+      title,
+      integrationId: 'sftp',
+      connectionParameters: {
+        host: 'bar.example.com',
+        port: 22,
+        username: 'bar-user',
+        auth_mode: 'password',
+        password: 'stored-secret',
+      },
+    });
+
+    await openConnectionEditor(page, title);
+
+    const saveButton = page.getByRole('button', { name: 'Save changes' });
+    const discardButton = page.getByRole('button', { name: 'Discard' });
+
+    // Pristine: no save bar.
+    await expect(saveButton).toBeHidden();
+    await expect(discardButton).toBeHidden();
+
+    // Editing a field surfaces the save bar with a dirty summary.
+    await page.getByLabel('Host').fill('edited.example.com');
+    await expect(saveButton).toBeVisible();
+    await expect(page.getByText('1 unsaved change')).toBeVisible();
+
+    // Discard reverts the field to the stored value and hides the bar.
+    await discardButton.click();
+    await expect(page.getByLabel('Host')).toHaveValue('bar.example.com');
+    await expect(saveButton).toBeHidden();
+
+    // Navigating away while dirty prompts the unsaved-changes guard.
+    await page.getByLabel('Host').fill('dirty.example.com');
+    await page.getByRole('link', { name: 'Back to connections' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('Unsaved changes');
+    await dialog.getByRole('button', { name: 'Keep editing' }).click();
+    await expect(page.getByLabel('Host')).toHaveValue('dirty.example.com');
+
+    // Discarding through the guard leaves the page.
+    await page.getByRole('link', { name: 'Back to connections' }).click();
+    await page
+      .getByRole('alertdialog')
+      .getByRole('button', { name: 'Discard changes' })
+      .click();
+    await expect(page).toHaveURL('/connections');
+
+    // The discarded edit never reached the server.
+    const saved = await getApiConnection(request, id);
+    expect(saved.editProjection.values.host).toBe('bar.example.com');
   });
 });
