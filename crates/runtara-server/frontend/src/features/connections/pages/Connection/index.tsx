@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate, useParams } from 'react-router';
 import { useAuth } from 'react-oidc-context';
@@ -25,8 +25,13 @@ import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOA
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { queryClient } from '@/main.tsx';
 import type { FormDefinition } from '@/shared/forms';
+import {
+  patchStripsAuthorization,
+  reauthorizationFieldLabels,
+} from '@/features/connections/utils/reauthorization';
 import { buildConnectionUpdateInput } from './update-payload';
 import { ConnectionConflictNotice } from './ConnectionConflictNotice';
+import { ReconnectPromptNotice } from './ReconnectPromptNotice';
 
 type ConnectionRecord = Awaited<ReturnType<typeof getConnectionById>>;
 
@@ -74,6 +79,14 @@ export function Connection() {
   const [conflict, setConflict] = useState<ConnectionConflictState | null>(
     null
   );
+  // Labels of the credential fields whose last save reset authorization, or
+  // null when the last save did not. Predictive value stashed at submit and
+  // promoted on success (never on a 409); the notice renders only once the
+  // refetched status confirms the flip.
+  const reauthLabelsRef = useRef<string[]>([]);
+  const [pendingReauthLabels, setPendingReauthLabels] = useState<
+    string[] | null
+  >(null);
 
   const connection = useCustomQuery({
     queryKey: queryKeys.connections.byId(id ?? ''),
@@ -98,6 +111,9 @@ export function Connection() {
     suppressConflictToasts: true,
     onSuccess: () => {
       setConflict(null);
+      setPendingReauthLabels(
+        reauthLabelsRef.current.length > 0 ? reauthLabelsRef.current : null
+      );
       queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
       queryClient.invalidateQueries({
         queryKey: queryKeys.connections.byId(id ?? ''),
@@ -189,6 +205,26 @@ export function Connection() {
       );
       return;
     }
+    // Predict whether this save resets authorization, so the post-save notice
+    // can prompt a reconnect. Mirrors the form's guarded param set: dirty
+    // descriptor fields (not the title frame) plus staged secret clears.
+    const behaviors = currentConnectionType?.fieldBehaviors ?? {};
+    const labels = Object.fromEntries(
+      Object.entries(descriptor.fields).map(([name, field]) => [
+        name,
+        field.label ?? name.replace(/_/g, ' '),
+      ])
+    );
+    const touched = [
+      ...operations.dirtyFields.filter(
+        (name) => name !== 'title' && name in descriptor.fields
+      ),
+      ...operations.clearSecrets,
+    ];
+    reauthLabelsRef.current = patchStripsAuthorization(behaviors, touched)
+      ? reauthorizationFieldLabels(behaviors, labels, touched)
+      : [];
+
     const update = buildConnectionUpdateInput({
       id: id as string,
       data,
@@ -267,6 +303,22 @@ export function Connection() {
     />
   ) : undefined;
 
+  // Post-save handoff: a reauth-stripping save that the refetch confirms as
+  // REQUIRES_RECONNECTION prompts a reconnect. Never auto-opens the popup —
+  // "Reconnect now" is a fresh user gesture (popup blockers).
+  const reconnectNotice =
+    pendingReauthLabels && needsReconnect && isOAuthAuthCode && id ? (
+      <ReconnectPromptNotice
+        provider={currentConnectionType.displayName || 'the provider'}
+        changedFieldLabels={pendingReauthLabels}
+        isReconnecting={isAuthorizing(id)}
+        onReconnectNow={() =>
+          authorize(id, { onSuccess: () => setPendingReauthLabels(null) })
+        }
+        onLater={() => setPendingReauthLabels(null)}
+      />
+    ) : undefined;
+
   return (
     <DynamicConnectionForm
       connectionType={currentConnectionType}
@@ -282,6 +334,7 @@ export function Connection() {
       isReconnecting={isAuthorizing(id)}
       needsReconnect={needsReconnect}
       conflictNotice={conflictNotice}
+      reconnectNotice={reconnectNotice}
     />
   );
 }

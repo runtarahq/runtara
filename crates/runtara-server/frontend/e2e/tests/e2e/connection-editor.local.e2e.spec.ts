@@ -404,7 +404,7 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(
       page.getByText("This connection isn't authorized", { exact: false })
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Connect' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
 
     let submittedBody: Record<string, unknown> | undefined;
@@ -552,7 +552,7 @@ test.describe.serial('Connection schema form local UI', () => {
     // Editing a reauthorization-sensitive field and clicking Connect must not
     // silently authorize with the old stored value — it intercepts.
     await page.getByLabel('Client ID').fill('guard-client-id-changed');
-    await page.getByRole('button', { name: 'Connect' }).click();
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
 
     const guard = page.getByRole('alertdialog');
     await expect(guard).toContainText('Save before reconnecting?');
@@ -607,5 +607,60 @@ test.describe.serial('Connection schema form local UI', () => {
     const response = await request.get(`${apiBase}/connections/${id}`);
     expect(response.status()).toBe(404);
     apiConnectionIds.delete(id);
+  });
+
+  test('prompts a reconnect after a save that resets authorization', async ({
+    page,
+    request,
+  }) => {
+    const title = `E2E reconnect handoff QBO ${runId}`;
+    const id = await createApiConnection(request, {
+      title,
+      integrationId: 'quickbooks_online',
+      connectionParameters: {
+        client_id: 'handoff-client',
+        client_secret: 'handoff-secret',
+      },
+    });
+
+    await openConnectionEditor(page, title);
+
+    const clientSecret = page.locator(
+      '[data-field="client_secret"] input[type="password"]'
+    );
+    await clientSecret.fill('rotated-secret');
+
+    // Editing a reauthorization-sensitive credential relabels the save action.
+    const saveAndReconnect = page.getByRole('button', {
+      name: 'Save & Reconnect',
+    });
+    await expect(saveAndReconnect).toBeVisible();
+    await saveAndReconnect.click();
+
+    // The save stays on the page and hands off to a reconnect prompt naming
+    // the changed field, without auto-opening a popup.
+    const notice = page.getByRole('alert').filter({
+      hasText: 'Saved — reconnection needed',
+    });
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText('Client Secret');
+    await expect(
+      notice.getByRole('button', { name: 'Reconnect now' })
+    ).toBeVisible();
+
+    // Backend reset authorization; the secret input cleared and the save bar
+    // collapsed after the version re-sync.
+    await expect(clientSecret).toHaveValue('');
+    await expect(saveAndReconnect).toBeHidden();
+    const saved = await getApiConnection(request, id);
+    expect(saved.status).toBe('REQUIRES_RECONNECTION');
+    expect(saved.editProjection.secretState.client_secret.configured).toBe(
+      true
+    );
+
+    // "Later" dismisses the prompt but the card keeps a Connect affordance.
+    await notice.getByRole('button', { name: 'Later' }).click();
+    await expect(notice).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
   });
 });

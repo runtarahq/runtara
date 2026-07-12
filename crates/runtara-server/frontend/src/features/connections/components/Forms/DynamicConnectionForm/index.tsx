@@ -58,6 +58,7 @@ type DynamicConnectionFormProps = {
   isReconnecting?: boolean;
   needsReconnect?: boolean;
   conflictNotice?: ReactNode;
+  reconnectNotice?: ReactNode;
 };
 
 export interface ConnectionFormOperations {
@@ -133,6 +134,7 @@ export function DynamicConnectionForm({
   onReconnect,
   isReconnecting,
   conflictNotice,
+  reconnectNotice,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
@@ -216,9 +218,14 @@ export function DynamicConnectionForm({
 
   // A version bump means the server accepted a write (ours or someone
   // else's): re-sync to the fresh projection and drop staged edits so
-  // secret inputs empty out and the save bar collapses.
+  // secret inputs empty out and the save bar collapses. The controlled
+  // FieldControls read from useWatch, and with keepDirtyValues a bare
+  // reset() doesn't reliably re-emit, so set each field explicitly first.
   useEffect(() => {
     setClearedSecrets(new Set());
+    for (const [name, value] of Object.entries(formValues)) {
+      form.setValue(name, value, { shouldDirty: false });
+    }
     form.reset(formValues);
     // formValues is intentionally not a dependency: only a version change
     // may discard in-progress edits.
@@ -342,7 +349,11 @@ export function DynamicConnectionForm({
                 isLoading={isLoading}
                 isSubmitDisabled={analysis?.wasmAvailable === false}
                 submitLabel={
-                  mode === 'edit' ? 'Save changes' : 'Create connection'
+                  mode === 'edit'
+                    ? hasReauthChanges
+                      ? 'Save & Reconnect'
+                      : 'Save changes'
+                    : 'Create connection'
                 }
                 loadingLabel={mode === 'edit' ? 'Saving...' : 'Creating...'}
                 dirtyCount={dirtyCount}
@@ -355,6 +366,7 @@ export function DynamicConnectionForm({
         >
           <div className="space-y-6">
             {conflictNotice}
+            {reconnectNotice}
             {mode === 'edit' && (
               <ConnectionStatusCard
                 status={
