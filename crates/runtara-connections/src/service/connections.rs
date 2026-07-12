@@ -86,6 +86,32 @@ fn validate_connection_parameters(
     Ok(())
 }
 
+/// True when the connection type is an *interactive* OAuth authorization-code
+/// type — one that requires the user to complete a consent popup before it is
+/// usable. Only authorization-code types declare an `oauth_config` (via the
+/// `oauth_auth_url`/`oauth_token_url` descriptor attrs); the static `auth_url` is
+/// empty for the params-driven generic type, so `oauth_config` *presence* is the
+/// discriminator, matching the frontend's `isOAuthAuthCode = !!oauthConfig`.
+/// Client-credentials OAuth types declare no `oauth_config` — they mint their own
+/// token on demand and are usable immediately — so they are excluded.
+fn requires_interactive_oauth(integration_id: &str) -> bool {
+    runtara_agents::registry::find_connection_type(integration_id)
+        .is_some_and(|m| m.oauth_config.is_some())
+}
+
+/// True when the connection parameters already carry an OAuth token — e.g. a
+/// connection seeded with credentials rather than created for the interactive
+/// popup flow. Such a connection is usable straight away.
+fn params_have_oauth_tokens(params: Option<&serde_json::Value>) -> bool {
+    params.is_some_and(|p| {
+        ["access_token", "refresh_token"].iter().any(|k| {
+            p.get(k)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty())
+        })
+    })
+}
+
 /// Validate a single `is_url` / `is_required` field value.
 fn validate_url_field(
     field_display: &str,
@@ -302,6 +328,19 @@ impl ConnectionService {
                 .clear_default_file_storage(tenant_id)
                 .await
                 .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+        }
+
+        // An interactive OAuth (authorization-code) connection is not usable until
+        // the consent popup completes and the callback stores tokens + flips it to
+        // ACTIVE. Created without tokens it must start REQUIRES_RECONNECTION, so the
+        // UI surfaces the reconnect affordance (and an honest status) instead of a
+        // misleading "Connected". Callers that pre-seed tokens or an explicit status
+        // are respected; client-credentials OAuth types (no auth_url) stay ACTIVE.
+        if request.status.is_none()
+            && requires_interactive_oauth(&integration_id)
+            && !params_have_oauth_tokens(request.connection_parameters.as_ref())
+        {
+            request.status = Some(ConnectionStatus::RequiresReconnection);
         }
 
         // Generate new connection ID
@@ -705,8 +744,8 @@ pub enum ServiceError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServiceError, validate_connection_parameters, validate_rate_limit_config,
-        validate_url_field,
+        ServiceError, params_have_oauth_tokens, requires_interactive_oauth,
+        validate_connection_parameters, validate_rate_limit_config, validate_url_field,
     };
     use crate::types::RateLimitConfigDto;
     use serde_json::json;
@@ -862,6 +901,38 @@ mod tests {
             "microsoft_entra_client_credentials",
             Some(&imds)
         )));
+    }
+
+    #[test]
+    fn interactive_oauth_detection_gates_on_oauth_config() {
+        // Authorization-code types (interactive consent) → true.
+        assert!(requires_interactive_oauth("quickbooks_online"));
+        assert!(requires_interactive_oauth("http_oauth2_authorization_code"));
+        // Client-credentials OAuth (empty auth_url, mints its own token) → false.
+        assert!(!requires_interactive_oauth(
+            "http_oauth2_client_credentials"
+        ));
+        // Non-OAuth types (no oauth_config) → false.
+        assert!(!requires_interactive_oauth("http_bearer"));
+        assert!(!requires_interactive_oauth("totally_unknown"));
+    }
+
+    #[test]
+    fn oauth_token_presence_detection() {
+        assert!(params_have_oauth_tokens(Some(
+            &json!({"access_token": "a"})
+        )));
+        assert!(params_have_oauth_tokens(Some(
+            &json!({"refresh_token": "r"})
+        )));
+        // Empty / whitespace tokens don't count as present.
+        assert!(!params_have_oauth_tokens(Some(
+            &json!({"access_token": ""})
+        )));
+        assert!(!params_have_oauth_tokens(Some(
+            &json!({"client_id": "c", "client_secret": "s"})
+        )));
+        assert!(!params_have_oauth_tokens(None));
     }
 
     #[test]
