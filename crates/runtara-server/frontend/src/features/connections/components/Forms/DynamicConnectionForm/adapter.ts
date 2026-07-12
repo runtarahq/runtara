@@ -17,7 +17,7 @@ export type ConnectionSecretStateMap = NonNullable<
 
 export interface ConnectionParameterPatchValues {
   set: Record<string, unknown>;
-  replaceSecrets: Record<string, string>;
+  write: Record<string, unknown>;
   clear: string[];
 }
 
@@ -99,31 +99,35 @@ export function buildConnectionParameterValues(
 export function buildConnectionParameterPatch(
   definition: FormDefinition,
   parameters: Record<string, unknown>,
-  projection: EditProjection,
+  dirtyFields: ReadonlySet<string>,
   explicitSecretClears: readonly string[]
 ): ConnectionParameterPatchValues {
   const set: Record<string, unknown> = {};
-  const replaceSecrets: Record<string, string> = {};
+  const write: Record<string, unknown> = {};
   const clear = new Set(explicitSecretClears);
 
   for (const [name, field] of Object.entries(definition.fields)) {
+    if (!dirtyFields.has(name) && !clear.has(name)) continue;
     const value = parameters[name];
     if (field.access === 'read') continue;
-    if (field.access === 'write' || field.secret) {
-      if (!clear.has(name) && typeof value === 'string' && value.length > 0) {
-        replaceSecrets[name] = value;
+    if (field.access === 'write') {
+      if (
+        !clear.has(name) &&
+        value !== '' &&
+        value !== null &&
+        value !== undefined
+      ) {
+        write[name] = value;
       }
       continue;
     }
 
-    const previous = projection.values?.[name];
-    if (JSON.stringify(value) === JSON.stringify(previous)) continue;
     if (value === '' || value === null || value === undefined) {
-      if (previous !== undefined) clear.add(name);
+      clear.add(name);
     } else {
       set[name] = value;
     }
   }
 
-  return { set, replaceSecrets, clear: [...clear].sort() };
+  return { set, write, clear: [...clear].sort() };
 }

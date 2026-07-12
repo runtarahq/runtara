@@ -33,6 +33,7 @@ type ConnectionFormLayoutProps = {
   /** When true the connection needs re-authorization — shows a banner + emphasis. */
   needsReconnect?: boolean;
   isSubmitDisabled?: boolean;
+  conflictNotice?: ReactNode;
 };
 
 export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
@@ -54,6 +55,7 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
     isReconnecting,
     needsReconnect,
     isSubmitDisabled,
+    conflictNotice,
   } = props;
 
   const isEditMode = title.toLowerCase().includes('edit');
@@ -169,6 +171,7 @@ export function ConnectionFormLayout(props: ConnectionFormLayoutProps) {
 
       {/* Form Content */}
       <div className="px-6 py-6 max-w-2xl">
+        {conflictNotice}
         {/* Needs-reconnection banner — the stored credentials are kept; a single
             click re-runs the OAuth consent to mint fresh tokens. */}
         {needsReconnect && showReconnect && onReconnect && (

@@ -19,12 +19,20 @@ struct PgFixture {
 }
 
 impl PgFixture {
-    async fn start() -> Option<Self> {
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+    async fn start() -> Self {
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let host = container.get_host().await.expect("required Postgres host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Postgres port");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Postgres connection");
         // Minimal schema for generate_authorization_url: the columns get_with_parameters
         // reads, plus the oauth_state table create_state writes.
         sqlx::query(
@@ -41,7 +49,7 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
+        .expect("create required connection table");
         sqlx::query(
             r#"
             CREATE TABLE oauth_state (
@@ -57,20 +65,17 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
-        Some(Self {
+        .expect("create required OAuth state table");
+        Self {
             pool,
             _container: container,
-        })
+        }
     }
 }
 
 #[tokio::test]
 async fn quickbooks_authorize_url_is_descriptor_driven() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping quickbooks authorize url e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
 
     sqlx::query(
         "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \

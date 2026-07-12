@@ -1479,7 +1479,6 @@ export interface ConnectionDto {
   /** Safe edit projection. Present only on the single-connection endpoint. */
   editProjection?: null | ConnectionEditProjection;
   id: string;
-  /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
   integrationId?: string | null;
   /** When true, this connection is the default S3 storage for webhook attachments */
   isDefaultFileStorage: boolean;
@@ -1516,16 +1515,17 @@ export interface ConnectionFieldBehavior {
   requiresReauthorization: boolean;
 }
 
-/** Update connection request - all fields optional */
+/** Explicit descriptor-aware connection parameter operations. */
 export interface ConnectionParameterPatch {
   /** Fields to remove explicitly. Blank strings never imply clearing. */
   clear?: string[];
-  /** Replacement values for write-only secret fields. */
-  replaceSecrets?: Partial<Record<string, string>>;
   /** New values for ordinary `read_write` fields. */
   set?: Partial<Record<string, any>>;
-  /** Optimistic concurrency token returned by `editProjection.version`. */
-  version: string;
+  /**
+   * Replacement values for `write` fields. Secrecy is independent from
+   * access, so values remain typed JSON rather than a secret-only string map.
+   */
+  write?: Partial<Record<string, any>>;
 }
 
 /** Response for single connection operations */
@@ -5077,20 +5077,20 @@ export interface TestAgentResponse {
   success: boolean;
 }
 
-/** Update connection request - all fields optional. */
+/** Versioned public connection update; mutable fields other than `version` are optional. */
 export interface UpdateConnectionRequest {
   /** Explicit safe parameter patch used by schema-driven connection editors. */
   connectionParameterPatch?: null | ConnectionParameterPatch;
-  connectionParameters?: any;
-  connectionSubtype?: string | null;
   defaultFor?: string[] | null;
-  /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
-  integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
   rateLimitConfig?: null | RateLimitConfigDto;
-  status?: null | ConnectionStatus;
   title?: string | null;
   validUntil?: string | null;
+  /**
+   * Optimistic concurrency token returned by `editProjection.version`.
+   * Every public update is guarded, including title-only updates.
+   */
+  version: string;
 }
 
 export interface UpdateInstanceRequest {

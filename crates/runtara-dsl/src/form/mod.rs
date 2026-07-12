@@ -450,7 +450,7 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
                     }),
                     label: field.display_name.map(str::to_string),
                     placeholder: field.placeholder.map(str::to_string),
-                    order: None,
+                    order: Some(field.order),
                     format: field.is_url.then(|| "url".to_string()),
                     min: None,
                     max: None,
@@ -477,21 +477,48 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
         );
     }
 
-    let mut sections: Vec<FormSection> = section_ids
-        .into_iter()
-        .map(|id| FormSection {
-            label: match id.as_str() {
-                "configuration" => "Connection details".to_string(),
-                "credentials" => "Credentials".to_string(),
-                _ => humanize_identifier(&id),
-            },
-            order: if id == "configuration" { 0 } else { 100 },
-            advanced: false,
-            description: None,
+    let mut sections: Vec<FormSection> = meta
+        .sections
+        .iter()
+        .map(|section| FormSection {
+            id: section.id.to_string(),
+            label: section
+                .label
+                .map(str::to_string)
+                .unwrap_or_else(|| match section.id {
+                    "configuration" => "Connection details".to_string(),
+                    "credentials" => "Credentials".to_string(),
+                    id => humanize_identifier(id),
+                }),
+            description: section.description.map(str::to_string),
+            order: section.order.unwrap_or(if section.id == "configuration" {
+                0
+            } else {
+                100
+            }),
+            advanced: section.advanced,
             conditions: FormConditions::default(),
-            id,
         })
         .collect();
+    let authored_section_ids: HashSet<&str> =
+        meta.sections.iter().map(|section| section.id).collect();
+    sections.extend(
+        section_ids
+            .into_iter()
+            .filter(|id| !authored_section_ids.contains(id.as_str()))
+            .map(|id| FormSection {
+                label: match id.as_str() {
+                    "configuration" => "Connection details".to_string(),
+                    "credentials" => "Credentials".to_string(),
+                    _ => humanize_identifier(&id),
+                },
+                order: if id == "configuration" { 0 } else { 100 },
+                advanced: false,
+                description: None,
+                conditions: FormConditions::default(),
+                id,
+            }),
+    );
     sections.sort_by(|left, right| left.order.cmp(&right.order).then(left.id.cmp(&right.id)));
 
     FormDefinition {
@@ -1322,6 +1349,7 @@ mod tests {
                 display_name: Some("Environment"),
                 description: None,
                 placeholder: None,
+                order: 0,
                 default_value: Some("sandbox"),
                 is_secret: false,
                 enum_values: Some(&["sandbox", "production"]),
@@ -1347,6 +1375,7 @@ mod tests {
                 display_name: Some("Private Key"),
                 description: None,
                 placeholder: None,
+                order: 1,
                 default_value: None,
                 is_secret: true,
                 enum_values: None,
@@ -1374,6 +1403,7 @@ mod tests {
             service_id: None,
             auth_type: None,
             fields: FIELDS,
+            sections: &[],
             oauth_config: None,
         };
 

@@ -19,17 +19,27 @@ struct PgFixture {
 }
 
 impl PgFixture {
-    async fn start() -> Option<Self> {
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+    async fn start() -> Self {
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let host = container.get_host().await.expect("required Postgres host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Postgres port");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
-        create_schema(&pool).await.ok()?;
-        Some(Self {
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Postgres connection");
+        create_schema(&pool)
+            .await
+            .expect("required connection test schema");
+        Self {
             pool,
             _container: container,
-        })
+        }
     }
 }
 
@@ -133,10 +143,7 @@ fn create_request(
 
 #[tokio::test]
 async fn default_connection_moves_between_compatible_object_model_connections() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_defaults_e2e";
     let (repo, service) = service(fixture.pool.clone());
 
@@ -194,10 +201,7 @@ async fn default_connection_moves_between_compatible_object_model_connections() 
 
 #[tokio::test]
 async fn create_applies_default_rate_limit_for_known_integration() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_rate_limit_default";
     let (_repo, service) = service(fixture.pool.clone());
 
@@ -225,10 +229,7 @@ async fn create_applies_default_rate_limit_for_known_integration() {
 
 #[tokio::test]
 async fn create_preserves_explicit_rate_limit_over_default() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_rate_limit_explicit";
     let (_repo, service) = service(fixture.pool.clone());
 
@@ -260,10 +261,7 @@ async fn create_preserves_explicit_rate_limit_over_default() {
 
 #[tokio::test]
 async fn create_leaves_opt_out_integration_without_rate_limit() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_rate_limit_opt_out";
     let (_repo, service) = service(fixture.pool.clone());
 
@@ -292,10 +290,7 @@ async fn create_leaves_opt_out_integration_without_rate_limit() {
 
 #[tokio::test]
 async fn create_rejects_a_zero_rate_limit() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_rate_limit_zero";
     let (_repo, service) = service(fixture.pool.clone());
 
@@ -318,10 +313,7 @@ async fn create_rejects_a_zero_rate_limit() {
 
 #[tokio::test]
 async fn object_storage_default_bridges_legacy_file_storage_flag() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping connection defaults e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let tenant_id = "tenant_file_storage_e2e";
     let (_repo, service) = service(fixture.pool.clone());
 
@@ -357,4 +349,78 @@ async fn object_storage_default_bridges_legacy_file_storage_flag() {
     assert!(s3.default_for.is_empty());
     assert!(azure.is_default_file_storage);
     assert_eq!(azure.default_for, vec!["object_storage".to_string()]);
+}
+
+#[tokio::test]
+async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
+    let fixture = PgFixture::start().await;
+    let tenant_id = "tenant_stale_default_e2e";
+    let (repo, service) = service(fixture.pool.clone());
+
+    let first_id = service
+        .create_connection(
+            create_request(
+                "Default storage",
+                "s3_compatible",
+                Some(vec!["object_storage"]),
+            ),
+            tenant_id,
+        )
+        .await
+        .expect("create initial default");
+    let second_id = service
+        .create_connection(
+            create_request("Candidate storage", "azure_blob_storage", None),
+            tenant_id,
+        )
+        .await
+        .expect("create candidate");
+    let opened_version = service
+        .get_connection(&second_id, tenant_id)
+        .await
+        .unwrap()
+        .updated_at;
+    let rename = serde_json::from_value(json!({
+        "version": opened_version,
+        "title": "Candidate changed elsewhere"
+    }))
+    .unwrap();
+    service
+        .update_connection(&second_id, tenant_id, rename)
+        .await
+        .expect("concurrent rename");
+
+    let stale = serde_json::from_value(json!({
+        "version": opened_version,
+        "isDefaultFileStorage": true,
+        "defaultFor": ["object_storage"]
+    }))
+    .unwrap();
+    assert!(matches!(
+        service
+            .update_connection(&second_id, tenant_id, stale)
+            .await,
+        Err(runtara_connections::service::connections::ServiceError::Conflict(_))
+    ));
+    assert!(
+        service
+            .get_connection(&first_id, tenant_id)
+            .await
+            .unwrap()
+            .is_default_file_storage
+    );
+    assert!(
+        !service
+            .get_connection(&second_id, tenant_id)
+            .await
+            .unwrap()
+            .is_default_file_storage
+    );
+    assert_eq!(
+        repo.get_default_connection_id(tenant_id, "object_storage")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(first_id.as_str())
+    );
 }

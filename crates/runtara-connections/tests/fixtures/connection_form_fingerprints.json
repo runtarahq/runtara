@@ -2,133 +2,133 @@
   {
     "integrationId": "aws_credentials",
     "fieldCount": 5,
-    "serializedBytes": 1675,
-    "fnv1a64": "6d7fb6f9c91ea35f"
+    "serializedBytes": 1725,
+    "fnv1a64": "3aef8e60025ee815"
   },
   {
     "integrationId": "azure_blob_storage",
     "fieldCount": 4,
-    "serializedBytes": 1439,
-    "fnv1a64": "5bd854eeeb6b88a7"
+    "serializedBytes": 1479,
+    "fnv1a64": "b8f430a26d056579"
   },
   {
     "integrationId": "http_api_key",
     "fieldCount": 3,
-    "serializedBytes": 999,
-    "fnv1a64": "7593505e05c0dc8f"
+    "serializedBytes": 1029,
+    "fnv1a64": "ba67ec945a80eac6"
   },
   {
     "integrationId": "http_bearer",
     "fieldCount": 2,
-    "serializedBytes": 760,
-    "fnv1a64": "e1486d6163571a1a"
+    "serializedBytes": 780,
+    "fnv1a64": "f33c8b63eec8038f"
   },
   {
     "integrationId": "http_oauth2_authorization_code",
     "fieldCount": 10,
-    "serializedBytes": 3169,
-    "fnv1a64": "e56038f0a1cc68ca"
+    "serializedBytes": 3269,
+    "fnv1a64": "309da2c38b830b7b"
   },
   {
     "integrationId": "http_oauth2_client_credentials",
     "fieldCount": 8,
-    "serializedBytes": 2395,
-    "fnv1a64": "3e1dd17c6aa55c66"
+    "serializedBytes": 2475,
+    "fnv1a64": "d41e1ce52cc609ba"
   },
   {
     "integrationId": "hubspot_access_token",
     "fieldCount": 1,
-    "serializedBytes": 513,
-    "fnv1a64": "6ece5ea925f96889"
+    "serializedBytes": 523,
+    "fnv1a64": "63faf69f71902227"
   },
   {
     "integrationId": "hubspot_private_app",
     "fieldCount": 3,
-    "serializedBytes": 1417,
-    "fnv1a64": "6f089641990806b4"
+    "serializedBytes": 1447,
+    "fnv1a64": "25adcacdae7d3cfd"
   },
   {
     "integrationId": "mailgun",
     "fieldCount": 4,
-    "serializedBytes": 1362,
-    "fnv1a64": "c9172d71d5874d5d"
+    "serializedBytes": 1402,
+    "fnv1a64": "182920f503b63483"
   },
   {
     "integrationId": "mcp",
     "fieldCount": 8,
-    "serializedBytes": 3527,
-    "fnv1a64": "58ec965792d390fe"
+    "serializedBytes": 3733,
+    "fnv1a64": "0f90f010d2f805c9"
   },
   {
     "integrationId": "microsoft_entra_client_credentials",
     "fieldCount": 6,
-    "serializedBytes": 2224,
-    "fnv1a64": "6a96a90309193d39"
+    "serializedBytes": 2284,
+    "fnv1a64": "2e182a4e1f056590"
   },
   {
     "integrationId": "openai_api_key",
     "fieldCount": 3,
-    "serializedBytes": 1053,
-    "fnv1a64": "23fc0ec095051182"
+    "serializedBytes": 1083,
+    "fnv1a64": "5fce813c446be821"
   },
   {
     "integrationId": "postgres",
     "fieldCount": 1,
-    "serializedBytes": 528,
-    "fnv1a64": "93235aa23c2e3dcd"
+    "serializedBytes": 538,
+    "fnv1a64": "8343227d3a476d3b"
   },
   {
     "integrationId": "quickbooks_online",
     "fieldCount": 5,
-    "serializedBytes": 1659,
-    "fnv1a64": "7ae621a83a9221ea"
+    "serializedBytes": 1709,
+    "fnv1a64": "e456c7c436b9a642"
   },
   {
     "integrationId": "s3_compatible",
     "fieldCount": 5,
-    "serializedBytes": 1663,
-    "fnv1a64": "0480caeebe8b04dd"
+    "serializedBytes": 1713,
+    "fnv1a64": "e14014babfd945a5"
   },
   {
     "integrationId": "sftp",
     "fieldCount": 7,
-    "serializedBytes": 4765,
-    "fnv1a64": "a41a15057cf4a0a4"
+    "serializedBytes": 4835,
+    "fnv1a64": "300a46aba6ccd63b"
   },
   {
     "integrationId": "shopify_access_token",
     "fieldCount": 3,
-    "serializedBytes": 1099,
-    "fnv1a64": "32293e36df98165b"
+    "serializedBytes": 1129,
+    "fnv1a64": "d5bf1544e1fecaa8"
   },
   {
     "integrationId": "shopify_client_credentials",
     "fieldCount": 15,
-    "serializedBytes": 4118,
-    "fnv1a64": "da003d32261ffb7a"
+    "serializedBytes": 4273,
+    "fnv1a64": "ab5b79d7c4ffd48a"
   },
   {
     "integrationId": "slack_bot",
     "fieldCount": 2,
-    "serializedBytes": 886,
-    "fnv1a64": "6e57977c3f00a8aa"
+    "serializedBytes": 906,
+    "fnv1a64": "696ef4f6ada5845d"
   },
   {
     "integrationId": "stripe_api_key",
     "fieldCount": 1,
-    "serializedBytes": 488,
-    "fnv1a64": "5440a0c0f1a6547d"
+    "serializedBytes": 498,
+    "fnv1a64": "555e4a185c041d37"
   },
   {
     "integrationId": "teams_bot",
     "fieldCount": 3,
-    "serializedBytes": 1117,
-    "fnv1a64": "d3faeabc59b7a2b0"
+    "serializedBytes": 1147,
+    "fnv1a64": "06cfd1e92ef09f99"
   },
   {
     "integrationId": "telegram_bot",
     "fieldCount": 1,
-    "serializedBytes": 489,
-    "fnv1a64": "dd3c80961d64064e"
+    "serializedBytes": 499,
+    "fnv1a64": "608b4e5db01474c4"
   }
 ]

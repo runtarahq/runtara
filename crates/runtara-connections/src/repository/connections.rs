@@ -26,6 +26,14 @@ pub struct ConnectionRepository {
     cipher: Arc<dyn CredentialCipher>,
 }
 
+/// Server-derived values that may accompany a public versioned update but are
+/// never accepted as unrestricted public request fields.
+pub struct ConnectionUpdateValues<'a> {
+    pub parameters: Option<&'a serde_json::Value>,
+    pub status: Option<&'a ConnectionStatus>,
+    pub default_for: Option<&'a [String]>,
+}
+
 impl ConnectionRepository {
     /// Construct a repository with a cipher for at-rest encryption.
     pub fn new(pool: PgPool, cipher: Arc<dyn CredentialCipher>) -> Self {
@@ -402,7 +410,8 @@ impl ConnectionRepository {
         id: &str,
         tenant_id: &str,
         request: &UpdateConnectionRequest,
-        expected_updated_at: Option<&str>,
+        values: ConnectionUpdateValues<'_>,
+        expected_updated_at: &str,
     ) -> Result<u64, sqlx::Error> {
         // Build dynamic UPDATE query based on provided fields
         let mut updates = vec!["updated_at = NOW()".to_string()];
@@ -412,16 +421,8 @@ impl ConnectionRepository {
             updates.push(format!("title = ${}", param_idx));
             param_idx += 1;
         }
-        if request.connection_subtype.is_some() {
-            updates.push(format!("connection_subtype = ${}", param_idx));
-            param_idx += 1;
-        }
-        if request.connection_parameters.is_some() {
+        if values.parameters.is_some() {
             updates.push(format!("connection_parameters = ${}", param_idx));
-            param_idx += 1;
-        }
-        if request.integration_id.is_some() {
-            updates.push(format!("integration_id = ${}", param_idx));
             param_idx += 1;
         }
         if request.rate_limit_config.is_some() {
@@ -432,7 +433,7 @@ impl ConnectionRepository {
             updates.push(format!("valid_until = ${}", param_idx));
             param_idx += 1;
         }
-        if request.status.is_some() {
+        if values.status.is_some() {
             updates.push(format!("status = ${}", param_idx));
             param_idx += 1;
         }
@@ -441,10 +442,8 @@ impl ConnectionRepository {
             param_idx += 1;
         }
 
-        let version_parameter = expected_updated_at.map(|_| param_idx);
-        let version_clause = version_parameter
-            .map(|parameter| format!(" AND updated_at = ${parameter}"))
-            .unwrap_or_default();
+        let version_parameter = param_idx;
+        let version_clause = format!(" AND updated_at = ${version_parameter}");
         let query_str = format!(
             "UPDATE connection_data_entity SET {} WHERE id = $1 AND tenant_id = $2{}",
             updates.join(", "),
@@ -453,7 +452,7 @@ impl ConnectionRepository {
 
         // Pre-encrypt parameters (if any) before binding — must live long
         // enough for the bind to reference it.
-        let sealed_parameters = match request.connection_parameters.as_ref() {
+        let sealed_parameters = match values.parameters {
             Some(plain) => Some(self.seal(Some(plain))?.unwrap_or(serde_json::Value::Null)),
             None => None,
         };
@@ -464,14 +463,8 @@ impl ConnectionRepository {
         if let Some(ref title) = request.title {
             query = query.bind(title);
         }
-        if let Some(ref connection_subtype) = request.connection_subtype {
-            query = query.bind(connection_subtype);
-        }
         if let Some(ref connection_parameters) = sealed_parameters {
             query = query.bind(connection_parameters);
-        }
-        if let Some(ref integration_id) = request.integration_id {
-            query = query.bind(integration_id);
         }
         if let Some(ref rate_limit_config) = request.rate_limit_config {
             let json_value =
@@ -484,20 +477,73 @@ impl ConnectionRepository {
                 .map(|dt| dt.with_timezone(&chrono::Utc));
             query = query.bind(parsed_dt);
         }
-        if let Some(ref status) = request.status {
+        if let Some(status) = values.status {
             query = query.bind(status.as_str());
         }
         if let Some(is_default) = request.is_default_file_storage {
             query = query.bind(is_default);
         }
-        if let Some(expected_updated_at) = expected_updated_at {
-            let parsed = chrono::DateTime::parse_from_rfc3339(expected_updated_at)
-                .map_err(|error| sqlx::Error::Encode(error.into()))?
-                .with_timezone(&chrono::Utc);
-            query = query.bind(parsed);
+        let parsed = chrono::DateTime::parse_from_rfc3339(expected_updated_at)
+            .map_err(|error| sqlx::Error::Encode(error.into()))?
+            .with_timezone(&chrono::Utc);
+        query = query.bind(parsed);
+
+        let mut tx = self.pool.begin().await?;
+        if request.is_default_file_storage == Some(true) {
+            // Serialize the tenant-scoped singleton transition and keep it in
+            // the same transaction as the optimistic row update.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(tenant_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                UPDATE connection_data_entity
+                SET is_default_file_storage = FALSE, updated_at = NOW()
+                WHERE tenant_id = $1 AND id <> $2 AND is_default_file_storage = TRUE
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         }
 
-        let result = query.execute(&self.pool).await?;
+        let result = query.execute(&mut *tx).await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(0);
+        }
+
+        if let Some(default_for) = values.default_for {
+            sqlx::query(
+                r#"
+                DELETE FROM connection_defaults
+                WHERE tenant_id = $1 AND connection_id = $2
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            for operator_id in default_for {
+                sqlx::query(
+                    r#"
+                    INSERT INTO connection_defaults (tenant_id, default_for, connection_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (tenant_id, default_for)
+                    DO UPDATE SET connection_id = EXCLUDED.connection_id, updated_at = NOW()
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(operator_id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 

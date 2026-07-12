@@ -21,12 +21,20 @@ struct PgFixture {
 }
 
 impl PgFixture {
-    async fn start() -> Option<Self> {
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+    async fn start() -> Self {
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let host = container.get_host().await.expect("required Postgres host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Postgres port");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Postgres connection");
         // Minimal schema: only the columns persist_refreshed_oauth touches.
         sqlx::query(
             r#"
@@ -41,11 +49,11 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
-        Some(Self {
+        .expect("create required connection table");
+        Self {
             pool,
             _container: container,
-        })
+        }
     }
 }
 
@@ -82,10 +90,7 @@ fn repo(pool: PgPool) -> ConnectionRepository {
 
 #[tokio::test]
 async fn rotation_persist_bootstraps_on_null_then_guards_on_generation() {
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping oauth rotation persist e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let repo = repo(fixture.pool.clone());
     let tenant = "t_rot";
     let id = "conn_rot";

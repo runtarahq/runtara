@@ -395,7 +395,6 @@ pub struct ConnectionDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "connectionSubtype")]
     pub connection_subtype: Option<String>,
-    /// Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "integrationId")]
     pub integration_id: Option<String>,
@@ -473,52 +472,42 @@ pub struct CreateConnectionRequest {
     pub default_for: Option<Vec<String>>,
 }
 
-/// Update connection request - all fields optional
+/// Explicit descriptor-aware connection parameter operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionParameterPatch {
-    /// Optimistic concurrency token returned by `editProjection.version`.
-    pub version: String,
     /// New values for ordinary `read_write` fields.
     #[serde(default)]
     pub set: std::collections::HashMap<String, serde_json::Value>,
-    /// Replacement values for write-only secret fields.
+    /// Replacement values for `write` fields. Secrecy is independent from
+    /// access, so values remain typed JSON rather than a secret-only string map.
     #[serde(default)]
-    pub replace_secrets: std::collections::HashMap<String, String>,
+    pub write: std::collections::HashMap<String, serde_json::Value>,
     /// Fields to remove explicitly. Blank strings never imply clearing.
     #[serde(default)]
     pub clear: Vec<String>,
 }
 
-/// Update connection request - all fields optional.
+/// Versioned public connection update; mutable fields other than `version` are optional.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateConnectionRequest {
+    /// Optimistic concurrency token returned by `editProjection.version`.
+    /// Every public update is guarded, including title-only updates.
+    pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "connectionSubtype")]
-    pub connection_subtype: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "connectionParameters")]
-    pub connection_parameters: Option<serde_json::Value>,
     /// Explicit safe parameter patch used by schema-driven connection editors.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "connectionParameterPatch")]
     pub connection_parameter_patch: Option<ConnectionParameterPatch>,
-    /// Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "integrationId")]
-    pub integration_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "rateLimitConfig")]
     pub rate_limit_config: Option<RateLimitConfigDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "validUntil")]
     pub valid_until: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<ConnectionStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: Option<bool>,

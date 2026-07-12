@@ -37,6 +37,12 @@ const descriptor: FormDefinition = {
       },
     },
     realm_id: { type: 'string', access: 'read', section: 'configuration' },
+    one_time_number: {
+      type: 'integer',
+      access: 'write',
+      secret: false,
+      section: 'configuration',
+    },
   },
 };
 
@@ -105,45 +111,87 @@ describe('connection canonical form adapter', () => {
   });
 
   it('emits mutually exclusive preserve, replace, and explicit-clear operations', () => {
-    const projection = {
-      values: { client_id: 'client', realm_id: 'managed' },
-      secretState: {
-        client_secret: { configured: true, clearable: true },
-      },
-      version: 'v1',
-    };
-
     expect(
       buildConnectionParameterPatch(
         descriptor,
         { client_id: 'client', client_secret: '' },
-        projection,
+        new Set(),
         []
       )
-    ).toEqual({ set: {}, replaceSecrets: {}, clear: [] });
+    ).toEqual({ set: {}, write: {}, clear: [] });
     expect(
       buildConnectionParameterPatch(
         descriptor,
         { client_id: 'changed', client_secret: 'replacement' },
-        projection,
+        new Set(['client_id', 'client_secret']),
         []
       )
     ).toEqual({
       set: { client_id: 'changed' },
-      replaceSecrets: { client_secret: 'replacement' },
+      write: { client_secret: 'replacement' },
       clear: [],
     });
     expect(
       buildConnectionParameterPatch(
         descriptor,
         { client_id: 'client', client_secret: '' },
-        projection,
+        new Set(['client_secret']),
         ['client_secret']
       )
     ).toEqual({
       set: {},
-      replaceSecrets: {},
+      write: {},
       clear: ['client_secret'],
+    });
+  });
+
+  it('does not persist displayed defaults unless the field was changed', () => {
+    const withDefault: FormDefinition = {
+      ...descriptor,
+      fields: {
+        ...descriptor.fields,
+        environment: {
+          type: 'string',
+          default: 'sandbox',
+          section: 'configuration',
+        },
+      },
+    };
+
+    expect(
+      buildConnectionParameterPatch(
+        withDefault,
+        { environment: 'sandbox' },
+        new Set(),
+        []
+      )
+    ).toEqual({ set: {}, write: {}, clear: [] });
+    expect(
+      buildConnectionParameterPatch(
+        withDefault,
+        { environment: 'production' },
+        new Set(['environment']),
+        []
+      )
+    ).toEqual({
+      set: { environment: 'production' },
+      write: {},
+      clear: [],
+    });
+  });
+
+  it('emits typed non-secret write-only values through write operations', () => {
+    expect(
+      buildConnectionParameterPatch(
+        descriptor,
+        { one_time_number: 42 },
+        new Set(['one_time_number']),
+        []
+      )
+    ).toEqual({
+      set: {},
+      write: { one_time_number: 42 },
+      clear: [],
     });
   });
 });

@@ -866,6 +866,16 @@ pub struct ConnectionFieldBehavior {
     pub requires_reauthorization: bool,
 }
 
+/// Author-owned presentation metadata for a connection form section.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectionSectionMeta {
+    pub id: &'static str,
+    pub label: Option<&'static str>,
+    pub description: Option<&'static str>,
+    pub order: Option<i32>,
+    pub advanced: bool,
+}
+
 /// Metadata for a connection field parameter
 #[derive(Debug, Clone)]
 pub struct ConnectionFieldMeta {
@@ -881,6 +891,8 @@ pub struct ConnectionFieldMeta {
     pub description: Option<&'static str>,
     /// Placeholder text for the input
     pub placeholder: Option<&'static str>,
+    /// Stable form order. The derive macro uses declaration order by default.
+    pub order: i32,
     /// Default value as JSON string
     pub default_value: Option<&'static str>,
     /// Whether this is a secret field (password, API key, etc.)
@@ -1006,6 +1018,8 @@ pub struct ConnectionTypeMeta {
     pub auth_type: Option<ConnectionAuthType>,
     /// Fields required for this connection type
     pub fields: &'static [ConnectionFieldMeta],
+    /// Explicit section presentation metadata authored by the descriptor.
+    pub sections: &'static [ConnectionSectionMeta],
     /// OAuth2 configuration (only for auth_type = Oauth2AuthorizationCode)
     pub oauth_config: Option<&'static OAuthConfig>,
 }

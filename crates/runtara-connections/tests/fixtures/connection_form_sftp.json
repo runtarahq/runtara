@@ -21,6 +21,7 @@
       "private_key"
     ],
     "label": "Authentication Mode",
+    "order": 3,
     "required": false,
     "section": "configuration",
     "type": "string"

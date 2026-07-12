@@ -34,7 +34,12 @@ struct ConditionalParams {
         requires_reauthorization,
         visible = bearer_mode,
         enabled = not_disabled,
-        required = bearer_mode
+        required = bearer_mode,
+        section = "advanced",
+        section_label = "Advanced authentication",
+        section_description = "Optional authentication tuning.",
+        section_order = 200,
+        section_advanced = true
     )]
     token: Option<String>,
 }
@@ -54,6 +59,20 @@ fn derive_emits_all_canonical_condition_factories() {
         .unwrap();
     assert!(token_meta.behavior.clearable);
     assert!(token_meta.behavior.requires_reauthorization);
+    assert_eq!(__CONNECTION_META_ConditionalParams.fields[0].order, 0);
+    assert_eq!(__CONNECTION_META_ConditionalParams.fields[1].order, 1);
+    assert_eq!(__CONNECTION_META_ConditionalParams.sections.len(), 1);
+    assert_eq!(
+        __CONNECTION_META_ConditionalParams.sections[0].label,
+        Some("Advanced authentication")
+    );
+    let advanced = definition
+        .sections
+        .iter()
+        .find(|section| section.id == "advanced")
+        .unwrap();
+    assert!(advanced.advanced);
+    assert_eq!(advanced.order, 200);
 
     let none = analyze_form(&definition, &json!({ "auth_mode": "none" }));
     assert!(!none.fields["token"].visible);

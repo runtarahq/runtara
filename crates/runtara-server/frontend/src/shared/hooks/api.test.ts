@@ -266,6 +266,48 @@ describe('useCustomMutation', () => {
     });
   });
 
+  it('uses the backend error field when message is absent', async () => {
+    const mockMutationFn = vi.fn().mockRejectedValue({
+      message: 'Request failed with status code 409',
+      response: {
+        status: 409,
+        data: { error: 'Connection changed since it was opened' },
+      },
+    });
+    const { result } = renderHook(
+      () => useCustomMutation({ mutationFn: mockMutationFn }),
+      { wrapper: createWrapper() }
+    );
+
+    result.current.mutate({});
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockToastError).toHaveBeenCalledWith('Error: 409', {
+      description: 'Connection changed since it was opened',
+    });
+  });
+
+  it('lets a caller own conflict recovery without a duplicate toast', async () => {
+    const callerOnError = vi.fn();
+    const mockMutationFn = vi.fn().mockRejectedValue({
+      message: 'conflict',
+      response: { status: 409, data: { message: 'Review latest' } },
+    });
+    const { result } = renderHook(
+      () =>
+        useCustomMutation({
+          mutationFn: mockMutationFn,
+          suppressConflictToasts: true,
+          onError: callerOnError,
+        }),
+      { wrapper: createWrapper() }
+    );
+
+    result.current.mutate({});
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockToastError).not.toHaveBeenCalled();
+    expect(callerOnError).toHaveBeenCalled();
+  });
+
   it('shows validation errors on 400 response with validationErrors', async () => {
     const validationError = {
       message: 'Validation failed',

@@ -29,12 +29,23 @@ struct PgFixture {
 }
 
 impl PgFixture {
-    async fn start() -> Option<Self> {
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+    async fn start() -> Self {
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let host = container
+            .get_host()
+            .await
+            .expect("required Docker Postgres host must resolve");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Docker Postgres port must resolve");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Docker Postgres must accept connections");
         // Full column set that ConnectionRepository::create writes.
         sqlx::query(
             r#"
@@ -56,7 +67,7 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
+        .expect("create required connection table");
         sqlx::query(
             r#"
             CREATE TABLE connection_defaults (
@@ -69,11 +80,11 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
-        Some(Self {
+        .expect("create required defaults table");
+        Self {
             pool,
             _container: container,
-        })
+        }
     }
 }
 
@@ -112,7 +123,15 @@ async fn params_of(pool: &PgPool, id: &str) -> serde_json::Value {
     .expect("fetch params")
 }
 
-async fn update(svc: &ConnectionService, id: &str, tenant: &str, body: serde_json::Value) {
+async fn update(svc: &ConnectionService, id: &str, tenant: &str, mut body: serde_json::Value) {
+    if body.get("version").is_none() {
+        let version = svc
+            .get_connection(id, tenant)
+            .await
+            .expect("fetch update version")
+            .updated_at;
+        body["version"] = json!(version);
+    }
     let req: runtara_connections::types::UpdateConnectionRequest =
         serde_json::from_value(body).expect("valid update request");
     svc.update_connection(id, tenant, req)
@@ -122,10 +141,7 @@ async fn update(svc: &ConnectionService, id: &str, tenant: &str, body: serde_jso
 
 #[tokio::test]
 async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
-    let Some(fx) = PgFixture::start().await else {
-        eprintln!("Skipping create_connection status e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fx = PgFixture::start().await;
     let svc = service(&fx.pool);
 
     // A. QuickBooks, no tokens → REQUIRES_RECONNECTION (the reported bug: was ACTIVE).
@@ -201,10 +217,7 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
 /// unrelated edits keep the grant.
 #[tokio::test]
 async fn editing_params_applies_descriptor_owned_reauthorization() {
-    let Some(fx) = PgFixture::start().await else {
-        eprintln!("Skipping update-merge e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fx = PgFixture::start().await;
     let svc = service(&fx.pool);
 
     // --- QuickBooks (curated): environment selects a different API host and
@@ -241,10 +254,10 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         &id,
         "t",
         json!({
+            "version": projection.version,
             "connectionParameterPatch": {
-                "version": projection.version,
                 "set": {"environment": "sandbox"},
-                "replaceSecrets": {},
+                "write": {},
                 "clear": []
             }
         }),
@@ -266,8 +279,8 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
     assert_eq!(status_of(&fx.pool, &id).await, "REQUIRES_RECONNECTION");
 
     let stale_request = serde_json::from_value(json!({
+        "version": stale_version,
         "connectionParameterPatch": {
-            "version": stale_version,
             "set": {"environment": "production"}
         }
     }))
@@ -297,7 +310,7 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         &svc,
         &g,
         "t",
-        json!({ "connectionParameters": { "pkce": false } }),
+        json!({ "connectionParameterPatch": { "set": { "pkce": false } } }),
     )
     .await;
     let g1 = params_of(&fx.pool, &g).await;
@@ -309,7 +322,7 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         &svc,
         &g,
         "t",
-        json!({ "connectionParameters": { "token_url": "https://other.example.com/token" } }),
+        json!({ "connectionParameterPatch": { "set": { "token_url": "https://other.example.com/token" } } }),
     )
     .await;
     let g2 = params_of(&fx.pool, &g).await;
@@ -326,11 +339,53 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
 }
 
 #[tokio::test]
+async fn title_only_update_preserves_absent_defaults_tokens_and_rejects_stale_versions() {
+    let fx = PgFixture::start().await;
+    let svc = service(&fx.pool);
+    let id = create(
+        &svc,
+        "t",
+        json!({
+            "title": "legacy-qb", "integrationId": "quickbooks_online", "status": "ACTIVE",
+            "connectionParameters": {
+                "client_id": "client", "client_secret": "secret", "realm_id": "realm",
+                "access_token": "access", "refresh_token": "refresh"
+            }
+        }),
+    )
+    .await;
+    let before = params_of(&fx.pool, &id).await;
+    assert!(before.get("environment").is_none());
+    assert!(before.get("scopes").is_none());
+    let opened_version = svc
+        .get_connection(&id, "t")
+        .await
+        .expect("load legacy connection")
+        .updated_at;
+
+    update(&svc, &id, "t", json!({ "title": "renamed-only" })).await;
+    assert_eq!(params_of(&fx.pool, &id).await, before);
+    assert_eq!(status_of(&fx.pool, &id).await, "ACTIVE");
+
+    let stale: runtara_connections::types::UpdateConnectionRequest =
+        serde_json::from_value(json!({
+            "version": opened_version,
+            "title": "stale-title"
+        }))
+        .expect("valid stale title update");
+    assert!(matches!(
+        svc.update_connection(&id, "t", stale).await,
+        Err(runtara_connections::service::connections::ServiceError::Conflict(_))
+    ));
+    assert_eq!(
+        svc.get_connection(&id, "t").await.unwrap().title,
+        "renamed-only"
+    );
+}
+
+#[tokio::test]
 async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
-    let Some(fx) = PgFixture::start().await else {
-        eprintln!("Skipping secret lifecycle e2e: Docker/Postgres unavailable");
-        return;
-    };
+    let fx = PgFixture::start().await;
     let svc = service(&fx.pool);
 
     let id = create(
@@ -359,9 +414,9 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         &id,
         "t",
         json!({
+            "version": projection.version,
             "connectionParameterPatch": {
-                "version": projection.version,
-                "replaceSecrets": {"password": "new-password"}
+                "write": {"password": "new-password"}
             }
         }),
     )
@@ -379,10 +434,10 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         &id,
         "t",
         json!({
+            "version": projection.version,
             "connectionParameterPatch": {
-                "version": projection.version,
                 "set": {"auth_mode": "private_key"},
-                "replaceSecrets": {"private_key": "key-material"},
+                "write": {"private_key": "key-material"},
                 "clear": ["password"]
             }
         }),
@@ -414,8 +469,8 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         .version;
     let forbidden: runtara_connections::types::UpdateConnectionRequest =
         serde_json::from_value(json!({
+            "version": version,
             "connectionParameterPatch": {
-                "version": version,
                 "clear": ["client_secret"]
             }
         }))

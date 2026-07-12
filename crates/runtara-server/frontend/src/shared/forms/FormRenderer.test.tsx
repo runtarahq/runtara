@@ -239,4 +239,55 @@ describe('FormRenderer', () => {
     );
     expect(await screen.findByText('Select a value')).toBeInTheDocument();
   });
+
+  it('honors descriptor order and renders author-declared advanced sections collapsed', async () => {
+    const ordered: FormDefinition = {
+      sections: [
+        {
+          id: 'advanced',
+          label: 'Advanced settings',
+          advanced: true,
+          order: 200,
+        },
+      ],
+      fields: {
+        client_secret: {
+          type: 'string',
+          label: 'Client Secret',
+          order: 1,
+        },
+        client_id: { type: 'string', label: 'Client ID', order: 0 },
+        headers: {
+          type: 'object',
+          label: 'Extra Headers',
+          order: 2,
+          section: 'advanced',
+          control: { kind: 'key_value' },
+        },
+      },
+    };
+    vi.mocked(analyzeFormWithRust).mockResolvedValue(
+      result({
+        fields: {
+          client_id: { visible: true, enabled: true, required: false },
+          client_secret: { visible: true, enabled: true, required: false },
+          headers: { visible: true, enabled: true, required: false },
+        },
+      })
+    );
+
+    const { container } = render(
+      <FormRenderer definition={ordered} value={{}} onChange={vi.fn()} />
+    );
+    await screen.findByLabelText('Client ID');
+    const labels = [...container.querySelectorAll('label')].map(
+      (label) => label.textContent
+    );
+    expect(labels.slice(0, 2)).toEqual(['Client ID', 'Client Secret']);
+    const details = screen.getByText('Advanced settings').closest('details');
+    expect(details).not.toHaveAttribute('open');
+    expect(details?.querySelector('summary')).toHaveTextContent(
+      'Advanced settings'
+    );
+  });
 });

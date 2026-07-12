@@ -69,7 +69,7 @@ pub async fn create_connection_handler(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
-                "error": msg,
+                "error": msg.clone(),
                 "message": Value::Null
             })),
         )),
@@ -77,7 +77,7 @@ pub async fn create_connection_handler(
             StatusCode::CONFLICT,
             Json(json!({
                 "success": false,
-                "error": msg,
+                "error": msg.clone(),
                 "message": Value::Null
             })),
         )),
@@ -223,7 +223,7 @@ pub async fn get_connection_handler(
             StatusCode::NOT_FOUND,
             Json(json!({
                 "success": false,
-                "error": msg,
+                "error": msg.clone(),
                 "message": Value::Null
             })),
         )),
@@ -250,7 +250,7 @@ pub async fn get_connection_handler(
     responses(
         (status = 200, description = "Connection updated successfully", body = ConnectionResponse),
         (status = 404, description = "Connection not found", body = ErrorResponse),
-        (status = 409, description = "Connection title already exists", body = ErrorResponse),
+        (status = 409, description = "Connection changed or title already exists", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "connections-controller"
@@ -277,7 +277,7 @@ pub async fn update_connection_handler(
             Json(json!({
                 "success": false,
                 "error": msg,
-                "message": Value::Null
+                "message": msg
             })),
         )),
         Err(ServiceError::NotFound(msg)) => Err((
@@ -285,7 +285,7 @@ pub async fn update_connection_handler(
             Json(json!({
                 "success": false,
                 "error": msg,
-                "message": Value::Null
+                "message": msg
             })),
         )),
         Err(ServiceError::Conflict(msg)) => Err((
@@ -293,7 +293,7 @@ pub async fn update_connection_handler(
             Json(json!({
                 "success": false,
                 "error": msg,
-                "message": Value::Null
+                "message": msg
             })),
         )),
         Err(ServiceError::DatabaseError(msg)) => Err((

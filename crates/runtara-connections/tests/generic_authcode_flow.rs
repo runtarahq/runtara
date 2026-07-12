@@ -24,12 +24,20 @@ struct PgFixture {
 }
 
 impl PgFixture {
-    async fn start() -> Option<Self> {
-        let container = Postgres::default().start().await.ok()?;
-        let host = container.get_host().await.ok()?;
-        let port = container.get_host_port_ipv4(5432).await.ok()?;
+    async fn start() -> Self {
+        let container = Postgres::default()
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let host = container.get_host().await.expect("required Postgres host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("required Postgres port");
         let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("required Postgres connection");
         sqlx::query(
             r#"
             CREATE TABLE connection_data_entity (
@@ -51,7 +59,7 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
+        .expect("create required connection table");
         sqlx::query(
             r#"
             CREATE TABLE connection_defaults (
@@ -64,7 +72,7 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
+        .expect("create required defaults table");
         sqlx::query(
             r#"
             CREATE TABLE oauth_state (
@@ -80,11 +88,11 @@ impl PgFixture {
         )
         .execute(&pool)
         .await
-        .ok()?;
-        Some(Self {
+        .expect("create required OAuth state table");
+        Self {
             pool,
             _container: container,
-        })
+        }
     }
 }
 
@@ -98,10 +106,7 @@ fn extract_query_param(url: &str, key: &str) -> Option<String> {
 #[tokio::test]
 async fn generic_authcode_full_flow_from_params() {
     unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping generic authcode flow test: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let provider = MockServer::start().await;
 
     // Token endpoint: requires HTTP Basic (token_auth = "basic"); asserts the
@@ -240,10 +245,7 @@ async fn generic_authcode_full_flow_from_params() {
 #[tokio::test]
 async fn generic_authcode_pkce_can_be_disabled() {
     unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping pkce-off test: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     sqlx::query(
         "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
          VALUES ($1, $2, $3, $4)",
@@ -283,10 +285,7 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
     // Save-time https gate: allow the loopback wiremock endpoints for this PATCH.
     unsafe { std::env::set_var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS", "127.0.0.1,localhost") };
-    let Some(fixture) = PgFixture::start().await else {
-        eprintln!("Skipping rule E test: Docker/Postgres unavailable");
-        return;
-    };
+    let fixture = PgFixture::start().await;
     let provider = MockServer::start().await;
     // Refresh endpoint: each mint hits it once — expect exactly 2 (warm + post-evict).
     Mock::given(method("POST"))
@@ -354,17 +353,24 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     let service =
         runtara_connections::service::connections::ConnectionService::new(repo, compatibility);
 
-    let mut new_params = params.clone();
-    new_params["base_url"] = json!("https://api.other-host.example");
+    let version = service
+        .get_connection("conn_rule_e", "tenant_gen")
+        .await
+        .expect("load connection version")
+        .updated_at;
     let update = runtara_connections::types::UpdateConnectionRequest {
+        version,
         title: None,
-        connection_subtype: None,
-        connection_parameters: Some(new_params),
-        connection_parameter_patch: None,
-        integration_id: None,
+        connection_parameter_patch: Some(runtara_connections::types::ConnectionParameterPatch {
+            set: std::collections::HashMap::from([(
+                "base_url".to_string(),
+                json!("https://api.other-host.example"),
+            )]),
+            write: Default::default(),
+            clear: Vec::new(),
+        }),
         rate_limit_config: None,
         valid_until: None,
-        status: None,
         is_default_file_storage: None,
         default_for: None,
     };

@@ -56,6 +56,7 @@
         },
         "description": "Header name for the API key (when auth_mode = \"api_key\"). Defaults to X-API-Key.",
         "label": "API Key Header",
+        "order": 3,
         "placeholder": "X-API-Key",
         "required": false,
         "section": "configuration",
@@ -98,6 +99,7 @@
         },
         "description": "API key value (when auth_mode = \"api_key\").",
         "label": "API Key",
+        "order": 4,
         "required": false,
         "secret": true,
         "section": "credentials",
@@ -130,6 +132,7 @@
           "api_key"
         ],
         "label": "Auth Mode",
+        "order": 1,
         "required": false,
         "section": "configuration",
         "type": "string"
@@ -171,6 +174,7 @@
         },
         "description": "Bearer token (when auth_mode = \"bearer\").",
         "label": "Bearer Token",
+        "order": 2,
         "required": false,
         "secret": true,
         "section": "credentials",
@@ -180,16 +184,18 @@
         "access": "read_write",
         "description": "Extra static headers to forward on every request (header_name → value).",
         "label": "Extra Headers",
+        "order": 5,
         "required": false,
-        "section": "configuration",
+        "section": "advanced",
         "type": "object"
       },
       "tool_hints": {
         "access": "read_write",
         "description": "Optional per-tool hint strings (tool_name → extra description) used by the search ranker.",
         "label": "Tool Hints",
+        "order": 6,
         "required": false,
-        "section": "configuration",
+        "section": "advanced",
         "type": "object"
       },
       "tool_scope": {
@@ -200,6 +206,7 @@
           "type": "string"
         },
         "label": "Tool Scope",
+        "order": 7,
         "required": false,
         "section": "configuration",
         "type": "array"
@@ -208,6 +215,7 @@
         "access": "read_write",
         "description": "Streamable-HTTP endpoint URL of the MCP server (e.g. https://mcp.example.com/jsonrpc).",
         "label": "Server URL",
+        "order": 0,
         "placeholder": "https://mcp.example.com/jsonrpc",
         "required": true,
         "section": "configuration",
@@ -225,6 +233,13 @@
         "id": "credentials",
         "label": "Credentials",
         "order": 100
+      },
+      {
+        "advanced": true,
+        "description": "Optional request and discovery customization.",
+        "id": "advanced",
+        "label": "Advanced settings",
+        "order": 200
       }
     ]
   }

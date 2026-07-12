@@ -96,7 +96,7 @@ type EntitlementErrorCode =
   | 'AGENT_NOT_ENABLED'
   | 'ENTITLEMENT_LIMIT_EXCEEDED';
 
-interface ApiError extends Error {
+export interface ApiError extends Error {
   /** Axios error code (e.g., 'ERR_NETWORK', 'ERR_BAD_REQUEST') */
   code?: string;
   /** HTTP status (set directly by axios v1+ even when response parsing fails) */
@@ -105,6 +105,7 @@ interface ApiError extends Error {
     status?: number;
     data?: {
       message?: string;
+      error?: string;
       success?: boolean;
       /** New format: WorkflowValidationErrorResponse */
       validationErrors?: ValidationError[];
@@ -132,6 +133,8 @@ interface CustomMutationOptions<TData = unknown, TVariables = unknown>
    * Other errors will still show toasts.
    */
   suppressValidationToasts?: boolean;
+  /** Caller renders a conflict-specific recovery surface. */
+  suppressConflictToasts?: boolean;
 }
 
 /**
@@ -213,6 +216,7 @@ export function isEntitlementDenial(error: unknown): boolean {
 export function useCustomMutation<TData = unknown, TVariables = unknown>({
   mutationFn,
   suppressValidationToasts = false,
+  suppressConflictToasts = false,
   ...options
 }: CustomMutationOptions<TData, TVariables>) {
   const auth = useAuth();
@@ -281,6 +285,8 @@ export function useCustomMutation<TData = unknown, TVariables = unknown>({
           duration: 8000,
         });
       }
+    } else if (error.response?.status === 409 && suppressConflictToasts) {
+      // The caller owns a stateful conflict-recovery surface.
     } else if (
       error.response?.status === 403 &&
       handleEntitlementDenial(error)
@@ -305,7 +311,8 @@ export function useCustomMutation<TData = unknown, TVariables = unknown>({
     } else {
       // Default error handling for other errors
       // Use the backend message if available, otherwise fall back to the error message
-      const backendMessage = error.response?.data?.message;
+      const backendMessage =
+        error.response?.data?.message ?? error.response?.data?.error;
       const errorMessage = backendMessage || error.message;
 
       toast.error(`Error: ${error.response?.status || 'Request failed'}`, {

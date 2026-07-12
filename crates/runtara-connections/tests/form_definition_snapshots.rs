@@ -41,6 +41,15 @@ fn normalized_descriptor(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> 
     }))
 }
 
+fn assert_snapshot(relative_path: &str, actual: &str, expected: &str, context: &str) {
+    if std::env::var_os("UPDATE_CONNECTION_FORM_SNAPSHOTS").is_some() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+        std::fs::write(path, format!("{actual}\n")).expect("update connection form snapshot");
+        return;
+    }
+    assert_eq!(actual, expected.trim(), "{context} snapshot changed");
+}
+
 fn sftp_pilot_snapshot(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Value {
     let definition = runtara_dsl::form::connection_form_definition(meta);
     let scenario = |data: Value| {
@@ -92,7 +101,12 @@ fn every_registered_connection_form_matches_the_stable_snapshot() {
         .collect::<Vec<_>>();
     let actual = serde_json::to_string_pretty(&fingerprints).unwrap();
     let expected = include_str!("fixtures/connection_form_fingerprints.json").trim();
-    assert_eq!(actual, expected, "connection form snapshot changed");
+    assert_snapshot(
+        "tests/fixtures/connection_form_fingerprints.json",
+        &actual,
+        expected,
+        "connection form",
+    );
 }
 
 #[test]
@@ -110,6 +124,11 @@ fn condition_heavy_pilot_forms_have_readable_snapshots() {
             "sftp" => include_str!("fixtures/connection_form_sftp.json"),
             _ => unreachable!(),
         };
-        assert_eq!(actual, expected.trim(), "{integration_id} snapshot changed");
+        assert_snapshot(
+            &format!("tests/fixtures/connection_form_{integration_id}.json"),
+            &actual,
+            expected,
+            integration_id,
+        );
     }
 }

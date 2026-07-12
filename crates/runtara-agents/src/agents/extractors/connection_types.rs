@@ -1196,7 +1196,12 @@ pub struct McpConnectionParams {
     #[serde(default)]
     #[field(
         display_name = "Extra Headers",
-        description = "Extra static headers to forward on every request (header_name → value)."
+        description = "Extra static headers to forward on every request (header_name → value).",
+        section = "advanced",
+        section_label = "Advanced settings",
+        section_description = "Optional request and discovery customization.",
+        section_order = 200,
+        section_advanced = true
     )]
     pub extra_headers: HashMap<String, String>,
 
@@ -1204,7 +1209,8 @@ pub struct McpConnectionParams {
     #[serde(default)]
     #[field(
         display_name = "Tool Hints",
-        description = "Optional per-tool hint strings (tool_name → extra description) used by the search ranker."
+        description = "Optional per-tool hint strings (tool_name → extra description) used by the search ranker.",
+        section = "advanced"
     )]
     pub tool_hints: HashMap<String, String>,
 

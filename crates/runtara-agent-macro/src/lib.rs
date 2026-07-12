@@ -733,6 +733,9 @@ struct ConnectionFieldArgs {
     description: Option<String>,
     #[darling(default)]
     placeholder: Option<String>,
+    /// Explicit field order; declaration order is used when absent.
+    #[darling(default)]
+    order: Option<i32>,
     #[darling(default)]
     default: Option<String>,
     /// Mark this field as a secret (password, API key, etc.)
@@ -763,6 +766,16 @@ struct ConnectionFieldArgs {
     /// Explicit shared form section id.
     #[darling(default)]
     section: Option<String>,
+    /// Presentation metadata for the named section. These are optional so one
+    /// field can declare a section and siblings can simply reference its id.
+    #[darling(default)]
+    section_label: Option<String>,
+    #[darling(default)]
+    section_description: Option<String>,
+    #[darling(default)]
+    section_order: Option<i32>,
+    #[darling(default)]
+    section_advanced: Option<bool>,
     /// Shared form access mode: read_write, read, or write.
     #[darling(default)]
     access: Option<String>,
@@ -886,9 +899,97 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
         }
     };
 
+    type SectionConfig = (Option<String>, Option<String>, Option<i32>, Option<bool>);
+    let mut section_configs = std::collections::BTreeMap::<String, SectionConfig>::new();
+    for field in &fields {
+        let has_section_metadata = field.section_label.is_some()
+            || field.section_description.is_some()
+            || field.section_order.is_some()
+            || field.section_advanced.is_some();
+        let Some(section_id) = field.section.as_ref() else {
+            if has_section_metadata {
+                return syn::Error::new_spanned(
+                    &field.ty,
+                    "section presentation metadata requires `section = \"...\"`",
+                )
+                .to_compile_error()
+                .into();
+            }
+            continue;
+        };
+        let entry = section_configs
+            .entry(section_id.clone())
+            .or_insert_with(|| (None, None, None, None));
+        for (slot, supplied, property) in [
+            (&mut entry.0, field.section_label.as_ref(), "label"),
+            (
+                &mut entry.1,
+                field.section_description.as_ref(),
+                "description",
+            ),
+        ] {
+            if let (Some(existing), Some(next)) = (slot.as_ref(), supplied) {
+                if existing != next {
+                    return syn::Error::new_spanned(
+                        &field.ty,
+                        format!("conflicting {property} metadata for section '{section_id}'"),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            } else if slot.is_none() {
+                *slot = supplied.cloned();
+            }
+        }
+        if let (Some(existing), Some(next)) = (entry.2, field.section_order) {
+            if existing != next {
+                return syn::Error::new_spanned(
+                    &field.ty,
+                    format!("conflicting order metadata for section '{section_id}'"),
+                )
+                .to_compile_error()
+                .into();
+            }
+        } else if entry.2.is_none() {
+            entry.2 = field.section_order;
+        }
+        if let (Some(existing), Some(next)) = (entry.3, field.section_advanced) {
+            if existing != next {
+                return syn::Error::new_spanned(
+                    &field.ty,
+                    format!("conflicting advanced metadata for section '{section_id}'"),
+                )
+                .to_compile_error()
+                .into();
+            }
+        } else if entry.3.is_none() {
+            entry.3 = field.section_advanced;
+        }
+    }
+
+    let section_metas: Vec<_> = section_configs
+        .into_iter()
+        .map(|(id, (label, description, order, advanced))| {
+            let label = option_to_tokens(&label);
+            let description = option_to_tokens(&description);
+            let order = order.map_or_else(|| quote! { None }, |value| quote! { Some(#value) });
+            let advanced = advanced.unwrap_or(false);
+            quote! {
+                runtara_dsl::agent_meta::ConnectionSectionMeta {
+                    id: #id,
+                    label: #label,
+                    description: #description,
+                    order: #order,
+                    advanced: #advanced,
+                }
+            }
+        })
+        .collect();
+
     let field_metas: Vec<_> = fields
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(index, f)| {
             let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let type_str = type_to_string(&f.ty);
             let (inner_type, is_option_type) = unwrap_option_type(&type_str);
@@ -898,6 +999,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let display_name_token = option_to_tokens(&f.display_name);
             let description_token = option_to_tokens(&f.description);
             let placeholder_token = option_to_tokens(&f.placeholder);
+            let order = f.order.unwrap_or(index as i32);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
             let clearable = f.clearable;
@@ -987,6 +1089,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     display_name: #display_name_token,
                     description: #description_token,
                     placeholder: #placeholder_token,
+                    order: #order,
                     default_value: #default_token,
                     is_secret: #is_secret,
                     enum_values: #enum_values_token,
@@ -1157,6 +1260,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             service_id: #service_id_token,
             auth_type: #auth_type_token,
             fields: &[#(#field_metas),*],
+            sections: &[#(#section_metas),*],
             oauth_config: #oauth_config_token,
         };
 

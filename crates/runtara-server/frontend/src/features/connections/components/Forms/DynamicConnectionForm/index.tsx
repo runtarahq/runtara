@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -48,10 +48,12 @@ type DynamicConnectionFormProps = {
   onReconnect?: () => void;
   isReconnecting?: boolean;
   needsReconnect?: boolean;
+  conflictNotice?: ReactNode;
 };
 
 export interface ConnectionFormOperations {
   clearSecrets: string[];
+  dirtyFields: string[];
 }
 
 const frameSchema = z
@@ -122,6 +124,7 @@ export function DynamicConnectionForm({
   onReconnect,
   isReconnecting,
   needsReconnect,
+  conflictNotice,
 }: DynamicConnectionFormProps) {
   const isFileStorage = FILE_STORAGE_CATEGORIES.has(
     connectionType.category ?? ''
@@ -220,7 +223,13 @@ export function DynamicConnectionForm({
         ...values,
         ...parameters,
       },
-      { clearSecrets: [...clearedSecrets].sort() }
+      {
+        clearSecrets: [...clearedSecrets].sort(),
+        dirtyFields: Object.entries(form.formState.dirtyFields)
+          .filter(([, dirty]) => dirty === true)
+          .map(([name]) => name)
+          .sort(),
+      }
     );
   };
 
@@ -256,6 +265,7 @@ export function DynamicConnectionForm({
           onReconnect={onReconnect}
           isReconnecting={isReconnecting}
           needsReconnect={needsReconnect}
+          conflictNotice={conflictNotice}
         >
           <div className="space-y-6">
             <FormRenderer
