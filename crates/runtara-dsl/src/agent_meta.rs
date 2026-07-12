@@ -1061,7 +1061,8 @@ fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult
             items_json: None,
             schema: None,
         },
-        "i32" | "i64" | "u32" | "u64" | "usize" => TypeConversionResult {
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => TypeConversionResult {
             json_type: "integer".to_string(),
             format: None,
             items_json: None,
@@ -1091,6 +1092,13 @@ fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult
             items_json: None,
             schema: Some(get_condition_expression_schema()),
         },
+        // Option<T> only affects nullability (tracked separately by the macro);
+        // the JSON type is the inner type's. Without this arm every Option<i64>
+        // fell through the catch-all and serialized as "string".
+        t if t.starts_with("Option<") => {
+            let inner = t.trim_start_matches("Option<").trim_end_matches('>');
+            rust_to_json_schema_type_with_schema(inner)
+        }
         t if t.starts_with("Vec<") => {
             let inner = t.trim_start_matches("Vec<").trim_end_matches('>');
             let inner_result = rust_to_json_schema_type_with_schema(inner);
@@ -1242,9 +1250,86 @@ pub fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
     }
 }
 
-/// Convert OutputFieldMeta to OutputField
-pub fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
-    let (type_name, format, _) = rust_to_json_schema_type(field.type_name);
+/// Depth cap for resolving nested output types. The visited-set below is the
+/// primary cycle guard; this bounds pathological (deep but acyclic) chains so
+/// the serialized meta.json stays reasonable.
+const MAX_OUTPUT_TYPE_DEPTH: usize = 8;
+
+/// Registry of output struct metadata keyed by type name, used to inline
+/// nested/item struct fields into the serialized schema. Agents build this
+/// from their macro-emitted `__OUTPUT_META_*` statics.
+pub type OutputTypeRegistry<'a> = std::collections::HashMap<&'a str, &'a OutputTypeMeta>;
+
+fn can_descend(type_name: &str, visited: &[String]) -> bool {
+    visited.len() < MAX_OUTPUT_TYPE_DEPTH && !visited.iter().any(|v| v == type_name)
+}
+
+fn resolve_output_fields(
+    meta: &OutputTypeMeta,
+    output_types: &OutputTypeRegistry<'_>,
+    visited: &mut Vec<String>,
+) -> Vec<OutputField> {
+    meta.fields
+        .iter()
+        .map(|field| resolve_output_field(field, output_types, visited))
+        .collect()
+}
+
+fn resolve_output_field(
+    field: &OutputFieldMeta,
+    output_types: &OutputTypeRegistry<'_>,
+    visited: &mut Vec<String>,
+) -> OutputField {
+    let (mut type_name, format, items_json) = rust_to_json_schema_type(field.type_name);
+    let mut fields: Option<Box<Vec<OutputField>>> = None;
+    let mut items: Option<Box<FieldTypeInfo>> = None;
+
+    if let Some(nested) = field.nested_type_name {
+        // Registered type: definitely a struct — resolve its fields inline.
+        // Unregistered names stay on the type mapper's result: the macro sets
+        // nested_type_name for any custom type, and an enum field serializes
+        // as a string, so flipping unregistered names to "object" would lie.
+        if let Some(meta) = output_types.get(nested) {
+            type_name = "object".to_string();
+            if can_descend(nested, visited) {
+                visited.push(nested.to_string());
+                fields = Some(Box::new(resolve_output_fields(meta, output_types, visited)));
+                visited.pop();
+            }
+        }
+    } else if let Some(item_type) = field.items_type_name {
+        // Vec<T>: the macro records T for every Vec, primitive or struct.
+        if let Some(meta) = output_types.get(item_type) {
+            type_name = "array".to_string();
+            let mut item_fields = None;
+            if can_descend(item_type, visited) {
+                visited.push(item_type.to_string());
+                item_fields = Some(Box::new(resolve_output_fields(meta, output_types, visited)));
+                visited.pop();
+            }
+            items = Some(Box::new(FieldTypeInfo {
+                type_name: "object".to_string(),
+                format: None,
+                display_name: meta.display_name.map(|s| s.to_string()),
+                description: meta.description.map(|s| s.to_string()),
+                fields: item_fields,
+                items: None,
+                nullable: false,
+            }));
+        }
+        // Unregistered item types keep the type mapper's items_json result
+        // below — an unregistered custom name may be an enum (a string on the
+        // wire), so guessing "object" here would lie.
+    }
+
+    // Vec<primitive>: surface the item type computed by the type mapper.
+    if items.is_none()
+        && let Some(items_str) = items_json
+    {
+        items = serde_json::from_str::<FieldTypeInfo>(&items_str)
+            .ok()
+            .map(Box::new);
+    }
 
     OutputField {
         name: field.name.to_string(),
@@ -1256,27 +1341,99 @@ pub fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
             .example
             .map(|s| serde_json::Value::String(s.to_string())),
         nullable: field.nullable,
-        // Note: items and fields are populated by frontend lookup using items_type_name/nested_type_name
-        // We don't recursively resolve here to avoid serde Deserialize stack overflow issues
-        items: None,
-        fields: None,
+        items,
+        fields,
     }
 }
 
-/// Convert CapabilityMeta to CapabilityInfo
+/// Convert OutputFieldMeta to OutputField, resolving nested struct types
+/// through the registry so the serialized schema carries the full shape.
+pub fn output_field_to_api_with_types(
+    field: &OutputFieldMeta,
+    output_types: &OutputTypeRegistry<'_>,
+) -> OutputField {
+    resolve_output_field(field, output_types, &mut Vec::new())
+}
+
+/// Convert OutputFieldMeta to OutputField without a type registry: nested
+/// struct fields stay unresolved (shape unknown), but scalar types are exact.
+pub fn output_field_to_api(field: &OutputFieldMeta) -> OutputField {
+    output_field_to_api_with_types(field, &OutputTypeRegistry::new())
+}
+
+/// Convert CapabilityMeta to CapabilityInfo without a nested-type registry.
+/// Prefer [`capability_to_api_with_types`]: without the registry, nested
+/// struct fields inside the output stay unresolved.
 pub fn capability_to_api(
     cap: &CapabilityMeta,
     input_type_meta: Option<&InputTypeMeta>,
     output_type_meta: Option<&OutputTypeMeta>,
 ) -> CapabilityInfo {
-    let (output_type, output_format, _) = rust_to_json_schema_type(cap.output_type);
+    capability_to_api_with_types(
+        cap,
+        input_type_meta,
+        output_type_meta,
+        &OutputTypeRegistry::new(),
+    )
+}
+
+/// Convert CapabilityMeta to CapabilityInfo, resolving nested output struct
+/// types through the registry so meta.json carries the full recursive shape.
+pub fn capability_to_api_with_types(
+    cap: &CapabilityMeta,
+    input_type_meta: Option<&InputTypeMeta>,
+    output_type_meta: Option<&OutputTypeMeta>,
+    output_types: &OutputTypeRegistry<'_>,
+) -> CapabilityInfo {
+    let (mut output_type, output_format, output_items_json) =
+        rust_to_json_schema_type(cap.output_type);
+    let mut output_items: Option<Box<FieldTypeInfo>> = None;
 
     let inputs = input_type_meta
         .map(|m| m.fields.iter().map(input_field_to_api).collect())
         .unwrap_or_default();
 
-    let output_fields = output_type_meta
-        .map(|m| Box::new(m.fields.iter().map(output_field_to_api).collect::<Vec<_>>()));
+    let output_fields = output_type_meta.map(|m| {
+        Box::new(resolve_output_fields(
+            m,
+            output_types,
+            &mut vec![m.type_name.to_string()],
+        ))
+    });
+
+    if output_type_meta.is_some() {
+        // A registered output struct is an object; the type mapper's catch-all
+        // would have reported the struct's Rust name as "string".
+        output_type = "object".to_string();
+    } else if output_type == "array" {
+        // Vec<T> capability output: resolve the item struct when registered.
+        let inner = cap
+            .output_type
+            .trim_start_matches("Vec<")
+            .trim_end_matches('>');
+        if let Some(meta) = output_types.get(inner) {
+            output_items = Some(Box::new(FieldTypeInfo {
+                type_name: "object".to_string(),
+                format: None,
+                display_name: meta.display_name.map(|s| s.to_string()),
+                description: meta.description.map(|s| s.to_string()),
+                fields: Some(Box::new(resolve_output_fields(
+                    meta,
+                    output_types,
+                    &mut vec![meta.type_name.to_string()],
+                ))),
+                items: None,
+                nullable: false,
+            }));
+        } else if let Some(items_str) = output_items_json {
+            output_items = serde_json::from_str::<FieldTypeInfo>(&items_str)
+                .ok()
+                .map(Box::new);
+        }
+    }
+    // Unregistered custom output types keep the type mapper's result: an
+    // unregistered name may be an enum (a string on the wire), so guessing
+    // "object" would lie. Registering the struct is the fix.
 
     // Convert compensation hint if present
     let compensation_hint = cap
@@ -1304,7 +1461,7 @@ pub fn capability_to_api(
             display_name: output_type_meta.and_then(|m| m.display_name.map(|s| s.to_string())),
             description: output_type_meta.and_then(|m| m.description.map(|s| s.to_string())),
             fields: output_fields,
-            items: None,
+            items: output_items,
             nullable: false,
         },
         has_side_effects: cap.has_side_effects,
@@ -1355,7 +1512,7 @@ pub fn get_agents() -> Vec<AgentInfo> {
             .map(|cap| {
                 let input_meta = input_types.get(cap.input_type).copied();
                 let output_meta = output_types.get(cap.output_type).copied();
-                capability_to_api(cap, input_meta, output_meta)
+                capability_to_api_with_types(cap, input_meta, output_meta, &output_types)
             })
             .collect();
 
@@ -1749,6 +1906,264 @@ impl AgentCatalog {
     /// True if the catalog has no agents (e.g. before discovery has run).
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod output_schema_tests {
+    use super::*;
+
+    const ADDRESS: OutputTypeMeta = OutputTypeMeta {
+        type_name: "Address",
+        display_name: Some("Address"),
+        description: None,
+        fields: &[OutputFieldMeta {
+            name: "city",
+            type_name: "String",
+            display_name: None,
+            description: None,
+            example: None,
+            nullable: false,
+            items_type_name: None,
+            nested_type_name: None,
+        }],
+    };
+
+    const ORDER: OutputTypeMeta = OutputTypeMeta {
+        type_name: "Order",
+        display_name: None,
+        description: None,
+        fields: &[
+            OutputFieldMeta {
+                name: "total",
+                type_name: "f64",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: None,
+                nested_type_name: None,
+            },
+            OutputFieldMeta {
+                name: "shipping_address",
+                type_name: "Address",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: None,
+                nested_type_name: Some("Address"),
+            },
+        ],
+    };
+
+    const CUSTOMER: OutputTypeMeta = OutputTypeMeta {
+        type_name: "Customer",
+        display_name: None,
+        description: None,
+        fields: &[
+            OutputFieldMeta {
+                name: "status_code",
+                type_name: "u16",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: None,
+                nested_type_name: None,
+            },
+            OutputFieldMeta {
+                name: "retries",
+                type_name: "Option<i64>",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: true,
+                items_type_name: None,
+                nested_type_name: None,
+            },
+            OutputFieldMeta {
+                name: "address",
+                type_name: "Address",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: None,
+                nested_type_name: Some("Address"),
+            },
+            OutputFieldMeta {
+                name: "orders",
+                type_name: "Vec<Order>",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: Some("Order"),
+                nested_type_name: None,
+            },
+            OutputFieldMeta {
+                name: "tags",
+                type_name: "Vec<String>",
+                display_name: None,
+                description: None,
+                example: None,
+                nullable: false,
+                items_type_name: Some("String"),
+                nested_type_name: None,
+            },
+        ],
+    };
+
+    /// Self-referential type: recursion must terminate via the visited set.
+    const TREE_NODE: OutputTypeMeta = OutputTypeMeta {
+        type_name: "TreeNode",
+        display_name: None,
+        description: None,
+        fields: &[OutputFieldMeta {
+            name: "child",
+            type_name: "TreeNode",
+            display_name: None,
+            description: None,
+            example: None,
+            nullable: true,
+            items_type_name: None,
+            nested_type_name: Some("TreeNode"),
+        }],
+    };
+
+    fn registry() -> OutputTypeRegistry<'static> {
+        [
+            ("Address", &ADDRESS),
+            ("Order", &ORDER),
+            ("Customer", &CUSTOMER),
+            ("TreeNode", &TREE_NODE),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn field(meta: &OutputTypeMeta, name: &str) -> OutputField {
+        let registry = registry();
+        meta.fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| output_field_to_api_with_types(f, &registry))
+            .expect("field exists")
+    }
+
+    #[test]
+    fn integer_widths_map_to_integer() {
+        assert_eq!(field(&CUSTOMER, "status_code").type_name, "integer");
+    }
+
+    #[test]
+    fn option_types_map_to_inner_type() {
+        let retries = field(&CUSTOMER, "retries");
+        assert_eq!(retries.type_name, "integer");
+        assert!(retries.nullable);
+    }
+
+    #[test]
+    fn nested_struct_fields_resolve_inline() {
+        let address = field(&CUSTOMER, "address");
+        assert_eq!(address.type_name, "object");
+        let fields = address.fields.expect("nested fields resolved");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "city");
+        assert_eq!(fields[0].type_name, "string");
+    }
+
+    #[test]
+    fn struct_array_items_resolve_inline_and_recurse() {
+        let orders = field(&CUSTOMER, "orders");
+        assert_eq!(orders.type_name, "array");
+        let items = orders.items.expect("item type resolved");
+        assert_eq!(items.type_name, "object");
+        let item_fields = items.fields.expect("item fields resolved");
+        assert_eq!(item_fields[0].name, "total");
+        assert_eq!(item_fields[0].type_name, "number");
+        // Order.shipping_address recurses one more level into Address.
+        assert_eq!(item_fields[1].type_name, "object");
+        assert!(item_fields[1].fields.is_some());
+    }
+
+    #[test]
+    fn primitive_array_items_carry_the_item_type() {
+        let tags = field(&CUSTOMER, "tags");
+        assert_eq!(tags.type_name, "array");
+        assert_eq!(tags.items.expect("items").type_name, "string");
+    }
+
+    #[test]
+    fn self_referential_types_terminate() {
+        let child = field(&TREE_NODE, "child");
+        assert_eq!(child.type_name, "object");
+        // The visited set stops the recursion at the self-reference: the
+        // outer field resolves, the inner one stays shapeless.
+        let fields = child.fields.expect("first level resolved");
+        assert_eq!(fields[0].name, "child");
+        assert!(fields[0].fields.is_none());
+    }
+
+    #[test]
+    fn without_registry_scalar_types_still_exact() {
+        let f = CUSTOMER
+            .fields
+            .iter()
+            .find(|f| f.name == "address")
+            .unwrap();
+        let converted = output_field_to_api(f);
+        // Unregistered custom type: no fields, and the type stays whatever the
+        // mapper says (an unregistered name may be an enum).
+        assert!(converted.fields.is_none());
+    }
+
+    fn capability(output_type: &'static str) -> CapabilityMeta {
+        CapabilityMeta {
+            module: Some("test"),
+            capability_id: "cap",
+            function_name: "cap",
+            input_type: "CapInput",
+            output_type,
+            display_name: None,
+            description: None,
+            has_side_effects: false,
+            is_idempotent: true,
+            rate_limited: false,
+            compensation_hint: None,
+            known_errors: &[],
+            tags: &[],
+        }
+    }
+
+    #[test]
+    fn registered_struct_output_is_an_object() {
+        let cap = capability("Customer");
+        let info = capability_to_api_with_types(&cap, None, Some(&CUSTOMER), &registry());
+        assert_eq!(info.output.type_name, "object");
+        let fields = info.output.fields.expect("fields resolved");
+        // Nested fields come through the registry now.
+        let address = fields.iter().find(|f| f.name == "address").unwrap();
+        assert!(address.fields.is_some());
+    }
+
+    #[test]
+    fn vec_of_registered_struct_output_resolves_items() {
+        let cap = capability("Vec<Order>");
+        let info = capability_to_api_with_types(&cap, None, None, &registry());
+        assert_eq!(info.output.type_name, "array");
+        let items = info.output.items.expect("items resolved");
+        assert_eq!(items.type_name, "object");
+        assert!(items.fields.is_some());
+    }
+
+    #[test]
+    fn unregistered_output_type_is_unchanged() {
+        let cap = capability("MysteryEnum");
+        let info = capability_to_api_with_types(&cap, None, None, &registry());
+        // Not registered: may be an enum, keep the mapper's result.
+        assert_eq!(info.output.type_name, "string");
     }
 }
 

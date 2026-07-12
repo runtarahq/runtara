@@ -637,7 +637,7 @@ fn deserialize_output<T: for<'de> Deserialize<'de>>(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     use runtara_dsl::agent_meta::{
-        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api,
+        AgentInfo, CapabilityMeta, InputTypeMeta, OutputTypeMeta, capability_to_api_with_types,
     };
     use std::collections::HashMap;
 
@@ -678,10 +678,11 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     let capabilities = caps
         .iter()
         .map(|cap| {
-            capability_to_api(
+            capability_to_api_with_types(
                 cap,
                 input_types.get(cap.input_type).copied(),
                 output_types.get(cap.output_type).copied(),
+                &output_types,
             )
         })
         .collect();
