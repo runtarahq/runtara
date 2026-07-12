@@ -181,6 +181,87 @@ describe('composePreviousSteps control-step output shapes', () => {
   });
 });
 
+describe('composePreviousSteps agent output nesting', () => {
+  const AGENTS = [
+    {
+      id: 'http',
+      name: 'HTTP',
+      supportedCapabilities: {
+        'http-request': {
+          id: 'http-request',
+          inputs: [],
+          output: {
+            type: 'object',
+            fields: [
+              { name: 'status_code', type: 'integer' },
+              {
+                name: 'body',
+                type: 'object',
+                fields: [
+                  { name: 'token', type: 'string' },
+                  {
+                    name: 'meta',
+                    type: 'object',
+                    fields: [{ name: 'count', type: 'integer' }],
+                  },
+                ],
+              },
+              { name: 'headers', type: 'object' },
+            ],
+          },
+        },
+      },
+    },
+  ] as any;
+
+  function agentGraph(): ExecutionGraph {
+    return {
+      entryPoint: 'fetch',
+      executionPlan: [{ fromStep: 'fetch', toStep: 'probe' }],
+      steps: {
+        fetch: {
+          id: 'fetch',
+          name: 'Fetch page',
+          stepType: 'Agent',
+          agentId: 'http',
+          capabilityId: 'http-request',
+        },
+        probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
+      },
+    } as unknown as ExecutionGraph;
+  }
+
+  it('recurses nested output fields with types', () => {
+    const [fetch] = composePreviousSteps({
+      stepId: 'probe',
+      agents: AGENTS,
+      executionGraph: agentGraph(),
+      workflows: [],
+    });
+
+    const suggestions = composeVariableSuggestions([fetch]);
+    const byValue = Object.fromEntries(
+      suggestions
+        .filter((s) => s.group === 'Step Outputs')
+        .map((s) => [s.value, s])
+    );
+
+    expect(byValue["steps['fetch'].outputs.status_code"]?.type).toBe(
+      'integer'
+    );
+    // Nested object fields are suggested with dotted labels and types.
+    expect(byValue["steps['fetch'].outputs.body.token"]?.type).toBe('string');
+    expect(byValue["steps['fetch'].outputs.body.token"]?.label).toBe(
+      'body.token'
+    );
+    expect(byValue["steps['fetch'].outputs.body.meta.count"]?.type).toBe(
+      'integer'
+    );
+    // Objects without declared children stay leaf-level.
+    expect(byValue["steps['fetch'].outputs.headers"]?.type).toBe('object');
+  });
+});
+
 describe('composeVariableSuggestions sibling labels', () => {
   beforeEach(() => {
     __setStepOutputShapesForTests(SHAPES);

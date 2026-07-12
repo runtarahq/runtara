@@ -176,14 +176,16 @@ function buildStepInfoList(
           const outputInfo = capability.output as any;
 
           if (outputInfo.fields && Array.isArray(outputInfo.fields)) {
-            // Output has fields - show each field as a suggestion
+            // Output has fields — suggest each field, recursing into nested
+            // object fields so steps.<id>.outputs.body.<child> is offered
+            // and typed (meta.json carries the nested shape).
             for (const field of outputInfo.fields) {
-              outputs.push({
-                name: field.name,
-                type: field.type as ParameterType,
-                path: `steps['${prevStepId}'].outputs.${field.name}`,
-                children: undefined,
-              });
+              outputs.push(
+                agentOutputFieldToParameter(
+                  field,
+                  `steps['${prevStepId}'].outputs`
+                )
+              );
             }
           } else {
             // Simple type output - show the outputs itself
@@ -327,6 +329,35 @@ function buildStepInfoList(
  */
 function shapeTypeToParameterType(type: string): ParameterType | undefined {
   return isValidParameterType(type) ? (type as ParameterType) : undefined;
+}
+
+/**
+ * Converts a capability OutputField (recursive: `fields` for nested objects,
+ * `items` for array element types) into a StepParameter tree. Array fields
+ * stay leaf-level — addressing into an array needs an index, which is not a
+ * useful static suggestion.
+ */
+function agentOutputFieldToParameter(
+  field: {
+    name: string;
+    type?: string;
+    fields?: { name: string; type?: string; fields?: unknown[] }[];
+  },
+  basePath: string
+): StepParameter {
+  const path = `${basePath}.${field.name}`;
+  const children = (field.fields ?? []).map((child) =>
+    agentOutputFieldToParameter(
+      child as Parameters<typeof agentOutputFieldToParameter>[0],
+      path
+    )
+  );
+  return {
+    name: field.name,
+    type: shapeTypeToParameterType(field.type ?? ''),
+    path,
+    children: children.length > 0 ? children : undefined,
+  };
 }
 
 /**
