@@ -666,4 +666,50 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(notice).toBeHidden();
     await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
   });
+
+  test('renders the non-OAuth status card and delete dialog without OAuth affordances', async ({
+    page,
+    request,
+  }) => {
+    // The editor is a schema-generated form shared by every connection type;
+    // a non-OAuth type (S3) must not surface any OAuth-only chrome.
+    const title = `E2E non-oauth S3 ${runId}`;
+    const id = await createApiConnection(request, {
+      title,
+      integrationId: 's3_compatible',
+      connectionParameters: {
+        endpoint: 'https://s3.example.com',
+        region: 'us-east-1',
+        access_key_id: 'AKIAEXAMPLE',
+        secret_access_key: 'stored-secret',
+      },
+    });
+
+    await openConnectionEditor(page, title);
+
+    // Status card shows the compact strip (secret count from secretState),
+    // not a pill/Connect affordance.
+    const saved = await getApiConnection(request, id);
+    const secretCount = Object.values(saved.editProjection.secretState).filter(
+      (s) => s.configured
+    ).length;
+    await expect(
+      page.getByText(`${secretCount} secret${secretCount === 1 ? '' : 's'} configured`, {
+        exact: false,
+      })
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Connect', exact: true })
+    ).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Reconnect' })).toHaveCount(0);
+    await expect(page.getByText('Authorization needed')).toHaveCount(0);
+    await expect(page.getByText('Reconnect required')).toHaveCount(0);
+
+    // Delete dialog omits the provider-grant revoke bullet for non-OAuth types.
+    await page.getByRole('button', { name: 'Delete…' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText(`Delete “${title}”?`);
+    await expect(dialog).not.toContainText('access grant will be revoked');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+  });
 });
