@@ -399,13 +399,6 @@ struct ServerState {
     sql_requests: Mutex<Vec<String>>,
 }
 
-fn tool_installed(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -847,10 +840,11 @@ fn serve(
 }
 
 fn direct_e2e_components_dir() -> PathBuf {
-    assert!(
-        tool_installed("wac"),
-        "direct-wasm-integration-tests requires wac"
-    );
+    // Composition is in-process via the `wac-graph` crate (see
+    // `direct_wasm/compile.rs`) — the `wac` CLI is never invoked, so it must
+    // not be required here. A stale `tool_installed("wac")` guard made the
+    // whole suite panic in CI environments that stage the components but don't
+    // install the (unused) CLI.
     assert!(
         embedded_executor_mode() || wasmtime_installed(),
         "direct-wasm-integration-tests in CLI mode requires wasmtime"

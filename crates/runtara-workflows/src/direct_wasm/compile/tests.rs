@@ -14,8 +14,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-#[cfg(feature = "direct-wasm-integration-tests")]
-use std::process::{Command, Stdio};
 
 use super::super::manifest::build_direct_workflow_manifest;
 use super::*;
@@ -553,16 +551,6 @@ fn collect_run_plan_ids(
         DirectRunPlan::Join => {}
         DirectRunPlan::ImplicitFinish => {}
     }
-}
-
-#[cfg(feature = "direct-wasm-integration-tests")]
-fn tool_installed(tool: &str) -> bool {
-    Command::new(tool)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 #[cfg(feature = "direct-wasm-integration-tests")]
@@ -9987,10 +9975,8 @@ fn direct_compile_writes_component_scaffold_sidecars() {
 #[cfg(feature = "direct-wasm-integration-tests")]
 #[test]
 fn direct_compile_composes_finish_with_shared_components_when_available() {
-    assert!(
-        tool_installed("wac"),
-        "direct-wasm-integration-tests requires wac"
-    );
+    // Composition is in-process via `wac-graph`; the `wac` CLI is never
+    // invoked, so it must not gate these tests (it isn't installed in CI).
     let components_dir = shared_components_dir();
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -10139,10 +10125,8 @@ fn direct_compile_composition_reports_missing_agent_component() {
 #[cfg(feature = "direct-wasm-integration-tests")]
 #[test]
 fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
-    assert!(
-        tool_installed("wac"),
-        "direct-wasm-integration-tests requires wac"
-    );
+    // Composition is in-process via `wac-graph`; the `wac` CLI is never
+    // invoked, so it must not gate these tests (it isn't installed in CI).
     let components_dir = shared_components_dir();
 
     let temp = tempfile::tempdir().expect("tempdir");
