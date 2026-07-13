@@ -6334,6 +6334,7 @@ mod tests {
                 max_tokens: None,
                 max_retries: None,
                 retry_delay: None,
+                turn_timeout: None,
                 memory: None,
                 output_schema: None,
             }),

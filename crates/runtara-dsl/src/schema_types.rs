@@ -1317,6 +1317,19 @@ pub struct AiAgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
+    /// Maximum duration of a single LLM "brain" turn, per attempt, in
+    /// milliseconds (default: 180000).
+    ///
+    /// A turn is one iteration of the tool loop (or the single-shot
+    /// completion), NOT a graph step — hence its own field alongside
+    /// `maxIterations` (which bounds the *number* of turns). Enforced at the
+    /// outbound-HTTP layer: the emitter injects it into the LLM invoke and the
+    /// server proxy honors it, so it bounds the model call rather than
+    /// preempting in-guest compute. Per-tool-call timeouts come from each
+    /// tool's own Agent step `timeout`, independently of this value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_timeout: Option<u64>,
+
     /// Conversation memory configuration.
     /// Requires a "memory" labeled edge pointing to a memory provider Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
