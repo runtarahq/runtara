@@ -3120,13 +3120,32 @@ mod tests {
         assert!(report.supported, "{:?}", report.unsupported);
     }
 
-    /// `AgentStep.timeout` is parsed but never enforced in the generated Rust
-    /// path (codegen never reads it; the synchronous component model cannot
-    /// preempt a running `capabilities.invoke`). Generated accepts + ignores it,
-    /// so direct accepts it as an inert no-op rather than rejecting workflows
-    /// generated compiles.
+    /// `AgentStep.timeout` is enforced at the outbound-HTTP layer: the emitter
+    /// injects it as an immediate `timeout_ms` into the capability input
+    /// mapping, so a capability that accepts one (e.g. the http agent) bounds
+    /// its outbound call via the proxy. It is not a wall-clock deadline (a
+    /// running `capabilities.invoke` cannot be preempted), so direct still
+    /// accepts the step; but the timeout is no longer a pure no-op.
     #[test]
-    fn agent_timeout_is_accepted_as_noop() {
+    fn agent_timeout_is_injected_into_capability_input() {
+        use crate::direct_wasm::manifest::build_direct_workflow_manifest;
+
+        // Unset: nothing is injected — the capability's own default applies.
+        let baseline = build_direct_workflow_manifest(&fixture("transform")).expect("manifest");
+        let baseline_mapping = baseline
+            .graph
+            .mappings
+            .iter()
+            .find(|m| m.step_id == "transform" && m.purpose == "agent.inputMapping")
+            .expect("transform input mapping");
+        assert!(
+            baseline_mapping.value.get("timeout_ms").is_none(),
+            "an unset timeout must not inject timeout_ms: {:?}",
+            baseline_mapping.value
+        );
+
+        // Explicit timeout: injected as an immediate timeout_ms, and still a
+        // direct-supported workflow.
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -3134,7 +3153,6 @@ mod tests {
         agent.timeout = Some(1_000);
 
         let report = analyze_direct_wasm_support(&graph);
-
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(
             !report
@@ -3143,6 +3161,16 @@ mod tests {
                 .any(|feature| feature.feature == "agent-timeout"),
             "timeout must not produce an unsupported feature"
         );
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|m| m.step_id == "transform" && m.purpose == "agent.inputMapping")
+            .expect("transform input mapping");
+        assert_eq!(mapping.value["timeout_ms"]["valueType"], "immediate");
+        assert_eq!(mapping.value["timeout_ms"]["value"], 1_000);
     }
 
     /// Compensation is dead code end-to-end (codegen never emits it, the SDK

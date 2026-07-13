@@ -3000,6 +3000,134 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
 }
 
 #[test]
+fn direct_compile_injects_ai_agent_tool_step_timeout() {
+    // Give one of the two Agent tool steps an explicit timeout; leave the other
+    // unset. The tool's own step timeout must reach its DirectAiToolPlan so the
+    // emitter can bound that tool call independently of the AiAgent turnTimeout.
+    let mut graph = fixture("ai_agent_multi_tool");
+    let Some(runtara_dsl::Step::Agent(tool)) = graph.steps.get_mut("echo") else {
+        panic!("expected Agent tool step 'echo'");
+    };
+    tool.timeout = Some(2_000);
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-multi-tool-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct multi-tool AiAgent compile should succeed");
+
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let core_config = DirectCoreConfig::new(
+        &manifest,
+        &manifest.to_canonical_json().expect("manifest json"),
+        false,
+    )
+    .expect("core config");
+    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
+        panic!(
+            "expected AiAgentLoop run plan, got {:?}",
+            core_config.run_plan
+        );
+    };
+    let agent_tool_timeouts: Vec<Option<u64>> = tools
+        .iter()
+        .filter_map(|t| match t {
+            crate::direct_wasm::plan::DirectAiToolPlan::Agent { timeout_ms, .. } => {
+                Some(*timeout_ms)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        agent_tool_timeouts.len(),
+        2,
+        "two Agent tools expected: {tools:?}"
+    );
+    assert!(
+        agent_tool_timeouts.contains(&Some(2_000)),
+        "the timed tool step's timeout must reach its plan: {agent_tool_timeouts:?}"
+    );
+    assert!(
+        agent_tool_timeouts.contains(&None),
+        "the untimed tool must stay None: {agent_tool_timeouts:?}"
+    );
+}
+
+#[test]
+fn direct_compile_injects_ai_agent_turn_timeout() {
+    // Unset turnTimeout: nothing is injected — the ai-tools chat capability
+    // defaults timeout_ms to DEFAULT_STEP_TIMEOUT_MS at runtime.
+    let temp0 = tempfile::tempdir().expect("tempdir");
+    let baseline = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-single-shot-baseline".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("ai_agent_single_shot"),
+        child_workflows: vec![],
+        output_dir: temp0.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("single-shot AiAgent compile should succeed");
+    let baseline_manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&baseline.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let baseline_mapping = baseline_manifest
+        .graph
+        .mappings
+        .iter()
+        .find(|m| m.step_id == "ai" && m.purpose == "agent.inputMapping")
+        .expect("AiAgent input mapping");
+    assert!(
+        baseline_mapping.value.get("timeout_ms").is_none(),
+        "unset turnTimeout must not inject timeout_ms: {:?}",
+        baseline_mapping.value
+    );
+
+    // Explicit turnTimeout: injected as an immediate timeout_ms into the
+    // synthesized chat mapping (feeds chat-completion single-shot and the
+    // chat-turn loop alike).
+    let mut graph = fixture("ai_agent_single_shot");
+    let Some(runtara_dsl::Step::AiAgent(step)) = graph.steps.get_mut("ai") else {
+        panic!("expected AiAgent fixture step 'ai'");
+    };
+    step.config.as_mut().expect("AiAgent config").turn_timeout = Some(5_000);
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-single-shot-turn-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("single-shot AiAgent compile should succeed");
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
+            .expect("manifest json");
+    let mapping = manifest
+        .graph
+        .mappings
+        .iter()
+        .find(|m| m.step_id == "ai" && m.purpose == "agent.inputMapping")
+        .expect("AiAgent input mapping");
+    assert_eq!(mapping.value["timeout_ms"]["valueType"], "immediate");
+    assert_eq!(mapping.value["timeout_ms"]["value"], 5_000);
+}
+
+#[test]
 fn direct_compile_supports_ai_agent_memory_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {

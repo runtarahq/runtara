@@ -111,3 +111,33 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
         .completion(builder.build())
         .map_err(|e| format!("LLM call failed: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_ms_defaults_to_none_when_absent() {
+        // A payload without `timeoutMs` deserializes to None, which
+        // run_completion resolves to DEFAULT_STEP_TIMEOUT_MS.
+        let req: CompletionInvokeRequest =
+            serde_json::from_value(serde_json::json!({ "integrationId": "openai" }))
+                .expect("deserialize");
+        assert_eq!(req.timeout_ms, None);
+        assert_eq!(
+            req.timeout_ms
+                .unwrap_or(runtara_dsl::DEFAULT_STEP_TIMEOUT_MS),
+            180_000,
+            "unset timeout must resolve to the shared 180s default"
+        );
+    }
+
+    #[test]
+    fn timeout_ms_passes_through_explicit_value() {
+        let req: CompletionInvokeRequest = serde_json::from_value(
+            serde_json::json!({ "integrationId": "openai", "timeoutMs": 4321 }),
+        )
+        .expect("deserialize");
+        assert_eq!(req.timeout_ms, Some(4321));
+    }
+}

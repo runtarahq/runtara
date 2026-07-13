@@ -2164,6 +2164,54 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
     );
 }
 
+/// End-to-end enforcement proof: the per-attempt LLM timeout reaches the proxy
+/// envelope (`timeout_ms`). With `turnTimeout` set it carries the configured
+/// value; unset, it defaults to DEFAULT_STEP_TIMEOUT_MS (180000) rather than the
+/// old 30s no-timeout proxy floor. This is the core "30s floor is gone" check.
+#[test]
+fn direct_wasm_execute_ai_agent_turn_timeout_reaches_proxy() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Configured turnTimeout passes through to the proxy envelope verbatim.
+    let configured = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-turn-timeout-configured",
+        &single_shot_ai_agent_graph_json(",\"turnTimeout\":4321"),
+        br#"{}"#,
+        vec![llm_ok("hi")],
+    );
+    assert!(configured.status_success, "stderr: {}", configured.stderr);
+    assert_eq!(configured.llm_requests.len(), 1, "exactly one model call");
+    assert_eq!(
+        configured.llm_requests[0]
+            .get("timeout_ms")
+            .and_then(Value::as_u64),
+        Some(4321),
+        "configured turnTimeout must reach the proxy envelope: {}",
+        configured.llm_requests[0]
+    );
+
+    // Unset: the ai-tools chat capability defaults timeout_ms to
+    // DEFAULT_STEP_TIMEOUT_MS, so the model call is bounded at 180s — proving
+    // the prior 30s floor (timeout_ms: null -> proxy unwrap_or(30_000)) is gone.
+    let defaulted = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-turn-timeout-default",
+        &single_shot_ai_agent_graph_json(""),
+        br#"{}"#,
+        vec![llm_ok("hi")],
+    );
+    assert!(defaulted.status_success, "stderr: {}", defaulted.stderr);
+    assert_eq!(
+        defaulted.llm_requests[0]
+            .get("timeout_ms")
+            .and_then(Value::as_u64),
+        Some(runtara_dsl::DEFAULT_STEP_TIMEOUT_MS),
+        "unset turnTimeout must default to DEFAULT_STEP_TIMEOUT_MS, not the 30s floor: {}",
+        defaulted.llm_requests[0]
+    );
+}
+
 #[test]
 fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() {
     let components_dir = direct_e2e_components_dir();
