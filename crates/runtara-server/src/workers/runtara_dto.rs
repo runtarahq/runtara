@@ -63,6 +63,22 @@ pub fn execution_status_to_runtara(status: &str) -> Option<RuntaraInstanceStatus
     }
 }
 
+/// Execution duration in seconds derived from the instance timestamps.
+///
+/// Returns `None` unless both timestamps are present and `finished_at` is at
+/// or after `started_at`. A relaunched/resumed run can briefly carry a
+/// `finished_at` stamped by an earlier suspend that predates its current
+/// `started_at`; such a row would otherwise report a negative duration, so it
+/// is dropped here rather than surfaced to the UI.
+fn duration_seconds(
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+) -> Option<f64> {
+    let (start, end) = started_at.zip(finished_at)?;
+    let ms = (end - start).num_milliseconds();
+    (ms >= 0).then(|| ms as f64 / 1000.0)
+}
+
 /// Enrich running instances with `has_pending_input` by checking for unresolved
 /// `external_input_requested` events. Only queries events for running instances.
 pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
@@ -124,11 +140,9 @@ pub fn runtara_instance_to_dto_with_info(
     // Convert to execution status
     let status = runtara_status_to_execution_status(inst.status);
 
-    // Calculate execution duration if available
-    let execution_duration_seconds = inst.started_at.and_then(|start| {
-        inst.finished_at
-            .map(|end| (end - start).num_milliseconds() as f64 / 1000.0)
-    });
+    // Calculate execution duration if available (dropping negatives from a
+    // stale suspend `finished_at` on a resumed run).
+    let execution_duration_seconds = duration_seconds(inst.started_at, inst.finished_at);
 
     WorkflowInstanceDto {
         id: inst.instance_id.clone(),
@@ -163,11 +177,9 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     // Convert to execution status
     let status = runtara_status_to_execution_status(info.status);
 
-    // Calculate execution duration if available
-    let execution_duration_seconds = info.started_at.and_then(|start| {
-        info.finished_at
-            .map(|end| (end - start).num_milliseconds() as f64 / 1000.0)
-    });
+    // Calculate execution duration if available (dropping negatives from a
+    // stale suspend `finished_at` on a resumed run).
+    let execution_duration_seconds = duration_seconds(info.started_at, info.finished_at);
 
     let created = info.created_at.to_rfc3339();
 
@@ -215,10 +227,9 @@ pub fn runtara_info_to_execution_with_metadata(
     // Convert to WorkflowInstanceDto first
     let status = runtara_status_to_execution_status(info.status);
 
-    let execution_duration_seconds = info.started_at.and_then(|start| {
-        info.finished_at
-            .map(|end| (end - start).num_milliseconds() as f64 / 1000.0)
-    });
+    // Calculate execution duration if available (dropping negatives from a
+    // stale suspend `finished_at` on a resumed run).
+    let execution_duration_seconds = duration_seconds(info.started_at, info.finished_at);
 
     let created = info.created_at.to_rfc3339();
     let updated = info

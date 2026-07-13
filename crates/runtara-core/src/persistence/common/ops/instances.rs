@@ -88,6 +88,15 @@ macro_rules! impl_instance_ops {
 
             /// UPDATE status (and optionally `started_at`). Errors with
             /// `InstanceNotFound` if no row matched.
+            ///
+            /// When `started_at` is supplied the instance is (re)entering
+            /// `running` — on relaunch/resume the guest re-registers here. A
+            /// row that ran before may still carry a `finished_at` (and
+            /// `termination_reason`) stamped by a prior suspend/force-stop;
+            /// those describe a run that is no longer over, so they are
+            /// cleared to restore the "running rows have no `finished_at`"
+            /// invariant. Leaving them would make `finished_at < started_at`
+            /// and render a negative duration for any resumed run.
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
                 instance_id: &str,
@@ -103,7 +112,8 @@ macro_rules! impl_instance_ops {
                 let result = if let Some(ts) = started_at {
                     let sql = format!(
                         "UPDATE instances \
-                         SET status = {p2}{status_cast}, started_at = {p3} \
+                         SET status = {p2}{status_cast}, started_at = {p3}, \
+                             finished_at = NULL, termination_reason = NULL \
                          WHERE instance_id = {p1}"
                     );
                     ::sqlx::query(&sql)
