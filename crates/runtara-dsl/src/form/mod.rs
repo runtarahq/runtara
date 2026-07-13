@@ -935,7 +935,11 @@ fn validate_field_value(
                     "Field does not match the required pattern",
                 ));
             }
-            if let Some(format) = schema.format.as_deref()
+            // An empty string means "not provided": skip format validation so an
+            // optional url/email/etc. field left blank doesn't error. A required
+            // blank field is already reported as missing before we get here.
+            if !value.trim().is_empty()
+                && let Some(format) = schema.format.as_deref()
                 && !value_matches_format(value, format)
             {
                 issues.push(error(
@@ -1200,6 +1204,46 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "SECRET_FIELD_MUST_BE_WRITE")
         );
+    }
+
+    #[test]
+    fn optional_url_field_allows_blank_but_rejects_malformed() {
+        let mut revocation = field(SchemaFieldType::String);
+        revocation.schema.required = false;
+        revocation.schema.format = Some("url".to_string());
+        let definition = FormDefinition {
+            fields: HashMap::from([("revocation_url".to_string(), revocation)]),
+            ..FormDefinition::default()
+        };
+
+        // Blank optional url → accepted (no format error); this was the bug.
+        let blank = analyze_form(&definition, &json!({ "revocation_url": "" }));
+        assert!(blank.valid, "{:?}", blank.issues);
+        assert!(
+            !blank
+                .issues
+                .iter()
+                .any(|i| i.code == "FORM_FIELD_FORMAT_INVALID")
+        );
+
+        // Whitespace-only is treated as blank too.
+        let ws = analyze_form(&definition, &json!({ "revocation_url": "   " }));
+        assert!(ws.valid, "{:?}", ws.issues);
+
+        // A non-empty malformed value is still rejected.
+        let bad = analyze_form(&definition, &json!({ "revocation_url": "not a url" }));
+        assert!(
+            bad.issues
+                .iter()
+                .any(|i| i.code == "FORM_FIELD_FORMAT_INVALID")
+        );
+
+        // A valid absolute https URL passes.
+        let ok = analyze_form(
+            &definition,
+            &json!({ "revocation_url": "https://provider.example.com/revoke" }),
+        );
+        assert!(ok.valid, "{:?}", ok.issues);
     }
 
     #[test]

@@ -1183,6 +1183,36 @@ mod tests {
     }
 
     #[test]
+    fn generic_oauth_token_auth_renders_as_select() {
+        for integration in [
+            "http_oauth2_authorization_code",
+            "http_oauth2_client_credentials",
+        ] {
+            let meta = runtara_agents::registry::find_connection_type(integration)
+                .unwrap_or_else(|| panic!("{integration} descriptor"));
+            let form = runtara_dsl::form::connection_form_definition(meta);
+            let token_auth = &form.fields["token_auth"];
+            // enum_values drive both the select control and value validation.
+            let values: Vec<&str> = token_auth
+                .schema
+                .enum_values
+                .as_ref()
+                .unwrap_or_else(|| panic!("{integration} token_auth enum_values missing"))
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert_eq!(values, ["form_body", "basic"], "{integration}");
+            assert!(
+                matches!(
+                    token_auth.control.as_ref().map(|c| &c.kind),
+                    Some(runtara_dsl::form::ControlKind::Select)
+                ),
+                "{integration} token_auth should render as a Select"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_patch_preserves_untouched_secrets_and_rejects_read_fields() {
         let existing = json!({
             "client_id": "client",

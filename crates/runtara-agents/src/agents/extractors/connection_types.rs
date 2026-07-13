@@ -1342,7 +1342,8 @@ pub struct HttpOAuth2ClientCredentialsParams {
     #[field(
         display_name = "Token Endpoint Auth",
         description = "How client credentials are sent to the token endpoint: 'form_body' (default) or 'basic' (HTTP Basic header)",
-        default = "form_body"
+        default = "form_body",
+        enum_values = "form_body,basic"
     )]
     pub token_auth: String,
 
@@ -1497,6 +1498,7 @@ pub struct HttpOAuth2AuthorizationCodeParams {
         display_name = "Token Endpoint Auth",
         description = "How client credentials are sent to the token endpoint: 'form_body' (default) or 'basic' (HTTP Basic header)",
         default = "form_body",
+        enum_values = "form_body,basic",
         requires_reauthorization
     )]
     pub token_auth: String,
