@@ -9,6 +9,11 @@ on:
       - '**.md'
       - 'LICENSE*'
       - '.github/**'
+  # Invoked by the manual "Publish Dev Snapshot" workflow (dev-release.yml).
+  # No tag ref is present on that path, so every job below takes its is_dev
+  # branch and (re)publishes the rolling `dev` pre-release + `:dev` image —
+  # exactly what a push to main used to do before releases went tag-only.
+  workflow_call:
 
 permissions:
   contents: write
