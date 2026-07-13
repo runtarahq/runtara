@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canonicalConditionToReportVisibility,
+  canonicalToLegacyCondition,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
+  legacyToCanonicalCondition,
   matchesReportRowCondition,
   reportVisibilityToCanonicalCondition,
   truncateCellText,
@@ -121,6 +123,121 @@ describe('report visibility compatibility', () => {
     const canonical = reportVisibilityToCanonicalCondition(visibility);
     expect(canonical).toBeDefined();
     expect(canonicalConditionToReportVisibility(canonical)).toEqual(visibility);
+  });
+});
+
+describe('legacyToCanonicalCondition — condition editor shapes', () => {
+  // The shared ConditionEditor emits arguments as ConditionArgument objects:
+  // a reference field once picked via the variable picker, and an edited
+  // immediate wrapped as {valueType:'immediate', value}. (No `type` key —
+  // that's what the editor emits; the canonical helpers add `type:'value'`.)
+  const editorRef = (path: string) => ({ valueType: 'reference', value: path });
+  const editorImm = (value: unknown) => ({ valueType: 'immediate', value });
+  const op = (name: string, args: unknown[]) => ({
+    type: 'operation',
+    op: name,
+    arguments: args,
+  });
+
+  it('converts a field the user picked as a reference (primary bug)', () => {
+    // Old bridge: typeof args[0] !== 'string' -> undefined -> VisibilityEditor
+    // called onChange(undefined) -> BlockEditor deleted the block's showWhen.
+    const canonical = legacyToCanonicalCondition(
+      op('EQ', [editorRef('status'), editorImm('ready')]) as never
+    );
+    expect(canonical).toBeDefined();
+    expect(matchesReportRowCondition(canonical!, { status: 'ready' })).toBe(
+      true
+    );
+    // And it persists back as a scalar equals, not undefined.
+    expect(canonicalConditionToReportVisibility(canonical)).toEqual({
+      filter: 'status',
+      equals: 'ready',
+    });
+  });
+
+  it('does not double-wrap an editor-emitted immediate value (reverse jank)', () => {
+    // Field stays a plain string (as canonicalToLegacyCondition emits it) while
+    // the user edits only the value, which the editor wraps as an object.
+    const canonical = legacyToCanonicalCondition(
+      op('EQ', ['status', editorImm('active')]) as never
+    );
+    expect(canonical).toBeDefined();
+    const visibility = canonicalConditionToReportVisibility(canonical);
+    // Without the unwrap, equals would be the {valueType,value} object.
+    expect(visibility).toEqual({ filter: 'status', equals: 'active' });
+    expect(typeof visibility!.equals).toBe('string');
+  });
+
+  it('converts IN with a reference field and an immediate array', () => {
+    const canonical = legacyToCanonicalCondition(
+      op('IN', [editorRef('priority'), editorImm([1, 2, 3])]) as never
+    );
+    expect(canonical).toBeDefined();
+    expect(matchesReportRowCondition(canonical!, { priority: 2 })).toBe(true);
+    expect(matchesReportRowCondition(canonical!, { priority: 9 })).toBe(false);
+  });
+
+  it('converts IS_DEFINED with a reference field', () => {
+    const canonical = legacyToCanonicalCondition(
+      op('IS_DEFINED', [editorRef('owner')]) as never
+    );
+    expect(canonical).toBeDefined();
+    expect(matchesReportRowCondition(canonical!, { owner: 'x' })).toBe(true);
+    expect(matchesReportRowCondition(canonical!, {})).toBe(false);
+  });
+
+  it('converts an AND of mixed editor-emitted clauses', () => {
+    const canonical = legacyToCanonicalCondition(
+      op('AND', [
+        { op: 'EQ', arguments: [editorRef('status'), editorImm('ready')] },
+        { op: 'NE', arguments: ['priority', editorImm(5)] },
+      ]) as never
+    );
+    expect(canonical).toBeDefined();
+    expect(
+      matchesReportRowCondition(canonical!, { status: 'ready', priority: 2 })
+    ).toBe(true);
+    expect(
+      matchesReportRowCondition(canonical!, { status: 'ready', priority: 5 })
+    ).toBe(false);
+  });
+
+  it('still rejects genuinely malformed field args', () => {
+    // A nested condition where a field is expected.
+    expect(
+      legacyToCanonicalCondition(
+        op('EQ', [
+          { op: 'EQ', arguments: ['a', 'b'] },
+          editorImm('x'),
+        ]) as never
+      )
+    ).toBeUndefined();
+    // A reference object whose value isn't a string.
+    expect(
+      legacyToCanonicalCondition(
+        op('EQ', [{ valueType: 'reference', value: 123 }, editorImm('x')]) as never
+      )
+    ).toBeUndefined();
+  });
+
+  it('mirrors the VisibilityEditor round-trip after an edit', () => {
+    // Load persisted visibility -> canonical -> legacy (what the editor shows).
+    const visibility = { filter: 'status', equals: 'ready' };
+    const canonical = reportVisibilityToCanonicalCondition(visibility);
+    const legacy = canonicalToLegacyCondition(canonical);
+    expect(legacy).toBeDefined();
+    // The user edits the value; the editor re-emits it as an immediate object
+    // and (after picking) the field as a reference object.
+    const edited = op('EQ', [
+      editorRef(String((legacy!.arguments as unknown[])[0])),
+      editorImm('processed'),
+    ]);
+    const reconverted = legacyToCanonicalCondition(edited as never);
+    expect(canonicalConditionToReportVisibility(reconverted)).toEqual({
+      filter: 'status',
+      equals: 'processed',
+    });
   });
 });
 

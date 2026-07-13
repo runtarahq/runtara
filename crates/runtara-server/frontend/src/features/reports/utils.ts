@@ -384,22 +384,65 @@ export function legacyToCanonicalCondition(
     return makeOperation(op, [canonicalInner]);
   }
   if (op === 'IN' || op === 'NOT_IN') {
-    if (typeof args[0] !== 'string') return undefined;
+    const field = readEditorFieldPath(args[0]);
+    if (field === undefined) return undefined;
     return makeOperation(op, [
-      makeReferenceArg(args[0]),
-      makeImmediateArg(args[1]),
+      makeReferenceArg(field),
+      makeImmediateArg(unwrapEditorImmediate(args[1])),
     ]);
   }
   if (op === 'IS_DEFINED' || op === 'IS_EMPTY' || op === 'IS_NOT_EMPTY') {
-    if (typeof args[0] !== 'string') return undefined;
-    return makeOperation(op, [makeReferenceArg(args[0])]);
+    const field = readEditorFieldPath(args[0]);
+    if (field === undefined) return undefined;
+    return makeOperation(op, [makeReferenceArg(field)]);
   }
   // Binary comparison: first arg = field, second = literal.
-  if (typeof args[0] !== 'string') return undefined;
+  const field = readEditorFieldPath(args[0]);
+  if (field === undefined) return undefined;
   return makeOperation(op, [
-    makeReferenceArg(args[0]),
-    makeImmediateArg(args[1]),
+    makeReferenceArg(field),
+    makeImmediateArg(unwrapEditorImmediate(args[1])),
   ]);
+}
+
+/**
+ * Extract a field path from a condition editor's first argument.
+ *
+ * The shared `ConditionEditor` emits the field as a
+ * `{valueType:'reference', value}` object once the user picks it via the
+ * variable picker (or as `{valueType:'immediate', value}` for a field it
+ * loaded as a plain string and the user re-touched); `RowConditionRow` emits
+ * a plain string. Reading the string, or the object's string `value`, covers
+ * every editor shape — a nested `Condition` (`op` present) or a non-string
+ * value still yields `undefined` so genuinely malformed args reject.
+ *
+ * Before this, the binary/IN/IS_DEFINED branches required `typeof args[0] ===
+ * 'string'`, so any field set through the picker converted to `undefined` and
+ * the caller dropped the block's existing `showWhen`.
+ */
+function readEditorFieldPath(arg: unknown): string | undefined {
+  if (typeof arg === 'string') return arg;
+  const o = asObject(arg);
+  if (o && !('op' in o) && typeof o.value === 'string') return o.value;
+  return undefined;
+}
+
+/**
+ * Unwrap a condition editor's second (value) argument to its literal.
+ *
+ * The `ConditionEditor` emits an edited immediate as a
+ * `{valueType:'immediate', value}` object. Passing that straight into
+ * `makeImmediateArg` double-wraps it — the canonical arg's `.value` becomes
+ * the whole `{valueType,value}` object, which then round-trips back into a
+ * corrupt `equals`/`notEquals` via `canonicalConditionToReportVisibility`.
+ * Raw literals (from `RowConditionRow`) pass through untouched.
+ */
+function unwrapEditorImmediate(arg: unknown): unknown {
+  const o = asObject(arg);
+  if (o && !('op' in o) && 'valueType' in o && 'value' in o) {
+    return o.value;
+  }
+  return arg;
 }
 
 function readReferencePath(arg: unknown): string | undefined {

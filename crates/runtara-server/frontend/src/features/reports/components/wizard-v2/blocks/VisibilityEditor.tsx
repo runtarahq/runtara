@@ -39,12 +39,19 @@ export function VisibilityEditor({
         value={legacyValue}
         onChange={(value) => {
           if (!value) {
+            // The editor was genuinely cleared — drop the condition.
             onChange(undefined);
             return;
           }
           try {
             const parsed = JSON.parse(value);
             const canonical = legacyToCanonicalCondition(parsed);
+            if (canonical === undefined) {
+              // A non-empty condition that didn't convert (e.g. mid-edit with
+              // no field yet). Keep the previous value rather than signalling
+              // a clear — the caller deletes the block's showWhen on undefined.
+              return;
+            }
             onChange(canonical);
           } catch {
             // Editor returned a bad payload — keep the previous value rather
