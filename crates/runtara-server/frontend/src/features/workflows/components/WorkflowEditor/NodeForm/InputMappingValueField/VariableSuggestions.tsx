@@ -49,6 +49,33 @@ function flattenStepParameters(
 }
 
 /**
+ * Recursively turns workflow input schema fields (including nested object
+ * `properties`) into dotted suggestions under `workflow.inputs.data.*`.
+ */
+function appendInputFieldSuggestions(
+  fields: SchemaField[],
+  prefix: string,
+  suggestions: VariableSuggestion[]
+): void {
+  for (const field of fields) {
+    if (!field.name) {
+      continue;
+    }
+    const path = prefix ? `${prefix}.${field.name}` : field.name;
+    suggestions.push({
+      label: path,
+      value: `workflow.inputs.data.${path}`,
+      description: field.description || 'Workflow input field',
+      group: 'Workflow Inputs',
+      type: field.type,
+    });
+    if (field.properties && field.properties.length > 0) {
+      appendInputFieldSuggestions(field.properties, path, suggestions);
+    }
+  }
+}
+
+/**
  * Composes variable suggestions from workflow inputs, variables, and previous steps
  */
 export function composeVariableSuggestions(
@@ -61,19 +88,11 @@ export function composeVariableSuggestions(
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
 
-  // Add workflow input schema fields
+  // Add workflow input schema fields, expanding nested object properties
+  // (declared via the schema editor's Advanced dialog) into dotted paths so
+  // workflow.inputs.data.customer.email is offered and typed.
   if (inputSchemaFields && inputSchemaFields.length > 0) {
-    for (const field of inputSchemaFields) {
-      if (field.name) {
-        suggestions.push({
-          label: field.name,
-          value: `workflow.inputs.data.${field.name}`,
-          description: field.description || 'Workflow input field',
-          group: 'Workflow Inputs',
-          type: field.type,
-        });
-      }
-    }
+    appendInputFieldSuggestions(inputSchemaFields, '', suggestions);
   }
 
   // Always add generic workflow.inputs.data as fallback

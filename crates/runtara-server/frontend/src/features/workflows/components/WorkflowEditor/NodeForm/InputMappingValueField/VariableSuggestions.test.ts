@@ -126,3 +126,49 @@ describe('composeConditionSuggestions', () => {
     expect(loopIndex?.type).toBe('number');
   });
 });
+
+describe('nested workflow input suggestions', () => {
+  it('expands object properties into dotted, typed suggestions', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [
+        {
+          name: 'customer',
+          type: 'object',
+          required: false,
+          description: 'customer record',
+          properties: [
+            {
+              name: 'email',
+              type: 'string',
+              required: false,
+              description: '',
+            },
+            {
+              name: 'address',
+              type: 'object',
+              required: false,
+              description: '',
+              properties: [
+                { name: 'city', type: 'string', required: false, description: '' },
+              ],
+            },
+          ],
+        },
+      ]
+    );
+
+    const byValue = Object.fromEntries(suggestions.map((s) => [s.value, s]));
+    expect(byValue['workflow.inputs.data.customer']?.type).toBe('object');
+    expect(byValue['workflow.inputs.data.customer.email']?.type).toBe(
+      'string'
+    );
+    expect(byValue['workflow.inputs.data.customer.email']?.label).toBe(
+      'customer.email'
+    );
+    // Two levels deep too.
+    expect(byValue['workflow.inputs.data.customer.address.city']?.type).toBe(
+      'string'
+    );
+  });
+});
