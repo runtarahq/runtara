@@ -26,6 +26,8 @@ export interface StepParameter {
 export interface StepInfo {
   id: string;
   name: string;
+  /** PascalCase step type ("Agent", "Split", …) for shape-aware validation. */
+  stepType?: string;
   inputs: StepParameter[];
   outputs: StepParameter[];
 }
@@ -319,6 +321,7 @@ function buildStepInfoList(
     result.push({
       id: prevStepId,
       name: step.name,
+      stepType: step.stepType,
       inputs,
       outputs,
     });

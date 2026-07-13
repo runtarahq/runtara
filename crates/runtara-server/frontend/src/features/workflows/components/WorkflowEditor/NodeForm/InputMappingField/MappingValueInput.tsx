@@ -20,6 +20,7 @@ import {
   describeStepReference,
   referenceTypeMismatch,
   resolveReferenceType,
+  validateReferencePath,
 } from '../reference-type';
 import { cn } from '@/lib/utils';
 
@@ -172,28 +173,32 @@ export function MappingValueInput({
     [isReference, stringValue, previousSteps]
   );
 
-  // Resolved type of the referenced value, for the pill's badge/icon.
-  const referenceType = useMemo(
-    () =>
-      isReference && stringValue
-        ? resolveReferenceType(stringValue, {
-            previousSteps,
-            inputSchemaFields,
-            variables,
-            insideSplitScope: isInsideSplit,
-            splitItemSchemaFields,
-          })
-        : undefined,
-    [
-      isReference,
-      stringValue,
+  // Resolved type of the referenced value, for the pill's badge/icon — and
+  // an inline existence error when the path provably cannot resolve.
+  const { referenceType, referenceError } = useMemo(() => {
+    if (!isReference || !stringValue) {
+      return { referenceType: undefined, referenceError: null };
+    }
+    const context = {
       previousSteps,
       inputSchemaFields,
       variables,
-      isInsideSplit,
+      insideSplitScope: isInsideSplit,
       splitItemSchemaFields,
-    ]
-  );
+    };
+    return {
+      referenceType: resolveReferenceType(stringValue, context),
+      referenceError: validateReferencePath(stringValue, context),
+    };
+  }, [
+    isReference,
+    stringValue,
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideSplit,
+    splitItemSchemaFields,
+  ]);
 
   // Cycle: immediate → template → reference → composite → immediate
   const handleModeToggle = () => {
@@ -230,12 +235,19 @@ export function MappingValueInput({
     // Reference mode - show pill or empty state
     if (isReference) {
       if (stringValue) {
-        const typeMismatch = referenceTypeMismatch(referenceType, fieldType, {
-          scalarsCoerceToString,
-        });
+        const typeMismatch = referenceError
+          ? null
+          : referenceTypeMismatch(referenceType, fieldType, {
+              scalarsCoerceToString,
+            });
         return (
           <div className="flex-1 min-w-0">
-            <div className="flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border">
+            <div
+              className={cn(
+                'flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border',
+                referenceError && 'border-destructive'
+              )}
+            >
               <ReferencePill
                 path={stringValue}
                 type={referenceType}
@@ -245,6 +257,14 @@ export function MappingValueInput({
                 disabled={disabled}
               />
             </div>
+            {referenceError && (
+              <p
+                className="text-[11px] text-destructive mt-0.5"
+                data-testid="reference-error"
+              >
+                {referenceError}
+              </p>
+            )}
             {typeMismatch && (
               <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-0.5">
                 {typeMismatch}

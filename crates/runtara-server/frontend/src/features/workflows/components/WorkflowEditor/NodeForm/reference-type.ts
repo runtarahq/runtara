@@ -10,6 +10,7 @@
  * a used reference shows its real type — or honestly nothing when the shape is
  * runtime-dependent.
  */
+import { getStepOutputShape } from '@/features/workflows/utils/step-output-shapes';
 import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 import { SimpleVariable } from './NodeFormContext';
 import { StepInfo, StepParameter } from './shared';
@@ -292,6 +293,130 @@ export function referenceTypeMismatch(
     return null;
   }
   return `Reference is ${reference}; this field expects ${field}`;
+}
+
+/**
+ * Authoring-time existence check for a reference path. Returns a
+ * human-readable error when the path provably cannot resolve — mirroring the
+ * save-time validator's semantics (unknown upstream step; a named field on a
+ * closed-shape output, E058; a named key into an array output, E059; an
+ * undeclared workflow-input / Split-item field) — or null when the path is
+ * valid or not statically checkable. Deliberately conservative: dynamic
+ * shapes, bracket indexing, sibling fields, and variables are never flagged.
+ */
+export function validateReferencePath(
+  path: string,
+  context: ReferenceTypeContext
+): string | null {
+  if (!path) {
+    return null;
+  }
+
+  if (path.startsWith('steps.') || path.startsWith("steps['")) {
+    return validateStepReferencePath(path, context.previousSteps ?? []);
+  }
+
+  const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
+  if (dataRest !== null && dataRest !== '') {
+    if (context.insideSplitScope) {
+      // Bare data.* is the Split's current item; check its declared schema.
+      // The explicit workflow.inputs.* spelling is left unchecked here.
+      if (path.startsWith('workflow.inputs.')) {
+        return null;
+      }
+      return validateSchemaFieldPath(
+        dataRest.split('.'),
+        context.splitItemSchemaFields,
+        'the Split iteration schema'
+      );
+    }
+    return validateSchemaFieldPath(
+      dataRest.split('.'),
+      context.inputSchemaFields,
+      'the workflow input schema'
+    );
+  }
+
+  return null;
+}
+
+function validateStepReferencePath(
+  path: string,
+  previousSteps: StepInfo[]
+): string | null {
+  const parsed = parseStepReference(path);
+  if (!parsed) {
+    return null;
+  }
+  // `steps.__error` is the onError scope's pseudo-step carrying the failure
+  // payload — always legal inside error handlers.
+  if (parsed.stepId === '__error') {
+    return null;
+  }
+  const step = previousSteps.find((s) => s.id === parsed.stepId);
+  if (!step) {
+    return `Step '${parsed.stepId}' is not an upstream step here`;
+  }
+  if (!step.stepType) {
+    return null;
+  }
+  const shape = getStepOutputShape(step.stepType);
+  if (!shape) {
+    return null;
+  }
+
+  const segments = parsed.rest.split('.');
+  // Only the outputs value has a statically-declared shape; sibling fields
+  // and bracket forms are never flagged (mirrors the save-time preflight).
+  if (segments[0] !== 'outputs' || parsed.rest.includes('[')) {
+    return null;
+  }
+  const after = segments[1];
+  if (after === undefined || after === '') {
+    return null;
+  }
+
+  const kind = shape.outputs?.kind;
+  if (kind === 'array') {
+    if (!/^-?\d+$/.test(after)) {
+      return `'${step.name}' outputs an array — address elements by index (e.g. outputs.0), not '.${after}'`;
+    }
+    return null;
+  }
+  if (kind === 'object') {
+    const fields = shape.outputs?.fields ?? [];
+    if (fields.length > 0 && !fields.some((f) => f.name === after)) {
+      const available = fields.map((f) => f.name).join(', ');
+      return `'${step.name}' has no output field '${after}'. Available: ${available}`;
+    }
+  }
+  return null;
+}
+
+function validateSchemaFieldPath(
+  segments: string[],
+  fields: SchemaField[] | undefined,
+  scopeLabel: string
+): string | null {
+  // An empty/undeclared schema is unchecked — the runtime accepts any shape.
+  if (!fields || fields.length === 0) {
+    return null;
+  }
+  const [head, ...rest] = segments;
+  const field = fields.find((f) => f.name === head);
+  if (!field) {
+    const available = fields.map((f) => f.name).join(', ');
+    return `'${head}' is not declared in ${scopeLabel}. Available: ${available}`;
+  }
+  if (rest.length === 0) {
+    return null;
+  }
+  // Only descend where nested properties are declared; other shapes are not
+  // statically checkable.
+  if (field.properties && field.properties.length > 0) {
+    return validateSchemaFieldPath(rest, field.properties, scopeLabel);
+  }
+  return null;
 }
 
 /**

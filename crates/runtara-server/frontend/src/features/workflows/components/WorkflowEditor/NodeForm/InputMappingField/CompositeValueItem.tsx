@@ -56,6 +56,7 @@ import { NodeFormContext } from '../NodeFormContext';
 import {
   describeStepReference,
   resolveReferenceType,
+  validateReferencePath,
 } from '../reference-type';
 import {
   VALUE_TYPE_OPTIONS,
@@ -194,27 +195,31 @@ export function CompositeValueItem({
     [value, previousSteps]
   );
 
-  // Resolved type of the referenced value, for the pill's badge/icon.
-  const referenceType = useMemo(
-    () =>
-      value.valueType === 'reference' && value.value
-        ? resolveReferenceType(value.value as string, {
-            previousSteps,
-            inputSchemaFields,
-            variables,
-            insideSplitScope: isInsideSplit,
-            splitItemSchemaFields,
-          })
-        : undefined,
-    [
-      value,
+  // Resolved type of the referenced value, for the pill's badge/icon — and
+  // an inline existence error when the path provably cannot resolve.
+  const { referenceType, referenceError } = useMemo(() => {
+    if (value.valueType !== 'reference' || !value.value) {
+      return { referenceType: undefined, referenceError: null };
+    }
+    const context = {
       previousSteps,
       inputSchemaFields,
       variables,
-      isInsideSplit,
+      insideSplitScope: isInsideSplit,
       splitItemSchemaFields,
-    ]
-  );
+    };
+    return {
+      referenceType: resolveReferenceType(value.value as string, context),
+      referenceError: validateReferencePath(value.value as string, context),
+    };
+  }, [
+    value,
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideSplit,
+    splitItemSchemaFields,
+  ]);
 
   // Handle value type change
   const handleTypeChange = useCallback(
@@ -490,8 +495,18 @@ export function CompositeValueItem({
                 fieldPath={stepInfo.fieldPath ?? undefined}
                 onRemove={() => onChange({ valueType: 'reference', value: '' })}
                 disabled={disabled}
-                className={hasError ? 'border-destructive' : undefined}
+                className={
+                  hasError || referenceError ? 'border-destructive' : undefined
+                }
               />
+              {referenceError && (
+                <p
+                  className="text-[11px] text-destructive mt-0.5"
+                  data-testid="reference-error"
+                >
+                  {referenceError}
+                </p>
+              )}
             </div>
           );
         }

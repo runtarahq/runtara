@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   describeStepReference,
   normalizeTypeName,
   parseStepReference,
   referenceTypeMismatch,
   resolveReferenceType,
+  validateReferencePath,
 } from './reference-type';
+import {
+  __resetStepOutputShapesForTests,
+  __setStepOutputShapesForTests,
+} from '@/features/workflows/utils/step-output-shapes';
 import type { StepInfo } from './shared';
 import type { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 import type { SimpleVariable } from './NodeFormContext';
@@ -14,6 +19,7 @@ const PREVIOUS_STEPS: StepInfo[] = [
   {
     id: 'filt',
     name: 'Filter results',
+    stepType: 'Filter',
     inputs: [],
     outputs: [
       {
@@ -31,6 +37,7 @@ const PREVIOUS_STEPS: StepInfo[] = [
   {
     id: 'fetch',
     name: 'Fetch page',
+    stepType: 'Agent',
     inputs: [],
     outputs: [
       {
@@ -50,6 +57,7 @@ const PREVIOUS_STEPS: StepInfo[] = [
   {
     id: 'split',
     name: 'Split items',
+    stepType: 'Split',
     inputs: [],
     outputs: [
       { name: '', type: 'array', path: "steps['split'].outputs" },
@@ -299,5 +307,118 @@ describe('referenceTypeMismatch', () => {
     expect(referenceTypeMismatch('array', 'string', opts)).toMatch(/array/);
     // Without the option the scalar warning stays (agent inputs don't coerce).
     expect(referenceTypeMismatch('integer', 'string')).toMatch(/integer/);
+  });
+});
+
+describe('validateReferencePath', () => {
+  beforeEach(() => {
+    __setStepOutputShapesForTests({
+      Filter: {
+        outputs: {
+          kind: 'object',
+          fields: [
+            { name: 'items', type: 'array' },
+            { name: 'count', type: 'integer' },
+          ],
+        },
+        siblingFields: [],
+      },
+      Split: {
+        outputs: { kind: 'array' },
+        siblingFields: [
+          { name: 'hasFailures', type: 'boolean', gatedBy: 'dontStopOnFailed' },
+        ],
+      },
+      Agent: { outputs: { kind: 'dynamic' }, siblingFields: [] },
+    });
+  });
+
+  afterEach(() => {
+    __resetStepOutputShapesForTests();
+  });
+
+  it('flags references to steps that are not upstream', () => {
+    expect(
+      validateReferencePath("steps['nope'].outputs.x", CONTEXT)
+    ).toMatch(/'nope' is not an upstream step/);
+    // The onError pseudo-step is always legal.
+    expect(
+      validateReferencePath('steps.__error.message', CONTEXT)
+    ).toBeNull();
+  });
+
+  it('flags named fields missing from closed-shape outputs (E058 parity)', () => {
+    expect(
+      validateReferencePath("steps['filt'].outputs.bogus", CONTEXT)
+    ).toMatch(/no output field 'bogus'.*items, count/);
+    expect(
+      validateReferencePath("steps['filt'].outputs.items", CONTEXT)
+    ).toBeNull();
+    expect(
+      validateReferencePath('steps.filt.outputs.count', CONTEXT)
+    ).toBeNull();
+  });
+
+  it('flags named keys into array outputs (E059 parity)', () => {
+    expect(
+      validateReferencePath("steps['split'].outputs.result", CONTEXT)
+    ).toMatch(/outputs an array/);
+    expect(
+      validateReferencePath("steps['split'].outputs.0", CONTEXT)
+    ).toBeNull();
+    // Sibling fields are never flagged, matching the save-time preflight.
+    expect(
+      validateReferencePath("steps['split'].hasFailures", CONTEXT)
+    ).toBeNull();
+  });
+
+  it('never flags dynamic shapes or deeper tails', () => {
+    expect(
+      validateReferencePath("steps['fetch'].outputs.anything.at.all", CONTEXT)
+    ).toBeNull();
+    expect(
+      validateReferencePath("steps['filt'].outputs.items.0.name", CONTEXT)
+    ).toBeNull();
+  });
+
+  it('flags undeclared workflow input fields', () => {
+    expect(validateReferencePath('data.unknown', CONTEXT)).toMatch(
+      /'unknown' is not declared in the workflow input schema.*flag, customer/
+    );
+    expect(validateReferencePath('data.flag', CONTEXT)).toBeNull();
+    expect(
+      validateReferencePath('workflow.inputs.data.customer.email', CONTEXT)
+    ).toBeNull();
+    expect(
+      validateReferencePath('workflow.inputs.data.customer.bogus', CONTEXT)
+    ).toMatch(/'bogus' is not declared/);
+  });
+
+  it('checks data.* against the Split iteration schema inside a Split', () => {
+    const insideSplit = {
+      ...CONTEXT,
+      insideSplitScope: true,
+      splitItemSchemaFields: [
+        { name: 'sku', type: 'string', required: true, description: '' },
+      ],
+    };
+    expect(validateReferencePath('data.sku', insideSplit)).toBeNull();
+    expect(validateReferencePath('data.flag', insideSplit)).toMatch(
+      /not declared in the Split iteration schema/
+    );
+    // No declared schema -> unchecked.
+    expect(
+      validateReferencePath('data.flag', {
+        ...CONTEXT,
+        insideSplitScope: true,
+        splitItemSchemaFields: undefined,
+      })
+    ).toBeNull();
+  });
+
+  it('never flags variables, loop context, or item references', () => {
+    expect(validateReferencePath('variables.whatever', CONTEXT)).toBeNull();
+    expect(validateReferencePath('loop.outputs.x', CONTEXT)).toBeNull();
+    expect(validateReferencePath('item.email', CONTEXT)).toBeNull();
   });
 });
