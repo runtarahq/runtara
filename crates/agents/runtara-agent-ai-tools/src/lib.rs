@@ -743,6 +743,14 @@ pub struct ChatCompletionInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
+
+    #[field(
+        display_name = "Timeout (ms)",
+        description = "Per-attempt outbound-HTTP timeout for the LLM call, in milliseconds (defaults to 180000 when absent)",
+        example = "180000"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
@@ -814,10 +822,9 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
             .output_schema
             .as_ref()
             .map(|s| serde_json::to_string(s).unwrap_or_default()),
-        // Placeholder — replaced with the author-configurable timeout in the
-        // next commit. None already resolves to DEFAULT_STEP_TIMEOUT_MS in
-        // run_completion, removing the prior 30s proxy floor.
-        timeout_ms: None,
+        // Author-configurable per-attempt timeout; None resolves to
+        // DEFAULT_STEP_TIMEOUT_MS in run_completion.
+        timeout_ms: input.timeout_ms,
     };
 
     let response = runtara_ai::run_completion(req)
@@ -946,6 +953,14 @@ pub struct ChatTurnInput {
     )]
     #[serde(default)]
     pub pending_tool_results: Vec<Value>,
+
+    #[field(
+        display_name = "Turn Timeout (ms)",
+        description = "Per-attempt outbound-HTTP timeout for this LLM turn, in milliseconds (defaults to 180000 when absent)",
+        example = "180000"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
@@ -1063,10 +1078,9 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
             .output_schema
             .as_ref()
             .map(|s| serde_json::to_string(s).unwrap_or_default()),
-        // Placeholder — replaced with the author-configurable timeout in the
-        // next commit. None already resolves to DEFAULT_STEP_TIMEOUT_MS in
-        // run_completion, removing the prior 30s proxy floor.
-        timeout_ms: None,
+        // Author-configurable per-attempt timeout; None resolves to
+        // DEFAULT_STEP_TIMEOUT_MS in run_completion.
+        timeout_ms: input.timeout_ms,
     };
     let response = runtara_ai::run_completion(req)
         .map_err(|e| AgentError::transient("AI_TURN_COMPLETION_FAILED", e))?;
