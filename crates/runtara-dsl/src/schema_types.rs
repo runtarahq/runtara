@@ -466,12 +466,16 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds.
+    /// Step timeout in milliseconds, per attempt.
     ///
-    /// **Not enforced** — a running capability invoke cannot be preempted in
-    /// the synchronous component model, so this value is accepted and ignored
-    /// (validation warns with W071). Split, While, and WaitForSignal timeouts
-    /// are enforced.
+    /// Bounds the capability's **outbound HTTP call**, not in-guest compute: the
+    /// emitter injects it as `timeout_ms` into the capability input, and the
+    /// server proxy honors that when the capability accepts a `timeout_ms`
+    /// input (e.g. the `http` agent, AI chat). A running invoke cannot be
+    /// preempted in the synchronous component model, so it never fails the step
+    /// purely on elapsed wall-clock, and capabilities that don't read
+    /// `timeout_ms` ignore it (validation warns with W071). Split, While, and
+    /// WaitForSignal timeouts are enforced as true deadlines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 

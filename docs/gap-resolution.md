@@ -157,6 +157,18 @@ checks) — the inconsistency is invisible to users.
 - [x] E2E: live server `POST /api/runtime/workflows/graph/validate` returns both W071 strings for
   an Agent+EmbedWorkflow-timeout graph and none for a Split-timeout graph.
 
+**Update (2026-07-13) — configurable AI/agent timeouts.** Item 3 above (real
+enforcement) is now partially delivered at the **outbound-HTTP layer** rather
+than by guest preemption: a single `runtara_dsl::DEFAULT_STEP_TIMEOUT_MS`
+(180000) is the default for AI/agent LLM calls, the `runtara-ai` providers apply
+a per-request timeout (removing the prior 30s proxy floor), and codegen injects
+`AgentStep.timeout` as `timeout_ms` into the capability input so capabilities
+that accept one (e.g. the `http` agent, AI chat) bound their outbound HTTP call
+via the proxy. A new `AiAgentConfig.turnTimeout` bounds each LLM brain turn
+(per attempt) and is genuinely enforced; per-tool-call timeouts come from each
+tool's own Agent-step `timeout`. W071 remains for the non-preemptible /
+non-HTTP case; its wording now credits the HTTP-bound behavior and turnTimeout.
+
 ---
 
 <a name="gap-04"></a>

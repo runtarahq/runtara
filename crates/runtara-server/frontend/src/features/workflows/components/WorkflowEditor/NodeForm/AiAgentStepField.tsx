@@ -1011,6 +1011,29 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 </FormControl>
               </FormItem>
             </div>
+
+            <FormItem>
+              <FormLabel>Turn Timeout (ms)</FormLabel>
+              <FormDescription>
+                Max duration of a single LLM turn, per attempt (defaults to
+                180000). Bounds the model call, not tool calls.
+              </FormDescription>
+              <FormControl>
+                <Input
+                  type="number"
+                  min={0}
+                  value={getValue('turnTimeout') ?? ''}
+                  onChange={(e) =>
+                    updateField(
+                      'turnTimeout',
+                      e.target.value ? Number(e.target.value) : ''
+                    )
+                  }
+                  placeholder="180000"
+                  className="w-32"
+                />
+              </FormControl>
+            </FormItem>
           </div>
         )}
       </div>

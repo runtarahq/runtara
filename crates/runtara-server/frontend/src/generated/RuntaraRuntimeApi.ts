@@ -438,12 +438,16 @@ export interface AgentStep {
    */
   retryDelay?: number | null;
   /**
-   * Step timeout in milliseconds.
+   * Step timeout in milliseconds, per attempt.
    *
-   * **Not enforced** — a running capability invoke cannot be preempted in
-   * the synchronous component model, so this value is accepted and ignored
-   * (validation warns with W071). Split, While, and WaitForSignal timeouts
-   * are enforced.
+   * Bounds the capability's **outbound HTTP call**, not in-guest compute: the
+   * emitter injects it as `timeout_ms` into the capability input, and the
+   * server proxy honors that when the capability accepts a `timeout_ms`
+   * input (e.g. the `http` agent, AI chat). A running invoke cannot be
+   * preempted in the synchronous component model, so it never fails the step
+   * purely on elapsed wall-clock, and capabilities that don't read
+   * `timeout_ms` ignore it (validation warns with W071). Split, While, and
+   * WaitForSignal timeouts are enforced as true deadlines.
    * @format int64
    * @min 0
    */
@@ -599,6 +603,21 @@ export interface AiAgentConfig {
    * @format double
    */
   temperature?: number | null;
+  /**
+   * Maximum duration of a single LLM "brain" turn, per attempt, in
+   * milliseconds (default: 180000).
+   *
+   * A turn is one iteration of the tool loop (or the single-shot
+   * completion), NOT a graph step — hence its own field alongside
+   * `maxIterations` (which bounds the *number* of turns). Enforced at the
+   * outbound-HTTP layer: the emitter injects it into the LLM invoke and the
+   * server proxy honors it, so it bounds the model call rather than
+   * preempting in-guest compute. Per-tool-call timeouts come from each
+   * tool's own Agent step `timeout`, independently of this value.
+   * @format int64
+   * @min 0
+   */
+  turnTimeout?: number | null;
   /** User message / request to process */
   userPrompt: MappingValue;
 }

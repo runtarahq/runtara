@@ -1397,9 +1397,12 @@ impl std::fmt::Display for ValidationWarning {
             ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
                 write!(
                     f,
-                    "[W071] Step '{}': 'timeout' is accepted but not enforced for {} steps — the \
-                     step will not fail when the duration is exceeded. Split, While, and \
-                     WaitForSignal timeouts are enforced.",
+                    "[W071] Step '{}': 'timeout' is accepted but not enforced by preemption for {} \
+                     steps — a running invoke/child cannot be interrupted, so the step will not \
+                     fail purely because the duration is exceeded. (Agent capabilities that accept \
+                     a `timeout_ms` input, e.g. the http agent, DO bound their outbound HTTP call \
+                     via it.) AiAgent turnTimeout, Split, While, and WaitForSignal timeouts are \
+                     enforced.",
                     step_id, step_type
                 )
             }
@@ -3973,10 +3976,13 @@ fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) 
 
 /// W071: warn when an Agent or EmbedWorkflow step configures `timeout`.
 ///
-/// No deadline exists for these step types — a running capability invoke
-/// cannot be preempted in the synchronous component model, so the value is
-/// parsed and ignored. Split, While, and WaitForSignal timeouts ARE enforced
-/// by the emitter, so those step types are deliberately not flagged.
+/// A running capability invoke (or child workflow) cannot be preempted in the
+/// synchronous component model, so `timeout` never fails the step purely on
+/// elapsed wall-clock. It is NOT a pure no-op for Agent steps, though: the
+/// emitter injects it as `timeout_ms` into the capability input, so a
+/// capability that accepts one (e.g. the http agent) bounds its outbound HTTP
+/// call via the proxy. AiAgent turnTimeout, Split, While, and WaitForSignal
+/// timeouts ARE enforced by the emitter, so those step types are not flagged.
 fn validate_unenforced_timeouts(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         match step {
