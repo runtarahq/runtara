@@ -384,6 +384,14 @@ interface json {
     ai-turn-tool-args: func(turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
     // The resolved tool index for the index-th tool call (u32::MAX = unknown).
     ai-turn-tool-index: func(turn-out: list<u8>, index: u32) -> result<u32, string>;
+    // Merge a `timeout_ms` field into a tool call's argument object so the
+    // dispatched tool capability applies the configured per-call timeout. The
+    // arguments come from the model, so the emitter injects the tool's own
+    // Agent-step timeout here. A non-object args value is returned unchanged.
+    ai-tool-args-with-timeout: func(
+        args: list<u8>,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
     // Append the index-th tool call's dispatched result to the pending list.
     ai-turn-add-result: func(
         pending: list<u8>,

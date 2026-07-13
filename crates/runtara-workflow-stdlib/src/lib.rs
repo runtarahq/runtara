@@ -854,6 +854,10 @@ mod component {
             direct_json::DirectJsonManifest::ai_turn_tool_index(&turn_out, index)
         }
 
+        fn ai_tool_args_with_timeout(args: Vec<u8>, timeout_ms: u64) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_tool_args_with_timeout(&args, timeout_ms)
+        }
+
         fn ai_turn_add_result(
             pending: Vec<u8>,
             turn_out: Vec<u8>,

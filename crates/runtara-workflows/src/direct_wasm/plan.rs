@@ -222,6 +222,11 @@ pub(super) enum DirectAiToolPlan {
     Agent {
         agent_id: u32,
         agent_component_id: String,
+        /// The tool Agent step's own `timeout` (ms), injected as `timeout_ms`
+        /// into the LLM-provided arguments so the dispatched call is bounded
+        /// independently of the AiAgent turnTimeout. `None` leaves the tool
+        /// capability's own default in effect.
+        timeout_ms: Option<u64>,
     },
     /// Run a composed child workflow with the LLM-provided arguments as its input
     /// data and feed the child's final output back as the tool result. Mirrors the
@@ -962,6 +967,7 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        timeout_ms: tool_agent.timeout,
                     });
                 } else {
                     let tool_agent = graph
@@ -980,6 +986,9 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        // MCP tool providers carry their own transport timeout;
+                        // this is typically None (no per-call override).
+                        timeout_ms: tool_agent.timeout,
                     });
                 }
             }

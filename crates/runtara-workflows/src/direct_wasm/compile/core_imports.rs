@@ -106,6 +106,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_tool_count: Option<u32>,
     stdlib_ai_turn_tool_args: Option<u32>,
     stdlib_ai_turn_tool_index: Option<u32>,
+    stdlib_ai_tool_args_with_timeout: Option<u32>,
     stdlib_ai_turn_add_result: Option<u32>,
     stdlib_wait_timeout_error_envelope: Option<u32>,
     stdlib_ai_turn_cache_key: Option<u32>,
@@ -408,6 +409,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_turn_tool_index,
                 "stdlib.ai-turn-tool-index",
             )?,
+            stdlib_ai_tool_args_with_timeout: require_import(
+                self.stdlib_ai_tool_args_with_timeout,
+                "stdlib.ai-tool-args-with-timeout",
+            )?,
             stdlib_ai_turn_add_result: require_import(
                 self.stdlib_ai_turn_add_result,
                 "stdlib.ai-turn-add-result",
@@ -612,6 +617,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_tool_count: u32,
     pub(super) stdlib_ai_turn_tool_args: u32,
     pub(super) stdlib_ai_turn_tool_index: u32,
+    pub(super) stdlib_ai_tool_args_with_timeout: u32,
     pub(super) stdlib_ai_turn_add_result: u32,
     pub(super) stdlib_wait_timeout_error_envelope: u32,
     pub(super) stdlib_ai_turn_cache_key: u32,
@@ -899,6 +905,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_tool_args = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-tool-index") {
         import_indices.stdlib_ai_turn_tool_index = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-tool-args-with-timeout") {
+        import_indices.stdlib_ai_tool_args_with_timeout = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-add-result") {
         import_indices.stdlib_ai_turn_add_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error-envelope") {

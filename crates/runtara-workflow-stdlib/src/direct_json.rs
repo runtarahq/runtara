@@ -1682,6 +1682,21 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-turn tool args: {err}"))
     }
 
+    /// Merge a `timeout_ms` field into a tool call's argument object so the
+    /// dispatched tool capability applies the configured per-call timeout. The
+    /// arguments are produced by the model, so this is where the emitter injects
+    /// the tool's own Agent-step timeout. A non-object args value (unusual) is
+    /// returned unchanged.
+    pub fn ai_tool_args_with_timeout(args: &[u8], timeout_ms: u64) -> Result<Vec<u8>, String> {
+        let mut args: Value = serde_json::from_slice(args)
+            .map_err(|err| format!("failed to parse ai tool args: {err}"))?;
+        if let Value::Object(map) = &mut args {
+            map.insert("timeout_ms".to_string(), Value::from(timeout_ms));
+        }
+        serde_json::to_vec(&args)
+            .map_err(|err| format!("failed to serialize ai tool args with timeout: {err}"))
+    }
+
     /// The resolved tool index for the `index`-th tool call (its position in the
     /// advertised tools). Returns `u32::MAX` when the model named an unknown
     /// tool, which the loop dispatches as a no-op.
