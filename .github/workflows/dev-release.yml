@@ -1,0 +1,23 @@
+name: Publish Dev Snapshot
+
+# Manual button. Rebuilds runtara from the latest commit on the selected branch
+# (default: main) and (re)publishes the rolling `dev` pre-release — the same
+# pipeline that used to run automatically on every push to main. It replaces the
+# existing `dev` release and retags `dev` at the current HEAD.
+#
+# There are deliberately no inputs: pick the branch in the "Run workflow"
+# dropdown (leave it on main for a main-based snapshot) and press the button.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  dev-release:
+    name: Build & publish dev snapshot
+    # Reuse the real release pipeline (bundle → smoke → release → docker). With
+    # no tag ref, its jobs resolve version=dev and publish the dev snapshot.
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
