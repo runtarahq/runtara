@@ -124,6 +124,17 @@ export function composeVariableSuggestions(
         suggestions
       );
     }
+  } else if (isInsideWaitScope) {
+    // Inside a WaitForSignal onWait subgraph, `data.*` is scoped to the onWait
+    // graph's own input schema (DataScope::RequireSchema), which the editor
+    // doesn't model — offer a bare, untyped `data` rather than the wrong
+    // workflow-level inputs.
+    suggestions.push({
+      label: 'data',
+      value: 'data',
+      description: 'onWait scope input data',
+      group: 'Wait Scope',
+    });
   } else {
     // Add workflow input schema fields, expanding nested object properties
     // (declared via the schema editor's Advanced dialog) into dotted paths so

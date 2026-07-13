@@ -8,7 +8,11 @@ import { composeExecutionGraph } from '../CustomNodes/utils.tsx';
 import { NodeFormContext } from './NodeFormContext.tsx';
 import { composePreviousSteps } from './shared.ts';
 import { warmStepOutputShapes } from '@/features/workflows/utils/step-output-shapes';
-import { parseSchema } from '@/features/workflows/utils/schema';
+import {
+  resolveContainerScope,
+  splitItemSchemaFieldsFromScope,
+  type ScopeNode,
+} from '@/features/workflows/utils/container-scope';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import {
   getAgents,
@@ -29,7 +33,19 @@ interface SimpleVariable {
 
 interface Props {
   nodeId?: string;
+  /**
+   * Edit flows: the node's enclosing container. Create flows: the
+   * PREDECESSOR the new step is inserted after (a historic conflation —
+   * container scope is resolved separately, see createContainerId).
+   */
   parentNodeId?: string;
+  /**
+   * Create flows only: the enclosing container of the node being created.
+   * `null` means explicitly top-level; undefined means "derive from the
+   * predecessor's own container". Edit flows resolve the container from the
+   * store node itself and ignore this.
+   */
+  createContainerId?: string | null;
   isAddingBefore?: boolean;
   outputSchemaFields?: SchemaField[];
   /** Workflow input schema fields for variable suggestions */
@@ -73,26 +89,11 @@ function createGraphStructureSignature(
   return `nodes:[${nodeSignatures.join(',')}];edges:[${edgeSignatures.join(',')}]`;
 }
 
-/**
- * Bridges utils/schema's parsed fields (optional type/required/description)
- * to the editor SchemaField shape the NodeForm context uses.
- */
-function normalizeSchemaField(
-  field: import('@/features/workflows/utils/schema').SchemaField
-): SchemaField {
-  return {
-    ...field,
-    type: field.type ?? 'string',
-    required: field.required ?? false,
-    description: field.description ?? '',
-    properties: field.properties?.map(normalizeSchemaField),
-  };
-}
-
 export const NodeFormProvider = ({
   children,
   nodeId,
   parentNodeId,
+  createContainerId,
   isAddingBefore,
   outputSchemaFields,
   inputSchemaFields,
@@ -213,66 +214,78 @@ export const NodeFormProvider = ({
     };
   }, []);
 
-  const previousSteps = useMemo(
-    () =>
-      !!nodeId || !!parentNodeId
-        ? composePreviousSteps({
-            stepId: nodeId,
-            parentStepId: parentNodeId,
-            agents,
-            executionGraph,
-            workflows,
-          })
-        : [],
+  // Resolve the node's enclosing container from the FLAT store nodes (each
+  // node carries parentId) — the composed executionGraph nests subgraphs, so
+  // top-level lookups miss containers inside containers.
+  //
+  // Edit flows: the container is the store node's own parentId. Create
+  // flows: the explicit createContainerId when the surface knows it, else
+  // the predecessor's container (a step inserted after/into an edge lives in
+  // the same container as its predecessor).
+  const { containerId, containerScope } = useMemo(() => {
+    const { nodes } = useWorkflowStore.getState();
+    const editNode = nodeId
+      ? nodes.find((node) => node.id === nodeId)
+      : undefined;
+    let resolvedContainerId: string | undefined;
+    if (editNode) {
+      resolvedContainerId = editNode.parentId ?? undefined;
+    } else if (createContainerId !== undefined) {
+      resolvedContainerId = createContainerId ?? undefined;
+    } else if (parentNodeId) {
+      resolvedContainerId = nodes.find((node) => node.id === parentNodeId)
+        ?.parentId;
+    }
+    return {
+      containerId: resolvedContainerId,
+      containerScope: resolveContainerScope(
+        nodes as ScopeNode[],
+        resolvedContainerId
+      ),
+    };
+    // graphSignature is the intentional store-change trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId, parentNodeId, createContainerId, graphSignature]);
+
+  const previousSteps = useMemo(() => {
+    const { nodes } = useWorkflowStore.getState();
+    const isEdit = !!nodeId && nodes.some((node) => node.id === nodeId);
+    if (!isEdit && !parentNodeId && !containerId) {
+      return [];
+    }
+    return composePreviousSteps({
+      stepId: isEdit ? nodeId : undefined,
+      predecessorId: isEdit ? undefined : parentNodeId,
+      containerId,
+      agents,
+      executionGraph,
+      workflows,
+    });
     // shapesReady is an intentional extra trigger: the shape cache feeding
     // composePreviousSteps is module-level, not a prop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeId, parentNodeId, agents, executionGraph, workflows, shapesReady]
+  }, [
+    nodeId,
+    parentNodeId,
+    containerId,
+    agents,
+    executionGraph,
+    workflows,
+    shapesReady,
+  ]);
+
+  // Scope flags follow the runtime's container-chain semantics (While bodies
+  // pass the data scope through; Split rebinds it; onWait is unknowable).
+  const isInsideWhileLoop = containerScope.isInsideWhileLoop;
+  const isInsideSplit = containerScope.isInsideSplit;
+  const isInsideWaitScope = containerScope.isInsideWaitScope;
+
+  // The governing Split's declared iteration schema (bare data.* inside the
+  // scope is the current item, validated against this schema).
+  const splitItemSchemaFields = useMemo(
+    () => splitItemSchemaFieldsFromScope(containerScope),
+    [containerScope]
   );
-
-  // Detect if this step is inside a While loop container
-  const isInsideWhileLoop = useMemo(() => {
-    if (!parentNodeId || !executionGraph?.steps) return false;
-    const parentStep = executionGraph.steps[parentNodeId];
-    return parentStep?.stepType === 'While';
-  }, [parentNodeId, executionGraph]);
-
-  // Detect if this step is inside a Split iteration container
-  const isInsideSplit = useMemo(() => {
-    if (!parentNodeId || !executionGraph?.steps) return false;
-    const parentStep = executionGraph.steps[parentNodeId];
-    return parentStep?.stepType === 'Split';
-  }, [parentNodeId, executionGraph]);
-
-  // The enclosing Split's declared iteration schema (bare data.* inside the
-  // subgraph is the current item, validated against this schema).
-  const splitItemSchemaFields = useMemo(() => {
-    if (!isInsideSplit || !parentNodeId || !executionGraph?.steps) {
-      return undefined;
-    }
-    const parentStep = executionGraph.steps[parentNodeId] as {
-      inputSchema?: Record<string, unknown>;
-    };
-    const schema = parentStep?.inputSchema;
-    if (!schema || Object.keys(schema).length === 0) {
-      return undefined;
-    }
-    try {
-      const fields = parseSchema(schema).map(normalizeSchemaField);
-      return fields.length > 0 ? fields : undefined;
-    } catch {
-      return undefined;
-    }
-  }, [isInsideSplit, parentNodeId, executionGraph]);
-
-  // Detect if this step is inside a WaitForSignal onWait scope (the runtime
-  // injects variables._signal_id there — see WAIT_ON_WAIT_SCOPE_VARIABLES in
-  // crates/runtara-workflows/src/validation.rs)
-  const isInsideWaitScope = useMemo(() => {
-    if (!parentNodeId || !executionGraph?.steps) return false;
-    const parentStep = executionGraph.steps[parentNodeId];
-    return parentStep?.stepType === 'WaitForSignal';
-  }, [parentNodeId, executionGraph]);
 
   const isLoading =
     agentsQuery.isFetching ||

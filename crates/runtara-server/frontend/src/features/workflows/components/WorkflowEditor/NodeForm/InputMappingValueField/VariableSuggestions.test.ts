@@ -73,7 +73,15 @@ describe('composeVariableSuggestions', () => {
     );
 
     const waitScope = suggestions.filter((s) => s.group === 'Wait Scope');
-    expect(waitScope.map((s) => s.value)).toEqual(['variables._signal_id']);
+    // The onWait scope offers a bare `data` (its own undeclared schema) plus
+    // the injected _signal_id — never the wrong-scope workflow inputs.
+    expect(waitScope.map((s) => s.value)).toEqual([
+      'data',
+      'variables._signal_id',
+    ]);
+    expect(
+      suggestions.some((s) => s.value.startsWith('workflow.inputs.data'))
+    ).toBe(false);
   });
 
   it('omits Wait Scope variables outside an onWait scope', () => {
@@ -94,7 +102,8 @@ describe('composeVariableSuggestions', () => {
       composeVariableSuggestions([], undefined, undefined, false, false, true)
     );
 
-    expect(grouped['Wait Scope']).toHaveLength(1);
+    // Bare `data` (onWait scope) plus the injected _signal_id.
+    expect(grouped['Wait Scope']).toHaveLength(2);
   });
 });
 

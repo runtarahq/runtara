@@ -4,7 +4,7 @@ import {
   __setStepOutputShapesForTests,
   OutputShapeJson,
 } from '@/features/workflows/utils/step-output-shapes';
-import { composePreviousSteps } from './shared';
+import { composePreviousSteps, findStepDeep } from './shared';
 import { composeVariableSuggestions } from '../NodeForm/InputMappingValueField/VariableSuggestions';
 import type { ExecutionGraph } from '../CustomNodes/utils.tsx';
 
@@ -308,5 +308,124 @@ describe('composeVariableSuggestions sibling labels', () => {
     );
     expect(hasFailures?.label).toBe('hasFailures');
     expect(hasFailures?.type).toBe('boolean');
+  });
+});
+
+describe('composePreviousSteps container + predecessor semantics', () => {
+  beforeEach(() => {
+    __setStepOutputShapesForTests(SHAPES);
+  });
+  afterEach(() => {
+    __resetStepOutputShapesForTests();
+  });
+
+  // workflow: fetch -> split; split's subgraph: a -> b (b edited)
+  function nestedGraph(): ExecutionGraph {
+    return {
+      entryPoint: 'fetch',
+      executionPlan: [{ fromStep: 'fetch', toStep: 'split' }],
+      steps: {
+        fetch: { id: 'fetch', name: 'Fetch', stepType: 'Agent' },
+        split: {
+          id: 'split',
+          name: 'Split',
+          stepType: 'Split',
+          subgraph: {
+            entryPoint: 'a',
+            executionPlan: [{ fromStep: 'a', toStep: 'b' }],
+            steps: {
+              a: { id: 'a', name: 'Inner A', stepType: 'Agent' },
+              b: { id: 'b', name: 'Inner B', stepType: 'Agent' },
+            },
+          },
+        },
+      },
+    } as unknown as ExecutionGraph;
+  }
+
+  it('scopes references to the container subgraph, not the workflow root', () => {
+    // Editing inner step b: only its sibling a is upstream, not the outer
+    // fetch/split.
+    const steps = composePreviousSteps({
+      stepId: 'b',
+      containerId: 'split',
+      agents: [],
+      executionGraph: nestedGraph(),
+      workflows: [],
+    });
+    expect(steps.map((s) => s.id)).toEqual(['a']);
+  });
+
+  it('finds a container nested inside another container', () => {
+    // Split > While > agent: the While is in split.subgraph, not top-level.
+    const graph = {
+      entryPoint: 'split',
+      executionPlan: [],
+      steps: {
+        split: {
+          id: 'split',
+          name: 'Split',
+          stepType: 'Split',
+          subgraph: {
+            entryPoint: 'while',
+            executionPlan: [],
+            steps: {
+              while: {
+                id: 'while',
+                name: 'While',
+                stepType: 'While',
+                subgraph: {
+                  entryPoint: 'inner',
+                  executionPlan: [],
+                  steps: {
+                    inner: { id: 'inner', name: 'Inner', stepType: 'Agent' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as ExecutionGraph;
+
+    expect(findStepDeep(graph, 'while')?.name).toBe('While');
+    expect(findStepDeep(graph, 'inner')?.name).toBe('Inner');
+    expect(findStepDeep(graph, 'nope')).toBeNull();
+  });
+
+  it('uses the predecessor for a new step at the workflow root', () => {
+    // Creating a step after `fetch` at top level: fetch is upstream.
+    const steps = composePreviousSteps({
+      predecessorId: 'fetch',
+      agents: [],
+      executionGraph: nestedGraph(),
+      workflows: [],
+    });
+    expect(steps.map((s) => s.id)).toContain('fetch');
+    // The Split (a sibling, not a predecessor's ancestor) is not upstream.
+    expect(steps.map((s) => s.id)).not.toContain('split');
+  });
+
+  it('returns empty for a container with no predecessor and no steps', () => {
+    const graph = {
+      entryPoint: 'split',
+      executionPlan: [],
+      steps: {
+        split: {
+          id: 'split',
+          name: 'Split',
+          stepType: 'Split',
+          subgraph: { entryPoint: '', executionPlan: [], steps: {} },
+        },
+      },
+    } as unknown as ExecutionGraph;
+    expect(
+      composePreviousSteps({
+        containerId: 'split',
+        agents: [],
+        executionGraph: graph,
+        workflows: [],
+      })
+    ).toEqual([]);
   });
 });

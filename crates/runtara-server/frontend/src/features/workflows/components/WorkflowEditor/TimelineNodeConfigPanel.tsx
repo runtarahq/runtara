@@ -11,6 +11,8 @@ import type { SchemaField } from './EditorSidebar/SchemaFieldsEditor';
 interface TimelineNodeConfigPanelProps {
   nodeId: string;
   parentNodeId?: string;
+  /** Create flows: the real enclosing container (null = top level). */
+  createContainerId?: string | null;
   nodeData: form.SchemaType;
   originalNodeData: form.SchemaType;
   outputSchemaFields?: SchemaField[];
@@ -29,6 +31,7 @@ interface TimelineNodeConfigPanelProps {
 export function TimelineNodeConfigPanel({
   nodeId,
   parentNodeId,
+  createContainerId,
   nodeData,
   originalNodeData,
   outputSchemaFields,
@@ -97,6 +100,7 @@ export function TimelineNodeConfigPanel({
         <NodeFormProvider
           nodeId={nodeId}
           parentNodeId={parentNodeId}
+          createContainerId={createContainerId}
           outputSchemaFields={outputSchemaFields}
           inputSchemaFields={inputSchemaFields}
           variables={variables}

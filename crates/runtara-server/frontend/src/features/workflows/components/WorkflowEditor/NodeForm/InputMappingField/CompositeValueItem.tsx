@@ -172,7 +172,9 @@ export function CompositeValueItem({
     inputSchemaFields,
     variables,
     isInsideSplit,
+    isInsideWaitScope,
     splitItemSchemaFields,
+    nodeId,
   } = useContext(NodeFormContext);
 
   // Get errors for this specific item
@@ -206,7 +208,9 @@ export function CompositeValueItem({
       inputSchemaFields,
       variables,
       insideSplitScope: isInsideSplit,
+      insideWaitScope: isInsideWaitScope,
       splitItemSchemaFields,
+      currentStepId: nodeId,
     };
     return {
       referenceType: resolveReferenceType(value.value as string, context),
@@ -218,7 +222,9 @@ export function CompositeValueItem({
     inputSchemaFields,
     variables,
     isInsideSplit,
+    isInsideWaitScope,
     splitItemSchemaFields,
+    nodeId,
   ]);
 
   // Handle value type change

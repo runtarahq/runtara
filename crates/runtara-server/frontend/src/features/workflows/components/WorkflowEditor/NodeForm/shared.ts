@@ -33,84 +33,100 @@ export interface StepInfo {
 }
 
 /**
- * Main function to compose information about previous steps
+ * Main function to compose information about previous steps.
+ *
+ * `containerId` is the enclosing container step (Split/While subgraph,
+ * WaitForSignal onWait), found at ANY nesting depth — undefined means top
+ * level. It is deliberately separate from `predecessorId` (the step the new
+ * step is created after): the old API overloaded one parameter with both
+ * meanings, so adding a step AFTER a Split was misread as adding INSIDE it,
+ * and containers nested in other containers were never found (the lookup
+ * only searched top-level steps).
  */
 export function composePreviousSteps({
   stepId,
-  parentStepId,
+  predecessorId,
+  containerId,
   agents,
   executionGraph,
   workflows = [],
 }: {
+  /** The existing step being edited. */
   stepId?: string;
-  parentStepId?: string;
+  /** For new steps: the step the new one is inserted after. */
+  predecessorId?: string;
+  /** The enclosing container step id (any depth); undefined = top level. */
+  containerId?: string;
   agents: ExtendedAgent[];
   executionGraph: ExecutionGraph | null;
   workflows?: WorkflowDto[];
 }): StepInfo[] {
-  if (!stepId && !parentStepId) {
-    throw new Error('Either stepId or parentStepId must be provided');
-  }
-
   if (!executionGraph) {
-    return []; // Return empty array if execution graph is null
+    return [];
   }
 
-  // Special handling for nodes inside container steps (Split, While,
-  // RepeatUntil, GroupBy — and WaitForSignal, whose nested graph is `onWait`)
-  if (parentStepId) {
-    // Find the parent container step
-    const parentStep = executionGraph.steps?.[parentStepId];
-
+  // Resolve the graph that scopes references: the container's subgraph, or
+  // the workflow root. The DSL does not allow referencing steps outside the
+  // container or in nested subgraphs.
+  let graph = executionGraph;
+  if (containerId) {
+    const containerStep = findStepDeep(executionGraph, containerId);
     const containerGraph =
-      parentStep?.subgraph ??
-      (parentStep as { onWait?: ExecutionGraph } | undefined)?.onWait;
-    if (containerGraph) {
-      // We're inside a container - get previous steps from the container's subgraph
-      const subgraph = containerGraph;
+      containerStep?.subgraph ??
+      (containerStep as { onWait?: ExecutionGraph } | null)?.onWait;
+    if (!containerGraph) {
+      return [];
+    }
+    graph = containerGraph;
+  }
 
-      // If stepId is provided, find steps before it in the subgraph
-      // If stepId is not provided (creating new step), get all steps in subgraph
-      let previousStepIds: string[] = [];
+  let previousStepIds: string[] = [];
+  if (stepId) {
+    const directParents = findParentStepIds(stepId, graph);
+    if (directParents.length > 0) {
+      previousStepIds = findPreviousSteps(directParents, graph);
+    }
+  } else if (predecessorId) {
+    previousStepIds = findPreviousSteps([predecessorId], graph);
+  } else if (containerId) {
+    // First step in a container with no predecessor: offer all siblings.
+    previousStepIds = Object.keys(graph.steps || {});
+  }
 
-      if (stepId) {
-        // Find direct parent steps within the subgraph
-        const directParents = findParentStepIds(stepId, subgraph);
+  if (previousStepIds.length === 0) {
+    return [];
+  }
 
-        // Get all ancestors of those parents
-        if (directParents.length > 0) {
-          previousStepIds = findPreviousSteps(directParents, subgraph);
+  return buildStepInfoList(previousStepIds, graph, agents, workflows);
+}
+
+/**
+ * Finds a step by id anywhere in the graph, recursing into Split/While
+ * subgraphs and WaitForSignal onWait graphs.
+ */
+export function findStepDeep(
+  graph: ExecutionGraph,
+  id: string
+): NonNullable<ExecutionGraph['steps']>[string] | null {
+  const direct = graph.steps?.[id];
+  if (direct) {
+    return direct;
+  }
+  for (const step of Object.values(graph.steps ?? {})) {
+    const nested = [
+      step.subgraph,
+      (step as { onWait?: ExecutionGraph }).onWait,
+    ];
+    for (const sub of nested) {
+      if (sub) {
+        const found = findStepDeep(sub, id);
+        if (found) {
+          return found;
         }
-      } else {
-        // No stepId means we're creating a new step - include all existing steps in container
-        previousStepIds = Object.keys(subgraph.steps || {});
       }
-
-      // Build StepInfo for steps inside the container
-      // Only include sibling steps within the same subgraph - the DSL does not
-      // allow referencing steps outside the container or in nested subgraphs
-      return buildStepInfoList(previousStepIds, subgraph, agents, workflows);
     }
   }
-
-  // Regular handling for steps not inside containers
-  // Get parent step IDs (either from parameter or by finding them)
-  let parentStepIds: string[] = [];
-  if (parentStepId) {
-    parentStepIds = [parentStepId];
-  } else if (stepId) {
-    parentStepIds = findParentStepIds(stepId, executionGraph);
-  }
-
-  if (parentStepIds.length === 0) {
-    return []; // No parent steps found or provided
-  }
-
-  // Get all previous step IDs (including parents)
-  const previousStepIds = findPreviousSteps(parentStepIds, executionGraph);
-
-  // Build StepInfo for each previous step
-  return buildStepInfoList(previousStepIds, executionGraph, agents, workflows);
+  return null;
 }
 
 /**

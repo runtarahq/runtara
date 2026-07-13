@@ -43,6 +43,8 @@ interface NodeConfigDialogProps {
   isCreate?: boolean;
   /** Parent node ID for computing previous steps (used when creating new nodes) */
   parentNodeId?: string;
+  /** Create flows: the real enclosing container (null = top level). */
+  createContainerId?: string | null;
 }
 
 export function NodeConfigDialog({
@@ -60,6 +62,7 @@ export function NodeConfigDialog({
   onDelete,
   isCreate = false,
   parentNodeId,
+  createContainerId,
 }: NodeConfigDialogProps) {
   // Store latest form data via ref to avoid circular updates
   // We use a ref instead of state because we don't want changes to trigger re-renders
@@ -168,6 +171,7 @@ export function NodeConfigDialog({
           <NodeFormProvider
             nodeId={nodeId}
             parentNodeId={parentNodeId}
+          createContainerId={createContainerId}
             outputSchemaFields={outputSchemaFields}
             inputSchemaFields={inputSchemaFields}
             variables={variables}

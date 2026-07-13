@@ -222,8 +222,16 @@ export function TemplateEditorModal({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Get nodeId and available context variables from NodeFormContext
-  const { nodeId, previousSteps, inputSchemaFields, variables } =
-    useContext(NodeFormContext);
+  const {
+    nodeId,
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+    splitItemSchemaFields,
+  } = useContext(NodeFormContext);
 
   // Get the "context" field entry from the store for this node
   // The Render Template capability uses "context" to store template variables
@@ -259,9 +267,22 @@ export function TemplateEditorModal({
     return composeVariableSuggestions(
       previousSteps,
       inputSchemaFields,
-      variables
+      variables,
+      isInsideWhileLoop,
+      isInsideSplit,
+      isInsideWaitScope,
+      splitItemSchemaFields
     );
-  }, [contextEntry, previousSteps, inputSchemaFields, variables]);
+  }, [
+    contextEntry,
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+    splitItemSchemaFields,
+  ]);
 
   // Filter variables by search query
   const filteredVariables = useMemo(() => {

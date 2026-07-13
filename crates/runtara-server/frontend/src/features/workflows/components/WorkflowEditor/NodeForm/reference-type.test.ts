@@ -421,4 +421,33 @@ describe('validateReferencePath', () => {
     expect(validateReferencePath('loop.outputs.x', CONTEXT)).toBeNull();
     expect(validateReferencePath('item.email', CONTEXT)).toBeNull();
   });
+
+  it('never flags bracket-indexed data references (runtime normalizes them)', () => {
+    // 'orders[0]' must not be matched against the declared field 'orders';
+    // the backend parses the index into a separate numeric segment.
+    expect(
+      validateReferencePath('data.customer[0].email', CONTEXT)
+    ).toBeNull();
+    expect(validateReferencePath('data.flag[0]', CONTEXT)).toBeNull();
+  });
+
+  it('never flags self-references (a save-time warning, not an error)', () => {
+    // Editing step 'filt', referencing its own output.
+    expect(
+      validateReferencePath("steps['filt'].outputs.items", {
+        ...CONTEXT,
+        currentStepId: 'filt',
+      })
+    ).toBeNull();
+  });
+
+  it('does not flag data.* inside a WaitForSignal onWait scope', () => {
+    // The onWait scope has its own (editor-unmodeled) schema.
+    expect(
+      validateReferencePath('data.anything', {
+        ...CONTEXT,
+        insideWaitScope: true,
+      })
+    ).toBeNull();
+  });
 });

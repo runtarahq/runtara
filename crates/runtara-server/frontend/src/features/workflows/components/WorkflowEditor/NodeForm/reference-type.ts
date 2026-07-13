@@ -143,6 +143,17 @@ export interface ReferenceTypeContext {
   insideSplitScope?: boolean;
   /** Declared iteration schema of the enclosing Split. */
   splitItemSchemaFields?: SchemaField[];
+  /**
+   * Inside a WaitForSignal onWait subgraph, `data.*` is scoped to the onWait
+   * graph's own (editor-unmodeled) schema — resolve to unknown and never flag.
+   */
+  insideWaitScope?: boolean;
+  /**
+   * Id of the step being edited. Self-references are demoted to a save-time
+   * warning by the server (SelfReference), so the inline check skips them
+   * instead of calling the step "not upstream".
+   */
+  currentStepId?: string;
 }
 
 /**
@@ -176,6 +187,10 @@ export function resolveReferenceType(
         return 'object';
       }
       return resolveSchemaFieldType(dataRest.split('.'), itemFields);
+    }
+    if (context.insideWaitScope) {
+      // onWait scope's own schema is not modeled in the editor.
+      return dataRest === '' ? 'object' : undefined;
     }
     if (dataRest === '') {
       return 'object';
@@ -313,11 +328,21 @@ export function validateReferencePath(
   }
 
   if (path.startsWith('steps.') || path.startsWith("steps['")) {
-    return validateStepReferencePath(path, context.previousSteps ?? []);
+    return validateStepReferencePath(
+      path,
+      context.previousSteps ?? [],
+      context.currentStepId
+    );
   }
 
   const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
   if (dataRest !== null && dataRest !== '') {
+    // Bracket indexing (data.orders[0].sku) is normalized at runtime into
+    // separate segments — mirror the step-reference branch and skip it here
+    // rather than mismatching 'orders[0]' against the declared 'orders'.
+    if (dataRest.includes('[')) {
+      return null;
+    }
     if (context.insideSplitScope) {
       // Bare data.* is the Split's current item; check its declared schema.
       // The explicit workflow.inputs.* spelling is left unchecked here.
@@ -329,6 +354,10 @@ export function validateReferencePath(
         context.splitItemSchemaFields,
         'the Split iteration schema'
       );
+    }
+    if (context.insideWaitScope) {
+      // onWait scope's own schema is not modeled — never flag.
+      return null;
     }
     return validateSchemaFieldPath(
       dataRest.split('.'),
@@ -342,7 +371,8 @@ export function validateReferencePath(
 
 function validateStepReferencePath(
   path: string,
-  previousSteps: StepInfo[]
+  previousSteps: StepInfo[],
+  currentStepId?: string
 ): string | null {
   const parsed = parseStepReference(path);
   if (!parsed) {
@@ -351,6 +381,10 @@ function validateStepReferencePath(
   // `steps.__error` is the onError scope's pseudo-step carrying the failure
   // payload — always legal inside error handlers.
   if (parsed.stepId === '__error') {
+    return null;
+  }
+  // Self-references are a save-time WARNING server-side, not an error.
+  if (currentStepId && parsed.stepId === currentStepId) {
     return null;
   }
   const step = previousSteps.find((s) => s.id === parsed.stepId);

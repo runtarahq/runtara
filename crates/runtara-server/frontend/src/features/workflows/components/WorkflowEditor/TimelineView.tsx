@@ -56,6 +56,11 @@ import {
   composeConditionSuggestions,
   type VariableSuggestion,
 } from './NodeForm/InputMappingValueField/VariableSuggestions';
+import {
+  resolveContainerScope,
+  splitItemSchemaFieldsFromScope,
+  type ScopeNode,
+} from '@/features/workflows/utils/container-scope';
 import type { SchemaField } from './EditorSidebar/SchemaFieldsEditor';
 import type { SimpleVariable } from './NodeForm/NodeFormContext';
 import { cn } from '@/lib/utils.ts';
@@ -181,8 +186,12 @@ type TimelineRouteController = {
   onDeleteRoute: (edgeId: string) => void;
   /** Creates an unconditional edge between two existing steps (join). */
   onConnectSteps: (sourceNodeId: string, targetNodeId: string) => void;
-  /** Composed reference suggestions for the route condition editor. */
-  conditionSuggestions: VariableSuggestion[];
+  /**
+   * Composed reference suggestions for a route condition editor, scoped to
+   * the container the edge lives in (an edge inside a Split body evaluates in
+   * the Split's iteration scope, where data.* is the current item).
+   */
+  conditionSuggestionsForEdge: (edge: Edge) => VariableSuggestion[];
 };
 
 function areTimelineAddRequestsEqual(
@@ -2028,7 +2037,7 @@ function TimelineRouteSettings({
               key={`${edge.id}-${conditionResetKey}`}
               value={conditionText || undefined}
               onChange={setConditionText}
-              suggestions={routeController.conditionSuggestions}
+              suggestions={routeController.conditionSuggestionsForEdge(edge)}
             />
           ) : (
             <Textarea
@@ -2863,14 +2872,22 @@ export function WorkflowTimelineView({
         onEdgesChange([{ id: edgeId, type: 'remove' }]),
       onConnectSteps: (sourceNodeId, targetNodeId) =>
         addStoreEdge(sourceNodeId, targetNodeId, 'source'),
-      // Edge conditions share the canonical suggestion pipeline. No upstream
-      // step context is threaded here yet, so only workflow inputs, variables
-      // and built-ins are offered.
-      conditionSuggestions: composeConditionSuggestions({
-        previousSteps: [],
-        inputSchemaFields,
-        variables,
-      }),
+      // Edge conditions share the canonical suggestion pipeline, scoped to the
+      // container the edge is in. No upstream step context is threaded yet, so
+      // only workflow inputs / Split-item data / variables / built-ins appear.
+      conditionSuggestionsForEdge: (edge: Edge) => {
+        const container = nodes.find((n) => n.id === edge.source)?.parentId;
+        const scope = resolveContainerScope(nodes as ScopeNode[], container);
+        return composeConditionSuggestions({
+          previousSteps: [],
+          inputSchemaFields,
+          variables,
+          isInsideWhileLoop: scope.isInsideWhileLoop,
+          isInsideSplit: scope.isInsideSplit,
+          isInsideWaitScope: scope.isInsideWaitScope,
+          splitItemSchemaFields: splitItemSchemaFieldsFromScope(scope),
+        });
+      },
     }),
     [
       flipConditionalBranches,
@@ -2880,6 +2897,7 @@ export function WorkflowTimelineView({
       addStoreEdge,
       inputSchemaFields,
       variables,
+      nodes,
     ]
   );
 

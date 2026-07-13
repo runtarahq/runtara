@@ -1931,6 +1931,7 @@ function WorkflowEditorContent({
           parentNodeId={
             pendingNewNode.sourceNodeId || pendingNewNode.insertionEdge?.source
           }
+          createContainerId={pendingNewNode.parentId ?? null}
         />
       );
     }
@@ -1945,6 +1946,7 @@ function WorkflowEditorContent({
           createStepContext.insertionEdge?.source ||
           createStepContext.parallelBranch?.source
         }
+        createContainerId={createStepContext.parentId ?? null}
       >
         <StepPickerPanel
           active
@@ -2156,6 +2158,7 @@ function WorkflowEditorContent({
           createStepContext?.connection?.source ||
           createStepContext?.insertionEdge?.source
         }
+        createContainerId={createStepContext?.parentId ?? null}
       >
         <StepPickerModal
           open={showStepPicker}
@@ -2209,6 +2212,7 @@ function WorkflowEditorContent({
           parentNodeId={
             pendingNewNode.sourceNodeId || pendingNewNode.insertionEdge?.source
           }
+          createContainerId={pendingNewNode.parentId ?? null}
         />
       )}
     </>

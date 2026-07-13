@@ -118,7 +118,9 @@ export function MappingValueInput({
     inputSchemaFields,
     variables,
     isInsideSplit,
+    isInsideWaitScope,
     splitItemSchemaFields,
+    nodeId,
   } = useContext(NodeFormContext);
 
   const isReference = valueType === 'reference';
@@ -184,7 +186,9 @@ export function MappingValueInput({
       inputSchemaFields,
       variables,
       insideSplitScope: isInsideSplit,
+      insideWaitScope: isInsideWaitScope,
       splitItemSchemaFields,
+      currentStepId: nodeId,
     };
     return {
       referenceType: resolveReferenceType(stringValue, context),
@@ -197,7 +201,9 @@ export function MappingValueInput({
     inputSchemaFields,
     variables,
     isInsideSplit,
+    isInsideWaitScope,
     splitItemSchemaFields,
+    nodeId,
   ]);
 
   // Cycle: immediate → template → reference → composite → immediate
