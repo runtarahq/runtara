@@ -4,6 +4,7 @@ import { NodeFormContext } from './NodeFormContext';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { ConditionEditor } from '@/shared/components/ui/condition-editor';
+import { composeConditionSuggestions } from './InputMappingValueField/VariableSuggestions';
 
 type WhileStepFieldProps = {
   name: string;
@@ -11,8 +12,28 @@ type WhileStepFieldProps = {
 
 export function WhileStepField({ name }: WhileStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps, inputSchemaFields, variables } =
-    useContext(NodeFormContext);
+  const {
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideSplit,
+    isInsideWaitScope,
+  } = useContext(NodeFormContext);
+
+  // The While condition always evaluates in its own loop context, so
+  // loop.index / loop.outputs are in scope regardless of nesting.
+  const conditionSuggestions = useMemo(
+    () =>
+      composeConditionSuggestions({
+        previousSteps,
+        inputSchemaFields,
+        variables,
+        isInsideWhileLoop: true,
+        isInsideSplit,
+        isInsideWaitScope,
+      }),
+    [previousSteps, inputSchemaFields, variables, isInsideSplit, isInsideWaitScope]
+  );
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const whileCondition = useWatch({
     name: 'whileCondition',
@@ -89,10 +110,7 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
         <ConditionEditor
           value={conditionValue}
           onChange={handleConditionChange}
-          previousSteps={previousSteps}
-          isInsideWhileLoop={true}
-          inputSchemaFields={inputSchemaFields}
-          variables={variables}
+          suggestions={conditionSuggestions}
         />
       </div>
 

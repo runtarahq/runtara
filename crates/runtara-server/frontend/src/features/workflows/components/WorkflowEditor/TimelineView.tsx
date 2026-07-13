@@ -51,11 +51,13 @@ import {
   PopoverTrigger,
 } from '@/shared/components/ui/popover';
 import { Textarea } from '@/shared/components/ui/textarea';
+import { ConditionEditor } from '@/shared/components/ui/condition-editor';
 import {
-  ConditionEditor,
-  type ConditionSchemaFieldInfo,
-  type ConditionVariableInfo,
-} from '@/shared/components/ui/condition-editor';
+  composeConditionSuggestions,
+  type VariableSuggestion,
+} from './NodeForm/InputMappingValueField/VariableSuggestions';
+import type { SchemaField } from './EditorSidebar/SchemaFieldsEditor';
+import type { SimpleVariable } from './NodeForm/NodeFormContext';
 import { cn } from '@/lib/utils.ts';
 import { NODE_TYPES } from '@/features/workflows/config/workflow.ts';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
@@ -78,9 +80,9 @@ type WorkflowTimelineViewProps = {
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
   /** Workflow input schema fields for the route condition editor picker. */
-  inputSchemaFields?: ConditionSchemaFieldInfo[];
+  inputSchemaFields?: SchemaField[];
   /** Workflow variables for the route condition editor picker. */
-  variables?: ConditionVariableInfo[];
+  variables?: SimpleVariable[];
 };
 
 export type TimelineAddStepRequest = {
@@ -179,8 +181,8 @@ type TimelineRouteController = {
   onDeleteRoute: (edgeId: string) => void;
   /** Creates an unconditional edge between two existing steps (join). */
   onConnectSteps: (sourceNodeId: string, targetNodeId: string) => void;
-  conditionInputSchemaFields?: ConditionSchemaFieldInfo[];
-  conditionVariables?: ConditionVariableInfo[];
+  /** Composed reference suggestions for the route condition editor. */
+  conditionSuggestions: VariableSuggestion[];
 };
 
 function areTimelineAddRequestsEqual(
@@ -2026,9 +2028,7 @@ function TimelineRouteSettings({
               key={`${edge.id}-${conditionResetKey}`}
               value={conditionText || undefined}
               onChange={setConditionText}
-              previousSteps={[]}
-              inputSchemaFields={routeController.conditionInputSchemaFields}
-              variables={routeController.conditionVariables}
+              suggestions={routeController.conditionSuggestions}
             />
           ) : (
             <Textarea
@@ -2863,8 +2863,14 @@ export function WorkflowTimelineView({
         onEdgesChange([{ id: edgeId, type: 'remove' }]),
       onConnectSteps: (sourceNodeId, targetNodeId) =>
         addStoreEdge(sourceNodeId, targetNodeId, 'source'),
-      conditionInputSchemaFields: inputSchemaFields,
-      conditionVariables: variables,
+      // Edge conditions share the canonical suggestion pipeline. No upstream
+      // step context is threaded here yet, so only workflow inputs, variables
+      // and built-ins are offered.
+      conditionSuggestions: composeConditionSuggestions({
+        previousSteps: [],
+        inputSchemaFields,
+        variables,
+      }),
     }),
     [
       flipConditionalBranches,

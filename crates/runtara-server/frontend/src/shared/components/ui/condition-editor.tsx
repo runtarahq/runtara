@@ -282,213 +282,25 @@ const getArgumentValueType = (
   return 'immediate'; // Default for plain strings
 };
 
-// Autocomplete suggestion interface
-interface VariableSuggestion {
+/**
+ * Autocomplete suggestion for condition references. Structurally compatible
+ * with the canonical VariableSuggestion from
+ * features/workflows .../InputMappingValueField/VariableSuggestions — the
+ * editor no longer composes suggestions itself (its old forked composer
+ * carried hardcoded guessed item.* field names not driven by any schema);
+ * call sites compose via composeConditionSuggestions and pass them in.
+ */
+export interface ConditionSuggestion {
   label: string;
   value: string;
   description?: string;
-  group:
-    | 'Workflow Inputs'
-    | 'Variables'
-    | 'Step Outputs'
-    | 'Current Item'
-    | 'Loop Context';
+  group: string;
   type?: string;
   stepName?: string; // Step name for display
   stepId?: string; // Step ID for reference
 }
 
-/** Minimal structural shape for workflow input schema fields. */
-export interface ConditionSchemaFieldInfo {
-  name?: string;
-  type?: string;
-  description?: string | null;
-}
-
-/** Minimal structural shape for workflow variables (constants). */
-export interface ConditionVariableInfo {
-  name?: string;
-  type?: string;
-  description?: string | null;
-}
-
-// Helper functions for autocomplete
-function composeVariableSuggestions(
-  previousSteps: any[],
-  isInsideWhileLoop?: boolean,
-  inputSchemaFields?: ConditionSchemaFieldInfo[],
-  variables?: ConditionVariableInfo[]
-): VariableSuggestion[] {
-  const suggestions: VariableSuggestion[] = [];
-
-  // Per-field workflow input suggestions (data.<field> references)
-  if (inputSchemaFields) {
-    for (const field of inputSchemaFields) {
-      if (field.name) {
-        suggestions.push({
-          label: `data.${field.name}`,
-          value: `workflow.inputs.data.${field.name}`,
-          description: field.description || 'Workflow input field',
-          group: 'Workflow Inputs',
-          type: field.type,
-        });
-      }
-    }
-  }
-
-  // Add hardcoded workflow input suggestions
-  suggestions.push({
-    label: 'workflow.inputs.data',
-    value: 'workflow.inputs.data',
-    description: 'Workflow input data',
-    group: 'Workflow Inputs',
-  });
-
-  suggestions.push({
-    label: 'workflow.inputs.variables',
-    value: 'workflow.inputs.variables',
-    description: 'Workflow input variables',
-    group: 'Workflow Inputs',
-  });
-
-  // Built-in runtime variables (always available)
-  suggestions.push({
-    label: '_workflow_id',
-    value: 'variables._workflow_id',
-    description:
-      'Workflow ID and instance ID (format: {workflow_id}::{instance_id})',
-    group: 'Variables',
-    type: 'string',
-  });
-  suggestions.push({
-    label: '_instance_id',
-    value: 'variables._instance_id',
-    description: 'Execution instance UUID',
-    group: 'Variables',
-    type: 'string',
-  });
-  suggestions.push({
-    label: '_tenant_id',
-    value: 'variables._tenant_id',
-    description: 'Tenant identifier',
-    group: 'Variables',
-    type: 'string',
-  });
-
-  // User-declared workflow variables (constants)
-  if (variables) {
-    for (const variable of variables) {
-      if (variable.name) {
-        suggestions.push({
-          label: variable.name,
-          value: `workflow.inputs.variables.${variable.name}`,
-          description: variable.description || 'Workflow variable',
-          group: 'Variables',
-          type: variable.type?.toLowerCase(),
-        });
-      }
-    }
-  }
-
-  // Add current item references (used in Filter/Split step conditions)
-  suggestions.push({
-    label: 'item',
-    value: 'item',
-    description: 'Current array item',
-    group: 'Current Item',
-  });
-  const commonItemFields = [
-    'id',
-    'name',
-    'title',
-    'status',
-    'type',
-    'value',
-    'key',
-    'email',
-    'price',
-    'quantity',
-    'created_at',
-    'updated_at',
-  ];
-  for (const field of commonItemFields) {
-    suggestions.push({
-      label: `item.${field}`,
-      value: `item.${field}`,
-      description: `Current item ${field}`,
-      group: 'Current Item',
-    });
-  }
-
-  // Add loop context references when inside a While loop
-  if (isInsideWhileLoop) {
-    suggestions.push({
-      label: 'loop.index',
-      value: 'loop.index',
-      description: 'Current iteration counter (0-based)',
-      group: 'Loop Context',
-    });
-    suggestions.push({
-      label: 'loop.outputs',
-      value: 'loop.outputs',
-      description:
-        'Finish step outputs from previous iteration (null on first)',
-      group: 'Loop Context',
-    });
-  }
-
-  // Add suggestions from previous steps' outputs
-  for (const step of previousSteps) {
-    if (step.outputs && Array.isArray(step.outputs)) {
-      const flattenParams = (params: any[], prefix = ''): any[] => {
-        const result: any[] = [];
-        for (const param of params) {
-          result.push({
-            path: param.path,
-            type: param.type,
-            name: param.name,
-          });
-          if (param.children && param.children.length > 0) {
-            result.push(...flattenParams(param.children, prefix));
-          }
-        }
-        return result;
-      };
-
-      const flattenedParams = flattenParams(step.outputs);
-      for (const param of flattenedParams) {
-        // Extract field path from full path (e.g., "steps['id'].outputs.field" -> "field")
-        const outputsPrefix = `steps['${step.id}'].outputs`;
-        const stepPrefix = `steps['${step.id}'].`;
-        let fieldPath = param.path;
-        if (param.path.startsWith(outputsPrefix)) {
-          fieldPath = param.path.slice(outputsPrefix.length);
-          // Remove leading dot if present
-          if (fieldPath.startsWith('.')) {
-            fieldPath = fieldPath.slice(1);
-          }
-        } else if (param.path.startsWith(stepPrefix)) {
-          // Sibling fields written directly under steps.<id> (e.g. Split's
-          // hasFailures, Switch's route) — label them by field name, matching
-          // the variable picker's labeling.
-          fieldPath = param.path.slice(stepPrefix.length);
-        }
-
-        suggestions.push({
-          label: fieldPath || 'outputs', // Show just the field path, not full path
-          value: param.path, // Keep full path as value for actual use
-          description: step.name || 'Step output', // Step name as description
-          group: 'Step Outputs',
-          type: param.type,
-          stepName: step.name, // Add step name for display
-          stepId: step.id, // Add step ID for reference
-        });
-      }
-    }
-  }
-
-  return suggestions;
-}
+type VariableSuggestion = ConditionSuggestion;
 
 function filterSuggestions(
   suggestions: VariableSuggestion[],
@@ -507,18 +319,31 @@ function filterSuggestions(
   });
 }
 
+/** Preferred display order; unknown groups append in insertion order. */
+const GROUP_ORDER = [
+  'Current Item',
+  'Loop Context',
+  'Split Scope',
+  'Wait Scope',
+  'Workflow Inputs',
+  'Variables',
+  'Step Outputs',
+];
+
 function groupSuggestions(
   suggestions: VariableSuggestion[]
-): Record<string, VariableSuggestion[]> {
-  const grouped: Record<string, VariableSuggestion[]> = {
-    'Loop Context': [],
-    'Current Item': [],
-    'Workflow Inputs': [],
-    Variables: [],
-    'Step Outputs': [],
-  };
+): Map<string, VariableSuggestion[]> {
+  const grouped = new Map<string, VariableSuggestion[]>();
+  for (const group of GROUP_ORDER) {
+    grouped.set(group, []);
+  }
   for (const suggestion of suggestions) {
-    grouped[suggestion.group].push(suggestion);
+    const bucket = grouped.get(suggestion.group);
+    if (bucket) {
+      bucket.push(suggestion);
+    } else {
+      grouped.set(suggestion.group, [suggestion]);
+    }
   }
   return grouped;
 }
@@ -528,31 +353,16 @@ const ConditionVariablePickerModal = ({
   open,
   onOpenChange,
   onSelect,
-  previousSteps,
-  isInsideWhileLoop = false,
-  inputSchemaFields,
-  variables,
+  suggestions,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (variable: VariableSuggestion) => void;
-  previousSteps: any[];
-  isInsideWhileLoop?: boolean;
-  inputSchemaFields?: ConditionSchemaFieldInfo[];
-  variables?: ConditionVariableInfo[];
+  suggestions: VariableSuggestion[];
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
 
-  const allSuggestions = useMemo(
-    () =>
-      composeVariableSuggestions(
-        previousSteps,
-        isInsideWhileLoop,
-        inputSchemaFields,
-        variables
-      ),
-    [previousSteps, isInsideWhileLoop, inputSchemaFields, variables]
-  );
+  const allSuggestions = suggestions;
 
   const filteredSuggestions = useMemo(
     () => filterSuggestions(allSuggestions, searchQuery),
@@ -636,141 +446,57 @@ const ConditionVariablePickerModal = ({
               </div>
             ) : (
               <>
-                {/* Workflow Inputs */}
-                {groupedSuggestions['Workflow Inputs'].length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Workflow Inputs
-                    </h4>
-                    <div className="space-y-0.5">
-                      {groupedSuggestions['Workflow Inputs'].map(
-                        (suggestion) => (
-                          <button
-                            key={suggestion.value}
-                            type="button"
-                            onClick={() => handleSelect(suggestion)}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <p className="font-mono text-sm truncate">
-                                {suggestion.label}
-                              </p>
-                              {suggestion.description && (
-                                <p className="text-xs truncate opacity-70">
-                                  {suggestion.description}
-                                </p>
-                              )}
-                            </div>
-                            {suggestion.type && (
-                              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
-                                {suggestion.type}
-                              </span>
-                            )}
-                          </button>
-                        )
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Current Item (Filter/Split context) */}
-                {groupedSuggestions['Current Item'].length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Current Item
-                    </h4>
-                    <div className="space-y-0.5">
-                      {groupedSuggestions['Current Item'].map((suggestion) => (
-                        <button
-                          key={suggestion.value}
-                          type="button"
-                          onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground overflow-hidden"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-mono truncate">
-                              {suggestion.label}
-                            </p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Variables (built-ins + user-declared constants) */}
-                {groupedSuggestions['Variables'].length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Variables
-                    </h4>
-                    <div className="space-y-0.5">
-                      {groupedSuggestions['Variables'].map((suggestion) => (
-                        <button
-                          key={suggestion.value}
-                          type="button"
-                          onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <p className="font-mono text-sm truncate">
-                              {suggestion.label}
-                            </p>
-                            {suggestion.description && (
-                              <p className="text-xs truncate opacity-70">
-                                {suggestion.description}
-                              </p>
-                            )}
-                          </div>
-                          {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
-                              {suggestion.type}
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Step Outputs */}
-                {groupedSuggestions['Step Outputs'].length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Step Outputs
-                    </h4>
-                    <div className="space-y-0.5">
-                      {groupedSuggestions['Step Outputs'].map((suggestion) => (
-                        <button
-                          key={suggestion.value}
-                          type="button"
-                          onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground overflow-hidden"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm truncate">
-                              <span className="font-medium">
-                                {suggestion.stepName || suggestion.description}
-                              </span>
-                              {suggestion.label && (
-                                <span className="text-muted-foreground">
-                                  {' → '}
-                                  <span className="font-mono">
+                {[...groupedSuggestions.entries()].map(
+                  ([group, groupSuggestionsList]) =>
+                    groupSuggestionsList.length > 0 && (
+                      <div key={group}>
+                        <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                          {group}
+                        </h4>
+                        <div className="space-y-0.5">
+                          {groupSuggestionsList.map((suggestion) => (
+                            <button
+                              key={suggestion.value}
+                              type="button"
+                              onClick={() => handleSelect(suggestion)}
+                              className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground overflow-hidden"
+                            >
+                              <div className="flex-1 min-w-0">
+                                {suggestion.stepName ? (
+                                  <p className="text-sm truncate">
+                                    <span className="font-medium">
+                                      {suggestion.stepName}
+                                    </span>
+                                    {suggestion.label && (
+                                      <span className="text-muted-foreground">
+                                        {' → '}
+                                        <span className="font-mono">
+                                          {suggestion.label}
+                                        </span>
+                                      </span>
+                                    )}
+                                  </p>
+                                ) : (
+                                  <p className="font-mono text-sm truncate">
                                     {suggestion.label}
-                                  </span>
+                                  </p>
+                                )}
+                                {suggestion.description && (
+                                  <p className="text-xs truncate opacity-70">
+                                    {suggestion.description}
+                                  </p>
+                                )}
+                              </div>
+                              {suggestion.type && (
+                                <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                                  {suggestion.type}
                                 </span>
                               )}
-                            </p>
-                          </div>
-                          {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
-                              {suggestion.type}
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
                 )}
               </>
             )}
@@ -785,16 +511,28 @@ const ConditionVariablePickerModal = ({
 // Converts "steps['uuid'].outputs.field" to "StepName → field"
 const formatReferenceForDisplay = (
   value: string,
-  previousSteps: any[]
+  suggestions: VariableSuggestion[]
 ): string => {
-  // Check if it's a step output reference
-  const stepMatch = value.match(/steps\['([^']+)'\]\.outputs\.?(.*)?/);
+  // A suggestion the user could have picked carries the friendly parts.
+  const suggestion = suggestions.find((s) => s.value === value);
+  if (suggestion) {
+    return suggestion.stepName
+      ? `${suggestion.stepName} → ${suggestion.label}`
+      : suggestion.label;
+  }
+  // Fallback for hand-typed paths: steps['id'].outputs.field and sibling
+  // fields directly under steps['id'] (e.g. hasFailures, route).
+  const stepMatch = value.match(/steps\['([^']+)'\]\.?(.*)$/);
   if (stepMatch) {
     const stepId = stepMatch[1];
-    const fieldPath = stepMatch[2] || 'outputs';
-    const step = previousSteps.find((s) => s.id === stepId);
-    const stepName = step?.name || `Step ${stepId.slice(0, 8)}...`;
-    return fieldPath ? `${stepName} → ${fieldPath}` : stepName;
+    let fieldPath = stepMatch[2] || 'outputs';
+    if (fieldPath.startsWith('outputs.')) {
+      fieldPath = fieldPath.slice('outputs.'.length);
+    }
+    const stepName =
+      suggestions.find((s) => s.stepId === stepId)?.stepName ||
+      `Step ${stepId.slice(0, 8)}...`;
+    return `${stepName} → ${fieldPath}`;
   }
   // For workflow inputs, just return the value as-is
   return value;
@@ -806,15 +544,15 @@ const ReferencePill = ({
   onRemove,
   onClick,
   disabled,
-  previousSteps = [],
+  suggestions = [],
 }: {
   value: string;
   onRemove: () => void;
   onClick: () => void;
   disabled?: boolean;
-  previousSteps?: any[];
+  suggestions?: VariableSuggestion[];
 }) => {
-  const displayValue = formatReferenceForDisplay(value, previousSteps);
+  const displayValue = formatReferenceForDisplay(value, suggestions);
 
   return (
     <span className="inline-flex items-center gap-1.5 px-2 py-1 text-xs bg-emerald-50 border border-emerald-200 rounded text-emerald-700 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300">
@@ -1011,20 +749,19 @@ interface ConditionEditorProps {
   value?: string;
   onChange?: (value: string) => void;
   disabled?: boolean;
-  previousSteps?: any[]; // StepInfo[] - for autocomplete suggestions
-  isInsideWhileLoop?: boolean; // Show loop.* references
-  inputSchemaFields?: ConditionSchemaFieldInfo[]; // data.<field> suggestions
-  variables?: ConditionVariableInfo[]; // variables.* suggestions
+  /**
+   * Reference suggestions for the picker — compose with
+   * composeConditionSuggestions (features/workflows VariableSuggestions) so
+   * every surface shares the one canonical, schema-driven pipeline.
+   */
+  suggestions?: ConditionSuggestion[];
 }
 
 export const ConditionEditor = ({
   value,
   onChange,
   disabled = false,
-  previousSteps = [],
-  isInsideWhileLoop = false,
-  inputSchemaFields,
-  variables,
+  suggestions = [],
 }: ConditionEditorProps) => {
   // Parse condition value from string
   const parseConditionValue = (val?: string): Condition | undefined => {
@@ -1089,10 +826,7 @@ export const ConditionEditor = ({
         value={condition}
         onChange={handleConditionChange}
         disabled={disabled}
-        previousSteps={previousSteps}
-        isInsideWhileLoop={isInsideWhileLoop}
-        inputSchemaFields={inputSchemaFields}
-        variables={variables}
+        suggestions={suggestions}
       />
       {/* Expression preview */}
       {readableExpression && (
@@ -1108,19 +842,13 @@ const ConditionBuilder = ({
   value,
   onChange,
   disabled = false,
-  previousSteps = [],
-  isInsideWhileLoop = false,
-  inputSchemaFields,
-  variables,
+  suggestions = [],
   inlineControls,
 }: {
   value?: Condition;
   onChange?: (condition: Condition) => void;
   disabled?: boolean;
-  previousSteps?: any[];
-  isInsideWhileLoop?: boolean;
-  inputSchemaFields?: ConditionSchemaFieldInfo[];
-  variables?: ConditionVariableInfo[];
+  suggestions?: ConditionSuggestion[];
   inlineControls?: React.ReactNode;
 }) => {
   const initialOp = value?.op || 'EQ';
@@ -1418,10 +1146,7 @@ const ConditionBuilder = ({
                   value={arg}
                   onChange={(nested) => handleArgChange(index, nested)}
                   disabled={disabled}
-                  previousSteps={previousSteps}
-                  isInsideWhileLoop={isInsideWhileLoop}
-                  inputSchemaFields={inputSchemaFields}
-                  variables={variables}
+                  suggestions={suggestions}
                   inlineControls={
                     <>
                       <ArgumentValueTypeSelector
@@ -1477,7 +1202,7 @@ const ConditionBuilder = ({
                       onRemove={() => handleRemoveReference(index)}
                       onClick={() => setPickerOpenForIndex(index)}
                       disabled={disabled}
-                      previousSteps={previousSteps}
+                      suggestions={suggestions}
                     />
                   ) : (
                     <button
@@ -1573,10 +1298,7 @@ const ConditionBuilder = ({
             handleVariableSelect(pickerOpenForIndex, variable);
           }
         }}
-        previousSteps={previousSteps}
-        isInsideWhileLoop={isInsideWhileLoop}
-        inputSchemaFields={inputSchemaFields}
-        variables={variables}
+        suggestions={suggestions}
       />
     </div>
   );

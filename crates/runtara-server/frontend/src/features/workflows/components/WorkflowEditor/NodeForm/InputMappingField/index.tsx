@@ -7,6 +7,7 @@ import {
 import { ErrorConditionTemplates } from '@/shared/components/ErrorConditionTemplates';
 import { useContext, useEffect, useMemo, useRef } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
+import { composeConditionSuggestions } from '../InputMappingValueField/VariableSuggestions';
 import { SwitchCasesField } from '../SwitchCasesField';
 import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
 import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
@@ -50,8 +51,39 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
 export function InputMappingField(props: any) {
   const { label, name } = props;
   const { watch, setValue } = useFormContext();
-  const { agents, workflows, previousSteps, nodeId, inputSchemaFields, variables } =
-    useContext(NodeFormContext);
+  const {
+    agents,
+    workflows,
+    previousSteps,
+    nodeId,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+  } = useContext(NodeFormContext);
+
+  // Suggestions for the Conditional step's condition editor — same canonical
+  // pipeline as the variable picker.
+  const conditionSuggestions = useMemo(
+    () =>
+      composeConditionSuggestions({
+        previousSteps,
+        inputSchemaFields,
+        variables,
+        isInsideWhileLoop,
+        isInsideSplit,
+        isInsideWaitScope,
+      }),
+    [
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideWhileLoop,
+      isInsideSplit,
+      isInsideWaitScope,
+    ]
+  );
   // We're in edit mode only if we have a nodeId (not parentNodeId)
   // parentNodeId means we're creating a child node, not editing
   const isEdit = !!nodeId;
@@ -386,9 +418,7 @@ export function InputMappingField(props: any) {
         <ConditionEditor
           value={conditionValue}
           onChange={handleConditionChange}
-          previousSteps={previousSteps}
-          inputSchemaFields={inputSchemaFields}
-          variables={variables}
+          suggestions={conditionSuggestions}
         />
         {error && (
           <div className="text-[0.8rem] mt-2 font-medium text-destructive">

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  composeConditionSuggestions,
   composeVariableSuggestions,
   groupSuggestions,
 } from './VariableSuggestions';
@@ -92,5 +93,36 @@ describe('composeVariableSuggestions', () => {
     );
 
     expect(grouped['Wait Scope']).toHaveLength(1);
+  });
+});
+
+describe('composeConditionSuggestions', () => {
+  it('includes a single honest item entry for Filter conditions', () => {
+    const suggestions = composeConditionSuggestions({
+      previousSteps: [],
+      includeItemScope: true,
+    });
+
+    const itemScope = suggestions.filter((s) => s.group === 'Current Item');
+    expect(itemScope.map((s) => s.value)).toEqual(['item']);
+    // The old forked composer invented item.id / item.name / item.title /
+    // item.status … suggestions not driven by any schema — never again.
+    expect(suggestions.some((s) => s.value.startsWith('item.'))).toBe(false);
+  });
+
+  it('omits the item scope unless requested', () => {
+    const suggestions = composeConditionSuggestions({ previousSteps: [] });
+    expect(suggestions.some((s) => s.group === 'Current Item')).toBe(false);
+  });
+
+  it('passes the canonical pipeline through (typed loop context)', () => {
+    const suggestions = composeConditionSuggestions({
+      previousSteps: [],
+      isInsideWhileLoop: true,
+    });
+
+    const loopIndex = suggestions.find((s) => s.value === 'loop.index');
+    expect(loopIndex?.group).toBe('Loop Context');
+    expect(loopIndex?.type).toBe('number');
   });
 });

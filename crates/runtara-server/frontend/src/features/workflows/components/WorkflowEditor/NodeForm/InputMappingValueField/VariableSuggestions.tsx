@@ -12,7 +12,8 @@ export interface VariableSuggestion {
     | 'Step Outputs'
     | 'Loop Context'
     | 'Split Scope'
-    | 'Wait Scope';
+    | 'Wait Scope'
+    | 'Current Item';
   type?: string;
   /** Step ID for step outputs (used to extract field path) */
   stepId?: string;
@@ -261,6 +262,7 @@ export function groupSuggestions(
   suggestions: VariableSuggestion[]
 ): Record<string, VariableSuggestion[]> {
   const grouped: Record<string, VariableSuggestion[]> = {
+    'Current Item': [],
     'Loop Context': [],
     'Split Scope': [],
     'Wait Scope': [],
@@ -274,4 +276,49 @@ export function groupSuggestions(
   }
 
   return grouped;
+}
+
+export interface ConditionSuggestionContext {
+  previousSteps: StepInfo[];
+  inputSchemaFields?: SchemaField[];
+  variables?: SimpleVariable[];
+  isInsideWhileLoop?: boolean;
+  isInsideSplit?: boolean;
+  isInsideWaitScope?: boolean;
+  /**
+   * Include the per-element `item` scope — Filter conditions evaluate
+   * against each array element via `item.*` references.
+   */
+  includeItemScope?: boolean;
+}
+
+/**
+ * Suggestions for condition editors (Conditional/While/Filter conditions,
+ * edge routes). Same canonical pipeline as the variable picker — the
+ * condition editor used to carry a forked composer with hardcoded guessed
+ * `item.*` field names (id, name, title, …) not driven by any schema.
+ */
+export function composeConditionSuggestions(
+  context: ConditionSuggestionContext
+): VariableSuggestion[] {
+  const suggestions = composeVariableSuggestions(
+    context.previousSteps,
+    context.inputSchemaFields,
+    context.variables,
+    context.isInsideWhileLoop,
+    context.isInsideSplit,
+    context.isInsideWaitScope
+  );
+
+  if (context.includeItemScope) {
+    suggestions.unshift({
+      label: 'item',
+      value: 'item',
+      description:
+        'Current array element — reference its fields as item.<field>',
+      group: 'Current Item',
+    });
+  }
+
+  return suggestions;
 }

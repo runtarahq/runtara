@@ -3,6 +3,7 @@ import { useFormContext, useWatch } from 'react-hook-form';
 import { NodeFormContext } from './NodeFormContext';
 import { Label } from '@/shared/components/ui/label';
 import { ConditionEditor } from '@/shared/components/ui/condition-editor';
+import { composeConditionSuggestions } from './InputMappingValueField/VariableSuggestions';
 import { SourceMappingValueField } from './SourceMappingValueField';
 
 type FilterStepFieldProps = {
@@ -11,8 +12,37 @@ type FilterStepFieldProps = {
 
 export function FilterStepField({ name }: FilterStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps, nodeId, inputSchemaFields, variables } =
-    useContext(NodeFormContext);
+  const {
+    previousSteps,
+    nodeId,
+    inputSchemaFields,
+    variables,
+    isInsideWhileLoop,
+    isInsideSplit,
+    isInsideWaitScope,
+  } = useContext(NodeFormContext);
+
+  // Filter conditions evaluate per array element: include the item scope.
+  const conditionSuggestions = useMemo(
+    () =>
+      composeConditionSuggestions({
+        previousSteps,
+        inputSchemaFields,
+        variables,
+        isInsideWhileLoop,
+        isInsideSplit,
+        isInsideWaitScope,
+        includeItemScope: true,
+      }),
+    [
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideWhileLoop,
+      isInsideSplit,
+      isInsideWaitScope,
+    ]
+  );
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const filterCondition = useWatch({
     name: 'filterCondition',
@@ -115,9 +145,7 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
         <ConditionEditor
           value={conditionValue}
           onChange={handleConditionChange}
-          previousSteps={previousSteps}
-          inputSchemaFields={inputSchemaFields}
-          variables={variables}
+          suggestions={conditionSuggestions}
         />
       </div>
     </div>
