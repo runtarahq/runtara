@@ -197,7 +197,7 @@ describe('resolveReferenceType', () => {
     expect(resolveReferenceType('loop.outputs', CONTEXT)).toBeUndefined();
   });
 
-  it('treats data.* as unknown inside a Split body (rebound to the item)', () => {
+  it('treats data.* as unknown inside a Split body without a declared schema', () => {
     const insideSplit = { ...CONTEXT, insideSplitScope: true };
     expect(resolveReferenceType('data.flag', insideSplit)).toBeUndefined();
     expect(resolveReferenceType('data', insideSplit)).toBeUndefined();
@@ -210,6 +210,38 @@ describe('resolveReferenceType', () => {
     expect(
       resolveReferenceType("steps['filt'].outputs.count", insideSplit)
     ).toBe('integer');
+  });
+
+  it('resolves data.* against the declared Split iteration schema', () => {
+    const insideSplit = {
+      ...CONTEXT,
+      insideSplitScope: true,
+      splitItemSchemaFields: [
+        { name: 'sku', type: 'string', required: true, description: '' },
+        {
+          name: 'dims',
+          type: 'object',
+          required: false,
+          description: '',
+          properties: [
+            {
+              name: 'weight',
+              type: 'number',
+              required: false,
+              description: '',
+            },
+          ],
+        },
+      ],
+    };
+    expect(resolveReferenceType('data', insideSplit)).toBe('object');
+    expect(resolveReferenceType('data.sku', insideSplit)).toBe('string');
+    expect(resolveReferenceType('data.dims.weight', insideSplit)).toBe(
+      'number'
+    );
+    // Fields the item schema doesn't declare stay unknown — and crucially the
+    // OUTER workflow schema's `flag` must not leak in.
+    expect(resolveReferenceType('data.flag', insideSplit)).toBeUndefined();
   });
 });
 

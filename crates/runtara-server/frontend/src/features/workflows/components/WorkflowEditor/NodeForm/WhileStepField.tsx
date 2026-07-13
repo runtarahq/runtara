@@ -18,6 +18,7 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
     variables,
     isInsideSplit,
     isInsideWaitScope,
+    splitItemSchemaFields,
   } = useContext(NodeFormContext);
 
   // The While condition always evaluates in its own loop context, so
@@ -31,8 +32,16 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
         isInsideWhileLoop: true,
         isInsideSplit,
         isInsideWaitScope,
+        splitItemSchemaFields,
       }),
-    [previousSteps, inputSchemaFields, variables, isInsideSplit, isInsideWaitScope]
+    [
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideSplit,
+      isInsideWaitScope,
+      splitItemSchemaFields,
+    ]
   );
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const whileCondition = useWatch({

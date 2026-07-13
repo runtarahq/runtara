@@ -61,6 +61,7 @@ export function InputMappingField(props: any) {
     isInsideWhileLoop,
     isInsideSplit,
     isInsideWaitScope,
+    splitItemSchemaFields,
   } = useContext(NodeFormContext);
 
   // Suggestions for the Conditional step's condition editor — same canonical
@@ -74,6 +75,7 @@ export function InputMappingField(props: any) {
         isInsideWhileLoop,
         isInsideSplit,
         isInsideWaitScope,
+        splitItemSchemaFields,
       }),
     [
       previousSteps,
@@ -82,6 +84,7 @@ export function InputMappingField(props: any) {
       isInsideWhileLoop,
       isInsideSplit,
       isInsideWaitScope,
+      splitItemSchemaFields,
     ]
   );
   // We're in edit mode only if we have a nodeId (not parentNodeId)

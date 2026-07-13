@@ -166,8 +166,13 @@ export function CompositeValueItem({
 }: CompositeValueItemProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
-  const { previousSteps, inputSchemaFields, variables, isInsideSplit } =
-    useContext(NodeFormContext);
+  const {
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideSplit,
+    splitItemSchemaFields,
+  } = useContext(NodeFormContext);
 
   // Get errors for this specific item
   const itemErrors = useMemo(() => {
@@ -198,9 +203,17 @@ export function CompositeValueItem({
             inputSchemaFields,
             variables,
             insideSplitScope: isInsideSplit,
+            splitItemSchemaFields,
           })
         : undefined,
-    [value, previousSteps, inputSchemaFields, variables, isInsideSplit]
+    [
+      value,
+      previousSteps,
+      inputSchemaFields,
+      variables,
+      isInsideSplit,
+      splitItemSchemaFields,
+    ]
   );
 
   // Handle value type change

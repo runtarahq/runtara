@@ -33,6 +33,7 @@ export function AutocompleteInput({
     isInsideWhileLoop,
     isInsideSplit,
     isInsideWaitScope,
+    splitItemSchemaFields,
   } = useContext(NodeFormContext);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
 
@@ -131,7 +132,8 @@ export function AutocompleteInput({
     variables,
     isInsideWhileLoop,
     isInsideSplit,
-    isInsideWaitScope
+    isInsideWaitScope,
+    splitItemSchemaFields
   );
   const filteredSuggestions = filterSuggestions(
     allSuggestions,

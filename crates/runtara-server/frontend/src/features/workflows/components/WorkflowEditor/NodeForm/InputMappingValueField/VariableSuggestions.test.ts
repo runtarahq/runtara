@@ -17,6 +17,7 @@ describe('composeVariableSuggestions', () => {
 
     const splitScope = suggestions.filter((s) => s.group === 'Split Scope');
     expect(splitScope.map((s) => s.value)).toEqual([
+      'data',
       'variables._item',
       'variables._index',
       'variables._loop',
@@ -56,7 +57,8 @@ describe('composeVariableSuggestions', () => {
       composeVariableSuggestions([], undefined, undefined, true, true)
     );
 
-    expect(grouped['Split Scope']).toHaveLength(4);
+    // The four injected variables plus the rebound `data` (current item).
+    expect(grouped['Split Scope']).toHaveLength(5);
     expect(grouped['Loop Context']).toHaveLength(2);
   });
 
@@ -170,5 +172,75 @@ describe('nested workflow input suggestions', () => {
     expect(byValue['workflow.inputs.data.customer.address.city']?.type).toBe(
       'string'
     );
+  });
+});
+
+describe('Split item scope suggestions', () => {
+  const ITEM_SCHEMA = [
+    { name: 'sku', type: 'string', required: true, description: 'Item SKU' },
+    {
+      name: 'dims',
+      type: 'object',
+      required: false,
+      description: '',
+      properties: [
+        { name: 'weight', type: 'number', required: false, description: '' },
+      ],
+    },
+  ];
+
+  it('suggests typed data.* from the declared iteration schema inside a Split', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [{ name: 'flag', type: 'string', required: true, description: '' }],
+      undefined,
+      false,
+      true, // inside Split
+      false,
+      ITEM_SCHEMA
+    );
+
+    const byValue = Object.fromEntries(suggestions.map((s) => [s.value, s]));
+    expect(byValue['data']?.group).toBe('Split Scope');
+    expect(byValue['data']?.type).toBe('object');
+    expect(byValue['data.sku']?.type).toBe('string');
+    expect(byValue['data.dims.weight']?.type).toBe('number');
+    // Workflow-level inputs are out of scope inside a Split body.
+    expect(byValue['workflow.inputs.data.flag']).toBeUndefined();
+    expect(byValue['workflow.inputs.data']).toBeUndefined();
+  });
+
+  it('offers an untyped data entry when the Split declares no schema', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [{ name: 'flag', type: 'string', required: true, description: '' }],
+      undefined,
+      false,
+      true,
+      false,
+      undefined
+    );
+
+    const dataEntry = suggestions.find((s) => s.value === 'data');
+    expect(dataEntry?.group).toBe('Split Scope');
+    expect(dataEntry?.type).toBeUndefined();
+    expect(
+      suggestions.some((s) => s.value.startsWith('workflow.inputs.data'))
+    ).toBe(false);
+  });
+
+  it('keeps workflow inputs outside Split scopes', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [{ name: 'flag', type: 'string', required: true, description: '' }],
+      undefined,
+      false,
+      false,
+      false,
+      undefined
+    );
+    expect(
+      suggestions.some((s) => s.value === 'workflow.inputs.data.flag')
+    ).toBe(true);
   });
 });

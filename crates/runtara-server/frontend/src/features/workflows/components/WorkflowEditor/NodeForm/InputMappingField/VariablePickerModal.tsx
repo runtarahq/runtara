@@ -99,6 +99,7 @@ export function VariablePickerModal({
     isInsideWhileLoop,
     isInsideSplit,
     isInsideWaitScope,
+    splitItemSchemaFields,
   } = useContext(NodeFormContext);
 
   // Generate and filter suggestions
@@ -110,7 +111,8 @@ export function VariablePickerModal({
         variables,
         isInsideWhileLoop,
         isInsideSplit,
-        isInsideWaitScope
+        isInsideWaitScope,
+        splitItemSchemaFields
       ),
     [
       previousSteps,
@@ -119,6 +121,7 @@ export function VariablePickerModal({
       isInsideWhileLoop,
       isInsideSplit,
       isInsideWaitScope,
+      splitItemSchemaFields,
     ]
   );
 

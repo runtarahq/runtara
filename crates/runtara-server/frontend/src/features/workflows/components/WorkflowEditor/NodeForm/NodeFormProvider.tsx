@@ -8,6 +8,7 @@ import { composeExecutionGraph } from '../CustomNodes/utils.tsx';
 import { NodeFormContext } from './NodeFormContext.tsx';
 import { composePreviousSteps } from './shared.ts';
 import { warmStepOutputShapes } from '@/features/workflows/utils/step-output-shapes';
+import { parseSchema } from '@/features/workflows/utils/schema';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import {
   getAgents,
@@ -70,6 +71,22 @@ function createGraphStructureSignature(
   );
 
   return `nodes:[${nodeSignatures.join(',')}];edges:[${edgeSignatures.join(',')}]`;
+}
+
+/**
+ * Bridges utils/schema's parsed fields (optional type/required/description)
+ * to the editor SchemaField shape the NodeForm context uses.
+ */
+function normalizeSchemaField(
+  field: import('@/features/workflows/utils/schema').SchemaField
+): SchemaField {
+  return {
+    ...field,
+    type: field.type ?? 'string',
+    required: field.required ?? false,
+    description: field.description ?? '',
+    properties: field.properties?.map(normalizeSchemaField),
+  };
 }
 
 export const NodeFormProvider = ({
@@ -227,6 +244,27 @@ export const NodeFormProvider = ({
     return parentStep?.stepType === 'Split';
   }, [parentNodeId, executionGraph]);
 
+  // The enclosing Split's declared iteration schema (bare data.* inside the
+  // subgraph is the current item, validated against this schema).
+  const splitItemSchemaFields = useMemo(() => {
+    if (!isInsideSplit || !parentNodeId || !executionGraph?.steps) {
+      return undefined;
+    }
+    const parentStep = executionGraph.steps[parentNodeId] as {
+      inputSchema?: Record<string, unknown>;
+    };
+    const schema = parentStep?.inputSchema;
+    if (!schema || Object.keys(schema).length === 0) {
+      return undefined;
+    }
+    try {
+      const fields = parseSchema(schema).map(normalizeSchemaField);
+      return fields.length > 0 ? fields : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [isInsideSplit, parentNodeId, executionGraph]);
+
   // Detect if this step is inside a WaitForSignal onWait scope (the runtime
   // injects variables._signal_id there — see WAIT_ON_WAIT_SCOPE_VARIABLES in
   // crates/runtara-workflows/src/validation.rs)
@@ -257,6 +295,7 @@ export const NodeFormProvider = ({
       isInsideWhileLoop,
       isInsideSplit,
       isInsideWaitScope,
+      splitItemSchemaFields,
     }),
     [
       nodeId,
@@ -273,6 +312,7 @@ export const NodeFormProvider = ({
       isInsideWhileLoop,
       isInsideSplit,
       isInsideWaitScope,
+      splitItemSchemaFields,
     ]
   );
 

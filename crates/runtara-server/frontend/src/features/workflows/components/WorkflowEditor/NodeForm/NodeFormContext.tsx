@@ -33,6 +33,12 @@ export interface NodeFormContextContextData {
   isInsideSplit?: boolean;
   /** Whether this step is inside a WaitForSignal onWait subgraph */
   isInsideWaitScope?: boolean;
+  /**
+   * The enclosing Split's declared iteration schema (its per-item
+   * inputSchema), when this step is inside a Split subgraph. Feeds data.*
+   * suggestions and reference-type resolution in that scope.
+   */
+  splitItemSchemaFields?: SchemaField[];
 }
 
 export const NodeFormContext = createContext<NodeFormContextContextData>({

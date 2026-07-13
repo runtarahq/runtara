@@ -112,8 +112,13 @@ export function MappingValueInput({
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
-  const { previousSteps, inputSchemaFields, variables, isInsideSplit } =
-    useContext(NodeFormContext);
+  const {
+    previousSteps,
+    inputSchemaFields,
+    variables,
+    isInsideSplit,
+    splitItemSchemaFields,
+  } = useContext(NodeFormContext);
 
   const isReference = valueType === 'reference';
   const lowerFieldType = fieldType?.toLowerCase() || 'text';
@@ -176,6 +181,7 @@ export function MappingValueInput({
             inputSchemaFields,
             variables,
             insideSplitScope: isInsideSplit,
+            splitItemSchemaFields,
           })
         : undefined,
     [
@@ -185,6 +191,7 @@ export function MappingValueInput({
       inputSchemaFields,
       variables,
       isInsideSplit,
+      splitItemSchemaFields,
     ]
   );
 

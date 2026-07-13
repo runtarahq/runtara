@@ -20,6 +20,7 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
     isInsideWhileLoop,
     isInsideSplit,
     isInsideWaitScope,
+    splitItemSchemaFields,
   } = useContext(NodeFormContext);
 
   // Filter conditions evaluate per array element: include the item scope.
@@ -32,6 +33,7 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
         isInsideWhileLoop,
         isInsideSplit,
         isInsideWaitScope,
+        splitItemSchemaFields,
         includeItemScope: true,
       }),
     [
@@ -41,6 +43,7 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
       isInsideWhileLoop,
       isInsideSplit,
       isInsideWaitScope,
+      splitItemSchemaFields,
     ]
   );
   const stepType = useWatch({ name: 'stepType', control: form.control });

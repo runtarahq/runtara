@@ -135,11 +135,13 @@ export interface ReferenceTypeContext {
   variables?: SimpleVariable[];
   /**
    * Inside a Split body the DSL rebinds bare `data.*` to the current item —
-   * the workflow-level input schema does not apply there, so `data.*`
-   * references resolve to unknown instead of the outer schema's (possibly
-   * wrong) types.
+   * the workflow-level input schema does not apply there. `data.*` resolves
+   * against the Split's declared iteration schema when one exists
+   * (splitItemSchemaFields), and to unknown otherwise.
    */
   insideSplitScope?: boolean;
+  /** Declared iteration schema of the enclosing Split. */
+  splitItemSchemaFields?: SchemaField[];
 }
 
 /**
@@ -163,8 +165,16 @@ export function resolveReferenceType(
   const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
   if (dataRest !== null) {
     if (context.insideSplitScope) {
-      // `data.*` is the Split's current item here, not the workflow input.
-      return undefined;
+      // `data.*` is the Split's current item here, not the workflow input —
+      // resolve against the Split's declared iteration schema when present.
+      const itemFields = context.splitItemSchemaFields;
+      if (!itemFields || itemFields.length === 0) {
+        return undefined;
+      }
+      if (dataRest === '') {
+        return 'object';
+      }
+      return resolveSchemaFieldType(dataRest.split('.'), itemFields);
     }
     if (dataRest === '') {
       return 'object';

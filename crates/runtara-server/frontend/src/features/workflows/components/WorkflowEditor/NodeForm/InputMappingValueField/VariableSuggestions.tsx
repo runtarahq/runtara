@@ -49,28 +49,38 @@ function flattenStepParameters(
 }
 
 /**
- * Recursively turns workflow input schema fields (including nested object
- * `properties`) into dotted suggestions under `workflow.inputs.data.*`.
+ * Recursively turns schema fields (including nested object `properties`)
+ * into dotted suggestions under `<valuePrefix>.<path>`.
  */
-function appendInputFieldSuggestions(
+function appendSchemaFieldSuggestions(
   fields: SchemaField[],
-  prefix: string,
+  pathPrefix: string,
+  valuePrefix: string,
+  group: VariableSuggestion['group'],
+  defaultDescription: string,
   suggestions: VariableSuggestion[]
 ): void {
   for (const field of fields) {
     if (!field.name) {
       continue;
     }
-    const path = prefix ? `${prefix}.${field.name}` : field.name;
+    const path = pathPrefix ? `${pathPrefix}.${field.name}` : field.name;
     suggestions.push({
       label: path,
-      value: `workflow.inputs.data.${path}`,
-      description: field.description || 'Workflow input field',
-      group: 'Workflow Inputs',
+      value: `${valuePrefix}.${path}`,
+      description: field.description || defaultDescription,
+      group,
       type: field.type,
     });
     if (field.properties && field.properties.length > 0) {
-      appendInputFieldSuggestions(field.properties, path, suggestions);
+      appendSchemaFieldSuggestions(
+        field.properties,
+        path,
+        valuePrefix,
+        group,
+        defaultDescription,
+        suggestions
+      );
     }
   }
 }
@@ -84,25 +94,60 @@ export function composeVariableSuggestions(
   variables?: SimpleVariable[],
   isInsideWhileLoop?: boolean,
   isInsideSplit?: boolean,
-  isInsideWaitScope?: boolean
+  isInsideWaitScope?: boolean,
+  splitItemSchemaFields?: SchemaField[]
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
 
-  // Add workflow input schema fields, expanding nested object properties
-  // (declared via the schema editor's Advanced dialog) into dotted paths so
-  // workflow.inputs.data.customer.email is offered and typed.
-  if (inputSchemaFields && inputSchemaFields.length > 0) {
-    appendInputFieldSuggestions(inputSchemaFields, '', suggestions);
-  }
+  if (isInsideSplit) {
+    // Inside a Split body the DSL rebinds `data.*` to the current iteration
+    // item — the workflow-level input schema does not apply here, so instead
+    // of offering wrong-scope workflow.inputs.data.* entries we surface the
+    // Split's declared iteration schema (when the author declared one).
+    suggestions.push({
+      label: 'data',
+      value: 'data',
+      description: 'Current iteration item',
+      group: 'Split Scope',
+      type:
+        splitItemSchemaFields && splitItemSchemaFields.length > 0
+          ? 'object'
+          : undefined,
+    });
+    if (splitItemSchemaFields && splitItemSchemaFields.length > 0) {
+      appendSchemaFieldSuggestions(
+        splitItemSchemaFields,
+        '',
+        'data',
+        'Split Scope',
+        'Iteration item field',
+        suggestions
+      );
+    }
+  } else {
+    // Add workflow input schema fields, expanding nested object properties
+    // (declared via the schema editor's Advanced dialog) into dotted paths so
+    // workflow.inputs.data.customer.email is offered and typed.
+    if (inputSchemaFields && inputSchemaFields.length > 0) {
+      appendSchemaFieldSuggestions(
+        inputSchemaFields,
+        '',
+        'workflow.inputs.data',
+        'Workflow Inputs',
+        'Workflow input field',
+        suggestions
+      );
+    }
 
-  // Always add generic workflow.inputs.data as fallback
-  suggestions.push({
-    label: 'data',
-    value: 'workflow.inputs.data',
-    description: 'All workflow input data',
-    group: 'Workflow Inputs',
-    type: 'object',
-  });
+    // Always add generic workflow.inputs.data as fallback
+    suggestions.push({
+      label: 'data',
+      value: 'workflow.inputs.data',
+      description: 'All workflow input data',
+      group: 'Workflow Inputs',
+      type: 'object',
+    });
+  }
 
   // Add built-in runtime variables (always available in all steps/subgraphs)
   suggestions.push({
@@ -304,6 +349,8 @@ export interface ConditionSuggestionContext {
   isInsideWhileLoop?: boolean;
   isInsideSplit?: boolean;
   isInsideWaitScope?: boolean;
+  /** Declared iteration schema of the enclosing Split, when inside one. */
+  splitItemSchemaFields?: SchemaField[];
   /**
    * Include the per-element `item` scope — Filter conditions evaluate
    * against each array element via `item.*` references.
@@ -326,7 +373,8 @@ export function composeConditionSuggestions(
     context.variables,
     context.isInsideWhileLoop,
     context.isInsideSplit,
-    context.isInsideWaitScope
+    context.isInsideWaitScope,
+    context.splitItemSchemaFields
   );
 
   if (context.includeItemScope) {
