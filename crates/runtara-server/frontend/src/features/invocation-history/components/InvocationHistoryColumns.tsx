@@ -10,18 +10,22 @@ import { ReplayButton } from '@/features/workflows/components/ReplayButton';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
 
-// Helper to format duration
+// Helper to format duration. A negative value is meaningless (it comes from a
+// stale suspend `finished_at` predating a resumed run's `started_at`); render
+// it as blank rather than a bogus "-15s".
 const formatDuration = (seconds: number | null | undefined): string => {
-  if (seconds === null || seconds === undefined) return '-';
+  if (seconds === null || seconds === undefined || seconds < 0) return '-';
   const ms = seconds * 1000;
   if (ms < 1000) return `${Math.round(ms)}ms`;
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 };
 
-// Helper to get duration color based on time
+// Helper to get duration color based on time. Negatives are neutral, never the
+// emerald "fast run" branch.
 const getDurationColorClass = (seconds: number | null | undefined): string => {
-  if (seconds === null || seconds === undefined) return 'text-slate-400';
+  if (seconds === null || seconds === undefined || seconds < 0)
+    return 'text-slate-400';
   const ms = seconds * 1000;
   if (ms < 100) return 'text-emerald-600 dark:text-emerald-400';
   if (ms < 1000) return 'text-slate-600 dark:text-slate-400';
@@ -95,7 +99,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     enableSorting: true,
     cell: ({ row }) => {
       const completedAt = row.original.completedAt;
-      if (!completedAt) {
+      // A non-terminal row (running/suspended/…) has no real completion time;
+      // its `completedAt` is a suspend/drain timestamp, so don't present it as
+      // "Completed".
+      if (!completedAt || isActiveStatus(row.original.status)) {
         return (
           <span className="text-sm text-slate-400 dark:text-slate-500">-</span>
         );
@@ -221,8 +228,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             />
           ) : (
             <>
-              {(status === 'failed' ||
-                status === 'cancelled') && (
+              {(status === 'failed' || status === 'cancelled') && (
                 <ResumeButton
                   instanceId={instanceId}
                   variant="ghost"

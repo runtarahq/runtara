@@ -1314,6 +1314,76 @@ mod tests {
         );
     }
 
+    /// Relaunch/resume re-registers via
+    /// `update_instance_status("running", Some(..))`. A row that ran before
+    /// may carry a stale `finished_at` / `termination_reason` from a prior
+    /// suspend or drain force-stop; the running transition must clear both so
+    /// the resumed run never renders a negative duration
+    /// (`finished_at < started_at`).
+    #[tokio::test]
+    async fn test_update_instance_status_running_clears_finished_at() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        // Suspend the way a drain / durable sleep does: stamps finished_at +
+        // termination_reason.
+        persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "suspended")
+                    .with_termination("sleeping", None),
+            )
+            .await
+            .expect("suspend should succeed");
+        let suspended = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            suspended.finished_at.is_some(),
+            "precondition: suspend stamps finished_at"
+        );
+
+        // Relaunch: re-register into running with a later started_at.
+        persistence
+            .update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        let running = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(running.status, "running");
+        assert!(
+            running.finished_at.is_none(),
+            "relaunch into running must clear the stale finished_at"
+        );
+
+        let (reason, _code) = sqlx::query_as::<_, (Option<String>, Option<i32>)>(
+            "SELECT termination_reason, exit_code FROM instances WHERE instance_id = ?",
+        )
+        .bind(&instance_id)
+        .fetch_one(&persistence.pool)
+        .await
+        .unwrap();
+        assert!(
+            reason.is_none(),
+            "relaunch into running must clear the stale termination_reason"
+        );
+    }
+
     /// `termination_reason` and `exit_code` use COALESCE semantics:
     /// passing `None` leaves the existing values intact. The default
     /// `op_get_instance` SELECT doesn't project these columns, so we
