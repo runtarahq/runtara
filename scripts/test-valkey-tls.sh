@@ -42,7 +42,18 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -subj '/CN=Wrong Test CA' \
     -addext 'basicConstraints=critical,CA:TRUE' >/dev/null 2>&1
 
-docker run -d --rm --name "$container_name" \
+# The valkey image's docker-entrypoint.sh re-execs valkey-server as the
+# non-root `valkey` user. `mktemp -d` is 0700 and openssl writes keys 0600,
+# both owned by the runner user — on Linux CI that user isn't the container's
+# `valkey` user, so it can't traverse the dir or read the certs and the
+# server exits immediately. (Docker Desktop on macOS masks this, so it only
+# bites in CI.) Make the throwaway test material world-readable.
+chmod 0755 "$tls_dir"
+chmod 0644 "$tls_dir"/*.crt "$tls_dir"/*.key
+
+# No --rm: a container that exits on a cert/config error must survive long
+# enough for `docker logs` to explain why. The cleanup trap removes it.
+docker run -d --name "$container_name" \
     -p "127.0.0.1:${host_port}:6379" \
     -v "$tls_dir:/tls:ro" \
     valkey/valkey:8-alpine \
@@ -59,8 +70,12 @@ for attempt in $(seq 1 50); do
         2>/dev/null | grep -q PONG; then
         break
     fi
-    if [ "$attempt" -eq 50 ]; then
-        docker logs "$container_name"
+    # Bail out early with diagnostics if the container has already exited,
+    # rather than spinning the full readiness budget against a dead container.
+    running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo missing)"
+    if [ "$running" != "true" ] || [ "$attempt" -eq 50 ]; then
+        echo "valkey container is not ready (running=$running, attempt=$attempt); logs:" >&2
+        docker logs "$container_name" 2>&1 || true
         exit 1
     fi
     sleep 0.1
