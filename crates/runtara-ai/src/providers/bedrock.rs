@@ -39,6 +39,7 @@ impl Client {
         BedrockCompletionModel {
             client: self.clone(),
             model: model.unwrap_or(DEFAULT_BEDROCK_MODEL).to_string(),
+            timeout_ms: None,
         }
     }
 }
@@ -51,11 +52,18 @@ impl Client {
 pub struct BedrockCompletionModel {
     client: Client,
     model: String,
+    /// Per-request outbound-HTTP timeout in milliseconds. `None` leaves the
+    /// request unbounded client-side (the proxy applies its own default).
+    timeout_ms: Option<u64>,
 }
 
 impl CompletionModel for BedrockCompletionModel {
     fn completion_request(&self, prompt: Message) -> CompletionRequestBuilder {
         CompletionRequestBuilder::new(prompt)
+    }
+
+    fn set_timeout(&mut self, timeout_ms: u64) {
+        self.timeout_ms = Some(timeout_ms);
     }
 
     fn completion(
@@ -65,14 +73,18 @@ impl CompletionModel for BedrockCompletionModel {
         let body = self.build_request_body(request)?;
         let path = format!("/model/{}/converse", self.model);
 
-        let response = self
+        let mut req = self
             .client
             .http
             .request("POST", &path)
             .header("X-Runtara-Connection-Id", &self.client.connection_id)
             .header("X-Runtara-Ai-Provider", crate::provider::PROVIDER_BEDROCK)
             .header("Content-Type", "application/json")
-            .body_json(&body)
+            .body_json(&body);
+        if let Some(ms) = self.timeout_ms {
+            req = req.timeout(std::time::Duration::from_millis(ms));
+        }
+        let response = req
             .call_agent()
             .map_err(|e| CompletionError::HttpError(e.to_string()))?;
 

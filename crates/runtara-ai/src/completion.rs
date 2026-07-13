@@ -57,6 +57,14 @@ pub trait CompletionModel {
     /// Execute a completion request synchronously.
     fn completion(&self, request: CompletionRequest)
     -> Result<CompletionResponse, CompletionError>;
+
+    /// Set the per-request outbound-HTTP timeout, in milliseconds, applied to
+    /// the provider's completion call.
+    ///
+    /// The timeout is enforced at the server proxy (which honors the
+    /// serialized `timeout_ms`), not by preempting a running call. Default is a
+    /// no-op so models that don't support it keep their prior behavior.
+    fn set_timeout(&mut self, _timeout_ms: u64) {}
 }
 
 // ================================================================

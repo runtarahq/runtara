@@ -73,6 +73,7 @@ impl Client {
         OpenAICompletionModel {
             client: self.clone(),
             model: model.to_string(),
+            timeout_ms: None,
         }
     }
 }
@@ -86,11 +87,18 @@ impl Client {
 pub struct OpenAICompletionModel {
     client: Client,
     model: String,
+    /// Per-request outbound-HTTP timeout in milliseconds. `None` leaves the
+    /// request unbounded client-side (the proxy applies its own default).
+    timeout_ms: Option<u64>,
 }
 
 impl CompletionModel for OpenAICompletionModel {
     fn completion_request(&self, prompt: Message) -> CompletionRequestBuilder {
         CompletionRequestBuilder::new(prompt)
+    }
+
+    fn set_timeout(&mut self, timeout_ms: u64) {
+        self.timeout_ms = Some(timeout_ms);
     }
 
     fn completion(
@@ -101,25 +109,33 @@ impl CompletionModel for OpenAICompletionModel {
 
         let response = if self.client.uses_proxy() {
             // Proxy mode: relative path + connection_id header
-            self.client
+            let mut req = self
+                .client
                 .http
                 .request("POST", "/v1/chat/completions")
                 .header("X-Runtara-Connection-Id", &self.client.connection_id)
                 .header("X-Runtara-Ai-Provider", crate::provider::PROVIDER_OPENAI)
                 .header("Content-Type", "application/json")
-                .body_json(&body)
-                .call_agent()
+                .body_json(&body);
+            if let Some(ms) = self.timeout_ms {
+                req = req.timeout(std::time::Duration::from_millis(ms));
+            }
+            req.call_agent()
                 .map_err(|e| CompletionError::HttpError(e.to_string()))?
         } else {
             // Direct mode: full URL + API key
             let url = format!("{}/chat/completions", self.client.base_url);
-            self.client
+            let mut req = self
+                .client
                 .http
                 .request("POST", &url)
                 .header("Authorization", &format!("Bearer {}", self.client.api_key))
                 .header("Content-Type", "application/json")
-                .body_json(&body)
-                .call()
+                .body_json(&body);
+            if let Some(ms) = self.timeout_ms {
+                req = req.timeout(std::time::Duration::from_millis(ms));
+            }
+            req.call()
                 .map_err(|e| CompletionError::HttpError(e.to_string()))?
         };
 

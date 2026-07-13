@@ -4640,6 +4640,7 @@ dependencies = [
 name = "runtara-ai"
 version = "8.2.8"
 dependencies = [
+ "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",

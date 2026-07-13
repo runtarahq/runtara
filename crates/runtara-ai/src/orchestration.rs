@@ -53,6 +53,10 @@ pub struct CompletionInvokeRequest {
     /// Optional structured-output JSON Schema, serialized as a string.
     #[serde(default)]
     pub output_schema_json: Option<String>,
+    /// Per-attempt outbound-HTTP timeout for this LLM call, in milliseconds.
+    /// `None` resolves to [`runtara_dsl::DEFAULT_STEP_TIMEOUT_MS`].
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Issue one LLM chat completion. Returns the model's response (choice + usage)
@@ -66,13 +70,20 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
     } else {
         Some(req.connection_id.as_str())
     };
-    let model = crate::provider::create_completion_model_with_connection(
+    let mut model = crate::provider::create_completion_model_with_connection(
         &req.integration_id,
         &req.conn_params,
         req.model_id.as_deref(),
         conn_id_opt,
     )
     .map_err(|e| format!("LLM model creation failed: {e}"))?;
+
+    // Bound the LLM HTTP call at the configured per-attempt timeout (or the
+    // shared default). Enforced at the proxy via the serialized `timeout_ms`.
+    model.set_timeout(
+        req.timeout_ms
+            .unwrap_or(runtara_dsl::DEFAULT_STEP_TIMEOUT_MS),
+    );
 
     let mut builder = model
         .completion_request(Message::user(&req.user_prompt))

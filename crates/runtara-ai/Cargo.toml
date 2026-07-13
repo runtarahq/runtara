@@ -21,6 +21,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
 tracing = { version = "0.1", optional = true }
+# DSL constants only (DEFAULT_STEP_TIMEOUT_MS). default-features = false keeps
+# schemars out of the wasm re-export via runtara-workflow-stdlib.
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
 
 # Backend selected per target so wasm workflows (which re-export runtara-ai
 # via runtara-workflow-stdlib) don't drag ureq + rustls + ring + url + icu_*

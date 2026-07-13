@@ -814,6 +814,10 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
             .output_schema
             .as_ref()
             .map(|s| serde_json::to_string(s).unwrap_or_default()),
+        // Placeholder — replaced with the author-configurable timeout in the
+        // next commit. None already resolves to DEFAULT_STEP_TIMEOUT_MS in
+        // run_completion, removing the prior 30s proxy floor.
+        timeout_ms: None,
     };
 
     let response = runtara_ai::run_completion(req)
@@ -1059,6 +1063,10 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
             .output_schema
             .as_ref()
             .map(|s| serde_json::to_string(s).unwrap_or_default()),
+        // Placeholder — replaced with the author-configurable timeout in the
+        // next commit. None already resolves to DEFAULT_STEP_TIMEOUT_MS in
+        // run_completion, removing the prior 30s proxy floor.
+        timeout_ms: None,
     };
     let response = runtara_ai::run_completion(req)
         .map_err(|e| AgentError::transient("AI_TURN_COMPLETION_FAILED", e))?;
@@ -1243,6 +1251,8 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
         temperature: 0.3,
         max_tokens: None,
         output_schema_json: None,
+        // See note in chat_completion — None resolves to the shared default.
+        timeout_ms: None,
     };
 
     // A summarization failure degrades like the generated path: keep the most
