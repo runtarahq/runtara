@@ -597,7 +597,12 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         body["prompt"] = json!(format!("{existing}. Avoid: {neg}"));
     }
 
-    let resp = openai_post_json(connection, "/v1/images/generations", body, 180_000)?;
+    let resp = openai_post_json(
+        connection,
+        "/v1/images/generations",
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1017,7 +1022,12 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         "size": format!("{}x{}", input.width.unwrap_or(1024), input.height.unwrap_or(1024)),
     });
 
-    let resp = openai_post_json(connection, &format!("/v1/{endpoint}"), body, 180_000)?;
+    let resp = openai_post_json(
+        connection,
+        &format!("/v1/{endpoint}"),
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()

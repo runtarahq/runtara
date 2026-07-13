@@ -689,7 +689,7 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         connection,
         &format!("/model/{}/invoke", model),
         body,
-        180_000,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
     )?;
 
     let image_data = resp["artifacts"][0]["base64"]
@@ -1129,7 +1129,7 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         connection,
         &format!("/model/{}/invoke", model),
         body,
-        180_000,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
     )?;
 
     let image_data = resp["artifacts"][0]["base64"]
@@ -1234,7 +1234,9 @@ pub fn bedrock_invoke_model(
             .with_attr("integration", "BEDROCK")
     })?;
 
-    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(180_000));
+    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    ));
     let url = format!(
         "https://bedrock-runtime.amazonaws.com/model/{}/invoke",
         input.model_id

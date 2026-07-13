@@ -15,6 +15,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Default per-step outbound-HTTP timeout, in milliseconds.
+///
+/// Single source of truth for the timeout applied to AI/agent capability
+/// calls when a step (or `AiAgentConfig.turnTimeout`) does not specify one.
+/// Enforced at the outbound-HTTP layer (the server proxy honors the
+/// `timeout_ms` the guest sends), not by preempting a running invoke — so it
+/// bounds the HTTP call, not in-guest compute. Semantics are per-attempt:
+/// worst-case wall-clock is `timeout × (1 + max_retries)`.
+///
+/// Not feature-gated: WASM agent crates consume this with
+/// `default-features = false`, so it must be visible at the crate root under
+/// any feature set.
+pub const DEFAULT_STEP_TIMEOUT_MS: u64 = 180_000;
+
 // Include the schema types
 include!("schema_types.rs");
 

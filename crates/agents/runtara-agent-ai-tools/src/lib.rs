@@ -1435,7 +1435,12 @@ fn image_generation_openai(
         body["prompt"] = json!(format!("{existing}. Avoid: {neg}"));
     }
 
-    let resp = openai_post(connection, "/v1/images/generations", body, 180_000)?;
+    let resp = openai_post(
+        connection,
+        "/v1/images/generations",
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1484,7 +1489,12 @@ fn image_generation_bedrock(
     });
 
     let path = format!("/model/{}/invoke", model);
-    let resp = bedrock_post(connection, &path, request_body, 180_000)?;
+    let resp = bedrock_post(
+        connection,
+        &path,
+        request_body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
@@ -1896,7 +1906,12 @@ fn vision_to_image_openai(
         "size": format!("{}x{}", input.width.unwrap_or(1024), input.height.unwrap_or(1024)),
     });
 
-    let resp = openai_post(connection, &format!("/v1/{endpoint}"), body, 180_000)?;
+    let resp = openai_post(
+        connection,
+        &format!("/v1/{endpoint}"),
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1941,7 +1956,12 @@ fn vision_to_image_bedrock(
     });
 
     let path = format!("/model/{}/invoke", model);
-    let resp = bedrock_post(connection, &path, request_body, 180_000)?;
+    let resp = bedrock_post(
+        connection,
+        &path,
+        request_body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
