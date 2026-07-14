@@ -9,15 +9,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use runtara_dsl::agent_meta::{AgentInfo, canonical_agent_id};
 use serde::{Deserialize, Serialize};
-use wasmtime::Engine;
+use wasmtime::component::{ComponentNamedList, Lift, Lower, TypedFunc};
+use wasmtime::{Engine, Store, UpdateDeadline};
 
 use crate::bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
-use crate::engine::{EngineConfig, build_engine};
-use crate::host_state::{CallContext, HostState};
+use crate::engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
+use crate::host_state::{
+    CallContext, DEFAULT_GUEST_MEMORY_MAX_BYTES, DEFAULT_GUEST_TABLE_MAX_ELEMENTS, HostState,
+    Termination,
+};
 use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent};
 
 /// Server-facing per-call request shape. Mirrors today's `TestAgentRequest`
@@ -72,6 +77,25 @@ pub struct DispatcherEnv {
     pub core_http_url: String,
 }
 
+/// Default wall-clock budget for a single `test_capability` invocation. The
+/// operator-test surface is interactive; a capability that hasn't produced a
+/// result in this long is wedged, not slow. Override with
+/// `RUNTARA_TEST_CAPABILITY_TIMEOUT_SECS`.
+const DEFAULT_TEST_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn parse_timeout(raw: Option<String>) -> Duration {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_TEST_CAPABILITY_TIMEOUT)
+}
+
+fn parse_memory_max(raw: Option<String>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .filter(|b| *b > 0)
+        .unwrap_or(DEFAULT_GUEST_MEMORY_MAX_BYTES)
+}
+
 pub struct ComponentDispatcherService {
     engine: Arc<Engine>,
     agents: HashMap<String, Arc<LoadedAgent>>,
@@ -80,6 +104,10 @@ pub struct ComponentDispatcherService {
     /// same data without copying.
     catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     env: DispatcherEnv,
+    /// Per-call wall-clock budget for `test_capability`.
+    test_timeout: Duration,
+    /// Per-call guest linear-memory cap for `test_capability`, in bytes.
+    memory_max_bytes: usize,
 }
 
 impl ComponentDispatcherService {
@@ -93,6 +121,10 @@ impl ComponentDispatcherService {
     /// `meta.id`) are also rejected so registration can't silently misroute.
     pub async fn from_dir(component_dir: &Path, env: DispatcherEnv) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())?;
+        // Drive the epoch clock for this engine so the per-call deadlines set in
+        // `test_capability` can actually fire — without a ticker the epoch never
+        // advances and an unbounded guest would run forever.
+        spawn_epoch_ticker(Arc::clone(&engine));
         let linker = build_linker(&engine)?;
 
         let mut agents = HashMap::new();
@@ -174,6 +206,10 @@ impl ComponentDispatcherService {
             agents,
             catalog,
             env,
+            test_timeout: parse_timeout(std::env::var("RUNTARA_TEST_CAPABILITY_TIMEOUT_SECS").ok()),
+            memory_max_bytes: parse_memory_max(
+                std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
+            ),
         })
     }
 
@@ -229,7 +265,8 @@ impl ComponentDispatcherService {
             &self.env.object_model_url,
             &self.env.core_http_url,
         ));
-        let state = HostState::new(ctx);
+        let mut state = HostState::new(ctx);
+        state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 
         // Dynamic dispatch: look up the agent's capabilities interface by the
@@ -261,11 +298,35 @@ impl ComponentDispatcherService {
         >;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
 
-        let started = std::time::Instant::now();
-        let (result,) = invoke
-            .call_async(&mut store, (req.capability_id.clone(), input_bytes, conn))
-            .await?;
+        let started = Instant::now();
+        let outcome = call_with_guards(
+            &mut store,
+            self.test_timeout,
+            invoke,
+            (req.capability_id.clone(), input_bytes, conn),
+        )
+        .await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        let (result,) = match outcome {
+            GuardOutcome::Returned(ret) => ret,
+            GuardOutcome::TimedOut => {
+                return Ok(timeout_result(elapsed_ms, self.test_timeout));
+            }
+            GuardOutcome::Trapped(trap) => {
+                // A guest that blew the memory cap traps on the failed grow; the
+                // limiter flags it so we can surface a clean error instead of an
+                // opaque wasm trap. Any other trap is a genuine guest fault and
+                // propagates as before (the server maps it to an ExecutionError).
+                if store.data().limiter.denied_memory_grow {
+                    return Ok(memory_limit_result(
+                        elapsed_ms,
+                        store.data().limiter.max_memory_bytes,
+                    ));
+                }
+                return Err(trap);
+            }
+        };
 
         Ok(match result {
             Ok(out_bytes) => TestResult {
@@ -287,5 +348,252 @@ impl ComponentDispatcherService {
                 execution_time_ms: elapsed_ms,
             },
         })
+    }
+}
+
+/// Outcome of a host-guarded guest call (see [`call_with_guards`]).
+pub(crate) enum GuardOutcome<R> {
+    /// The guest returned without trapping. Carries the typed return; a
+    /// guest-level error lives inside `R`, not here.
+    Returned(R),
+    /// The guest trapped. Distinguish a memory-cap OOM from a genuine fault via
+    /// `store.data().limiter.denied_memory_grow` after this returns.
+    Trapped(anyhow::Error),
+    /// The per-call wall-clock budget elapsed and the call was interrupted —
+    /// either a pure-wasm loop caught by the epoch ring, or a guest parked in a
+    /// host call caught by the watchdog ring.
+    TimedOut,
+}
+
+/// Run one typed guest call under two interruption rings, mirroring the runtime
+/// path in `workflow.rs`:
+/// - an epoch deadline callback that interrupts a pure-wasm loop at the next
+///   guest branch point once `timeout` elapses, and
+/// - a watchdog `select!` that drops the in-flight future when the guest is
+///   parked in a host call (where the epoch callback can't fire) past budget.
+///
+/// The engine behind `store` must have epoch interruption enabled and an epoch
+/// ticker running (both hold for the dispatcher engine). `store` is left
+/// readable afterward so the caller can inspect e.g. `limiter.denied_memory_grow`.
+pub(crate) async fn call_with_guards<P, R>(
+    store: &mut Store<HostState>,
+    timeout: Duration,
+    func: TypedFunc<P, R>,
+    params: P,
+) -> GuardOutcome<R>
+where
+    P: ComponentNamedList + Lower,
+    R: ComponentNamedList + Lift + 'static,
+{
+    let started = Instant::now();
+
+    // Epoch ring: fires at guest branch points every EPOCH_TICK; interrupts
+    // once the wall-clock budget is spent, otherwise re-arms for one more tick.
+    store.epoch_deadline_callback(move |mut ctx| {
+        if started.elapsed() >= timeout {
+            ctx.data_mut().termination = Some(Termination::Timeout);
+            return Ok(UpdateDeadline::Interrupt);
+        }
+        Ok(UpdateDeadline::Yield(1))
+    });
+    store.set_epoch_deadline(1);
+
+    // Watchdog ring: catches a guest blocked inside a host call, where the epoch
+    // callback can't fire. Cancellation = dropping the in-flight future. Scoped
+    // so the `&mut store` reborrow is released before we read the store back.
+    let outcome = {
+        let call = func.call_async(&mut *store, params);
+        tokio::pin!(call);
+        let watchdog = async {
+            loop {
+                tokio::time::sleep(EPOCH_TICK).await;
+                if started.elapsed() >= timeout {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            result = &mut call => match result {
+                Ok(ret) => GuardOutcome::Returned(ret),
+                Err(trap) => GuardOutcome::Trapped(trap.into()),
+            },
+            _ = watchdog => GuardOutcome::TimedOut,
+        }
+    };
+
+    // A pure-wasm loop trips the epoch ring instead: the call returns
+    // Err(trap) with our Timeout marker set. Reclassify that as TimedOut so the
+    // caller doesn't mistake it for a genuine guest fault.
+    if matches!(outcome, GuardOutcome::Trapped(_))
+        && store.data().termination == Some(Termination::Timeout)
+    {
+        return GuardOutcome::TimedOut;
+    }
+    outcome
+}
+
+/// Structured result for a capability that blew the wall-clock budget.
+fn timeout_result(elapsed_ms: f64, timeout: Duration) -> TestResult {
+    TestResult {
+        success: false,
+        output: None,
+        error: Some(TestError {
+            code: "EXECUTION_TIMEOUT".into(),
+            message: format!("capability did not complete within {timeout:?} and was interrupted"),
+            category: "transient".into(),
+            severity: "error".into(),
+            retryable: false,
+        }),
+        execution_time_ms: elapsed_ms,
+    }
+}
+
+/// Structured result for a capability that exceeded the guest memory cap.
+fn memory_limit_result(elapsed_ms: f64, max_bytes: usize) -> TestResult {
+    TestResult {
+        success: false,
+        output: None,
+        error: Some(TestError {
+            code: "MEMORY_LIMIT_EXCEEDED".into(),
+            message: format!(
+                "capability exceeded the {max_bytes}-byte guest memory limit and was terminated"
+            ),
+            category: "permanent".into(),
+            severity: "error".into(),
+            retryable: false,
+        }),
+        execution_time_ms: elapsed_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+    use wasmtime::component::Component;
+
+    /// One engine with a ticker running, shared across the guard tests so we
+    /// don't leak a ticker thread per test. The epoch ring only fires when the
+    /// engine's epoch actually advances, which is exactly what the ticker does.
+    fn guarded_engine() -> Arc<Engine> {
+        static ENGINE: OnceLock<Arc<Engine>> = OnceLock::new();
+        ENGINE
+            .get_or_init(|| {
+                let engine = build_engine(&EngineConfig::default()).expect("build engine");
+                spawn_epoch_ticker(Arc::clone(&engine));
+                engine
+            })
+            .clone()
+    }
+
+    fn test_ctx() -> Arc<CallContext> {
+        Arc::new(CallContext::for_test(
+            "tenant-test",
+            "http://localhost:1",
+            "http://localhost:2",
+            "http://localhost:3",
+            "http://localhost:4",
+        ))
+    }
+
+    /// Instantiate a minimal WAT component that exports a no-arg `run` func and
+    /// return the store plus a typed handle to `run`. Goes through the real
+    /// `instantiate` so the resource limiter is installed exactly as in
+    /// production.
+    async fn instantiate_run(
+        engine: &Arc<Engine>,
+        wat: &str,
+    ) -> (Store<HostState>, TypedFunc<(), ()>) {
+        let linker = build_linker(engine).expect("linker");
+        let component = Component::new(engine, wat).expect("compile wat component");
+        let pre = linker.instantiate_pre(&component).expect("instantiate_pre");
+        let (mut store, instance) = instantiate(engine, &pre, HostState::new(test_ctx()))
+            .await
+            .expect("instantiate");
+        let idx = instance
+            .get_export_index(&mut store, None, "run")
+            .expect("run export");
+        let func = instance
+            .get_typed_func::<(), ()>(&mut store, idx)
+            .expect("typed run");
+        (store, func)
+    }
+
+    /// Smallest component exporting `run`; returns immediately.
+    const RETURNS_IMMEDIATELY: &str = r#"
+        (component
+            (core module $m (func (export "run")))
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
+        )
+    "#;
+
+    /// Same shape, but `run` spins forever — the only way out is the guard.
+    const BUSY_LOOP: &str = r#"
+        (component
+            (core module $m
+                (func (export "run") (loop $spin (br $spin))))
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
+        )
+    "#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_with_guards_returns_for_a_fast_call() {
+        let engine = guarded_engine();
+        let (mut store, func) = instantiate_run(&engine, RETURNS_IMMEDIATELY).await;
+        let outcome = call_with_guards(&mut store, Duration::from_secs(5), func, ()).await;
+        assert!(
+            matches!(outcome, GuardOutcome::Returned(())),
+            "a fast call should return, not time out or trap"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_with_guards_interrupts_a_runaway_loop() {
+        let engine = guarded_engine();
+        let (mut store, func) = instantiate_run(&engine, BUSY_LOOP).await;
+        let started = Instant::now();
+        let outcome = call_with_guards(&mut store, Duration::from_millis(300), func, ()).await;
+        assert!(
+            matches!(outcome, GuardOutcome::TimedOut),
+            "a runaway guest must be interrupted, not run forever"
+        );
+        // Without the epoch ring this call never returns; bound the wall clock
+        // generously to keep the test robust under load while still failing a
+        // genuine regression (the loop would otherwise hang the suite).
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "runaway loop was not bounded promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn parse_timeout_uses_default_when_absent_or_invalid() {
+        assert_eq!(parse_timeout(None), DEFAULT_TEST_CAPABILITY_TIMEOUT);
+        assert_eq!(
+            parse_timeout(Some("0".into())),
+            DEFAULT_TEST_CAPABILITY_TIMEOUT
+        );
+        assert_eq!(
+            parse_timeout(Some("abc".into())),
+            DEFAULT_TEST_CAPABILITY_TIMEOUT
+        );
+        assert_eq!(parse_timeout(Some("5".into())), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn parse_memory_max_uses_default_when_absent_or_invalid() {
+        assert_eq!(parse_memory_max(None), DEFAULT_GUEST_MEMORY_MAX_BYTES);
+        assert_eq!(
+            parse_memory_max(Some("0".into())),
+            DEFAULT_GUEST_MEMORY_MAX_BYTES
+        );
+        assert_eq!(
+            parse_memory_max(Some("nope".into())),
+            DEFAULT_GUEST_MEMORY_MAX_BYTES
+        );
+        assert_eq!(parse_memory_max(Some("4096".into())), 4096);
     }
 }
