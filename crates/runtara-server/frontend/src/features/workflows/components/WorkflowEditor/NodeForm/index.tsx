@@ -141,10 +141,14 @@ export function NodeForm({
     />
   );
 
-  const renderActions = () =>
-    hideActions ? null : (
-      <FormActions isEdit={isEdit} onReset={handleReset} onDelete={onDelete} />
-    );
+  const renderActions = () => (
+    <FormActions
+      isEdit={isEdit}
+      hideActions={hideActions}
+      onReset={handleReset}
+      onDelete={onDelete}
+    />
+  );
 
   return (
     <TabProvider>
@@ -162,12 +166,14 @@ export function NodeForm({
   );
 }
 
-function FormActions({
+export function FormActions({
   isEdit,
+  hideActions = false,
   onReset,
   onDelete,
 }: {
   isEdit?: boolean;
+  hideActions?: boolean;
   onReset: () => void;
   onDelete?: () => void;
 }) {
@@ -182,8 +188,15 @@ function FormActions({
     }
   }, [activeTab]);
 
-  // Main tab: Show Reset button (for edit mode) or Save button (for create mode)
+  // Main tab: Show Reset button (for edit mode) or Save button (for create mode).
+  // When hideActions is set, the parent (e.g. TimelineNodeConfigPanel) renders
+  // its own Save/Cancel footer, so suppress the form's own main-tab buttons to
+  // avoid a duplicate Save. This does not apply to the Run Test action below,
+  // which no parent footer provides.
   if (activeTab === 'main') {
+    if (hideActions) {
+      return null;
+    }
     if (isEdit) {
       return (
         <div className="flex justify-between pt-4 mt-auto border-t">
@@ -224,7 +237,9 @@ function FormActions({
     );
   }
 
-  // Testing tab: Show Run Test button
+  // Testing tab: Show Run Test button. Always available regardless of
+  // hideActions — the Run Test action works off in-memory form state and does
+  // not require the step to be saved, so it must show while creating a step too.
   if (activeTab === 'testing') {
     const testHandler = getTestHandler();
 
@@ -233,6 +248,7 @@ function FormActions({
         <Button
           type="button"
           className="px-6"
+          data-testid="node-form-run-test"
           onClick={() => testHandler?.runTest()}
           disabled={
             !testHandler?.isAvailable ||
