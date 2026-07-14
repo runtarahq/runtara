@@ -37,6 +37,8 @@ const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.jso
 const EDGE_CONDITION_PRIORITY: &str = include_str!("fixtures/edge_condition_priority.json");
 const AGENT_EDGE_CONDITION: &str = include_str!("fixtures/agent_edge_condition.json");
 const WAIT_TIMEOUT_ON_ERROR: &str = include_str!("fixtures/wait_timeout_on_error.json");
+const WAIT_DELAY_FINISH: &str = include_str!("fixtures/wait_delay_finish.json");
+const WAIT_WAIT_FINISH: &str = include_str!("fixtures/wait_wait_finish.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
@@ -366,6 +368,9 @@ struct CapturedRun {
     /// Raw-SQL request paths the workflow sent (one per attempt — retries
     /// included), in order.
     sql_requests: Vec<String>,
+    /// Number of custom-signal polls the mock answered with a signal — a
+    /// replayed wait re-polls, so this is > the number of waits after a resume.
+    custom_signal_polls: u32,
     status_success: bool,
     stderr: String,
     /// Peak guest linear memory observed by the embedded executor's limiter, when
@@ -397,6 +402,16 @@ struct ServerState {
     sql_responses: Mutex<Vec<(u16, Value)>>,
     /// Paths of raw-SQL requests received, in order — retry counting.
     sql_requests: Mutex<Vec<String>>,
+    /// Payloads served for custom-signal polls (`GET signals/{id}`), modeling
+    /// the pending-signal row. Served **non-destructively** (peeked, never
+    /// removed) so a replayed `WaitForSignal` re-reads the same signal — the
+    /// core `take_pending_custom_signal` is likewise a non-destructive read.
+    /// The first entry answers every poll; empty → no signal (the wait keeps
+    /// polling), so a test that arms no signal would hang by design.
+    custom_signals: Mutex<Vec<Value>>,
+    /// Count of custom-signal polls served with a signal — lets a test assert
+    /// the wait re-polled on replay.
+    custom_signal_polls: Mutex<u32>,
 }
 
 fn workspace_root() -> PathBuf {
@@ -660,6 +675,40 @@ fn route(
                 return (200, serde_json::json!({"success": true}));
             }
             ("POST", "checkpoint") => return checkpoint_response(body, sink, server_state),
+            // Lifecycle-signal poll (WaitForSignal loop's `check_signals`). No
+            // drain injected in these tests → no pending lifecycle signal.
+            ("GET", "signals") => {
+                return (
+                    200,
+                    serde_json::json!({"signal": null, "custom_signal": null}),
+                );
+            }
+            // Custom-signal poll (`GET signals/{signal_id}`). The signal id is a
+            // single percent-encoded path segment, so it lands here as
+            // `signals/<encoded>`; a fixture has one wait per id, so we ignore
+            // the exact id and serve the armed payload. Non-destructive: peek
+            // the front and leave it, so a replayed wait re-reads it.
+            ("GET", ep) if ep.starts_with("signals/") => {
+                let custom = server_state
+                    .custom_signals
+                    .lock()
+                    .expect("custom_signals lock")
+                    .first()
+                    .cloned();
+                let custom_signal = custom.map(|payload| {
+                    *server_state
+                        .custom_signal_polls
+                        .lock()
+                        .expect("custom_signal_polls lock") += 1;
+                    let payload_b64 = base64::engine::general_purpose::STANDARD
+                        .encode(serde_json::to_vec(&payload).expect("payload serializes"));
+                    serde_json::json!({"checkpoint_id": "wait", "payload": payload_b64})
+                });
+                return (
+                    200,
+                    serde_json::json!({"signal": null, "custom_signal": custom_signal}),
+                );
+            }
             ("POST", "sleep") => {
                 capture_sleep(body, sink);
                 return (200, serde_json::json!({"success": true}));
@@ -982,6 +1031,32 @@ fn run_direct_workflow_with_llm_script(
     )
 }
 
+/// Run a `WaitForSignal` workflow against the mock, arming a non-destructive
+/// custom-signal payload the wait(s) will consume. `preloaded_checkpoints`
+/// simulates a drain/resume: pass a prior run's captured checkpoints to replay
+/// the instance from the entry point with its durable state already present.
+fn run_wait_workflow(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    custom_signals: Vec<Value>,
+) -> CapturedRun {
+    run_direct_workflow_capture_full_sql(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+        preloaded_checkpoints,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        custom_signals,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_direct_workflow_capture_with_preloaded_checkpoints(
     components_dir: &Path,
@@ -1025,6 +1100,7 @@ fn run_direct_workflow_capture_full(
         llm_script,
         extra_env,
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -1042,6 +1118,7 @@ fn run_direct_workflow_capture_full_sql(
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
     sql_script: Vec<(u16, Value)>,
+    custom_signals: Vec<Value>,
 ) -> CapturedRun {
     let first = run_direct_workflow_capture_attempt(
         components_dir,
@@ -1053,6 +1130,7 @@ fn run_direct_workflow_capture_full_sql(
         llm_script.clone(),
         extra_env.clone(),
         sql_script.clone(),
+        custom_signals.clone(),
     );
     // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
     // TCP listeners) a run occasionally dies before reaching the mock runtime
@@ -1080,6 +1158,7 @@ fn run_direct_workflow_capture_full_sql(
         llm_script,
         extra_env,
         sql_script,
+        custom_signals,
     )
 }
 
@@ -1094,6 +1173,7 @@ fn run_direct_workflow_capture_attempt(
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
     sql_script: Vec<(u16, Value)>,
+    custom_signals: Vec<Value>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -1124,6 +1204,8 @@ fn run_direct_workflow_capture_attempt(
         llm_requests: Mutex::new(Vec::new()),
         sql_responses: Mutex::new(sql_script),
         sql_requests: Mutex::new(Vec::new()),
+        custom_signals: Mutex::new(custom_signals),
+        custom_signal_polls: Mutex::new(0),
     });
     let server_state_for_assertions = server_state.clone();
     let server_handle =
@@ -1183,6 +1265,10 @@ fn run_direct_workflow_capture_attempt(
         .lock()
         .expect("sql_requests lock")
         .clone();
+    let custom_signal_polls = *server_state_for_assertions
+        .custom_signal_polls
+        .lock()
+        .expect("custom_signal_polls lock");
     CapturedRun {
         output_json,
         error_json,
@@ -1191,6 +1277,7 @@ fn run_direct_workflow_capture_attempt(
         checkpoints,
         llm_requests,
         sql_requests,
+        custom_signal_polls,
         status_success,
         stderr,
         memory_peak_bytes,
@@ -3253,6 +3340,159 @@ fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
     assert!(result.checkpoints.is_empty());
 }
 
+// A [WaitForSignal -> durable Delay -> Finish] workflow whose signal was
+// consumed and whose execution moved past the wait must, when the environment
+// is drained and the instance replays from the entry point, re-read its signal
+// and complete — not dead-hang on a destructively-deleted signal, and not fire
+// a spurious WAIT_TIMEOUT from a recomputed deadline. Modeled with the two-run
+// preloaded-checkpoints seam: run 1 executes fresh; run 2 replays with run 1's
+// durable state present and the signal still retained.
+#[test]
+fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "direct-wasm-execute-wait-delay-resume";
+    let signal = serde_json::json!({ "approved": true });
+
+    // Run 1: the wait consumes the delivered approval, persists its absolute
+    // deadline as an 8-byte checkpoint, then the durable delay parks the
+    // instance — the post-wait window a real drain would land in.
+    let first = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        WAIT_DELAY_FINISH,
+        b"{}",
+        Vec::new(),
+        vec![signal.clone()],
+    );
+    assert!(
+        first.status_success,
+        "run 1 should complete on the delivered-signal path; stderr: {}",
+        first.stderr
+    );
+    assert_eq!(
+        first.output_json,
+        Some(serde_json::json!({ "approved": true })),
+    );
+    assert!(
+        first.custom_signal_polls >= 1,
+        "run 1 wait must have read the delivered signal"
+    );
+
+    // The wait persisted exactly one 8-byte absolute-deadline checkpoint under
+    // its deterministic signal id (the timeout-drift fix). Pre-fix, the wait
+    // emitted no checkpoint at all.
+    let deadline: Vec<_> = first
+        .checkpoints
+        .iter()
+        .filter(|cp| cp.state.len() == 8)
+        .collect();
+    assert_eq!(
+        deadline.len(),
+        1,
+        "run 1 should persist one 8-byte wait deadline checkpoint; saw: {:?}",
+        first.checkpoints
+    );
+    assert!(
+        deadline[0].checkpoint_id.ends_with("/wait"),
+        "deadline checkpoint must be keyed by the wait's deterministic signal id, got: {}",
+        deadline[0].checkpoint_id
+    );
+
+    // The durable state a resume would find committed: the wait deadline.
+    let preloaded: Vec<(String, Vec<u8>)> = first
+        .checkpoints
+        .iter()
+        .filter(|cp| !cp.state.is_empty())
+        .map(|cp| (cp.checkpoint_id.clone(), cp.state.clone()))
+        .collect();
+
+    // Run 2: replay from the entry point with the deadline preloaded and the
+    // signal still present (non-destructive retention).
+    let second = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        WAIT_DELAY_FINISH,
+        b"{}",
+        preloaded,
+        vec![signal.clone()],
+    );
+    assert!(
+        second.status_success,
+        "resume must complete, not hang or time out; stderr: {}",
+        second.stderr
+    );
+    assert_eq!(
+        second.output_json,
+        Some(serde_json::json!({ "approved": true })),
+        "resume must reproduce the delivered-signal result (no spurious WAIT_TIMEOUT)"
+    );
+    assert!(
+        second.custom_signal_polls >= 1,
+        "resume must re-poll and re-read the retained signal"
+    );
+    // The deadline was read from its checkpoint, not recomputed and re-saved.
+    assert!(
+        second.checkpoints.iter().all(|cp| cp.state.len() != 8),
+        "resume must hit the preloaded deadline checkpoint, not re-save one: {:?}",
+        second.checkpoints
+    );
+}
+
+// [WaitForSignal -> WaitForSignal -> Finish]: after wait1 consumes its signal,
+// a drain replays from the entry point back through wait1, which must re-read
+// its already-consumed signal rather than re-poll a deleted one. Both waits'
+// signals must survive the replay.
+#[test]
+fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "direct-wasm-execute-wait-wait-resume";
+    let signal = serde_json::json!({ "approved": true });
+
+    let first = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        WAIT_WAIT_FINISH,
+        b"{}",
+        Vec::new(),
+        vec![signal.clone()],
+    );
+    assert!(
+        first.status_success,
+        "run 1 should complete once both signals are read; stderr: {}",
+        first.stderr
+    );
+    assert_eq!(
+        first.output_json,
+        Some(serde_json::json!({ "first": true, "second": true })),
+    );
+    assert!(
+        first.custom_signal_polls >= 2,
+        "both waits must read a signal on run 1; polls: {}",
+        first.custom_signal_polls
+    );
+
+    // Resume: replay from the entry point with the signals still retained. Both
+    // waits re-read and the workflow completes identically.
+    let second = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        WAIT_WAIT_FINISH,
+        b"{}",
+        Vec::new(),
+        vec![signal.clone()],
+    );
+    assert!(
+        second.status_success,
+        "resume must complete, not hang on a consumed signal; stderr: {}",
+        second.stderr
+    );
+    assert_eq!(
+        second.output_json,
+        Some(serde_json::json!({ "first": true, "second": true })),
+        "resume must reproduce both delivered-signal results"
+    );
+}
+
 #[test]
 fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
     let components_dir = direct_e2e_components_dir();
@@ -4121,6 +4361,10 @@ fn run_direct_workflow_embedded(
         .lock()
         .expect("sql_requests lock")
         .clone();
+    let custom_signal_polls = *server_state_for_assertions
+        .custom_signal_polls
+        .lock()
+        .expect("custom_signal_polls lock");
     let stderr = match &result.exit {
         runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
         _ => String::new(),
@@ -4133,6 +4377,7 @@ fn run_direct_workflow_embedded(
         checkpoints,
         llm_requests,
         sql_requests,
+        custom_signal_polls,
         status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
         stderr,
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -4764,6 +5009,7 @@ fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
             (500, sql_error_body("upstream boom")),
             (200, serde_json::json!({"success": true, "rowsAffected": 1})),
         ],
+        Vec::new(),
     );
 
     assert!(
@@ -4810,6 +5056,7 @@ fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
                 serde_json::json!({"success": true, "rows": [{"one": 1}], "rowCount": 1}),
             ),
         ],
+        Vec::new(),
     );
 
     assert!(
@@ -4856,6 +5103,7 @@ fn direct_wasm_sql_transport_failure_classification() {
             Vec::new(),
             Vec::new(),
             refused_env.clone(),
+            Vec::new(),
             Vec::new(),
         );
 

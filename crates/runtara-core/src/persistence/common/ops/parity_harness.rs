@@ -172,16 +172,19 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .take_pending_custom_signal(&instance_id, checkpoint_id)
         .await
         .expect("take_pending_custom_signal failed")
-        .expect("custom signal should be taken once");
+        .expect("custom signal should be readable");
     assert_eq!(taken.checkpoint_id, checkpoint_id);
+    // Reads are non-destructive across backends: a replayed WaitForSignal
+    // re-reads the same signal after a drain/resume, so a second read returns
+    // the row again rather than None (the row is reclaimed by ON DELETE CASCADE
+    // at instance deletion).
     let taken_again = backend
         .take_pending_custom_signal(&instance_id, checkpoint_id)
         .await
-        .expect("take_pending_custom_signal second call failed");
-    assert!(
-        taken_again.is_none(),
-        "custom signal must not be re-takeable"
-    );
+        .expect("take_pending_custom_signal second call failed")
+        .expect("custom signal must remain re-readable (non-destructive)");
+    assert_eq!(taken_again.checkpoint_id, checkpoint_id);
+    assert_eq!(taken_again.payload, taken.payload);
 
     // --- step summaries (empty is fine; invariant is that it compiles/runs) -
     let step_filter = ListStepSummariesFilter::default();

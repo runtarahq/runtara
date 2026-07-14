@@ -1276,7 +1276,7 @@ mod tests {
             .await
             .unwrap();
 
-        // First take should retrieve and delete
+        // First read retrieves the signal.
         let signal = PostgresPersistence::op_take_pending_custom_signal(
             &pool,
             &instance_id.to_string(),
@@ -1288,15 +1288,20 @@ mod tests {
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
-        // Second take should return none
+        // Reads are non-destructive: a second read (as happens on
+        // replay-from-start) returns the same signal, not None — this is what
+        // lets a drained/resumed WaitForSignal re-read its consumed signal
+        // instead of dead-hanging.
         let signal = PostgresPersistence::op_take_pending_custom_signal(
             &pool,
             &instance_id.to_string(),
             "wait-1",
         )
         .await
-        .unwrap();
-        assert!(signal.is_none());
+        .unwrap()
+        .expect("custom signal should still exist (non-destructive read)");
+        assert_eq!(signal.checkpoint_id, "wait-1");
+        assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
         cleanup_test_instance(&pool, instance_id).await;
     }

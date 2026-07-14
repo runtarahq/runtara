@@ -154,6 +154,13 @@ const DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OF
 const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 48;
 const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 52;
 const DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 56;
+/// Fixed 8-byte scratch slot in the reserved 256-byte low-memory region (past
+/// the retptr scratch at 0 and the agent-args scratch at 128, below the static
+/// data base at 256). Used to marshal a `WaitForSignal` absolute timeout
+/// deadline (i64 ms since epoch) into the bytes of its durability checkpoint so
+/// a resumed wait reads the original deadline instead of recomputing
+/// `now + timeout` and sliding it forward on every replay.
+const DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET: i32 = 208;
 const DIRECT_AGENT_RESULT_OK_PTR_OFFSET: u64 = 8;
 const DIRECT_AGENT_RESULT_OK_LEN_OFFSET: u64 = 12;
 const DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET: u64 = 8;

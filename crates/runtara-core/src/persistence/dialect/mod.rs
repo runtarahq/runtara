@@ -33,28 +33,6 @@ pub enum EnumKind {
     InstanceEventType,
 }
 
-/// How to atomically take (select + delete) a pending custom signal.
-///
-/// Postgres can do this in one statement with `DELETE ... RETURNING`. SQLite
-/// needs a transactional SELECT followed by DELETE. Returned by
-/// [`Dialect::sql_take_pending_custom_signal`] so the shared executor picks
-/// the right code path.
-#[derive(Debug, Clone)]
-pub enum TakeCustomSignalPlan {
-    /// Single atomic statement returning the deleted row.
-    Atomic {
-        /// SQL with two placeholders: instance_id, checkpoint_id.
-        sql: &'static str,
-    },
-    /// Transactional SELECT + DELETE.
-    Transactional {
-        /// SELECT statement returning the row (placeholders: instance_id, checkpoint_id).
-        select_sql: &'static str,
-        /// DELETE statement removing the row (placeholders: instance_id, checkpoint_id).
-        delete_sql: &'static str,
-    },
-}
-
 /// SQL-dialect abstraction for the persistence layer.
 ///
 /// Implementations are zero-sized types associated with a specific sqlx
@@ -136,8 +114,18 @@ pub trait Dialect: Send + Sync + 'static {
 
     // --- Whole-SQL (for queries where fragment composition loses value) ----
 
-    /// Plan for taking a pending custom signal atomically.
-    fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan;
+    /// SQL for reading a pending custom signal by `(instance_id, checkpoint_id)`.
+    ///
+    /// **Non-destructive**: this SELECTs the row and leaves it in place. The
+    /// workflow engine is replay-from-start with checkpoints as a result
+    /// cache, so a `WaitForSignal` step must be able to re-read the signal it
+    /// already consumed when the instance is drained/restarted and replayed.
+    /// A destructive take made the wait the only non-replayable durable step
+    /// and dead-hung post-consume resumes. Rows are reclaimed by
+    /// `ON DELETE CASCADE` when the instance is deleted.
+    ///
+    /// Binds (in order): instance_id, checkpoint_id.
+    fn sql_take_pending_custom_signal() -> &'static str;
 
     /// SQL for inserting/upserting a checkpoint row.
     ///

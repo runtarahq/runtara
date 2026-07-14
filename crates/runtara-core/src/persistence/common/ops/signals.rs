@@ -18,9 +18,10 @@
 //!   ones. This is a legacy SQLite bug that's explicitly out of scope
 //!   for this refactor; see `SqliteDialect::sql_get_pending_signal`.
 //!
-//! `take_pending_custom_signal` uses `Dialect::sql_take_pending_custom_signal`
-//! to pick between an atomic `DELETE ... RETURNING` (Postgres) and a
-//! transactional SELECT + DELETE (SQLite).
+//! `take_pending_custom_signal` is a **non-destructive** read via
+//! `Dialect::sql_take_pending_custom_signal` (a plain SELECT on both
+//! backends). The row is retained so replay-from-start re-reads the same
+//! signal — see the op's doc comment for the durability rationale.
 
 macro_rules! impl_signal_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
@@ -67,11 +68,16 @@ macro_rules! impl_signal_ops {
                 Ok(())
             }
 
-            /// Atomically remove and return a pending custom signal for
-            /// `(instance_id, checkpoint_id)`. Postgres uses a single
-            /// `DELETE ... RETURNING`; SQLite runs a transactional
-            /// `SELECT` + `DELETE` (no `RETURNING` available in its
-            /// runtime). Dispatches via `Dialect::sql_take_pending_custom_signal`.
+            /// Read (non-destructively) the pending custom signal for
+            /// `(instance_id, checkpoint_id)`, leaving the row in place.
+            ///
+            /// The row is intentionally retained so replay-from-start re-reads
+            /// the same signal idempotently — the workflow engine replays
+            /// durable steps from a result cache, and a `WaitForSignal` that
+            /// destructively consumed its signal would dead-hang when a
+            /// drain/restart replayed it. Retained rows are reclaimed by
+            /// `ON DELETE CASCADE` at instance deletion. Name kept as
+            /// `take_*` for call-site stability; the semantics are read-only.
             pub(crate) async fn op_take_pending_custom_signal(
                 pool: &$Pool,
                 instance_id: &str,
@@ -80,40 +86,14 @@ macro_rules! impl_signal_ops {
                 ::core::option::Option<$crate::persistence::CustomSignalRecord>,
                 $crate::error::CoreError,
             > {
-                use $crate::persistence::dialect::{Dialect, TakeCustomSignalPlan};
-                let dialect = <$Dialect>::default();
-                match dialect.sql_take_pending_custom_signal() {
-                    TakeCustomSignalPlan::Atomic { sql } => {
-                        let record =
-                            ::sqlx::query_as::<_, $crate::persistence::CustomSignalRecord>(sql)
-                                .bind(instance_id)
-                                .bind(checkpoint_id)
-                                .fetch_optional(pool)
-                                .await?;
-                        Ok(record)
-                    }
-                    TakeCustomSignalPlan::Transactional {
-                        select_sql,
-                        delete_sql,
-                    } => {
-                        let mut tx = pool.begin().await?;
-                        let record =
-                            ::sqlx::query_as::<_, $crate::persistence::CustomSignalRecord>(
-                                select_sql,
-                            )
-                            .bind(instance_id)
-                            .bind(checkpoint_id)
-                            .fetch_optional(&mut *tx)
-                            .await?;
-                        ::sqlx::query(delete_sql)
-                            .bind(instance_id)
-                            .bind(checkpoint_id)
-                            .execute(&mut *tx)
-                            .await?;
-                        tx.commit().await?;
-                        Ok(record)
-                    }
-                }
+                use $crate::persistence::dialect::Dialect;
+                let sql = <$Dialect>::sql_take_pending_custom_signal();
+                let record = ::sqlx::query_as::<_, $crate::persistence::CustomSignalRecord>(sql)
+                    .bind(instance_id)
+                    .bind(checkpoint_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(record)
             }
         }
     };

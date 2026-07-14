@@ -50,6 +50,27 @@ pub(super) fn store_local_i32_at(function: &mut WasmFunction, offset: i32, local
     }));
 }
 
+/// Store the i64 in `local` at fixed linear-memory `offset` (8-byte aligned).
+pub(super) fn store_local_i64_at(function: &mut WasmFunction, offset: i32, local: u32) {
+    function.instruction(&Instruction::I32Const(offset));
+    function.instruction(&Instruction::LocalGet(local));
+    function.instruction(&Instruction::I64Store(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+}
+
+/// Push the i64 at the linear-memory address held in `ptr_local` (8-byte aligned).
+pub(super) fn push_i64_load_from_ptr(function: &mut WasmFunction, ptr_local: u32) {
+    function.instruction(&Instruction::LocalGet(ptr_local));
+    function.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 3,
+        memory_index: 0,
+    }));
+}
+
 pub(super) fn push_segment_args(function: &mut WasmFunction, segment: &DirectDataSegment) {
     function.instruction(&Instruction::I32Const(segment.offset));
     function.instruction(&Instruction::I32Const(segment.len_i32()));
