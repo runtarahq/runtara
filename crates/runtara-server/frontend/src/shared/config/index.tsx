@@ -19,6 +19,10 @@ export type MenuChild = {
   title: string;
   to: string;
   icon?: React.ReactNode;
+  /** When true, `to` is an absolute path outside the SPA (e.g. the management
+   *  SPA at /ui/management/), rendered as a plain anchor doing a full browser
+   *  navigation rather than a react-router <Link>. */
+  external?: boolean;
 };
 
 export type MenuItem = {

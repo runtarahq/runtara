@@ -15,19 +15,18 @@ import {
   SidebarTrigger,
   useSidebar,
 } from '@/shared/components/ui/sidebar.tsx';
-import { menu, filterMenu } from '@/shared/config';
+import { menu, filterMenu, type MenuItem } from '@/shared/config';
 import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
 import { useAuthStore, useHasExplicitPermission } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
-import { DollarSign, Settings, Users } from 'lucide-react';
+import { DollarSign, Settings } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
 import { toast } from 'sonner';
-import { useNavigate } from 'react-router';
 
 export function Sidebar() {
   return (
@@ -98,13 +97,37 @@ function AppMenu() {
     [userGroups, entitlements]
   );
 
-  // The tenant user-management UI lives in the smo-management SPA (served by the gateway at
-  // /ui/management/ — shared, NOT org-namespaced; the SPA resolves the tenant from the JWT).
-  // Show the link only when /me explicitly grants `user_management:access` (Owner/Admin under
-  // enforcement). Default-deny, unlike other permission gates: the target surface only exists
-  // in the managed deployment, so before enforcement is on — and in self-hosted modes — the
-  // entry must stay hidden rather than render a dead link. UI-only gate; smo-management enforces.
+  // Settings is a collapsible group whose children are the settings sections.
+  // "User Management" links out to the separate smo-management SPA
+  // (/ui/management/) and is default-deny: shown only when /me explicitly grants
+  // `user_management:access` (the target surface exists only in the managed
+  // deployment, so it must stay hidden rather than render a dead link in
+  // self-hosted modes). UI-only gate; smo-management enforces.
   const canManageUsers = useHasExplicitPermission('user_management:access');
+
+  const settingsItem: MenuItem = useMemo(
+    () => ({
+      key: 'settings',
+      title: 'Settings',
+      to: '/settings',
+      icon: <Settings size={16} />,
+      allowedGroups: [],
+      children: [
+        { key: 'api-keys', title: 'API Keys', to: '/settings/api-keys' },
+        ...(canManageUsers
+          ? [
+              {
+                key: 'user-management',
+                title: 'User Management',
+                to: '/ui/management/',
+                external: true,
+              },
+            ]
+          : []),
+      ],
+    }),
+    [canManageUsers]
+  );
 
   const isHomePage = location.pathname === '/';
 
@@ -122,31 +145,20 @@ function AppMenu() {
             }
           />
         ))}
-        {canManageUsers && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              tooltip="User Management"
-              className="text-muted-foreground"
-            >
-              {/* External link: leaves the runtara SPA for the management SPA. A plain
-                  anchor (not react-router <Link>) so the browser does a full navigation. */}
-              <a href="/ui/management/">
-                <Users size={16} />
-                <span>User Management</span>
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+        <SideBarNavLink
+          key={settingsItem.key}
+          route={settingsItem}
+          tooltip={settingsItem.title}
+          active={location.pathname.startsWith('/settings')}
+        />
       </SidebarGroup>
     </SidebarMenu>
   );
 }
 
 function FooterMenu() {
-  const navigate = useNavigate();
-  // The "User Management" entry now lives in the main sidebar nav (see AppMenu), gated by the
-  // `user_management:access` permission.
+  // Settings (with API Keys / User Management) is a group in the main nav above,
+  // so there's no footer gear here.
   const versionLabel = formatBuildLabel(
     config.build.version,
     config.build.commit,
@@ -171,16 +183,6 @@ function FooterMenu() {
     <div className="flex min-w-0 flex-col gap-1 px-2 py-2">
       <div className="flex items-center justify-center gap-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
         <AuthSidebar />
-        <Button
-          variant="ghost"
-          size="icon"
-          className="relative h-9 w-9 shrink-0"
-          aria-label="Settings"
-          onClick={() => navigate('/settings/api-keys')}
-        >
-          <Settings className="h-4 w-4" />
-          <span className="sr-only">Settings</span>
-        </Button>
         <Button
           variant="ghost"
           size="icon"
@@ -316,14 +318,24 @@ function SideBarNavLink({
                 asChild
                 size="sm"
                 isActive={
-                  child.to === currentUrl || location.pathname === child.to
+                  !child.external &&
+                  (child.to === currentUrl || location.pathname === child.to)
                 }
                 onClick={handleNavClick}
               >
-                <Link to={child.to}>
-                  {child.icon}
-                  {child.title}
-                </Link>
+                {child.external ? (
+                  // Leaves the SPA (e.g. the management SPA): a plain anchor so
+                  // the browser does a full navigation, not a react-router push.
+                  <a href={child.to}>
+                    {child.icon}
+                    {child.title}
+                  </a>
+                ) : (
+                  <Link to={child.to}>
+                    {child.icon}
+                    {child.title}
+                  </Link>
+                )}
               </SidebarMenuSubButton>
             </SidebarMenuSubItem>
           ))}
