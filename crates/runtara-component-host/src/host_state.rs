@@ -121,12 +121,85 @@ impl WasiHttpHooks for HostHooks {
     }
 }
 
+/// Cap on any single guest linear memory for a host-guarded invocation, in
+/// bytes. A component carries one memory per inner core module, so this bounds
+/// each, not their sum; growth past it fails the grow in-guest (an OOM trap)
+/// rather than letting a runaway allocation exhaust the host. Matches the
+/// runtime path's `WorkflowLimits` default.
+pub const DEFAULT_GUEST_MEMORY_MAX_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Cap on elements in any single guest table for a host-guarded invocation.
+pub const DEFAULT_GUEST_TABLE_MAX_ELEMENTS: usize = 10_000_000;
+
+/// Per-instance resource limiter for a guest `Store`. Denies memory/table
+/// growth past the configured caps and records the peak memory seen plus
+/// whether a grow was ever denied. Mirrors the runtime path's
+/// `WorkflowLimiter` (see `workflow.rs`); the test-dispatcher surface was
+/// previously unlimited.
+#[derive(Debug)]
+pub struct GuestLimiter {
+    pub max_memory_bytes: usize,
+    pub max_table_elements: usize,
+    pub memory_peak_bytes: u64,
+    pub denied_memory_grow: bool,
+}
+
+impl GuestLimiter {
+    fn new(max_memory_bytes: usize, max_table_elements: usize) -> Self {
+        Self {
+            max_memory_bytes,
+            max_table_elements,
+            memory_peak_bytes: 0,
+            denied_memory_grow: false,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for GuestLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if desired > self.max_memory_bytes {
+            self.denied_memory_grow = true;
+            return Ok(false);
+        }
+        self.memory_peak_bytes = self.memory_peak_bytes.max(desired as u64);
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= self.max_table_elements)
+    }
+}
+
+/// Marker recorded by the per-call epoch deadline callback so a
+/// `Trap::Interrupt` can be told apart from a genuine guest trap once the call
+/// returns. Mirrors the runtime path's `Termination`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Termination {
+    /// The per-call wall-clock budget elapsed.
+    Timeout,
+}
+
 pub struct HostState {
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
     pub hooks: HostHooks,
     pub ctx: Arc<CallContext>,
+    /// Memory/table caps for this call, enforced once the store installs it via
+    /// `store.limiter(|s| &mut s.limiter)` (see `registry::instantiate`).
+    pub limiter: GuestLimiter,
+    /// Set by the epoch deadline callback when it force-interrupts the guest.
+    pub termination: Option<Termination>,
 }
 
 impl HostState {
@@ -162,7 +235,20 @@ impl HostState {
             table: ResourceTable::new(),
             hooks: HostHooks { ctx: ctx.clone() },
             ctx,
+            limiter: GuestLimiter::new(
+                DEFAULT_GUEST_MEMORY_MAX_BYTES,
+                DEFAULT_GUEST_TABLE_MAX_ELEMENTS,
+            ),
+            termination: None,
         }
+    }
+
+    /// Override the per-call memory/table caps before the store is built.
+    /// Callers set this to apply an operator-configured limit; the defaults are
+    /// large enough that real agents never hit them.
+    pub fn set_limits(&mut self, max_memory_bytes: usize, max_table_elements: usize) {
+        self.limiter.max_memory_bytes = max_memory_bytes;
+        self.limiter.max_table_elements = max_table_elements;
     }
 }
 
@@ -206,5 +292,52 @@ mod tests {
         assert_eq!(url_host("http://proxy.local:7001"), "proxy.local");
         assert_eq!(url_host("https://example.com/path"), "example.com");
         assert_eq!(url_host("not-a-url"), "");
+    }
+
+    #[test]
+    fn guest_limiter_allows_growth_under_cap_and_tracks_peak() {
+        use wasmtime::ResourceLimiter;
+        let mut l = GuestLimiter::new(1024, 1000);
+        assert!(l.memory_growing(0, 512, None).unwrap());
+        assert!(l.memory_growing(512, 1024, None).unwrap());
+        assert_eq!(l.memory_peak_bytes, 1024);
+        assert!(!l.denied_memory_grow);
+    }
+
+    #[test]
+    fn guest_limiter_denies_growth_over_cap_and_records_oom() {
+        use wasmtime::ResourceLimiter;
+        let mut l = GuestLimiter::new(1024, 1000);
+        assert!(!l.memory_growing(512, 2048, None).unwrap());
+        assert!(l.denied_memory_grow);
+        // Peak only tracks granted growth.
+        assert_eq!(l.memory_peak_bytes, 0);
+    }
+
+    #[test]
+    fn guest_limiter_bounds_table_elements() {
+        use wasmtime::ResourceLimiter;
+        let mut l = GuestLimiter::new(1024, 1000);
+        assert!(l.table_growing(0, 1000, None).unwrap());
+        assert!(!l.table_growing(0, 1001, None).unwrap());
+    }
+
+    #[test]
+    fn set_limits_overrides_defaults() {
+        let ctx = Arc::new(CallContext::for_test(
+            "tenant-1",
+            "http://proxy.local:7001",
+            "http://agent.local:7002",
+            "http://obj.local:7003",
+            "http://core.local:7004",
+        ));
+        let mut state = HostState::new(ctx);
+        assert_eq!(
+            state.limiter.max_memory_bytes,
+            DEFAULT_GUEST_MEMORY_MAX_BYTES
+        );
+        state.set_limits(4096, 42);
+        assert_eq!(state.limiter.max_memory_bytes, 4096);
+        assert_eq!(state.limiter.max_table_elements, 42);
     }
 }

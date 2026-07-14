@@ -95,17 +95,31 @@ fn is_capabilities_iface_name(name: &str) -> bool {
     name.contains("/capabilities@")
 }
 
+/// A "no effective deadline" epoch-delta for stores that don't want a per-call
+/// timeout. `Store::set_epoch_deadline(delta)` sets the deadline to
+/// `current_epoch + delta`, so passing `u64::MAX` overflows once an epoch
+/// ticker has advanced `current_epoch` past 0. This delta is astronomically far
+/// in the future (~thousands of years at the ticker's 100 ms cadence) yet far
+/// enough below `u64::MAX` that adding it to a live epoch can never overflow.
+const NO_DEADLINE_EPOCH_DELTA: u64 = 1 << 40;
+
 /// Instantiate the agent in a fresh `Store` and return the raw component
-/// `Instance`. The store starts with `epoch_deadline = u64::MAX` (no
-/// deadline). Callers that want per-call timeouts should override via
-/// `store.set_epoch_deadline` after this returns.
+/// `Instance`. The store's memory/table caps (`HostState::limiter`) are
+/// installed before instantiation so instantiation-time growth is bounded too;
+/// set them on the `HostState` via `HostState::set_limits` beforehand.
+///
+/// The store starts with no effective epoch deadline. Callers that want a
+/// per-call timeout should install an epoch deadline callback and override the
+/// deadline (see `dispatcher::call_with_guards`) after this returns, and the
+/// engine must have an epoch ticker running.
 pub async fn instantiate(
     engine: &Engine,
     pre: &InstancePre<HostState>,
     state: HostState,
 ) -> Result<(wasmtime::Store<HostState>, wasmtime::component::Instance)> {
     let mut store = wasmtime::Store::new(engine, state);
-    store.set_epoch_deadline(u64::MAX);
+    store.limiter(|s| &mut s.limiter);
+    store.set_epoch_deadline(NO_DEADLINE_EPOCH_DELTA);
     let instance = pre.instantiate_async(&mut store).await?;
     Ok((store, instance))
 }
