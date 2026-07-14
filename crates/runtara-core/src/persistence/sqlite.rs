@@ -933,7 +933,7 @@ mod tests {
             .await
             .expect("Failed to insert custom signal");
 
-        // First take should retrieve and delete
+        // First read retrieves the signal.
         let signal = persistence
             .take_pending_custom_signal(&instance_id, "wait-1")
             .await
@@ -943,13 +943,18 @@ mod tests {
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload, Some(b"custom-payload".to_vec()));
 
-        // Second take should return None
+        // Reads are non-destructive: a second read (as happens on
+        // replay-from-start) returns the same signal, not None. This is what
+        // lets a drained/resumed WaitForSignal re-read its consumed signal
+        // instead of dead-hanging.
         let signal = persistence
             .take_pending_custom_signal(&instance_id, "wait-1")
             .await
-            .expect("Query should succeed");
+            .expect("Query should succeed")
+            .expect("Custom signal should still exist (non-destructive read)");
 
-        assert!(signal.is_none());
+        assert_eq!(signal.checkpoint_id, "wait-1");
+        assert_eq!(signal.payload, Some(b"custom-payload".to_vec()));
     }
 
     #[tokio::test]

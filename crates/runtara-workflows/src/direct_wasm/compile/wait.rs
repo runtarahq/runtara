@@ -15,10 +15,12 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_retptr_list, load_retptr_option_list, push_retptr_arg,
-    push_retptr_i64_load, push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    emit_retptr_error_or_return, load_retptr_list, load_retptr_option_list, push_i64_load_from_ptr,
+    push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
+    return_if_retptr_error, store_local_i64_at,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
+use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -27,10 +29,10 @@ use super::{
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_TAG_OFFSET,
     DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
     DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
-    DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL, DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL,
-    DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
+    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL,
+    DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
     DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables, emit_runtime_fail_return,
@@ -276,6 +278,24 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::If(BlockType::Empty));
     push_retptr_i64_load(body, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    // Persist the absolute deadline so a drained/resumed wait fires at the
+    // ORIGINAL deadline instead of recomputing `now + timeout` on every
+    // replay-from-start (which slides the deadline forward and it never fires).
+    // The deadline is checkpointed under the wait's deterministic signal id
+    // (checkpoints table — a distinct keyspace from the pending-signal row that
+    // carries the payload). On the first entry (cache miss) we compute and save
+    // it; on every resume the lookup hits and we read the stored value back.
+    emit_checkpoint_lookup(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        output_ptr_local,
+        output_len_local,
+    );
+    push_i64_load_from_ptr(body, output_ptr_local);
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::Else);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body);
@@ -283,6 +303,24 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    store_local_i64_at(
+        body,
+        DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
+        DIRECT_WAIT_DEADLINE_MS_LOCAL,
+    );
+    body.instruction(&Instruction::I32Const(DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET));
+    body.instruction(&Instruction::LocalSet(output_ptr_local));
+    body.instruction(&Instruction::I32Const(8));
+    body.instruction(&Instruction::LocalSet(output_len_local));
+    emit_checkpoint_save(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        output_ptr_local,
+        output_len_local,
+    );
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::I64Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));

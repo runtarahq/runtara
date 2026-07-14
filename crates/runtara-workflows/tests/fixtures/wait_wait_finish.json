@@ -1,0 +1,40 @@
+{
+  "name": "Wait then Wait then Finish",
+  "description": "Two WaitForSignal steps in series then Finish. A drain between the two waits (after wait1 consumed its signal) replays from the entry point back through wait1, which must re-read its already-consumed signal rather than re-poll a deleted one.",
+  "steps": {
+    "wait1": {
+      "stepType": "WaitForSignal",
+      "id": "wait1",
+      "name": "First approval",
+      "pollIntervalMs": 0
+    },
+    "wait2": {
+      "stepType": "WaitForSignal",
+      "id": "wait2",
+      "name": "Second approval",
+      "pollIntervalMs": 0
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "first": {
+          "valueType": "reference",
+          "value": "steps.wait1.outputs.approved"
+        },
+        "second": {
+          "valueType": "reference",
+          "value": "steps.wait2.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait1",
+  "executionPlan": [
+    { "fromStep": "wait1", "toStep": "wait2" },
+    { "fromStep": "wait2", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

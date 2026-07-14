@@ -1,0 +1,43 @@
+{
+  "name": "Wait then Durable Delay then Finish",
+  "description": "WaitForSignal (with timeout) -> durable Delay -> Finish. Exercises post-wait durability: the durable delay is a legitimate suspension point, so a drain/resume during it replays from the entry point back through the (already-consumed) wait. The signal must survive as a non-destructive re-read and the timeout deadline must be read from its checkpoint, not recomputed.",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "timeoutMs": {
+        "valueType": "immediate",
+        "value": 3600000
+      },
+      "pollIntervalMs": 0
+    },
+    "delay": {
+      "stepType": "Delay",
+      "id": "delay",
+      "name": "Post-approval durable delay",
+      "durationMs": {
+        "valueType": "immediate",
+        "value": 0
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": {
+          "valueType": "reference",
+          "value": "steps.wait.outputs.approved"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    { "fromStep": "wait", "toStep": "delay" },
+    { "fromStep": "delay", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

@@ -348,11 +348,14 @@ impl Persistence for MockPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> std::result::Result<Option<CustomSignalRecord>, CoreError> {
+        // Non-destructive read (mirrors the DB ops): retain the row so a
+        // replayed WaitForSignal re-reads the same signal idempotently.
         Ok(self
             .custom_signals
             .lock()
             .unwrap()
-            .remove(&(instance_id.to_string(), checkpoint_id.to_string())))
+            .get(&(instance_id.to_string(), checkpoint_id.to_string()))
+            .cloned())
     }
 
     async fn save_retry_attempt(

@@ -5,7 +5,7 @@
 
 use crate::error::CoreError;
 
-use super::{Dialect, EnumKind, TakeCustomSignalPlan};
+use super::{Dialect, EnumKind};
 
 /// Zero-sized Postgres dialect implementation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -76,14 +76,12 @@ impl Dialect for PostgresDialect {
         expr.to_string()
     }
 
-    fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan {
-        // Postgres's current inline code uses `DELETE ... RETURNING` for an
-        // atomic take-and-return. Preserving that.
-        TakeCustomSignalPlan::Atomic {
-            sql: "DELETE FROM pending_checkpoint_signals \
-                  WHERE instance_id = $1 AND checkpoint_id = $2 \
-                  RETURNING instance_id, checkpoint_id, payload, created_at",
-        }
+    fn sql_take_pending_custom_signal() -> &'static str {
+        // Non-destructive read: SELECT and leave the row in place so a
+        // replayed WaitForSignal re-reads the same signal (see the trait doc).
+        "SELECT instance_id, checkpoint_id, payload, created_at \
+         FROM pending_checkpoint_signals \
+         WHERE instance_id = $1 AND checkpoint_id = $2"
     }
 
     fn sql_save_checkpoint() -> &'static str {
