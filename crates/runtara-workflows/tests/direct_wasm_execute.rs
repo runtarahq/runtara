@@ -1341,18 +1341,18 @@ fn runtime_binding_mode() -> RuntimeBinding {
     }
 }
 
-/// Battery-wide export-shape selection. `RUNTARA_DIRECT_WORKFLOW_ABI=invoke`
-/// re-runs the whole battery through the invoke export (input as the call
-/// argument, terminal result in-band) — the ABI-differential axis. Requires
-/// the embedded executor + HostImport binding; the legacy shape is the
-/// default.
+/// Battery-wide export-shape selection, mirroring the production default:
+/// the invoke export (input as the call argument, terminal result in-band).
+/// `RUNTARA_DIRECT_WORKFLOW_ABI=cli-run` re-runs the whole battery through
+/// the legacy shape — the ABI-differential axis. The CLI executor and the
+/// Composed binding force the legacy shape (neither can drive host imports).
 fn workflow_abi_mode() -> WorkflowAbi {
     if !embedded_executor_mode() || runtime_binding_mode() == RuntimeBinding::Composed {
         return WorkflowAbi::CliRunHttp;
     }
     match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").as_deref() {
-        Ok("invoke") => WorkflowAbi::InvokeHostImports,
-        _ => WorkflowAbi::CliRunHttp,
+        Ok("cli-run") => WorkflowAbi::CliRunHttp,
+        _ => WorkflowAbi::InvokeHostImports,
     }
 }
 
@@ -1983,16 +1983,21 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
     let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut result = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "phase1-host-import-exec".to_string(),
-        version: 1,
-        source_checksum: None,
-        execution_graph: graph,
-        child_workflows: vec![],
-        output_dir: temp.path().to_path_buf(),
-        track_events: false,
-        agent_catalog: None,
-    })
+    // This test pins the RUN-shaped (legacy-export) host-import path — the
+    // invoke shape has its own suite below.
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "phase1-host-import-exec".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        WorkflowAbi::CliRunHttp,
+    )
     .expect("direct emit succeeds");
     result.component_artifacts =
         emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
@@ -5977,7 +5982,9 @@ fn compile_invoke_abi_artifact(
 ) -> runtara_workflows::direct_wasm::DirectCompilationResult {
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+    // Pin BOTH knobs: these tests assert the HostImport+invoke shape and
+    // must not inherit the battery's binding/ABI axis env vars.
+    let result = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: 1,
@@ -5988,10 +5995,11 @@ fn compile_invoke_abi_artifact(
             track_events: false,
             agent_catalog: None,
         },
+        components_dir,
+        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
     )
-    .expect("invoke-abi emit succeeds");
-    compose_direct_workflow(&mut result, components_dir).expect("invoke-abi compose succeeds");
+    .expect("invoke-abi compile+compose succeeds");
     // Keep the tempdir alive by leaking it — the executor reads the artifact
     // lazily and the test owns the whole lifetime anyway.
     std::mem::forget(temp);

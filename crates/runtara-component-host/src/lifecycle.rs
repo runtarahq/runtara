@@ -69,3 +69,17 @@ pub enum WorkflowOutcome {
     #[component(name = "suspended")]
     Suspended(Vec<WorkflowWake>),
 }
+
+/// True when the loaded component exports the lifecycle interface — i.e. it
+/// is an invoke-shaped artifact that must run through
+/// [`crate::workflow::WorkflowExecutor::execute_invoke`] rather than the
+/// legacy `wasi:cli/run` path. The runner's dual-ABI dispatch keys off this.
+pub fn exports_lifecycle_invoke(
+    pre: &wasmtime::component::InstancePre<crate::workflow::WorkflowState>,
+    engine: &wasmtime::Engine,
+) -> bool {
+    pre.component()
+        .component_type()
+        .exports(engine)
+        .any(|(name, _)| name == LIFECYCLE_INTERFACE_NAME)
+}

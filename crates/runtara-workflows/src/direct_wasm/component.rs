@@ -64,9 +64,14 @@ pub enum RuntimeBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkflowAbi {
     /// Legacy: export `wasi:cli/run`, lifecycle over the runtime interface.
-    #[default]
+    /// Retained for already-compiled artifacts (the runner dispatches by
+    /// artifact shape) and as the `RUNTARA_DIRECT_WORKFLOW_ABI=cli-run`
+    /// rollback lever.
     CliRunHttp,
     /// Unified: export `lifecycle.invoke`, input/result at the call boundary.
+    /// The production default since Phase 5 of
+    /// docs/unify-agents-workflows-plan.md.
+    #[default]
     InvokeHostImports,
 }
 
@@ -287,7 +292,19 @@ mod tests {
                 .world_wit
                 .contains("import runtara:workflow-runtime/runtime@0.1.0;")
         );
-        assert!(artifacts.world_wit.contains("export wasi:cli/run@0.2.3;"));
+        // The Phase-5 default exports the invoke lifecycle; the legacy run
+        // export remains reachable via the explicit CliRunHttp ABI.
+        assert!(
+            artifacts
+                .world_wit
+                .contains("export runtara:workflow-lifecycle/lifecycle@0.1.0;")
+        );
+        let legacy = emit_direct_component_artifacts_configured(
+            &[],
+            RuntimeBinding::HostImport,
+            WorkflowAbi::CliRunHttp,
+        );
+        assert!(legacy.world_wit.contains("export wasi:cli/run@0.2.3;"));
     }
 
     #[test]

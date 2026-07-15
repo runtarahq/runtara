@@ -49,6 +49,10 @@ pub(super) struct DirectCoreConfig {
 }
 
 impl DirectCoreConfig {
+    /// Test constructor pinned to the LEGACY `wasi:cli/run` body shape — the
+    /// structural lowering tests describe that sequence (load-input included).
+    /// Invoke-shape structure is asserted by explicit `.with_abi` tests and
+    /// the execution battery.
     #[cfg(test)]
     pub(super) fn new(
         manifest: &DirectWorkflowManifest,
@@ -56,6 +60,7 @@ impl DirectCoreConfig {
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
         Self::new_inner(manifest, manifest_json, track_events, None)
+            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowAbi::CliRunHttp))
     }
 
     pub(super) fn new_with_workflow_id(

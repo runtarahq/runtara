@@ -659,11 +659,14 @@ pub fn compile_direct_workflow_composed_with_binding(
     components_dir: impl AsRef<Path>,
     binding: super::component::RuntimeBinding,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
+    // This entry exists for the legacy axes (the wasmtime-CLI A/B and the
+    // composed-binding differential) — pin the legacy export shape; the
+    // invoke shape goes through compile_direct_workflow_composed_configured.
     compile_direct_workflow_composed_configured(
         input,
         components_dir,
         binding,
-        super::component::WorkflowAbi::default(),
+        super::component::WorkflowAbi::CliRunHttp,
     )
 }
 
@@ -721,7 +724,24 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_abi(input, super::component::WorkflowAbi::default())
+    compile_direct_workflow_with_abi(input, workflow_abi_from_env())
+}
+
+/// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
+/// the rollback lever mirroring `RUNTARA_DIRECT_RUNTIME_BINDING`.
+///
+/// Default (unset or anything else): the invoke export. `cli-run` reverts new
+/// compiles to the legacy `wasi:cli/run` shape, which the runner executes
+/// fully — set it on the server and recompile for a same-day escape hatch.
+fn workflow_abi_from_env() -> super::component::WorkflowAbi {
+    workflow_abi_from_raw(std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").ok().as_deref())
+}
+
+fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
+    match raw {
+        Some("cli-run") => super::component::WorkflowAbi::CliRunHttp,
+        _ => super::component::WorkflowAbi::default(),
+    }
 }
 
 /// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`]
@@ -936,14 +956,17 @@ fn emit_direct_component(
 
 #[cfg(test)]
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
-    build_direct_component_resolve_configured(&[], super::component::WorkflowAbi::default())
+    // Pinned to the legacy world to match DirectCoreConfig::new (the
+    // structural tests describe the wasi:cli/run lowering).
+    build_direct_component_resolve_configured(&[], super::component::WorkflowAbi::CliRunHttp)
 }
 
 #[cfg(test)]
 fn build_direct_component_resolve_with_agents(
     agents: &[String],
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
-    build_direct_component_resolve_configured(agents, super::component::WorkflowAbi::default())
+    // See build_direct_component_resolve: pinned to the legacy world.
+    build_direct_component_resolve_configured(agents, super::component::WorkflowAbi::CliRunHttp)
 }
 
 fn build_direct_component_resolve_configured(

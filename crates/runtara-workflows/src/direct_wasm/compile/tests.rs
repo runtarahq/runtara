@@ -1112,13 +1112,18 @@ fn direct_compile_embeds_manifest_and_support_sections() {
                     serde_json::from_slice(section.data()).expect("abi json");
                 assert_eq!(
                     abi["abiVersion"].as_u64(),
-                    Some(u64::from(DIRECT_WORKFLOW_ABI_VERSION))
+                    Some(u64::from(
+                        crate::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+                    ))
                 );
-                assert_eq!(abi["artifactKind"], "direct-run-component");
-                assert_eq!(abi["componentRunExport"], "wasi:cli/run@0.2.3");
+                assert_eq!(abi["artifactKind"], "direct-invoke-component");
+                assert_eq!(
+                    abi["componentRunExport"],
+                    "runtara:workflow-lifecycle/lifecycle@0.1.0"
+                );
                 assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
-                assert_eq!(abi["outputMode"], "stdlib-apply-mapping");
+                assert_eq!(abi["outputMode"], "invoke-result-outcome");
                 assert_eq!(
                     abi["manifestVersion"].as_u64(),
                     Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
@@ -1190,7 +1195,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.expect("component export");
-                    if export.name.0 == "wasi:cli/run@0.2.3" {
+                    if export.name.0 == "runtara:workflow-lifecycle/lifecycle@0.1.0" {
                         assert_eq!(export.kind, ComponentExternalKind::Instance);
                         saw_run_export = true;
                     }
@@ -1202,7 +1207,10 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
 
     assert!(saw_stdlib_import, "stdlib interface import should exist");
     assert!(saw_runtime_import, "runtime interface import should exist");
-    assert!(saw_run_export, "wasi:cli/run export should exist");
+    assert!(
+        saw_run_export,
+        "lifecycle invoke export should exist (the Phase-5 default)"
+    );
 }
 
 #[test]
@@ -10095,7 +10103,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
     assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
-    assert!(world_wit.contains("export wasi:cli/run@0.2.3;"));
+    assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.1.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
     // spread — its interface bubbles to the composed artifact's imports.
@@ -10492,5 +10500,23 @@ fn runtime_binding_env_lever_defaults_host_import() {
     assert_eq!(
         super::runtime_binding_from_raw(Some("")),
         RuntimeBinding::HostImport
+    );
+}
+
+#[test]
+fn workflow_abi_env_lever_defaults_invoke() {
+    use crate::direct_wasm::component::WorkflowAbi;
+    // Phase-5 default: the invoke export; only the literal "cli-run" reverts.
+    assert_eq!(
+        super::workflow_abi_from_raw(None),
+        WorkflowAbi::InvokeHostImports
+    );
+    assert_eq!(
+        super::workflow_abi_from_raw(Some("cli-run")),
+        WorkflowAbi::CliRunHttp
+    );
+    assert_eq!(
+        super::workflow_abi_from_raw(Some("invoke")),
+        WorkflowAbi::InvokeHostImports
     );
 }

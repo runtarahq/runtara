@@ -121,6 +121,20 @@ impl EmbeddedWasmRunner {
         }
     }
 
+    /// The instance's persisted (enriched) input envelope — what
+    /// `runtime.load-input` served the legacy guest. Fetched fresh on every
+    /// launch so a woken instance re-reads the SAME stored bytes (never the
+    /// relaunch request's placeholder input).
+    async fn persisted_input(&self, instance_id: &str) -> Result<Vec<u8>> {
+        let instance = self
+            .persistence
+            .get_instance(instance_id)
+            .await
+            .map_err(|e| RunnerError::StartFailed(format!("load instance input: {e:#}")))?
+            .ok_or_else(|| RunnerError::StartFailed(format!("instance {instance_id} not found")))?;
+        Ok(instance.input.unwrap_or_else(|| b"{}".to_vec()))
+    }
+
     fn task_of(&self, instance_id: &str) -> Option<Arc<InstanceTask>> {
         self.tasks
             .lock()
@@ -160,6 +174,38 @@ fn exit_to_result(exit: &WorkflowExit) -> std::result::Result<(), RunnerError> {
     }
 }
 
+/// Map an invoke-shaped run to the same `Result<()>` shape. A suspension is a
+/// clean exit (the suspended status was recorded host-side by the signal
+/// ack), exactly as the legacy run path's Ok-exit-with-DB-suspended was; a
+/// Failed outcome mirrors GuestError (the error was recorded additively via
+/// runtime.fail, so `load_output` surfaces it downstream unchanged).
+fn invoke_exit_to_result(
+    exit: &runtara_component_host::InvokeExit,
+) -> std::result::Result<(), RunnerError> {
+    use runtara_component_host::InvokeExit;
+    match exit {
+        InvokeExit::Completed(_) | InvokeExit::Suspended(_) => Ok(()),
+        InvokeExit::Failed(_) => Err(RunnerError::ExitCode {
+            exit_code: 1,
+            stderr: String::new(),
+        }),
+        InvokeExit::Trapped { reason } => Err(RunnerError::ExitCode {
+            exit_code: 1,
+            stderr: reason.clone(),
+        }),
+        InvokeExit::Timeout => Err(RunnerError::Timeout),
+        InvokeExit::Cancelled => Err(RunnerError::Cancelled),
+    }
+}
+
+fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
+    ContainerMetrics {
+        memory_peak_bytes: Some(result.memory_peak_bytes),
+        memory_current_bytes: Some(result.memory_peak_bytes),
+        ..Default::default()
+    }
+}
+
 fn metrics_of(result: &runtara_component_host::WorkflowRunResult) -> ContainerMetrics {
     ContainerMetrics {
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -187,21 +233,45 @@ impl Runner for EmbeddedWasmRunner {
         }
 
         let env = self.merged_env(options);
-        let pre = self
+        let instance_pre = self
             .executor
-            .load(&wasm_path)
+            .load_instance_pre(&wasm_path)
             .await
             .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
 
-        let run = self
-            .executor
-            .execute(
-                &pre,
-                self.run_spec(options, env, None, options.timeout, cancel_token),
-            )
-            .await;
-        let metrics = metrics_of(&run);
-        let result = exit_to_result(&run.exit);
+        // Dual-ABI dispatch: an invoke-shaped artifact runs through the
+        // in-band entry (input fetched from persistence — the enriched
+        // stored envelope, first run AND wake alike); a legacy artifact
+        // keeps the wasi:cli/run path unchanged.
+        let (metrics, result) = if runtara_component_host::lifecycle::exports_lifecycle_invoke(
+            &instance_pre,
+            self.executor.engine(),
+        ) {
+            let input = self.persisted_input(&options.instance_id).await?;
+            let run = self
+                .executor
+                .execute_invoke(
+                    &instance_pre,
+                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                    input,
+                )
+                .await;
+            (invoke_metrics_of(&run), invoke_exit_to_result(&run.exit))
+        } else {
+            let pre = self
+                .executor
+                .load(&wasm_path)
+                .await
+                .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
+            let run = self
+                .executor
+                .execute(
+                    &pre,
+                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                )
+                .await;
+            (metrics_of(&run), exit_to_result(&run.exit))
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
@@ -302,35 +372,94 @@ impl Runner for EmbeddedWasmRunner {
         let spec = self.run_spec(options, env, stderr_file, Duration::MAX, Some(cancel));
 
         let executor = Arc::clone(&self.executor);
+        let persistence = Arc::clone(&self.persistence);
         let metrics_for_task = Arc::clone(&metrics);
         let task_for_run = Arc::clone(&task);
         let registry = Arc::clone(&self.tasks);
         let instance_id = options.instance_id.clone();
         tokio::spawn(async move {
-            match executor.load(&wasm_path).await {
-                Ok(pre) => {
-                    let run = executor.execute(&pre, spec).await;
-                    {
-                        let mut guard = metrics_for_task.lock().await;
-                        *guard = metrics_of(&run);
-                    }
-                    match &run.exit {
-                        WorkflowExit::Completed => {
-                            info!(instance_id = %instance_id, "Embedded workflow run completed");
+            match executor.load_instance_pre(&wasm_path).await {
+                Ok(instance_pre) => {
+                    if runtara_component_host::lifecycle::exports_lifecycle_invoke(
+                        &instance_pre,
+                        executor.engine(),
+                    ) {
+                        // Invoke-shaped artifact: input from persistence (the
+                        // enriched stored envelope), terminal result in-band.
+                        let input = match persistence.get_instance(&instance_id).await {
+                            Ok(Some(instance)) => instance.input.unwrap_or_else(|| b"{}".to_vec()),
+                            Ok(None) => {
+                                error!(instance_id = %instance_id, "Instance not found for invoke launch");
+                                b"{}".to_vec()
+                            }
+                            Err(e) => {
+                                error!(instance_id = %instance_id, error = %e, "Failed to load instance input");
+                                b"{}".to_vec()
+                            }
+                        };
+                        let run = executor.execute_invoke(&instance_pre, spec, input).await;
+                        {
+                            let mut guard = metrics_for_task.lock().await;
+                            *guard = invoke_metrics_of(&run);
                         }
-                        WorkflowExit::GuestError => {
-                            // Failure details were reported to runtara-core
-                            // by the SDK before run() returned.
-                            warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                        use runtara_component_host::InvokeExit;
+                        match &run.exit {
+                            InvokeExit::Completed(_) => {
+                                info!(instance_id = %instance_id, "Embedded workflow run completed");
+                            }
+                            InvokeExit::Suspended(wakes) => {
+                                info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+                            }
+                            InvokeExit::Failed(_) => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                            }
+                            InvokeExit::Trapped { reason } => {
+                                error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                            }
+                            InvokeExit::Timeout => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                            }
+                            InvokeExit::Cancelled => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                            }
                         }
-                        WorkflowExit::Failed { reason } => {
-                            error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                        }
-                        WorkflowExit::Timeout => {
-                            warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                        }
-                        WorkflowExit::Cancelled => {
-                            warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                    } else {
+                        match runtara_component_host::WorkflowExecutor::load(&executor, &wasm_path)
+                            .await
+                        {
+                            Ok(pre) => {
+                                let run = executor.execute(&pre, spec).await;
+                                {
+                                    let mut guard = metrics_for_task.lock().await;
+                                    *guard = metrics_of(&run);
+                                }
+                                match &run.exit {
+                                    WorkflowExit::Completed => {
+                                        info!(instance_id = %instance_id, "Embedded workflow run completed");
+                                    }
+                                    WorkflowExit::GuestError => {
+                                        // Failure details were reported to runtara-core
+                                        // by the SDK before run() returned.
+                                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                                    }
+                                    WorkflowExit::Failed { reason } => {
+                                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                                    }
+                                    WorkflowExit::Timeout => {
+                                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                                    }
+                                    WorkflowExit::Cancelled => {
+                                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    instance_id = %instance_id,
+                                    error = format!("{e:#}"),
+                                    "Failed to load workflow component"
+                                );
+                            }
                         }
                     }
                 }
