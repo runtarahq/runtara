@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use runtara_dsl::agent_meta::AgentCatalog;
-use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
+use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, MappingValue, Step};
 use sha2::{Digest, Sha256};
 
 use crate::compile::TEMPLATE_MAJOR_VERSION;
@@ -961,6 +961,13 @@ fn step_manifest(
                     serde_json::json!({ "valueType": "immediate", "value": timeout }),
                 );
             }
+            // A resolvable connection binding is lowered into the input mapping:
+            // it resolves against the runtime source to the injected `_connection`
+            // (see `connection_ref_input_entries`), and the manifest
+            // `connection_id` is left `None` so the literal path is bypassed.
+            if let serde_json::Value::Object(map) = &mut input_mapping {
+                apply_connection_ref_entries(map, step.connection_ref.as_ref())?;
+            }
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -977,7 +984,10 @@ fn step_manifest(
                 purpose: "agent.config".to_string(),
                 agent_id: agent_id.clone(),
                 capability_id: step.capability_id.clone(),
-                connection_id: step.connection_id.clone(),
+                connection_id: manifest_connection_id(
+                    step.connection_ref.as_ref(),
+                    &step.connection_id,
+                ),
                 durable: inherited_durable && step.durable.unwrap_or(true),
                 rate_limited: agent_capability_rate_limited(
                     agent_catalog,
@@ -1117,6 +1127,10 @@ fn step_manifest(
                 }
                 "chat-turn"
             };
+            // The AiAgent's provider connection may be a resolvable ref: lower it
+            // into the chat input mapping just like an Agent step, with the
+            // manifest `connection_id` left `None` below.
+            apply_connection_ref_entries(&mut mapping, step.connection_ref.as_ref())?;
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -1133,7 +1147,10 @@ fn step_manifest(
                 purpose: "agent.config".to_string(),
                 agent_id: "ai-tools".to_string(),
                 capability_id: capability_id.to_string(),
-                connection_id: step.connection_id.clone(),
+                connection_id: manifest_connection_id(
+                    step.connection_ref.as_ref(),
+                    &step.connection_id,
+                ),
                 durable: inherited_durable && step.durable.unwrap_or(true),
                 rate_limited: agent_capability_rate_limited(
                     agent_catalog,
@@ -1205,6 +1222,38 @@ fn step_manifest(
                         matches!(strategy, runtara_dsl::CompactionStrategy::Summarize)
                     });
                 if use_summarize {
+                    // Summarize reuses the AiAgent's own provider connection.
+                    // With a resolvable ref, give summarize a DEDICATED input
+                    // mapping carrying the ref-injected `_connection` (so the
+                    // memory load/save agents that share `conversation_mapping_id`
+                    // keep their own literal connection untouched), and leave its
+                    // manifest `connection_id` None. With a literal, reuse the
+                    // shared conversation mapping unchanged.
+                    let (summarize_mapping_id, summarize_connection_id) =
+                        if let Some(connection_ref) = step.connection_ref.as_ref() {
+                            let mut summarize_input = serde_json::Map::new();
+                            if let Some(memory) = memory {
+                                summarize_input.insert(
+                                    "conversation_id".to_string(),
+                                    canonical_json(&memory.conversation_id)?,
+                                );
+                            }
+                            apply_connection_ref_entries(
+                                &mut summarize_input,
+                                Some(connection_ref),
+                            )?;
+                            let id = state.allocate_mapping_id();
+                            collections.mappings.push(DirectMappingManifest {
+                                id,
+                                step_id: step.id.clone(),
+                                step_type: "AiAgent".to_string(),
+                                purpose: "memory.summarize.inputMapping".to_string(),
+                                value: serde_json::Value::Object(summarize_input),
+                            });
+                            (id, None)
+                        } else {
+                            (conversation_mapping_id, step.connection_id.clone())
+                        };
                     collections.agents.push(DirectAgentManifest {
                         id: state.allocate_agent_id(),
                         step_id: step.id.clone(),
@@ -1213,14 +1262,14 @@ fn step_manifest(
                         purpose: "memory.summarize".to_string(),
                         agent_id: "ai-tools".to_string(),
                         capability_id: "summarize-memory".to_string(),
-                        connection_id: step.connection_id.clone(),
+                        connection_id: summarize_connection_id,
                         durable: inherited_durable && step.durable.unwrap_or(true),
                         rate_limited: agent_capability_rate_limited(
                             agent_catalog,
                             "ai-tools",
                             "summarize-memory",
                         ),
-                        input_mapping_id: conversation_mapping_id,
+                        input_mapping_id: summarize_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
@@ -1350,6 +1399,65 @@ fn canonical_json<T: serde::Serialize>(
 
 fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
+}
+
+/// The manifest `connection_id` for a step: a same-tenant literal, but `None`
+/// when a `connection_ref` is present so the static-segment / stdlib literal
+/// injection path is bypassed and the resolvable ref (lowered into the input
+/// mapping by [`connection_ref_input_entries`]) is the sole connection source.
+fn manifest_connection_id(
+    connection_ref: Option<&MappingValue>,
+    connection_id: &Option<String>,
+) -> Option<String> {
+    if connection_ref.is_some() {
+        None
+    } else {
+        connection_id.clone()
+    }
+}
+
+/// Lower a step's `connection_ref` into input-mapping entries that resolve, at
+/// runtime, to the same injected connection the stdlib produces for a literal
+/// id — a `_connection` object plus a top-level `connection_id` — but sourced
+/// from the resolvable ref (a `connection` input, a rotated value, a per-record
+/// selection) instead of a compile-time-pinned segment.
+///
+/// The referenced value is an opaque connection id; `integration_id` and
+/// `parameters` stay empty exactly as the stdlib literal path does
+/// (`agent_connection_input`) — the proxy resolves the real integration and
+/// credentials by `(connection_id, tenant_id)` server-side. Because the entries
+/// ride the input mapping, `apply_input_mapping` resolves the ref against the
+/// execution source with no new host call, WIT change, or stdlib change.
+fn connection_ref_input_entries(
+    connection_ref: &MappingValue,
+) -> Result<[(String, serde_json::Value); 2], DirectManifestError> {
+    let ref_value = canonical_json(connection_ref)?;
+    let connection = serde_json::json!({
+        "valueType": "composite",
+        "value": {
+            "connection_id": ref_value.clone(),
+            "integration_id": { "valueType": "immediate", "value": "" },
+            "parameters": { "valueType": "immediate", "value": {} },
+        }
+    });
+    Ok([
+        ("_connection".to_string(), connection),
+        ("connection_id".to_string(), ref_value),
+    ])
+}
+
+/// Insert the `connection_ref` mapping entries into an input-mapping object when
+/// a ref is present. No-op for literal / connectionless steps.
+fn apply_connection_ref_entries(
+    mapping: &mut serde_json::Map<String, serde_json::Value>,
+    connection_ref: Option<&MappingValue>,
+) -> Result<(), DirectManifestError> {
+    if let Some(connection_ref) = connection_ref {
+        for (key, value) in connection_ref_input_entries(connection_ref)? {
+            mapping.insert(key, value);
+        }
+    }
+    Ok(())
 }
 
 /// The AiAgent's memory provider: the agent id and connection id of the Agent
@@ -2039,5 +2147,134 @@ mod tests {
         assert_eq!(agent.capability_id, "chat-completion");
         assert_eq!(agent.max_retries, Some(3));
         assert_eq!(agent.retry_delay, Some(10));
+    }
+
+    #[test]
+    fn agent_connection_ref_lowers_into_input_mapping_and_clears_literal() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "call",
+              "executionPlan": [{"fromStep":"call","toStep":"finish"}],
+              "inputSchema": {
+                "crm": {"type":"connection","integration":"hubspot","required":true}
+              },
+              "steps": {
+                "call": {"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request",
+                  "connectionRef":{"valueType":"reference","value":"data.crm"},
+                  "inputMapping":{"url":{"valueType":"immediate","value":"https://example.test"}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "call")
+            .expect("agent entry");
+        // The literal path is bypassed: no baked connection id.
+        assert_eq!(agent.connection_id, None);
+
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == agent.input_mapping_id)
+            .expect("input mapping");
+        // The ref is lowered into the input mapping as a resolvable
+        // `connection_id` plus the `_connection` object the agent reads.
+        assert_eq!(mapping.value["connection_id"]["valueType"], "reference");
+        assert_eq!(mapping.value["connection_id"]["value"], "data.crm");
+        assert_eq!(mapping.value["_connection"]["valueType"], "composite");
+        assert_eq!(
+            mapping.value["_connection"]["value"]["connection_id"]["value"],
+            "data.crm"
+        );
+        assert_eq!(
+            mapping.value["_connection"]["value"]["integration_id"]["value"],
+            ""
+        );
+        // The author's own mapped input survives untouched.
+        assert_eq!(mapping.value["url"]["value"], "https://example.test");
+    }
+
+    #[test]
+    fn literal_connection_id_leaves_input_mapping_free_of_connection_keys() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "call",
+              "executionPlan": [{"fromStep":"call","toStep":"finish"}],
+              "steps": {
+                "call": {"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request",
+                  "connectionId":"conn-123",
+                  "inputMapping":{"url":{"valueType":"immediate","value":"https://x.test"}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "call")
+            .expect("agent entry");
+        // Back-compat: the literal id still rides the manifest, and the input
+        // mapping is untouched (the stdlib injects `_connection` post-mapping).
+        assert_eq!(agent.connection_id.as_deref(), Some("conn-123"));
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == agent.input_mapping_id)
+            .expect("input mapping");
+        assert!(mapping.value.get("_connection").is_none());
+        assert!(mapping.value.get("connection_id").is_none());
+    }
+
+    #[test]
+    fn ai_agent_connection_ref_lowers_into_chat_mapping() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [{"fromStep":"ai","toStep":"finish","label":"next"}],
+              "inputSchema": {
+                "llm": {"type":"connection","integration":"openai","required":true}
+              },
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent",
+                  "connectionRef":{"valueType":"reference","value":"data.llm"},
+                  "config":{
+                    "systemPrompt":{"valueType":"immediate","value":"sys"},
+                    "userPrompt":{"valueType":"immediate","value":"go"},
+                    "provider":"openai"
+                  }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "ai")
+            .expect("ai agent entry");
+        assert_eq!(agent.connection_id, None);
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == agent.input_mapping_id)
+            .expect("chat input mapping");
+        assert_eq!(mapping.value["connection_id"]["value"], "data.llm");
+        assert_eq!(mapping.value["_connection"]["valueType"], "composite");
     }
 }

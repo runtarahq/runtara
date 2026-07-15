@@ -7862,6 +7862,45 @@ mod tests {
     }
 
     #[test]
+    fn resolvable_connection_ref_mapping_resolves_to_injected_connection() {
+        // The exact input-mapping shape the emitter produces for a step whose
+        // connection is a `connection_ref` (see
+        // `connection_ref_input_entries` in runtara-workflows): a `_connection`
+        // composite plus a top-level `connection_id`, both pointing at a
+        // caller-supplied `connection` input in `data`. This proves the id is
+        // resolved from the runtime source into the shape the agent reads
+        // (`RawConnection`) — the same shape the stdlib injects for a literal.
+        let manifest = DirectJsonManifest::parse(&manifest(json!({
+            "_connection": {
+                "valueType": "composite",
+                "value": {
+                    "connection_id": { "valueType": "reference", "value": "data.crm" },
+                    "integration_id": { "valueType": "immediate", "value": "" },
+                    "parameters": { "valueType": "immediate", "value": {} }
+                }
+            },
+            "connection_id": { "valueType": "reference", "value": "data.crm" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"crm":"conn-live-42"}"#, b"{}", b"{}").expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output,
+            json!({
+                "_connection": {
+                    "connection_id": "conn-live-42",
+                    "integration_id": "",
+                    "parameters": {}
+                },
+                "connection_id": "conn-live-42"
+            })
+        );
+    }
+
+    #[test]
     fn template_resolves_through_interned_loop_outputs() {
         // Regression (interning stage 1, 8.0.19): a While iteration's accumulated
         // `loop.outputs` grows past the 16 KiB intern threshold, so build_source
