@@ -155,13 +155,17 @@ fn validate_graph_connections(
     for step in graph.steps.values() {
         match step {
             Step::Agent(agent_step) => {
-                if agent_requires_connection(catalog, &agent_step.agent_id)
-                    && agent_step
-                        .connection_id
-                        .as_ref()
-                        .map(|conn_id| conn_id.trim().is_empty())
-                        .unwrap_or(true)
-                {
+                // A resolvable `connection_ref` (a caller-supplied `connection`
+                // input, a rotated value, a dynamic selection) satisfies the
+                // connection requirement — its concrete id is bound at runtime,
+                // so there is nothing to check for existence/ownership here.
+                let has_literal = agent_step
+                    .connection_id
+                    .as_ref()
+                    .is_some_and(|conn_id| !conn_id.trim().is_empty());
+                let has_binding = has_literal || agent_step.connection_ref.is_some();
+
+                if agent_requires_connection(catalog, &agent_step.agent_id) && !has_binding {
                     issues.push(
                         ValidationIssue::error(
                             IssueCategory::MissingConnection,
@@ -508,6 +512,65 @@ mod tests {
         );
         assert!(issues[0].message.contains("requires a connection"));
         assert!(issues[0].message.contains("shopify"));
+    }
+
+    /// A connection-requiring agent bound via `connection_ref` (a caller-supplied
+    /// `connection` input) carries no literal `connection_id`, yet must NOT be
+    /// flagged as missing a connection — the concrete id is bound at runtime, so
+    /// there is nothing to existence/ownership-check at author time.
+    #[test]
+    fn connection_ref_satisfies_the_requirement_without_a_literal_id() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionRef": {"valueType": "reference", "value": "data.store"}
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": [],
+                "inputSchema": {
+                    "store": {"type": "connection", "integration": "shopify", "required": true}
+                }
+            },
+            "variables": []
+        }))
+        .unwrap();
+
+        let existing: HashSet<String> = HashSet::new();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+        assert!(
+            issues.is_empty(),
+            "connection_ref should satisfy the requirement, got {issues:?}"
+        );
+
+        // And a literal connection_id is still ownership-checked as before: an
+        // unknown id under the same agent is flagged.
+        let no_ref: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionId": "unknown-id"
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            },
+            "variables": []
+        }))
+        .unwrap();
+        let issues = validate_connections(&no_ref, &existing, &catalog);
+        assert_eq!(issues.len(), 1, "literal id still checked: {issues:?}");
+        assert!(issues[0].message.contains("unknown-id"));
     }
 
     #[test]

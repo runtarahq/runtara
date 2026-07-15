@@ -3149,11 +3149,14 @@ fn validate_agents(
                 continue;
             }
 
+            // A resolvable `connection_ref` binds the connection at runtime, so
+            // it satisfies the requirement even with no literal `connection_id`.
             if agent_capability_requires_connection(
                 &agent_step.agent_id,
                 &agent_step.capability_id,
                 agent,
             ) && connection_id_is_missing(agent_step.connection_id.as_ref())
+                && agent_step.connection_ref.is_none()
             {
                 result.errors.push(ValidationError::AgentMissingConnection {
                     step_id: step_id.clone(),
@@ -5678,8 +5681,11 @@ fn extract_template_static_references_from_condition_argument(
 fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Step::AiAgent(ai_step) = step {
-            // Must have a connection_id
-            if connection_id_is_missing(ai_step.connection_id.as_ref()) {
+            // Must have a connection — a literal `connection_id` or a
+            // resolvable `connection_ref` bound at runtime.
+            if connection_id_is_missing(ai_step.connection_id.as_ref())
+                && ai_step.connection_ref.is_none()
+            {
                 result
                     .errors
                     .push(ValidationError::AiAgentMissingConnection {
@@ -6256,6 +6262,54 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| matches!(error, ValidationError::AgentMissingConnection { .. }))
+        );
+    }
+
+    #[test]
+    fn test_agent_connection_ref_satisfies_connection_requirement() {
+        let mut input_mapping = InputMapping::new();
+        input_mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("Product"),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "query".to_string(),
+            Step::Agent(AgentStep {
+                id: "query".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                // No literal id — bound at runtime via a `connection` input.
+                connection_id: None,
+                connection_ref: Some(MappingValue::Reference(runtara_dsl::ReferenceValue {
+                    value: "data.db".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                input_mapping: Some(input_mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "query");
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::AgentMissingConnection { .. })),
+            "connection_ref should satisfy E026, got {:?}",
+            result.errors
         );
     }
 
