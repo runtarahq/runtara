@@ -37,6 +37,9 @@ runtara-agent-wit = { path = "../runtara-agent-wit" }
 # parses each agent's meta.json into AgentInfo and serves it back to the
 # server unchanged.
 runtara-dsl = { path = "../runtara-dsl" }
+# Canonical LIFECYCLE_INTERFACE_NAME — one source of truth for the invoke
+# export name shared with the compiler.
+runtara-workflow-wit = { path = "../runtara-workflow-wit" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
 # wasmtime crate version is independent of the wasmtime CLI version pinned in

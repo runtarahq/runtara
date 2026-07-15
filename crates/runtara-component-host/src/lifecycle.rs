@@ -8,8 +8,10 @@
 //! type-checks them against the component's export when the typed function is
 //! looked up.
 
-/// Fully-qualified component export name of the lifecycle interface.
-pub const LIFECYCLE_INTERFACE_NAME: &str = "runtara:workflow-lifecycle/lifecycle@0.1.0";
+/// Fully-qualified component export name of the lifecycle interface —
+/// re-exported from the canonical WIT crate so the host and the compiler
+/// cannot drift apart.
+pub use runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME;
 
 /// WIT mirror of `lifecycle.error-info` (field-for-field the agent error).
 #[derive(

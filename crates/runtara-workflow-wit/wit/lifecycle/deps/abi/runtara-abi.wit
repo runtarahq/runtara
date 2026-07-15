@@ -1,0 +1,35 @@
+// Neutral shared vocabulary for the runtara component ABI — the one home for
+// the types that cross both the agent boundary (runtara:agent) and the
+// workflow invoke boundary (runtara:workflow-lifecycle).
+//
+// error-info and connection-info are byte-for-byte the records the agent WIT
+// (`runtara:agent/types@0.3.0`) already defines; the component model matches
+// records structurally, so an agent built against `runtara:agent/types` and a
+// workflow lifecycle built against `runtara:abi/types` interoperate today.
+//
+// Migration state: the workflow lifecycle interface `use`s this package. The
+// per-agent WIT still carries its own copy of these records
+// (auto-generated from a template into ~26 crates); repointing them here is a
+// separate, coordinated change — deferred to avoid regenerating every agent's
+// `bindings.rs` in the same step.
+package runtara:abi@0.1.0;
+
+interface types {
+    record connection-info {
+        connection-id: string,
+        integration-id: string,
+        connection-subtype: option<string>,
+        parameters: string,                  // JSON object
+        rate-limit-config: option<string>,   // JSON object
+    }
+
+    record error-info {
+        code: string,
+        message: string,
+        category: string,            // "transient" | "permanent" | "timeout" | ...
+        severity: string,            // "warning" | "error" | "critical"
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,  // JSON object
+    }
+}

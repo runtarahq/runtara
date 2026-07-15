@@ -58,7 +58,7 @@ use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{
-    LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
+    ABI_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
 };
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
@@ -987,6 +987,10 @@ fn build_direct_component_resolve_configured(
                 .map_err(component_error)?;
         }
         super::component::WorkflowAbi::InvokeHostImports => {
+            // The lifecycle package `use`s runtara:abi — push it first.
+            resolve
+                .push_str("runtara-abi.wit", ABI_WIT)
+                .map_err(component_error)?;
             resolve
                 .push_str("runtara-workflow-lifecycle.wit", LIFECYCLE_WIT)
                 .map_err(component_error)?;
