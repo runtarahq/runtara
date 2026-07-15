@@ -450,9 +450,25 @@ pub struct AgentStep {
     /// Capability name (e.g., "random-double", "group-by", "http-request")
     pub capability_id: String,
 
-    /// Connection ID for agents requiring authentication
+    /// Connection ID for agents requiring authentication.
+    ///
+    /// A same-tenant literal id, pinned at author time (back-compat). Ignored
+    /// when `connection_ref` is set — the ref then supplies the id at runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+
+    /// Resolvable connection binding, evaluated against the execution source at
+    /// runtime to ONE concrete connection id.
+    ///
+    /// This is how a step binds to a caller-supplied connection (a `connection`
+    /// input, `{"valueType": "reference", "value": "data.crm"}`), rotates
+    /// connections (point the ref at a different value), or selects one
+    /// dynamically per record (`data.chosenConnectionId`). When set, it takes
+    /// precedence over the `connection_id` literal; the resolved value is an
+    /// opaque per-tenant connection id (never a secret — the host resolves
+    /// credentials by id at outbound-call time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<MappingValue>,
 
     /// Maps data to agent capability inputs
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1232,9 +1248,21 @@ pub struct AiAgentStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Connection ID for the LLM provider (e.g., OpenAI, Anthropic)
+    /// Connection ID for the LLM provider (e.g., OpenAI, Anthropic).
+    ///
+    /// A same-tenant literal id, pinned at author time (back-compat). Ignored
+    /// when `connection_ref` is set — the ref then supplies the id at runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+
+    /// Resolvable connection binding, evaluated against the execution source at
+    /// runtime to ONE concrete connection id (see `AgentStep::connection_ref`).
+    ///
+    /// Lets an AI step bind to a caller-supplied `connection` input, rotate LLM
+    /// provider connections, or select one dynamically. When set, it takes
+    /// precedence over the `connection_id` literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<MappingValue>,
 
     /// AI Agent configuration
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2232,5 +2260,62 @@ mod connection_field_tests {
         .expect("serializes")
         .get("integration")
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod connection_ref_tests {
+    use super::*;
+
+    #[test]
+    fn agent_step_parses_connection_ref_reference() {
+        let step: AgentStep = serde_json::from_str(
+            r#"{
+                "id": "call-crm",
+                "agentId": "hubspot",
+                "capabilityId": "create-contact",
+                "connectionRef": { "valueType": "reference", "value": "data.crm" }
+            }"#,
+        )
+        .expect("agent step with connectionRef parses");
+        assert!(step.connection_id.is_none());
+        match step.connection_ref {
+            Some(MappingValue::Reference(ref r)) => assert_eq!(r.value, "data.crm"),
+            other => panic!("expected a reference connectionRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_ref_absent_by_default_and_omitted_when_none() {
+        // Back-compat: an existing step with only a literal connection_id and no
+        // connectionRef parses, and re-serializes without a connectionRef key.
+        let step: AgentStep = serde_json::from_str(
+            r#"{
+                "id": "call-crm",
+                "agentId": "hubspot",
+                "capabilityId": "create-contact",
+                "connectionId": "conn-123"
+            }"#,
+        )
+        .expect("literal-only agent step parses");
+        assert_eq!(step.connection_id.as_deref(), Some("conn-123"));
+        assert!(step.connection_ref.is_none());
+        let json = serde_json::to_value(&step).expect("serializes");
+        assert!(json.get("connectionRef").is_none());
+        assert_eq!(json["connectionId"], "conn-123");
+    }
+
+    #[test]
+    fn ai_agent_step_round_trips_connection_ref() {
+        let step: AiAgentStep = serde_json::from_str(
+            r#"{
+                "id": "assist",
+                "connectionRef": { "valueType": "reference", "value": "data.llm" }
+            }"#,
+        )
+        .expect("ai-agent step with connectionRef parses");
+        let json = serde_json::to_value(&step).expect("serializes");
+        assert_eq!(json["connectionRef"]["valueType"], "reference");
+        assert_eq!(json["connectionRef"]["value"], "data.llm");
     }
 }
