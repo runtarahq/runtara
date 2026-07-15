@@ -6090,27 +6090,34 @@ fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
         runtara_component_host::InvokeExit::Failed(error) => error,
         other => panic!("expected Failed, got {other:?}"),
     };
-    // v1 wrapping: the raw error bytes ride `message`; code/category/severity
-    // are empty until the structured mapping lands with the suspend wiring.
-    assert!(
-        !error.message.is_empty(),
-        "error message must carry the failure payload"
-    );
-    assert_eq!(error.code, "");
+    // Structured decomposition: the fixture's error envelope maps
+    // field-for-field into error-info (stdlib.invoke-error-fields).
+    assert_eq!(error.code, "DIRECT_FAILURE");
+    assert_eq!(error.message, "Direct workflow failure");
+    assert_eq!(error.category, "permanent");
+    assert_eq!(error.severity, "critical");
     assert!(!error.retryable);
+    assert!(
+        error
+            .attributes
+            .as_deref()
+            .is_some_and(|attributes| attributes.contains("fixture")),
+        "context attributes must survive: {:?}",
+        error.attributes
+    );
 
-    // runtime.fail fired additively with the same payload.
+    // runtime.fail fired additively with the RAW envelope; the in-band
+    // error is its structured decomposition — same payload, richer shape.
     let recorded = host
         .failed
         .lock()
         .unwrap()
         .clone()
         .expect("fail fired additively");
-    assert_eq!(
-        String::from_utf8_lossy(&recorded),
-        error.message,
-        "in-band and recorded errors must agree"
-    );
+    let recorded_json: Value =
+        serde_json::from_slice(&recorded).expect("recorded error is the JSON envelope");
+    assert_eq!(recorded_json["code"], "DIRECT_FAILURE");
+    assert_eq!(recorded_json["message"], error.message);
 }
 
 #[test]
@@ -6171,4 +6178,83 @@ fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
     };
     let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
     assert_eq!(output_json, serde_json::json!({ "result": "invoke-agent" }));
+}
+
+/// Durable per-item delays inside a Split get PER-ITERATION sleep-checkpoint
+/// keys (`{step}::{index}`) — without the loop-index fold every iteration
+/// collides on one key, the hazard flagged (and deferred) by the unify plan.
+/// Top-level durable delays keep the bare step id (asserted by the existing
+/// delay tests' `checkpoint_id == "delay"` expectations).
+#[test]
+fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+      "name": "Split Durable Delay Keys",
+      "durable": true,
+      "steps": {
+        "split": {
+          "stepType": "Split",
+          "id": "split",
+          "name": "Per Item",
+          "config": { "value": { "valueType": "reference", "value": "data.items" } },
+          "subgraph": {
+            "name": "Body",
+            "entryPoint": "tick",
+            "steps": {
+              "tick": {
+                "stepType": "Delay",
+                "id": "tick",
+                "name": "Tick",
+                "durationMs": { "valueType": "immediate", "value": 1 }
+              },
+              "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                  "v": { "valueType": "reference", "value": "item" }
+                }
+              }
+            },
+            "executionPlan": [ { "fromStep": "tick", "toStep": "finish" } ]
+          }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "results": { "valueType": "reference", "value": "steps.split.outputs" }
+          }
+        }
+      },
+      "entryPoint": "split",
+      "executionPlan": [ { "fromStep": "split", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "items": { "type": "array", "required": true } },
+      "outputSchema": {}
+    }"#;
+
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "split-durable-delay-keys",
+        graph,
+        br#"{"items":[{"i":1},{"i":2}]}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "run failed: error={:?} stderr={}",
+        captured.error_json, captured.stderr
+    );
+    let result = captured;
+
+    let sleep_keys: Vec<&str> = result
+        .sleeps
+        .iter()
+        .map(|sleep| sleep.checkpoint_id.as_str())
+        .collect();
+    assert_eq!(
+        sleep_keys,
+        vec!["tick::0", "tick::1"],
+        "per-item durable delays must not collide on one sleep key"
+    );
 }

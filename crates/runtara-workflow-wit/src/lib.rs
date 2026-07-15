@@ -85,6 +85,8 @@ mod tests {
             "group-by",
             "delay-duration-ms",
             "delay",
+            "delay-sleep-key",
+            "invoke-error-fields",
             "breakpoint-key",
             "breakpoint-event",
             "wait-signal-id",

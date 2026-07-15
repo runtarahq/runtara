@@ -124,7 +124,9 @@ pub use agent_input_validation::{
 mod component {
     use std::cell::RefCell;
 
-    use super::bindings::exports::runtara::workflow_stdlib::json::{AgentRetryError, Guest};
+    use super::bindings::exports::runtara::workflow_stdlib::json::{
+        AgentRetryError, Guest, InvokeError,
+    };
     use super::direct_json::{self, DirectJsonManifest};
 
     struct Component;
@@ -517,6 +519,31 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.delay(delay_id, &source, duration_ms)
+            })
+        }
+
+        fn delay_sleep_key(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest
+                    .delay_sleep_key(&step_id, &source)
+                    .map(String::into_bytes)
+            })
+        }
+
+        fn invoke_error_fields(error: Vec<u8>) -> Result<InvokeError, String> {
+            let fields = direct_json::invoke_error_fields(&error);
+            Ok(InvokeError {
+                code: fields.code,
+                message: fields.message,
+                category: fields.category,
+                severity: fields.severity,
+                retryable: fields.retryable,
+                retry_after_ms: fields.retry_after_ms,
+                attributes: fields.attributes,
             })
         }
 

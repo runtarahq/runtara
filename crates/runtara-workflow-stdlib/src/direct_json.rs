@@ -1009,6 +1009,41 @@ impl DirectJsonManifest {
         }
     }
 
+    /// Per-scope durability key for a durable Delay's sleep checkpoint.
+    ///
+    /// The bare step id at top level — byte-identical to the legacy static
+    /// key, so existing checkpoint rows and assertions are unaffected — and
+    /// `{step_id}::{indices}` inside Split/While iterations (folding
+    /// `variables._loop_indices` exactly like [`Self::breakpoint_key`]).
+    /// Without the fold, per-item durable delays collide on one key.
+    pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse delay-sleep-key source: {err}"))?;
+        self.steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct delay step '{step_id}'"))?;
+
+        let loop_indices = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_loop_indices"))
+            .and_then(Value::as_array)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join("_")
+            })
+            .unwrap_or_default();
+        if loop_indices.is_empty() {
+            Ok(step_id.to_string())
+        } else {
+            Ok(format!("{step_id}::{loop_indices}"))
+        }
+    }
+
     /// Build the generated-code-compatible custom event payload for a step breakpoint.
     pub fn breakpoint_event(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -4409,6 +4444,70 @@ fn agent_error_info_envelope(
     }
 
     Value::Object(object).to_string()
+}
+
+/// Structured fields for the invoke export's `Err(error-info)` arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectInvokeErrorFields {
+    pub code: String,
+    pub message: String,
+    pub category: String,
+    pub severity: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub attributes: Option<String>,
+}
+
+/// Best-effort decomposition of a terminal error payload into structured
+/// error-info fields. A JSON envelope (the `agent_error_info_envelope` /
+/// stdlib error-step shape: `{code, message, category, severity, retryable,
+/// retryAfterMs, attributes}`) maps field-for-field; anything else — plain
+/// strings, non-object JSON, invalid UTF-8 — rides `message` verbatim
+/// (lossily decoded), matching what `runtime.fail` records. Infallible by
+/// construction.
+pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
+    let raw = String::from_utf8_lossy(error).into_owned();
+    let Ok(Value::Object(envelope)) = serde_json::from_slice::<Value>(error) else {
+        return DirectInvokeErrorFields {
+            code: String::new(),
+            message: raw,
+            category: String::new(),
+            severity: String::new(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        };
+    };
+    let field = |name: &str| {
+        envelope
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let message = match envelope.get("message").and_then(Value::as_str) {
+        Some(message) => message.to_string(),
+        // An object without a message string still surfaces everything.
+        None => raw,
+    };
+    DirectInvokeErrorFields {
+        code: field("code"),
+        message,
+        category: field("category"),
+        severity: field("severity"),
+        retryable: envelope
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        retry_after_ms: envelope.get("retryAfterMs").and_then(Value::as_u64),
+        // Agent envelopes carry `attributes`; workflow Error-step envelopes
+        // carry the resolved `context` — both surface as the attributes JSON.
+        attributes: envelope
+            .get("attributes")
+            .or_else(|| envelope.get("context"))
+            .filter(|value| !value.is_null())
+            .map(|value| value.to_string()),
+    }
 }
 
 fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
@@ -11660,5 +11759,89 @@ mod tests {
                 "route": "active"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod invoke_error_and_delay_key_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn invoke_error_fields_decomposes_structured_envelopes() {
+        let envelope = json!({
+            "code": "HTTP_TIMEOUT",
+            "message": "upstream timed out",
+            "category": "transient",
+            "severity": "error",
+            "retryable": true,
+            "retryAfterMs": 1500,
+            "attributes": {"host": "api.example.com"}
+        });
+        let fields = invoke_error_fields(envelope.to_string().as_bytes());
+        assert_eq!(fields.code, "HTTP_TIMEOUT");
+        assert_eq!(fields.message, "upstream timed out");
+        assert_eq!(fields.category, "transient");
+        assert_eq!(fields.severity, "error");
+        assert!(fields.retryable);
+        assert_eq!(fields.retry_after_ms, Some(1500));
+        assert_eq!(
+            fields.attributes.as_deref(),
+            Some(r#"{"host":"api.example.com"}"#)
+        );
+    }
+
+    #[test]
+    fn invoke_error_fields_rides_raw_bytes_as_message() {
+        for raw in [
+            "plain failure text",
+            "[1,2,3]",
+            "\"just a json string\"",
+            "{not json",
+        ] {
+            let fields = invoke_error_fields(raw.as_bytes());
+            assert_eq!(fields.message, raw, "raw payload must ride message");
+            assert_eq!(fields.code, "");
+            assert!(!fields.retryable);
+            assert_eq!(fields.retry_after_ms, None);
+            assert_eq!(fields.attributes, None);
+        }
+        // An object without a message string surfaces the whole envelope.
+        let fields = invoke_error_fields(br#"{"code":"X"}"#);
+        assert_eq!(fields.code, "X");
+        assert_eq!(fields.message, r#"{"code":"X"}"#);
+    }
+
+    #[test]
+    fn delay_sleep_key_folds_loop_indices_and_keeps_top_level_bare() {
+        let manifest_bytes = serde_json::to_vec(&json!({
+            "graph": {
+                "steps": [{
+                    "id": "tick",
+                    "stepType": "Delay",
+                    "name": "Tick"
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_bytes).expect("manifest parses");
+
+        // Top level: byte-identical to the legacy static key.
+        let top = manifest
+            .delay_sleep_key("tick", br#"{"data":{},"variables":{}}"#)
+            .expect("top-level key");
+        assert_eq!(top, "tick");
+
+        // Inside a Split/While iteration: the indices fold in.
+        let nested = manifest
+            .delay_sleep_key(
+                "tick",
+                br#"{"data":{},"variables":{"_loop_indices":[2,0]}}"#,
+            )
+            .expect("nested key");
+        assert_eq!(nested, "tick::2_0");
+
+        // Unknown steps fail loudly.
+        assert!(manifest.delay_sleep_key("nope", b"{}").is_err());
     }
 }

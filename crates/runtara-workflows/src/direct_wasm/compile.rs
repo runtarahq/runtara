@@ -1088,35 +1088,14 @@ fn emit_runtime_fail_return(
             body.instruction(&Instruction::Return);
         }
         super::component::WorkflowAbi::InvokeHostImports => {
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::I32Const(80));
-            body.instruction(&Instruction::MemoryFill(0));
-            // result disc = 1 (err)
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::I32Const(1));
-            body.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            }));
-            // error-info.message = the raw error bytes
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::LocalGet(error_ptr_local));
-            body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-                offset: 16,
-                align: 2,
-                memory_index: 0,
-            }));
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::LocalGet(error_len_local));
-            body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-                offset: 20,
-                align: 2,
-                memory_index: 0,
-            }));
-            body.instruction(&Instruction::I32Const(0));
-            body.instruction(&Instruction::Return);
+            // Structured Err(error-info): stdlib decomposes the payload
+            // directly into the result area; abi.rs owns the writer.
+            abi::emit_invoke_err_return_from_locals(
+                body,
+                indices.stdlib_invoke_error_fields,
+                error_ptr_local,
+                error_len_local,
+            );
         }
     }
 }

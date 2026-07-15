@@ -14,6 +14,21 @@ interface json {
         rate-limited: bool,
     }
 
+    // Structured fields for the invoke export's Err arm. Field order matches
+    // the lifecycle error-info record EXACTLY: the canonical-ABI layout of
+    // `result<invoke-error, string>`'s ok arm at retptr+8 is byte-identical
+    // to error-info at result-area+8, so the emitter writes the stdlib call's
+    // retptr at the result area and flips one discriminant byte.
+    record invoke-error {
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+    }
+
     init-manifest: func(manifest: list<u8>) -> result<_, string>;
 
     // Free interned scope values not reachable from the given loop roots (the
@@ -207,6 +222,24 @@ interface json {
         source: list<u8>,
         duration-ms: u64,
     ) -> result<list<u8>, string>;
+
+    // Per-scope durability key for a durable Delay's sleep checkpoint: the
+    // bare step id at top level, `{step-id}::{indices}` inside Split/While
+    // iterations (folding `variables._loop_indices` like breakpoint-key) —
+    // without the fold, per-item durable delays collide on ONE key.
+    delay-sleep-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Best-effort decomposition of a terminal error payload into structured
+    // error-info fields: a JSON envelope ({code, message, category, severity,
+    // retryable, retryAfterMs, attributes}) maps field-for-field; anything
+    // else rides `message` verbatim. Infallible by construction — the err arm
+    // exists only for WIT-convention uniformity.
+    invoke-error-fields: func(
+        error: list<u8>,
+    ) -> result<invoke-error, string>;
 
     breakpoint-key: func(
         step-id: string,

@@ -106,7 +106,21 @@ pub(super) fn emit_delay_plan(
         let step_id_segment = static_data
             .step_id(step_id)
             .expect("run plan step ids are present in static data");
+        // Per-scope sleep-checkpoint key: bare step id at top level
+        // (byte-identical to the legacy static key), `{step}::{indices}`
+        // inside Split/While iterations — without the fold, per-item durable
+        // delays collide on ONE key (the hazard the unify plan flagged).
         push_segment_args(body, step_id_segment);
+        body.instruction(&Instruction::LocalGet(source_ptr_local));
+        body.instruction(&Instruction::LocalGet(source_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_delay_sleep_key));
+        return_if_retptr_error(body, indices);
+        // The debug-start payload in the output locals is already emitted —
+        // safe scratch for the key until the sleep call consumes it.
+        load_retptr_list(body, output_ptr_local, output_len_local);
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::I32Const(0));
     }

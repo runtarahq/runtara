@@ -118,26 +118,32 @@ pub(super) fn return_if_retptr_error(
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
-            emit_invoke_err_return_from_retptr(function, None);
+            emit_invoke_err_return_from_retptr(function, None, indices.stdlib_invoke_error_fields);
             function.instruction(&Instruction::End);
         }
     }
 }
 
 /// Write `Err(error-info)` into the fixed invoke result area at offset 0 and
-/// `Return` its pointer, sourcing the message string from the retptr error
+/// `Return` its pointer, sourcing the error bytes from the retptr error
 /// payload (ptr @+4, len @+8). When `fail_index` is given, `runtime.fail`
 /// fires additively with the same bytes first. Free of locals by design (some
-/// call sites have none): the message ptr/len are staged into their final
-/// slots (@16/@20 — beyond every host call's ≤12-byte retptr write) BEFORE
-/// anything clobbers the retptr, then every other field is stored explicitly
-/// (option tags included — a garbage tag is exactly the
-/// "unexpected discriminant" lift trap).
+/// call sites have none): the error ptr/len are staged into the low scratch
+/// at @88/@92 — beyond every host call's retptr write — BEFORE anything
+/// clobbers the retptr.
+///
+/// The structured decomposition is delegated to `stdlib.invoke-error-fields`,
+/// called with the RESULT AREA as its retptr: the canonical layout of
+/// `result<invoke-error, string>`'s ok arm at +8 is byte-identical to
+/// error-info at +8, so all that remains is flipping the result discriminant
+/// to err. If the stdlib call itself errored (infallible by construction, but
+/// defended), the raw bytes ride `message` with empty structured fields.
 pub(super) fn emit_invoke_err_return_from_retptr(
     function: &mut WasmFunction,
     fail_index: Option<u32>,
+    stdlib_invoke_error_fields: u32,
 ) {
-    // Stage message ptr/len into their final Err-record slots.
+    // Stage the error ptr/len out of the retptr region.
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Load(MemArg {
@@ -146,7 +152,7 @@ pub(super) fn emit_invoke_err_return_from_retptr(
         memory_index: 0,
     }));
     function.instruction(&Instruction::I32Store(MemArg {
-        offset: 16,
+        offset: 88,
         align: 2,
         memory_index: 0,
     }));
@@ -158,35 +164,84 @@ pub(super) fn emit_invoke_err_return_from_retptr(
         memory_index: 0,
     }));
     function.instruction(&Instruction::I32Store(MemArg {
-        offset: 20,
+        offset: 92,
         align: 2,
         memory_index: 0,
     }));
     if let Some(fail) = fail_index {
-        // Additive host-side recording; its retptr write (≤12 bytes) cannot
-        // reach the staged slots.
+        // Additive host-side recording (its retptr write cannot reach @88+).
         function.instruction(&Instruction::I32Const(0));
         function.instruction(&Instruction::I32Load(MemArg {
-            offset: 16,
+            offset: 88,
             align: 2,
             memory_index: 0,
         }));
         function.instruction(&Instruction::I32Const(0));
         function.instruction(&Instruction::I32Load(MemArg {
-            offset: 20,
+            offset: 92,
             align: 2,
             memory_index: 0,
         }));
         push_retptr_arg(function);
         function.instruction(&Instruction::Call(fail));
     }
-    emit_invoke_err_return_fixed_fields(function);
+    // Structured decomposition, written directly at the result area.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0)); // retptr = the result area
+    function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
+    emit_invoke_err_finalize_from_scratch(function);
 }
 
-/// Write the non-message fields of the invoke `Err(error-info)` area (message
-/// ptr/len must already sit at @16/@20) and `Return` the area pointer.
-pub(super) fn emit_invoke_err_return_fixed_fields(function: &mut WasmFunction) {
-    // result disc = 1 (err).
+/// Finalize the invoke `Err` result after `stdlib.invoke-error-fields` wrote
+/// its result at the area: on the (defended) err arm fall back to the raw
+/// bytes staged at @88/@92 as `message` with empty structured fields; either
+/// way flip the result discriminant to err and return the area pointer.
+fn emit_invoke_err_finalize_from_scratch(function: &mut WasmFunction) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    // Fallback: zero the record, message = staged raw bytes.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(80));
+    function.instruction(&Instruction::MemoryFill(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 20,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::End);
+    // result disc = 1 (err) — on the ok arm this flips 0 -> 1 over the
+    // stdlib result whose record @8 is already the error-info payload.
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::I32Store8(MemArg {
@@ -194,28 +249,38 @@ pub(super) fn emit_invoke_err_return_fixed_fields(function: &mut WasmFunction) {
         align: 0,
         memory_index: 0,
     }));
-    // code / category / severity: empty strings (ptr 0, len 0).
-    for offset in [8u64, 12, 24, 28, 32, 36] {
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Store(MemArg {
-            offset,
-            align: 2,
-            memory_index: 0,
-        }));
-    }
-    // retryable = false; option tags (retry-after-ms @48, attributes @64) = none.
-    for offset in [40u64, 48, 64] {
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Store8(MemArg {
-            offset,
-            align: 0,
-            memory_index: 0,
-        }));
-    }
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::Return);
+}
+
+/// Locals-sourced variant of the invoke `Err` writer (fail already fired by
+/// the caller or not wanted): stage the locals into @88/@92 so the shared
+/// finalizer's fallback can reach them, then decompose + finalize.
+pub(super) fn emit_invoke_err_return_from_locals(
+    function: &mut WasmFunction,
+    stdlib_invoke_error_fields: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(error_ptr_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(error_len_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::LocalGet(error_ptr_local));
+    function.instruction(&Instruction::LocalGet(error_len_local));
+    function.instruction(&Instruction::I32Const(0)); // retptr = the result area
+    function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
+    emit_invoke_err_finalize_from_scratch(function);
 }
 
 /// Suspend-and-exit for the entry function: the run stops early because a
@@ -311,7 +376,11 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
-            emit_invoke_err_return_from_retptr(function, Some(indices.runtime_fail));
+            emit_invoke_err_return_from_retptr(
+                function,
+                Some(indices.runtime_fail),
+                indices.stdlib_invoke_error_fields,
+            );
             function.instruction(&Instruction::End);
         }
     }
