@@ -15,8 +15,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_agent_retptr_list, load_retptr_list, load_retptr_tag,
-    push_retptr_arg,
+    emit_get_checkpoint_has_value, emit_retptr_error_or_return, load_agent_retptr_list,
+    load_retptr_list, load_retptr_option_list, load_retptr_tag, push_retptr_arg,
+    return_if_retptr_error,
 };
 use super::agent_error::{
     emit_agent_error_route_or_fail, emit_agent_invoke_error_body_from_info,
@@ -25,7 +26,7 @@ use super::agent_error::{
 use super::agent_invoke::emit_agent_invoke;
 use super::agent_io::{emit_agent_cache_key, emit_agent_connection_input};
 use super::agent_retry::{
-    emit_agent_advance_retry_attempt, emit_agent_capture_retry_sleep,
+    emit_agent_advance_retry_attempt, emit_agent_attempt_decode, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
     emit_agent_retry_error_info, emit_agent_retry_sleep,
 };
@@ -34,8 +35,13 @@ use super::debug::{emit_agent_debug_error, emit_step_breakpoint, emit_step_debug
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping_start_step_error, emit_build_source};
 use super::{
-    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
+    DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
+    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL,
+    DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
+    DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RETRY_ATTEMPT_LOCAL,
+    DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL, DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+    DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL, DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL,
+    DIRECT_AGENT_RETRYABLE_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables,
 };
@@ -195,48 +201,193 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
         body.instruction(&Instruction::Block(BlockType::Empty));
         body.instruction(&Instruction::Loop(BlockType::Empty));
-        emit_agent_invoke(
-            body,
-            invoke,
-            capability_id,
-            static_data,
-            agent_id,
-            output_ptr_local,
-            output_len_local,
-        );
-        load_retptr_tag(body);
+
+        // Per-attempt prologue: run this attempt fresh, or replay it from a
+        // per-attempt checkpoint. On a durable step every FAILED attempt is
+        // checkpointed under `{cache_key}::attempt::{N}` before the backoff, so a
+        // resume (replay-from-start after a drain/restart mid-retry) short-circuits
+        // the invoke for attempts that already ran instead of re-firing the agent —
+        // the bug this fixes. Both paths leave `ATTEMPT_ERR_FLAG` set and, on a
+        // failure, the retry state-machine locals populated.
+        if durable_checkpoint {
+            // 1. Build the per-attempt result key: `{cache_key}::attempt::{N}`.
+            body.instruction(&Instruction::LocalGet(route_ptr_local));
+            body.instruction(&Instruction::LocalGet(route_len_local));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_result_key));
+            return_if_retptr_error(body);
+            load_retptr_list(
+                body,
+                DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
+                DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
+            );
+
+            // 2. Read-only lookup of this attempt's checkpoint -> HIT_FLAG.
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+            emit_get_checkpoint_has_value(body);
+            body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
+
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            // HIT: a stored failure. Decode it into the retry locals — no invoke.
+            load_retptr_option_list(
+                body,
+                DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
+                DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
+            );
+            emit_agent_attempt_decode(
+                body,
+                DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
+                DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
+            );
+            body.instruction(&Instruction::Else);
+            // MISS: this attempt has not run. Invoke, then persist its outcome.
+            emit_agent_invoke(
+                body,
+                invoke,
+                capability_id,
+                static_data,
+                agent_id,
+                output_ptr_local,
+                output_len_local,
+            );
+            load_retptr_tag(body);
+            body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            // Fresh failure: capture the classification + error payload BEFORE the
+            // state machine runs (its sleep path reuses the error locals as
+            // scratch), then checkpoint the per-attempt envelope. On a successful
+            // attempt (ERR_FLAG == 0) nothing is stored here — the outer step
+            // checkpoint covers success, keeping the write cost to failures only.
+            emit_agent_capture_retry_sleep(body);
+            emit_agent_retry_error_info(
+                body,
+                indices,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
+            // Encode {tag=err, retryable, rate_limited, retry_after_tag,
+            // retry_after_ms(raw), payload}. Persisting the already-computed
+            // classification bits (not re-deriving on replay) is required: the
+            // agent retry formula differs from the workflow one and the latter
+            // reads AUTO_RETRY_ON_429 from the environment at classify time.
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRYABLE_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RATE_LIMITED_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_envelope));
+            return_if_retptr_error(body);
+            load_retptr_list(
+                body,
+                DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
+                DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
+            );
+            // Bare `checkpoint` (not `emit_checkpoint_save`): a durability point,
+            // not a suspend point — `handle_checkpoint` is load-first idempotent,
+            // and the following backoff sleep is where a pending cancel/pause parks
+            // the instance. Its `checkpoint-result` (found / pending-signal) is
+            // intentionally ignored here.
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+            return_if_retptr_error(body);
+            body.instruction(&Instruction::End); // fresh-failure If
+            body.instruction(&Instruction::End); // hit/miss If
+        } else {
+            // Non-durable: no per-attempt durability. `HIT_FLAG` is never set (stays
+            // 0), so the shared sleep gate below always sleeps — identical behavior
+            // to before this change.
+            emit_agent_invoke(
+                body,
+                invoke,
+                capability_id,
+                static_data,
+                agent_id,
+                output_ptr_local,
+                output_len_local,
+            );
+            load_retptr_tag(body);
+            body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            emit_agent_capture_retry_sleep(body);
+            emit_agent_retry_error_info(
+                body,
+                indices,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
+            body.instruction(&Instruction::End);
+        }
+
+        // Shared retry state machine, driven by ATTEMPT_ERR_FLAG (set by both the
+        // fresh-invoke and the checkpoint-replay paths). On the success path
+        // (ERR_FLAG == 0) this whole block is skipped and the invoke's OK result —
+        // still in the retptr, only ever reached on a fresh MISS — is materialized.
+        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
         body.instruction(&Instruction::If(BlockType::Empty));
-        emit_agent_capture_retry_sleep(body);
-        emit_agent_retry_error_info(
-            body,
-            indices,
-            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-        );
         emit_agent_retry_condition(body, max_retries, retry_delay_ms, rate_limit_budget_ms);
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
-        emit_agent_retry_delay(
-            body,
-            indices,
-            max_retries,
-            retry_delay_ms,
-            rate_limit_budget_ms,
-        );
-        emit_agent_retry_sleep(
-            body,
-            indices,
-            static_data,
-            durable_checkpoint,
-            route_ptr_local,
-            route_len_local,
-            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-        );
         if durable_checkpoint {
+            // A replayed (HIT) attempt already slept its backoff and recorded its
+            // audit row on the original run; skip both. Core `handle_sleep`
+            // re-sleeps the full duration on replay, so this gate — not the sleep
+            // key — is what prevents re-sleeping every completed attempt.
+            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
+            body.instruction(&Instruction::I32Eqz);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            emit_agent_retry_delay(
+                body,
+                indices,
+                max_retries,
+                retry_delay_ms,
+                rate_limit_budget_ms,
+            );
+            emit_agent_retry_sleep(
+                body,
+                indices,
+                static_data,
+                durable_checkpoint,
+                route_ptr_local,
+                route_len_local,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
             emit_agent_record_retry_attempt(
                 body,
                 indices,
+                route_ptr_local,
+                route_len_local,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
+            body.instruction(&Instruction::End); // !HIT gate
+        } else {
+            emit_agent_retry_delay(
+                body,
+                indices,
+                max_retries,
+                retry_delay_ms,
+                rate_limit_budget_ms,
+            );
+            emit_agent_retry_sleep(
+                body,
+                indices,
+                static_data,
+                durable_checkpoint,
                 route_ptr_local,
                 route_len_local,
                 DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,

@@ -772,6 +772,34 @@ mod component {
             ))
         }
 
+        fn agent_attempt_result_key(
+            checkpoint_id: String,
+            attempt_number: u32,
+        ) -> Result<Vec<u8>, String> {
+            Ok(direct_json::DirectJsonManifest::agent_attempt_result_key(
+                &checkpoint_id,
+                attempt_number,
+            ))
+        }
+
+        fn agent_attempt_envelope(
+            tag: u8,
+            retryable: bool,
+            rate_limited: bool,
+            retry_after_tag: bool,
+            retry_after_ms: u64,
+            payload: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            Ok(direct_json::DirectJsonManifest::agent_attempt_envelope(
+                tag,
+                retryable,
+                rate_limited,
+                retry_after_tag,
+                retry_after_ms,
+                &payload,
+            ))
+        }
+
         fn retry_delay_ms(
             attempt_number: u32,
             total_attempts: u32,

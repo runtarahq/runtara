@@ -352,6 +352,23 @@ const DIRECT_WHILE_HEAP_BASE_LOCAL: u32 = DIRECT_SPLIT_HEAP_BASE_LOCAL;
 /// i32 local.
 const DIRECT_AI_HEAP_BASE_LOCAL: u32 = 109;
 
+/// Per-attempt durable-retry scratch for the durable Agent retry loop. Makes each
+/// failed attempt's invoke result durable so a resumed retry loop short-circuits
+/// attempts that already ran (keyed `{cache_key}::attempt::{N}`) instead of
+/// re-invoking the agent — see `emit_agent_plan`. All i32.
+/// - `HIT_FLAG`: this attempt's result was served from a per-attempt checkpoint
+///   (replay), so its backoff sleep + audit record are skipped.
+/// - `ERR_FLAG`: this attempt failed (invoke error or a replayed failure); drives
+///   the retry state machine in place of the raw invoke result tag.
+/// - `KEY_PTR`/`KEY_LEN`: the per-attempt result key.
+/// - `ENV_PTR`/`ENV_LEN`: the encoded per-attempt result envelope.
+const DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL: u32 = 110;
+const DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL: u32 = 111;
+const DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL: u32 = 112;
+const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
+const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
+const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

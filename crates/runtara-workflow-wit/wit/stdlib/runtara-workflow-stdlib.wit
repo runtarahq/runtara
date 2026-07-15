@@ -521,6 +521,34 @@ interface json {
         attempt-number: u32,
     ) -> result<list<u8>, string>;
 
+    // Durable per-attempt invoke-result key for an Agent retry:
+    // "{checkpoint-id}::attempt::{attempt-number}". A distinct namespace from
+    // `agent-retry-sleep-key` ("::retry_sleep::") and the write-only audit key
+    // ("::retry::"), so a per-attempt invoke-result checkpoint never collides
+    // with the durable-sleep or audit checkpoints. Used to make each failed
+    // retry attempt durable so a resumed retry loop short-circuits attempts that
+    // already ran instead of re-invoking the agent.
+    agent-attempt-result-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    // Encode a per-attempt invoke-result envelope: a fixed 12-byte header
+    // (tag:u8, retryable:u8, rate-limited:u8, retry-after-tag:u8,
+    // retry-after-ms:u64 little-endian) followed by the raw error-info payload.
+    // Persisted as the per-attempt checkpoint state so a resumed retry loop
+    // replays the stored failure — including its classification bits — instead
+    // of re-invoking the agent. The leading tag byte keeps the envelope
+    // non-empty (a `checkpoint` with empty state is treated as a read probe).
+    agent-attempt-envelope: func(
+        tag: u8,
+        retryable: bool,
+        rate-limited: bool,
+        retry-after-tag: bool,
+        retry-after-ms: u64,
+        payload: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-retry-delay-ms: func(
         attempt-number: u32,
         total-attempts: u32,

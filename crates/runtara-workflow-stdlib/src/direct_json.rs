@@ -2281,6 +2281,46 @@ impl DirectJsonManifest {
         Self::retry_sleep_key(checkpoint_id, attempt_number)
     }
 
+    /// Durable per-attempt invoke-result key for an Agent retry. A distinct
+    /// namespace ("::attempt::") from the durable-sleep key ("::retry_sleep::")
+    /// and the write-only audit key ("::retry::") so the per-attempt result
+    /// checkpoint never collides with either.
+    pub fn agent_attempt_result_key(checkpoint_id: &str, attempt_number: u32) -> Vec<u8> {
+        format!("{checkpoint_id}::attempt::{attempt_number}").into_bytes()
+    }
+
+    /// Encode a per-attempt invoke-result envelope. Fixed 12-byte header
+    /// followed by the raw error-info payload:
+    ///
+    /// | offset | field           | type      |
+    /// |--------|-----------------|-----------|
+    /// | 0      | tag             | u8        |
+    /// | 1      | retryable       | u8 (bool) |
+    /// | 2      | rate_limited    | u8 (bool) |
+    /// | 3      | retry_after_tag | u8 (bool) |
+    /// | 4..12  | retry_after_ms  | u64 le    |
+    /// | 12..   | payload         | bytes     |
+    ///
+    /// The emitter decodes the header by fixed offset from the checkpoint bytes;
+    /// see `emit_agent_attempt_decode` in the direct core emitter.
+    pub fn agent_attempt_envelope(
+        tag: u8,
+        retryable: bool,
+        rate_limited: bool,
+        retry_after_tag: bool,
+        retry_after_ms: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut envelope = Vec::with_capacity(12 + payload.len());
+        envelope.push(tag);
+        envelope.push(retryable as u8);
+        envelope.push(rate_limited as u8);
+        envelope.push(retry_after_tag as u8);
+        envelope.extend_from_slice(&retry_after_ms.to_le_bytes());
+        envelope.extend_from_slice(payload);
+        envelope
+    }
+
     /// Compute the generated-code-compatible delay for the next Agent retry.
     pub fn agent_retry_delay_ms(
         attempt_number: u32,
@@ -10133,6 +10173,52 @@ mod tests {
         assert_eq!(
             String::from_utf8(key).expect("utf8"),
             "wf-42::agent::utils::normalize::agent::[1]::retry_sleep::2"
+        );
+    }
+
+    #[test]
+    fn agent_attempt_result_key_uses_distinct_namespace() {
+        let base = "wf-42::agent::utils::normalize::agent::[1]";
+        let attempt = DirectJsonManifest::agent_attempt_result_key(base, 3);
+        assert_eq!(
+            String::from_utf8(attempt).expect("utf8"),
+            "wf-42::agent::utils::normalize::agent::[1]::attempt::3"
+        );
+        // Must never collide with the durable-sleep key or the audit key.
+        let sleep = DirectJsonManifest::agent_retry_sleep_key(base, 3);
+        assert_ne!(DirectJsonManifest::agent_attempt_result_key(base, 3), sleep);
+        assert!(!String::from_utf8_lossy(&sleep).contains("::attempt::"));
+    }
+
+    #[test]
+    fn agent_attempt_envelope_round_trips_header_and_payload() {
+        let payload = br#"{"code":"HTTP_RATE_LIMITED","category":"transient","retryable":true}"#;
+        let envelope = DirectJsonManifest::agent_attempt_envelope(
+            1,    // tag = err
+            true, // retryable
+            true, // rate_limited
+            true, // retry_after_tag
+            1500, // retry_after_ms
+            payload,
+        );
+        // Decode by the exact fixed offsets the emitter reads.
+        assert_eq!(envelope[0], 1, "tag");
+        assert_eq!(envelope[1], 1, "retryable");
+        assert_eq!(envelope[2], 1, "rate_limited");
+        assert_eq!(envelope[3], 1, "retry_after_tag");
+        let retry_after_ms = u64::from_le_bytes(envelope[4..12].try_into().unwrap());
+        assert_eq!(retry_after_ms, 1500);
+        assert_eq!(&envelope[12..], payload);
+
+        // No retry-after: tag byte 0, value 0, payload still recoverable.
+        let envelope =
+            DirectJsonManifest::agent_attempt_envelope(1, true, false, false, 0, payload);
+        assert_eq!(envelope[3], 0, "retry_after_tag");
+        assert_eq!(u64::from_le_bytes(envelope[4..12].try_into().unwrap()), 0);
+        assert_eq!(&envelope[12..], payload);
+        // Envelope is always non-empty even for an empty payload (leading header).
+        assert!(
+            !DirectJsonManifest::agent_attempt_envelope(1, false, false, false, 0, b"").is_empty()
         );
     }
 
