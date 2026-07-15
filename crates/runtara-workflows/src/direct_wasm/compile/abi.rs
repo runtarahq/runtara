@@ -111,16 +111,13 @@ pub(super) fn return_if_retptr_error(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    match indices.abi {
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-            return_if_retptr_error_tag(function);
-        }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
-            load_retptr_tag(function);
-            function.instruction(&Instruction::If(BlockType::Empty));
-            emit_invoke_err_return_from_retptr(function, None, indices.stdlib_invoke_error_fields);
-            function.instruction(&Instruction::End);
-        }
+    if indices.abi.is_invoke_export() {
+        load_retptr_tag(function);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        emit_invoke_err_return_from_retptr(function, None, indices.stdlib_invoke_error_fields);
+        function.instruction(&Instruction::End);
+    } else {
+        return_if_retptr_error_tag(function);
     }
 }
 
@@ -297,12 +294,17 @@ pub(super) fn emit_entry_suspend_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
+    // `AgentCapabilities` never reaches a suspend site (a pure agent workflow
+    // has no runtime signal check / breakpoint / durable sleep — gated at
+    // compile), so it rides the InvokeHostImports layout: correct if it were
+    // ever emitted, and provably dead otherwise.
     match indices.abi {
         crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::Return);
         }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+        | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
             // Zero result area + wake element (0..120).
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::I32Const(0));
@@ -529,7 +531,8 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
             function.instruction(&Instruction::Return);
             function.instruction(&Instruction::End);
         }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+        | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
             // Additive host-side `runtime.fail` unless the runtime is omitted

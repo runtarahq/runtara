@@ -6163,6 +6163,124 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
     );
 }
 
+fn compile_agent_capabilities_artifact(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+) -> runtara_workflows::direct_wasm::DirectCompilationResult {
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        // omit_runtime is forced true for AgentCapabilities by the compiler.
+        false,
+    )
+    .expect("agent-capabilities compile+compose succeeds");
+    std::mem::forget(temp);
+    result
+}
+
+/// Workflow-as-agent slice a: a pure workflow compiled with the
+/// `AgentCapabilities` ABI exports `runtara:agent-<id>/capabilities.invoke(
+/// capability-id, input, connection) -> result<list<u8>, error-info>` — the
+/// exact agent shape — and is invocable AS an agent through a wasmtime typed
+/// call. This exercises the 17-param fold, the `result<list<u8>, error-info>`
+/// return layout, and the export naming end to end (a wrong local layout or
+/// return offset would surface as a typed-call trap or a wrong payload).
+#[test]
+fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_agent_capabilities_artifact(&components_dir, "workflow-as-agent", PURE_PASSTHROUGH);
+
+    // Shape: agent-shaped export, zero runtime imports.
+    assert!(
+        compiled.omit_runtime,
+        "AgentCapabilities implies omit-runtime"
+    );
+    let world = &compiled.component_artifacts.world_wit;
+    assert!(
+        world.contains("export runtara:agent-workflow-agent/capabilities@0.3.0"),
+        "world must export the capabilities interface:\n{world}"
+    );
+    assert!(
+        !world.contains("workflow-runtime/runtime"),
+        "agent-shaped workflow must import no runtime:\n{world}"
+    );
+
+    // Invoke it AS an agent: capabilities.invoke(cap-id, input, connection).
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load agent-capabilities artifact");
+        executor
+            .invoke_capability(
+                &pre,
+                "runtara:agent-workflow-agent/capabilities@0.3.0",
+                "invoke",
+                br#"{"input":"as-agent"}"#.to_vec(),
+                None,
+            )
+            .await
+            .expect("capability invocation runs")
+    });
+    let output = result.expect("capability returns Ok(list<u8>)");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "result": "as-agent" }),
+        "the workflow-as-agent must transform input exactly as it does as a workflow"
+    );
+}
+
+/// The non-suspending gate: a workflow that would call the runtime (here a
+/// durable Delay) is rejected when compiled as an agent, rather than silently
+/// producing a poisoned import — the agent capability shape cannot suspend.
+#[test]
+fn direct_wasm_execute_agent_capabilities_rejects_runtime_needing_workflow() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph =
+        serde_json::from_str(STORE_FREEING_DELAY).expect("delay fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let err = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "delay-not-agent".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect_err("a durable-delay workflow must be rejected as an agent");
+    assert!(
+        format!("{err}").contains("not agent-eligible"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
     let components_dir = direct_e2e_components_dir();

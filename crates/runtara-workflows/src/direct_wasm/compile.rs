@@ -866,9 +866,30 @@ fn compile_direct_workflow_inner(
     // dependency, it then cannot touch the parent's runtime). Opt-in per
     // `RUNTARA_DIRECT_OMIT_RUNTIME`; the `needs_runtime` guard keeps it SOUND —
     // a workflow that would call runtime keeps the import.
-    let omit_runtime = omit_runtime_requested
-        && abi == super::component::WorkflowAbi::InvokeHostImports
-        && !manifest.feature_summary.needs_runtime(input.track_events);
+    let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
+    let omit_runtime = match abi {
+        // Workflow-as-agent: the capabilities export is agent-shaped by
+        // definition (zero runtime imports). A workflow that would call the
+        // runtime — anything durable, delaying, waiting, logging, sub-agent, or
+        // suspend-capable — cannot be an agent; reject it loudly rather than
+        // emit a poisoned import. This is the non-suspending gate.
+        super::component::WorkflowAbi::AgentCapabilities => {
+            if needs_runtime {
+                return Err(DirectCompileError::Component(format!(
+                    "workflow is not agent-eligible: it uses features that require the \
+                     runtime interface (durability, delay, wait-for-signal, logging, \
+                     sub-agents, breakpoints, or tracing), which the agent capability \
+                     shape forbids. Features: {:?}",
+                    manifest.feature_summary.features
+                )));
+            }
+            true
+        }
+        super::component::WorkflowAbi::InvokeHostImports => {
+            omit_runtime_requested && !needs_runtime
+        }
+        super::component::WorkflowAbi::CliRunHttp => false,
+    };
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
@@ -984,6 +1005,22 @@ fn emit_direct_artifact(
                 "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
             }))?
         }
+        super::component::WorkflowAbi::AgentCapabilities => {
+            serde_json::to_vec(&serde_json::json!({
+                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+                "artifactKind": "direct-agent-capability-component",
+                "componentRunExport": format!(
+                    "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
+                    super::component::CAPABILITIES_EXPORT_AGENT_ID
+                ),
+                "entryPointExecutable": true,
+                "runtimeExecutable": true,
+                "outputMode": "capabilities-invoke-list",
+                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+                "stepCount": manifest.feature_summary.total_steps,
+                "note": "workflow-as-agent: exports runtara:agent-<id>/capabilities.invoke(cap-id, input, connection) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
+            }))?
+        }
     };
 
     let mut component = emit_direct_component(
@@ -1089,6 +1126,18 @@ fn build_direct_component_resolve_configured(
                 .push_str("runtara-workflow-lifecycle.wit", LIFECYCLE_WIT)
                 .map_err(component_error)?;
         }
+        super::component::WorkflowAbi::AgentCapabilities => {
+            // Export the agent capability interface. A workflow-as-agent is
+            // pure (the gate forbids agent steps), so `agents` is empty and the
+            // types/package below cannot collide with an imported agent.
+            resolve
+                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
+                .map_err(component_error)?;
+            let id = super::component::CAPABILITIES_EXPORT_AGENT_ID;
+            resolve
+                .push_str(format!("runtara-agent-{id}.wit"), &agent_wit_package(id))
+                .map_err(component_error)?;
+        }
     }
     if !agents.is_empty() {
         resolve
@@ -1126,6 +1175,12 @@ fn build_direct_component_resolve_configured(
         }
         super::component::WorkflowAbi::InvokeHostImports => {
             workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
+        }
+        super::component::WorkflowAbi::AgentCapabilities => {
+            let id = super::component::CAPABILITIES_EXPORT_AGENT_ID;
+            workflow_wit.push_str(&format!(
+                "    export runtara:agent-{id}/capabilities@{AGENT_WIT_VERSION};\n"
+            ))
         }
     }
     workflow_wit.push_str("}\n");
@@ -1190,21 +1245,19 @@ fn emit_runtime_fail_return(
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_fail));
     }
-    match indices.abi {
-        super::component::WorkflowAbi::CliRunHttp => {
-            body.instruction(&Instruction::I32Const(1));
-            body.instruction(&Instruction::Return);
-        }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            // Structured Err(error-info): stdlib decomposes the payload
-            // directly into the result area; abi.rs owns the writer.
-            abi::emit_invoke_err_return_from_locals(
-                body,
-                indices.stdlib_invoke_error_fields,
-                error_ptr_local,
-                error_len_local,
-            );
-        }
+    if indices.abi.is_invoke_export() {
+        // Structured Err(error-info): stdlib decomposes the payload directly
+        // into the result area; abi.rs owns the writer. Both invoke shapes have
+        // `result<_, error-info>` with error-info at the same offset.
+        abi::emit_invoke_err_return_from_locals(
+            body,
+            indices.stdlib_invoke_error_fields,
+            error_ptr_local,
+            error_len_local,
+        );
+    } else {
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::Return);
     }
 }
 

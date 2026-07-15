@@ -627,6 +627,59 @@ impl WorkflowExecutor {
             duration: started.elapsed(),
         }
     }
+
+    /// Invoke a workflow-as-agent's `capabilities.invoke(capability-id, input,
+    /// connection) -> result<list<u8>, error-info>` export directly, without a
+    /// catalog entry — for verifying the `AgentCapabilities` ABI. A pure,
+    /// agent-shaped workflow imports no runtime, so a runtime-less state
+    /// suffices; `iface_name` is the fully-qualified capabilities interface
+    /// export (e.g. `runtara:agent-<id>/capabilities@0.3.0`).
+    pub async fn invoke_capability(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        iface_name: &str,
+        capability_id: &str,
+        input: Vec<u8>,
+        connection: Option<crate::ConnectionInfo>,
+    ) -> anyhow::Result<Result<Vec<u8>, crate::ErrorInfo>> {
+        let limits = WorkflowLimits::default();
+        let state = WorkflowState {
+            wasi: WasiCtxBuilder::new().build(),
+            http: WasiHttpCtx::new(),
+            table: ResourceTable::new(),
+            hooks: WorkflowHooks,
+            limiter: WorkflowLimiter {
+                max_memory_bytes: limits.max_memory_bytes,
+                max_table_elements: limits.max_table_elements,
+                memory_peak_bytes: 0,
+                denied_memory_grow: false,
+            },
+            termination: None,
+            runtime: None,
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limiter);
+        // The engine uses epoch interruption; a large finite deadline (not
+        // u64::MAX, which overflows the engine's `current + delta`) lets a pure
+        // (sub-millisecond) capability run to completion.
+        store.set_epoch_deadline(1 << 40);
+        let instance = pre.instantiate_async(&mut store).await?;
+        let iface_idx = instance
+            .get_export_index(&mut store, None, iface_name)
+            .ok_or_else(|| anyhow::anyhow!("missing interface export `{iface_name}`"))?;
+        let invoke_idx = instance
+            .get_export_index(&mut store, Some(&iface_idx), "invoke")
+            .ok_or_else(|| anyhow::anyhow!("interface `{iface_name}` has no `invoke` export"))?;
+        type InvokeFunc = wasmtime::component::TypedFunc<
+            (String, Vec<u8>, Option<crate::ConnectionInfo>),
+            (Result<Vec<u8>, crate::ErrorInfo>,),
+        >;
+        let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
+        let (result,) = invoke
+            .call_async(&mut store, (capability_id.to_string(), input, connection))
+            .await?;
+        Ok(result)
+    }
 }
 
 /// Why an invoke-shaped workflow run ended. Unlike [`WorkflowExit`], terminal

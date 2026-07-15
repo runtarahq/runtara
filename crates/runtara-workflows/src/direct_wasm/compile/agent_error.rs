@@ -602,6 +602,14 @@ fn emit_terminal_run_plan_mapping(
                 );
                 body.instruction(&Instruction::Return);
             }
+            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+                super::core_module::emit_capabilities_ok_return(
+                    body,
+                    output_ptr_local,
+                    output_len_local,
+                );
+                body.instruction(&Instruction::Return);
+            }
         }
     }
 }

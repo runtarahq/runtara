@@ -331,12 +331,14 @@ fn export_core_function(
 
     let body = if is_wasi_cli_run_export(resolve, interface, function)
         || super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
+        || super::core_imports::is_capabilities_invoke_export(resolve, interface, function)
     {
-        // The entry export of the current ABI (the world declares exactly
-        // one): `wasi:cli/run` under CliRunHttp, `lifecycle.invoke` under
-        // InvokeHostImports. `direct_run_function` shapes its prologue and
-        // return convention from `config.abi`.
-        direct_run_function(import_indices, config)
+        // The entry export of the current ABI (the world declares exactly one):
+        // `wasi:cli/run` under CliRunHttp, `lifecycle.invoke` under
+        // InvokeHostImports, `capabilities.invoke` under AgentCapabilities.
+        // `direct_run_function` shapes its prologue, param fold, and return
+        // convention from `config.abi` and the export's param count.
+        direct_run_function(import_indices, config, signature.params.len())
     } else {
         zero_return_function(&signature.results)
     };
@@ -444,9 +446,62 @@ fn export_initialize(
     code.function(&body);
 }
 
+/// Canonical declared-local groups for the run function under ZERO export
+/// params (the `wasi:cli/run` shape). Every other ABI derives its declared
+/// locals by dropping its export params off the FRONT of this list
+/// ([`drop_leading_locals`]): `wasi:cli/run` takes 0 params (uses this list
+/// verbatim), `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals
+/// 0/1), and `capabilities.invoke(cap-id, input, connection)` takes 17. Because
+/// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
+/// off the front keeps each surviving declared local at its original absolute
+/// index with its original type — the invariant the lowerers depend on.
+const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
+    (16, ValType::I32),
+    (2, ValType::I64),
+    (10, ValType::I32),
+    (1, ValType::I64),
+    (17, ValType::I32),
+    (6, ValType::I32),
+    (2, ValType::I64),
+    (10, ValType::I32),
+    (9, ValType::I32),
+    (2, ValType::I64),
+    (5, ValType::I32),
+    (2, ValType::I64),
+    (2, ValType::I32),
+    // Trailing i32 scratch group. Notable indices: 107
+    // (DIRECT_CONDITION_RESULT_LOCAL) stashes a Conditional's evaluated bool
+    // across its debug-end event; 108 (DIRECT_SPLIT_HEAP_BASE_LOCAL) holds the
+    // Split/While loop's heap watermark; 109 (DIRECT_AI_HEAP_BASE_LOCAL) holds
+    // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
+    // the durable Agent retry per-attempt-result checkpoint scratch.
+    (20, ValType::I32),
+    (12, ValType::I32),
+];
+
+/// Drop `n` leading local slots from `groups`, splitting (never merging) the
+/// group the drop lands in so every surviving slot keeps its absolute index and
+/// type. Used to fold export params onto the front of [`CANONICAL_LOCAL_GROUPS`].
+fn drop_leading_locals(groups: &[(u32, ValType)], n: u32) -> Vec<(u32, ValType)> {
+    let mut remaining = n;
+    let mut out = Vec::new();
+    for &(count, ty) in groups {
+        if remaining == 0 {
+            out.push((count, ty));
+        } else if remaining >= count {
+            remaining -= count;
+        } else {
+            out.push((count - remaining, ty));
+            remaining = 0;
+        }
+    }
+    out
+}
+
 fn direct_run_function(
     indices: &DirectCoreFunctionIndices,
     config: &DirectCoreConfig,
+    export_param_count: usize,
 ) -> WasmFunction {
     use crate::direct_wasm::component::WorkflowAbi;
 
@@ -461,54 +516,59 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    // Under the invoke ABI the export takes `input: list<u8>`, whose two
-    // flattened i32 params occupy indices 0/1 — exactly where DATA_PTR/
-    // DATA_LEN live as declared locals under `wasi:cli/run` (which takes no
-    // params). Shrinking the first declared group by two keeps every one of
-    // the ~100 hand-assigned DIRECT_*_LOCAL indices identical across ABIs.
-    let first_i32_group = match config.abi {
-        WorkflowAbi::CliRunHttp => 16,
-        WorkflowAbi::InvokeHostImports => 14,
-    };
-    let mut body = WasmFunction::new([
-        (first_i32_group, ValType::I32),
-        (2, ValType::I64),
-        (10, ValType::I32),
-        (1, ValType::I64),
-        (17, ValType::I32),
-        (6, ValType::I32),
-        (2, ValType::I64),
-        (10, ValType::I32),
-        (9, ValType::I32),
-        (2, ValType::I64),
-        (5, ValType::I32),
-        (2, ValType::I64),
-        (2, ValType::I32),
-        (20, ValType::I32),
-        // Trailing i32 scratch group. Notable indices: 107
-        // (DIRECT_CONDITION_RESULT_LOCAL) stashes a Conditional's evaluated bool
-        // across its debug-end event; 108 (DIRECT_SPLIT_HEAP_BASE_LOCAL) holds the
-        // Split/While loop's heap watermark; 109 (DIRECT_AI_HEAP_BASE_LOCAL) holds
-        // the AiAgent loop's heap watermark (the last two reclaim per-iteration/turn
-        // scratch — see the Split/While/AiAgent arena resets); 110-115
-        // (DIRECT_AGENT_ATTEMPT_*) are the durable Agent retry per-attempt-result
-        // checkpoint scratch (hit/err flags, key ptr/len, envelope ptr/len).
-        (12, ValType::I32),
-    ]);
+    // Fold the export params onto the front of the canonical local layout. The
+    // input list's two i32s land on DATA_PTR/DATA_LEN (0/1) under
+    // `lifecycle.invoke` (2 params); under `capabilities.invoke` (17 params:
+    // cap-id + input + option<connection-info>) the front 17 canonical slots are
+    // consumed by params and the input is copied into 0/1 in the prologue below.
+    // Every surviving declared local keeps its absolute DIRECT_*_LOCAL index.
+    let mut body = WasmFunction::new(drop_leading_locals(
+        CANONICAL_LOCAL_GROUPS,
+        export_param_count as u32,
+    ));
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
-    if config.abi == WorkflowAbi::CliRunHttp {
-        push_retptr_arg(&mut body);
-        body.instruction(&Instruction::Call(indices.runtime_load_input));
-        emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-        load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
+    match config.abi {
+        WorkflowAbi::CliRunHttp => {
+            push_retptr_arg(&mut body);
+            body.instruction(&Instruction::Call(indices.runtime_load_input));
+            emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
+            load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
+        }
+        WorkflowAbi::InvokeHostImports => {
+            // The input envelope arrived as the call argument — params 0/1 ARE
+            // (DATA_PTR, DATA_LEN); no load-input round-trip.
+        }
+        WorkflowAbi::AgentCapabilities => {
+            // capabilities.invoke(capability-id, input, connection) flattens to
+            // 17 core params (> the 16-param flat limit), so the canonical ABI
+            // passes them INDIRECTLY: the single core param (local 0) is a
+            // pointer to a params area laid out as capability-id string (ptr @0,
+            // len @4), input list<u8> (ptr @8, len @12), connection option
+            // (@16, ignored). Load the input ptr/len onto DATA_PTR/DATA_LEN
+            // (0/1). DATA_PTR_LOCAL IS local 0 (the params pointer), so read the
+            // area before overwriting it: set DATA_LEN (a declared local) first,
+            // then DATA_PTR last. init-manifest above never touches local 0.
+            body.instruction(&Instruction::LocalGet(0));
+            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 12,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
+            body.instruction(&Instruction::LocalGet(0));
+            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 8,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
+        }
     }
-    // InvokeHostImports: the input envelope arrived as the call argument —
-    // params 0/1 ARE (DATA_PTR, DATA_LEN); no load-input round-trip.
 
     body.instruction(&Instruction::I32Const(config.static_data.steps.offset));
     body.instruction(&Instruction::LocalSet(STEPS_PTR_LOCAL));
@@ -571,6 +631,10 @@ fn direct_run_function(
             // Ok(outcome::completed(output)).
             emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
         }
+        WorkflowAbi::AgentCapabilities => {
+            // Agent capability shape: Ok(output) as a bare list<u8>.
+            emit_capabilities_ok_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
+        }
     }
     body.instruction(&Instruction::End);
     body
@@ -610,5 +674,42 @@ pub(super) fn emit_invoke_ok_completed_return(
         memory_index: 0,
     }));
     // The return value: the result area's address.
+    body.instruction(&Instruction::I32Const(0));
+}
+
+/// Write `Ok(output)` for the agent-capabilities export into the fixed result
+/// area and leave its pointer on the stack.
+///
+/// Canonical-ABI layout of `result<list<u8>, error-info>` (payload align 8 —
+/// error-info carries a `u64`): result disc u8 @0 (0 = ok); ok payload = the
+/// `list<u8>` directly at @8: ptr @8, len @12. (Contrast the lifecycle export's
+/// `result<outcome, error-info>`, whose ok arm is `outcome::completed` — a
+/// variant disc @8 plus the list at @12/@16.) The error arm is `error-info` at
+/// @8, byte-identical to the lifecycle error arm, so the shared err writer
+/// applies unchanged.
+pub(super) fn emit_capabilities_ok_return(
+    body: &mut WasmFunction,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    // Zero the header (result disc @0 = 0 = ok) and the ok payload slot.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(16));
+    body.instruction(&Instruction::MemoryFill(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
     body.instruction(&Instruction::I32Const(0));
 }

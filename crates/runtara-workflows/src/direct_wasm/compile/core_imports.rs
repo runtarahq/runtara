@@ -821,6 +821,22 @@ pub(super) fn is_lifecycle_invoke_export(
             .is_some_and(|name| name.starts_with("runtara:workflow-lifecycle/lifecycle"))
 }
 
+/// True for the workflow-as-agent capability export: an `invoke` in a
+/// `runtara:agent-<id>/capabilities` interface. The compiled workflow is the
+/// agent, so the package is `runtara:agent-*` (not a composed dependency).
+pub(super) fn is_capabilities_invoke_export(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "invoke"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| {
+                name.starts_with("runtara:agent-") && name.contains("/capabilities")
+            })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn import_core_function(
     resolve: &Resolve,
