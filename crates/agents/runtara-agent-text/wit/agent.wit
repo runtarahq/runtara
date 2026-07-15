@@ -4,11 +4,14 @@
 package runtara:agent-text@0.3.0;
 
 interface capabilities {
-    use runtara:agent/types@0.3.0.{connection-info, error-info};
+    use runtara:agent/types@0.3.0.{error-info};
+    // The connection (if any) is delivered inside `input` under `_connection`;
+    // there is no out-of-band connection argument. A connection is an opaque
+    // id — the host proxy resolves credentials by (id, tenant), so nothing
+    // secret ever crosses this boundary.
     invoke: func(
         capability-id: string,
         input: list<u8>,
-        connection: option<connection-info>,
     ) -> result<list<u8>, error-info>;
 }
 

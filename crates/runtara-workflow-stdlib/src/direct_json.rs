@@ -2245,22 +2245,35 @@ impl DirectJsonManifest {
     }
 
     /// Inject generated-code-compatible connection fields into Agent JSON input.
-    pub fn agent_connection_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
+    /// Inject the Agent's connection into its input as `_connection` (plus a
+    /// top-level `connection_id`), evaluated against the execution `source`.
+    ///
+    /// This is the SINGLE connection channel: agents read `input._connection`
+    /// directly (there is no out-of-band `connection` WIT argument anymore).
+    /// The id is resolved by [`Self::resolve_connection_id`] — a resolvable
+    /// `connection_ref` wins over the literal `connection_id`; an empty result
+    /// (no connection, or a ref that resolves to null/absent) leaves the input
+    /// untouched. `integration_id`/`parameters` stay empty: a connection is an
+    /// opaque id, and the proxy resolves credentials by `(id, tenant)`
+    /// server-side, so nothing secret ever rides the input.
+    pub fn agent_connection_input(
+        &self,
+        agent_id: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let mut input: Value = serde_json::from_slice(input)
             .map_err(|err| format!("failed to parse Agent input for connection: {err}"))?;
-        let agent = self
-            .agents
-            .get(&agent_id)
-            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let Some(connection_id) = agent.connection_id.as_deref() else {
-            return serde_json::to_vec(&input)
-                .map_err(|err| format!("failed to serialize Agent input: {err}"));
-        };
 
-        if let Value::Object(ref mut map) = input {
+        let resolved = self.resolve_connection_id(agent_id, source)?;
+        if !resolved.is_empty()
+            && let Value::Object(ref mut map) = input
+        {
+            let connection_id = String::from_utf8(resolved)
+                .map_err(|err| format!("resolved connection id is not valid UTF-8: {err}"))?;
             map.insert(
                 "connection_id".to_string(),
-                Value::String(connection_id.to_string()),
+                Value::String(connection_id.clone()),
             );
             map.insert(
                 "_connection".to_string(),
@@ -2282,12 +2295,9 @@ impl DirectJsonManifest {
     /// `connection_id`: it lets a step bind to a caller-supplied `connection`
     /// input, rotate connections, or select one per record. Returns the id as
     /// UTF-8 bytes, or an EMPTY vec when the agent has no connection or the ref
-    /// resolves to null/absent — the caller then writes no connection argument.
-    ///
-    /// This is the runtime source for the agent-invoke `connection` argument,
-    /// which every agent's `invoke` glue merges into `input._connection`; using
-    /// it uniformly means memory and MCP-tool agents (whose input is not a
-    /// mapping) honor refs just like a primary Agent step.
+    /// resolves to null/absent. Used by [`Self::agent_connection_input`] to
+    /// inject `input._connection` — uniformly for every agent kind (primary,
+    /// memory, MCP-tool), whose input at runtime need not be a mapping.
     pub fn resolve_connection_id(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let agent = self
             .agents
@@ -10306,7 +10316,7 @@ mod tests {
             .expect("manifest");
 
         let input = manifest
-            .agent_connection_input(0, br#"{"value":"present"}"#)
+            .agent_connection_input(0, br#"{"value":"present"}"#, b"{}")
             .expect("connection input");
         let input: Value = serde_json::from_slice(&input).expect("input json");
 

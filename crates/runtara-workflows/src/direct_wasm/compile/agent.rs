@@ -24,7 +24,7 @@ use super::agent_error::{
     emit_agent_invoke_error_branch,
 };
 use super::agent_invoke::emit_agent_invoke;
-use super::agent_io::{emit_agent_cache_key, emit_agent_connection_input};
+use super::agent_io::emit_agent_cache_key;
 use super::agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_attempt_decode, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
@@ -159,14 +159,9 @@ pub(super) fn emit_agent_plan(
         handled_target,
     );
 
-    emit_agent_connection_input(
-        body,
-        indices,
-        static_data,
-        agent_id,
-        output_ptr_local,
-        output_len_local,
-    );
+    // The connection is injected into the input at the invoke boundary
+    // (`emit_agent_invoke` → `emit_agent_connection_input`), so it is resolved
+    // once, per invoke, for every agent kind — nothing to do here.
 
     if durable_checkpoint {
         emit_agent_cache_key(

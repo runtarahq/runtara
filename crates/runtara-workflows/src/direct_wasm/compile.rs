@@ -147,16 +147,6 @@ const DIRECT_CHECKPOINT_FOUND_OFFSET: u64 = 4;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET: u64 = 20;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET: u64 = 24;
-const DIRECT_AGENT_ARGS_OFFSET: i32 = 128;
-const DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 16;
-const DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 20;
-const DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 24;
-const DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 28;
-const DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 32;
-const DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 36;
-const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 48;
-const DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 52;
-const DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET: i32 = DIRECT_AGENT_ARGS_OFFSET + 56;
 /// Fixed 8-byte scratch slot in the reserved 256-byte low-memory region (past
 /// the retptr scratch at 0 and the agent-args scratch at 128, below the static
 /// data base at 256). Used to marshal a `WaitForSignal` absolute timeout
@@ -371,12 +361,6 @@ const DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL: u32 = 112;
 const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
 const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
 const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
-
-/// Scratch holding the connection id (ptr/len) resolved at the invoke boundary
-/// by `resolve-connection-id`, stashed out of the shared retptr before it is
-/// written into the agent-invoke `connection` argument. All i32.
-const DIRECT_AGENT_CONN_ID_PTR_LOCAL: u32 = 116;
-const DIRECT_AGENT_CONN_ID_LEN_LOCAL: u32 = 117;
 
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
@@ -1205,11 +1189,10 @@ fn agent_wit_package(agent: &str) -> String {
         "package runtara:agent-{agent}@{AGENT_WIT_VERSION};\n\
          \n\
          interface capabilities {{\n\
-             use runtara:agent/types@{AGENT_WIT_VERSION}.{{connection-info, error-info}};\n\
+             use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
              invoke: func(\n\
                  capability-id: string,\n\
                  input: list<u8>,\n\
-                 connection: option<connection-info>,\n\
              ) -> result<list<u8>, error-info>;\n\
          }}\n\
          \n\

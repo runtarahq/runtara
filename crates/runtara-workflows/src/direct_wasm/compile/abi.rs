@@ -30,26 +30,6 @@ use super::{
 };
 use crate::direct_wasm::static_data::DirectDataSegment;
 
-pub(super) fn store_i32_at(function: &mut WasmFunction, offset: i32, value: i32) {
-    function.instruction(&Instruction::I32Const(offset));
-    function.instruction(&Instruction::I32Const(value));
-    function.instruction(&Instruction::I32Store(MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }));
-}
-
-pub(super) fn store_local_i32_at(function: &mut WasmFunction, offset: i32, local: u32) {
-    function.instruction(&Instruction::I32Const(offset));
-    function.instruction(&Instruction::LocalGet(local));
-    function.instruction(&Instruction::I32Store(MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }));
-}
-
 /// Store the i64 in `local` at fixed linear-memory `offset` (8-byte aligned).
 pub(super) fn store_local_i64_at(function: &mut WasmFunction, offset: i32, local: u32) {
     function.instruction(&Instruction::I32Const(offset));

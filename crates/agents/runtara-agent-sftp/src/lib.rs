@@ -516,47 +516,15 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_sftp::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_sftp::capabilities::{ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(
-        capability_id: String,
-        input: Vec<u8>,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<Vec<u8>, ErrorInfo> {
+    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        // Inject the WIT `connection` arg into the input JSON under `_connection`
-        // so the macro-generated executor can deserialize it into the capability
-        // input struct's `_connection: Option<RawConnection>` field.
-        //
-        // Credentials never cross the wasm boundary: we forward ONLY the opaque
-        // `connection_id`. The host resolves the real parameters from it
-        // (`internal_agents::run_agent`) and overwrites `_connection` wholesale,
-        // so `c.parameters` is deliberately ignored — nothing secret flows
-        // through here, and there is no path to reintroduce one.
-        if let Some(c) = connection.as_ref() {
-            if let serde_json::Value::Object(ref mut obj) = value {
-                let rate_limit_config = c
-                    .rate_limit_config
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-                obj.insert(
-                    "_connection".into(),
-                    serde_json::json!({
-                        "connection_id": c.connection_id,
-                        "integration_id": c.integration_id,
-                        "connection_subtype": c.connection_subtype,
-                        "parameters": serde_json::Value::Object(Default::default()),
-                        "rate_limit_config": rate_limit_config,
-                    }),
-                );
-            }
-        }
 
         let executor_result = match capability_id.as_str() {
             "sftp-list-files" => __executor_sftp_list_files(value),

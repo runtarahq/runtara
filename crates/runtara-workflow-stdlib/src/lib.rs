@@ -1109,23 +1109,17 @@ mod component {
             })
         }
 
-        fn agent_connection_input(agent_id: u32, input: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn agent_connection_input(
+            agent_id: u32,
+            input: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
                 let manifest = slot
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
-                manifest.agent_connection_input(agent_id, &input)
-            })
-        }
-
-        fn resolve_connection_id(agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
-            MANIFEST.with(|slot| {
-                let slot = slot.borrow();
-                let manifest = slot
-                    .as_ref()
-                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
-                manifest.resolve_connection_id(agent_id, &source)
+                manifest.agent_connection_input(agent_id, &input, &source)
             })
         }
 

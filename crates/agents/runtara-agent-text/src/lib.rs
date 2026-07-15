@@ -2131,18 +2131,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_text::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_text::capabilities::{ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(
-        capability_id: String,
-        input: Vec<u8>,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<Vec<u8>, ErrorInfo> {
+    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
         let executor_result = match capability_id.as_str() {
             "render-template" => __executor_render_template(value),

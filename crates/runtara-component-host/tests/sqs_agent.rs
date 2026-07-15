@@ -32,11 +32,7 @@ fn agent_wasm_path() -> PathBuf {
 }
 
 type InvokeFunc = wasmtime::component::TypedFunc<
-    (
-        String,
-        Vec<u8>,
-        Option<runtara_component_host::ConnectionInfo>,
-    ),
+    (String, Vec<u8>),
     (Result<Vec<u8>, runtara_component_host::ErrorInfo>,),
 >;
 
@@ -79,7 +75,6 @@ async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
             (
                 "queue-send-message".to_string(),
                 br#"{"queue_url":"https://sqs.us-east-1.amazonaws.com/123456789012/q","message_body":"hello"}"#.to_vec(),
-                None,
             ),
         )
         .await?;
@@ -99,7 +94,6 @@ async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
             (
                 "queue-create-queue".to_string(),
                 br#"{"queue_name":"orders.fifo","kms_master_key_id":"alias/my-key","attributes":{"VisibilityTimeout":"30"},"fifo_queue":true}"#.to_vec(),
-                None,
             ),
         )
         .await?;

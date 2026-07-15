@@ -133,7 +133,10 @@ pub(super) struct DirectCoreStaticData {
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
+    /// Agents with a literal `connection_id`. Not baked — the stdlib injects the
+    /// connection from the manifest (`agent-connection-input`); this only gates
+    /// the pre-invoke injection call.
+    agent_connection_literals: BTreeSet<u32>,
     /// Agents whose connection is a resolvable `connection_ref` (evaluated at
     /// runtime), not a baked literal. The invoke path resolves these via the
     /// stdlib `resolve-connection-id` instead of reading a static segment.
@@ -260,13 +263,13 @@ impl DirectCoreStaticData {
         }
 
         let mut agent_capability_ids = BTreeMap::new();
-        let mut agent_connection_ids = BTreeMap::new();
+        let mut agent_connection_literals = BTreeSet::new();
         let mut agent_connection_refs = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
             &mut agent_capability_ids,
-            &mut agent_connection_ids,
+            &mut agent_connection_literals,
             &mut agent_connection_refs,
         )?;
         for child in child_workflows {
@@ -274,7 +277,7 @@ impl DirectCoreStaticData {
                 &child.graph,
                 &mut offset,
                 &mut agent_capability_ids,
-                &mut agent_connection_ids,
+                &mut agent_connection_literals,
                 &mut agent_connection_refs,
             )?;
         }
@@ -300,7 +303,7 @@ impl DirectCoreStaticData {
             split_timeout_error,
             step_ids,
             agent_capability_ids,
-            agent_connection_ids,
+            agent_connection_literals,
             agent_connection_refs,
             heap_base: offset,
             memory_min_pages,
@@ -324,14 +327,12 @@ impl DirectCoreStaticData {
         })
     }
 
-    pub(super) fn agent_connection_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
-        self.agent_connection_ids.get(&agent_id)
-    }
-
-    /// True when the Agent's connection is a resolvable `connection_ref` (must be
-    /// resolved at runtime via `resolve-connection-id`, not read from a segment).
-    pub(super) fn agent_has_connection_ref(&self, agent_id: u32) -> bool {
-        self.agent_connection_refs.contains(&agent_id)
+    /// True when the Agent has a connection to inject into its input — a literal
+    /// `connection_id` or a resolvable `connection_ref`. Gates the pre-invoke
+    /// `agent-connection-input` call (the single connection channel).
+    pub(super) fn agent_has_connection(&self, agent_id: u32) -> bool {
+        self.agent_connection_literals.contains(&agent_id)
+            || self.agent_connection_refs.contains(&agent_id)
     }
 
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
@@ -356,7 +357,6 @@ impl DirectCoreStaticData {
         ];
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());
-        segments.extend(self.agent_connection_ids.values());
         segments
     }
 }
@@ -395,7 +395,7 @@ fn collect_static_agent_data(
     graph: &DirectGraphManifest,
     offset: &mut i32,
     agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
+    agent_connection_literals: &mut BTreeSet<u32>,
     agent_connection_refs: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
@@ -403,17 +403,19 @@ fn collect_static_agent_data(
         *offset = align_i32(checked_offset_add(*offset, agent.capability_id.len())?, 16);
         agent_capability_ids.insert(agent.id, segment);
 
-        // A resolvable `connection_ref` is evaluated at runtime, so it is NOT
-        // baked into a segment; record the agent id so the invoke path resolves
-        // it via `resolve-connection-id`. A literal `connection_id` is baked as
-        // before (the fast path). Both may be present; the ref wins at runtime.
+        // Both connection forms are resolved from the manifest at the invoke
+        // boundary (`agent-connection-input`) and injected into the input — no
+        // id is baked. Record which agents have a connection so the emitter
+        // knows to emit the injection call; a `connection_ref` wins at runtime.
         if agent.connection_ref.is_some() {
             agent_connection_refs.insert(agent.id);
         }
-        if let Some(connection_id) = agent.connection_id.as_deref() {
-            let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
-            *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
-            agent_connection_ids.insert(agent.id, segment);
+        if agent
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        {
+            agent_connection_literals.insert(agent.id);
         }
     }
     for step in &graph.steps {
@@ -422,7 +424,7 @@ fn collect_static_agent_data(
                 &nested.graph,
                 offset,
                 agent_capability_ids,
-                agent_connection_ids,
+                agent_connection_literals,
                 agent_connection_refs,
             )?;
         }
@@ -528,11 +530,10 @@ mod tests {
                 .data,
             b"nested-capability"
         );
-        assert_eq!(
-            static_data.agent_connection_id(1).expect("connection").data,
-            b"conn-1"
-        );
-        assert!(static_data.agent_connection_id(2).is_none());
+        // Agent 1 has a literal connection (injected at the invoke boundary, not
+        // baked); agent 2 (nested) has none.
+        assert!(static_data.agent_has_connection(1));
+        assert!(!static_data.agent_has_connection(2));
         assert_eq!(static_data.memory_min_pages, 1);
         assert_eq!(static_data.heap_base % 16, 0);
     }

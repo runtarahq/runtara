@@ -634,13 +634,14 @@ impl WorkflowExecutor {
     /// agent-shaped workflow imports no runtime, so a runtime-less state
     /// suffices; `iface_name` is the fully-qualified capabilities interface
     /// export (e.g. `runtara:agent-<id>/capabilities@0.3.0`).
+    /// The connection (if any) must already be injected into `input` under
+    /// `_connection` by the caller — the invoke ABI has no connection argument.
     pub async fn invoke_capability(
         &self,
         pre: &wasmtime::component::InstancePre<WorkflowState>,
         iface_name: &str,
         capability_id: &str,
         input: Vec<u8>,
-        connection: Option<crate::ConnectionInfo>,
     ) -> anyhow::Result<Result<Vec<u8>, crate::ErrorInfo>> {
         let limits = WorkflowLimits::default();
         let state = WorkflowState {
@@ -670,13 +671,11 @@ impl WorkflowExecutor {
         let invoke_idx = instance
             .get_export_index(&mut store, Some(&iface_idx), "invoke")
             .ok_or_else(|| anyhow::anyhow!("interface `{iface_name}` has no `invoke` export"))?;
-        type InvokeFunc = wasmtime::component::TypedFunc<
-            (String, Vec<u8>, Option<crate::ConnectionInfo>),
-            (Result<Vec<u8>, crate::ErrorInfo>,),
-        >;
+        type InvokeFunc =
+            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, crate::ErrorInfo>,)>;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
         let (result,) = invoke
-            .call_async(&mut store, (capability_id.to_string(), input, connection))
+            .call_async(&mut store, (capability_id.to_string(), input))
             .await?;
         Ok(result)
     }

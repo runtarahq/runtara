@@ -539,20 +539,15 @@ interface json {
         input: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Inject the Agent's connection into its input as `_connection`, evaluated
+    // against the execution `source`. The connection is a resolvable value: a
+    // `connection_ref` (reference / dynamic selection / rotation) wins over the
+    // literal `connection_id`; an empty result leaves the input untouched.
+    // This is the SINGLE connection channel — agents read `input._connection`
+    // directly; there is no out-of-band `connection` argument.
     agent-connection-input: func(
         agent-id: u32,
         input: list<u8>,
-    ) -> result<list<u8>, string>;
-
-    // Resolve an Agent's connection to ONE concrete connection id, evaluated
-    // against the execution source. Honors a resolvable `connection_ref`
-    // (reference / dynamic selection / rotation) when present, else the literal
-    // `connection_id`. Returns the id bytes, or an EMPTY list when the agent
-    // has no connection (or a ref that resolves to null/absent). Used to fill
-    // the agent-invoke `connection` argument at runtime, uniformly for every
-    // agent kind (primary, memory, MCP tool).
-    resolve-connection-id: func(
-        agent-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 

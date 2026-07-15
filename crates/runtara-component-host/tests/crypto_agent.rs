@@ -55,18 +55,14 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
         .get_export_index(&mut store, Some(&iface_idx), "invoke")
         .expect("invoke export inside capabilities");
     type InvokeFunc = wasmtime::component::TypedFunc<
-        (
-            String,
-            Vec<u8>,
-            Option<runtara_component_host::ConnectionInfo>,
-        ),
+        (String, Vec<u8>),
         (Result<Vec<u8>, runtara_component_host::ErrorInfo>,),
     >;
     let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
     let (result,) = invoke
         .call_async(
             &mut store,
-            ("hash".to_string(), br#"{"data":"hello"}"#.to_vec(), None),
+            ("hash".to_string(), br#"{"data":"hello"}"#.to_vec()),
         )
         .await?;
     let result = result.map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;

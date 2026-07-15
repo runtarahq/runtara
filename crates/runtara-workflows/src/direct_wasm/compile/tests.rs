@@ -5225,7 +5225,20 @@ fn direct_core_lowers_non_durable_agent_call() {
         "invoke",
     );
     let signature = resolve.wasm_signature(ManglingAndAbi::Standard32.import_variant(), function);
-    assert_eq!(signature.params, vec![WasmType::Pointer, WasmType::Pointer]);
+    // invoke(capability-id: string, input: list<u8>) -> result<list<u8>,
+    // error-info> flattens DIRECTLY (4 value params ≤ 16): cap (ptr, len),
+    // input (ptr, len), then the trailing return pointer — no indirect args
+    // spill now that the `connection` argument is gone.
+    assert_eq!(
+        signature.params,
+        vec![
+            WasmType::Pointer,
+            WasmType::Length,
+            WasmType::Pointer,
+            WasmType::Length,
+            WasmType::Pointer,
+        ]
+    );
     assert!(signature.results.is_empty());
     assert_eq!(signature.params.last(), Some(&WasmType::Pointer));
 
@@ -6517,9 +6530,6 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     let mut agent_invoke_index = None;
     let mut agent_connection_input_index = None;
     let mut saw_connection_input_before_invoke = false;
-    let mut saw_connection_some_tag_store = false;
-    let mut pending_connection_tag_value = false;
-    let mut previous_i32_const = None;
     let mut code_body_index = 0;
     let mut next_function_index = 0;
 
@@ -6543,6 +6553,10 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
             }
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
+                    // The connection is delivered inside `input` under
+                    // `_connection`: `agent-connection-input` rewrites the input
+                    // BEFORE `invoke` is called (the invoke ABI has no
+                    // connection argument).
                     let mut saw_connection_input_call = false;
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
@@ -6556,21 +6570,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                             {
                                 saw_connection_input_before_invoke = saw_connection_input_call;
                             }
-                            Operator::I32Const { value } => {
-                                pending_connection_tag_value = previous_i32_const
-                                    == Some(DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET)
-                                    && value == 1;
-                                previous_i32_const = Some(value);
-                            }
-                            Operator::I32Store { .. } if pending_connection_tag_value => {
-                                saw_connection_some_tag_store = true;
-                                pending_connection_tag_value = false;
-                                previous_i32_const = None;
-                            }
-                            _ => {
-                                pending_connection_tag_value = false;
-                                previous_i32_const = None;
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -6587,10 +6587,6 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     assert!(
         saw_connection_input_before_invoke,
         "Agent connection input injection should run before capabilities.invoke"
-    );
-    assert!(
-        saw_connection_some_tag_store,
-        "Agent connection lowering should store option<connection-info> discriminant 1"
     );
 }
 

@@ -27,7 +27,7 @@ pub mod registry;
 pub mod runtime_host;
 pub mod workflow;
 
-pub use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
+pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
 pub use dispatcher::{
     ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
     TestError, TestResult,

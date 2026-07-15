@@ -476,9 +476,7 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
-    // Trailing i32 scratch group. 116/117 (DIRECT_AGENT_CONN_ID_PTR/LEN) stash
-    // the runtime-resolved connection id at the agent-invoke boundary.
-    (14, ValType::I32),
+    (12, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
@@ -520,14 +518,27 @@ fn direct_run_function(
 
     // Fold the export params onto the front of the canonical local layout. The
     // input list's two i32s land on DATA_PTR/DATA_LEN (0/1) under
-    // `lifecycle.invoke` (2 params); under `capabilities.invoke` (17 params:
-    // cap-id + input + option<connection-info>) the front 17 canonical slots are
-    // consumed by params and the input is copied into 0/1 in the prologue below.
-    // Every surviving declared local keeps its absolute DIRECT_*_LOCAL index.
+    // `lifecycle.invoke` (2 params); under `capabilities.invoke(capability-id,
+    // input)` (4 params: cap-id + input, ≤ the 16-param flat limit so passed
+    // DIRECTLY) the input lands on params 2/3 and is copied to 0/1 in the
+    // prologue below. Every surviving declared local keeps its absolute
+    // DIRECT_*_LOCAL index.
     let mut body = WasmFunction::new(drop_leading_locals(
         CANONICAL_LOCAL_GROUPS,
         export_param_count as u32,
     ));
+
+    // `capabilities.invoke` flattens to (cap-ptr @0, cap-len @1, input-ptr @2,
+    // input-len @3). The input params ALIAS the SOURCE locals (2/3), which
+    // init-manifest's error path scribbles into — so stash the input onto
+    // DATA_PTR/DATA_LEN (0/1) BEFORE init-manifest runs. (The cap-id at 0/1 is
+    // unused: a workflow-agent has a single self-capability.)
+    if matches!(config.abi, WorkflowAbi::AgentCapabilities) {
+        body.instruction(&Instruction::LocalGet(2));
+        body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(3));
+        body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
+    }
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
@@ -546,29 +557,8 @@ fn direct_run_function(
             // (DATA_PTR, DATA_LEN); no load-input round-trip.
         }
         WorkflowAbi::AgentCapabilities => {
-            // capabilities.invoke(capability-id, input, connection) flattens to
-            // 17 core params (> the 16-param flat limit), so the canonical ABI
-            // passes them INDIRECTLY: the single core param (local 0) is a
-            // pointer to a params area laid out as capability-id string (ptr @0,
-            // len @4), input list<u8> (ptr @8, len @12), connection option
-            // (@16, ignored). Load the input ptr/len onto DATA_PTR/DATA_LEN
-            // (0/1). DATA_PTR_LOCAL IS local 0 (the params pointer), so read the
-            // area before overwriting it: set DATA_LEN (a declared local) first,
-            // then DATA_PTR last. init-manifest above never touches local 0.
-            body.instruction(&Instruction::LocalGet(0));
-            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 12,
-                align: 2,
-                memory_index: 0,
-            }));
-            body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
-            body.instruction(&Instruction::LocalGet(0));
-            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
-                offset: 8,
-                align: 2,
-                memory_index: 0,
-            }));
-            body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
+            // Input already stashed onto DATA_PTR/DATA_LEN above (before
+            // init-manifest could clobber the aliased SOURCE params).
         }
     }
 

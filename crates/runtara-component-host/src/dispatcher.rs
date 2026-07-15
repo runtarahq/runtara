@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use wasmtime::component::{ComponentNamedList, Lift, Lower, TypedFunc};
 use wasmtime::{Engine, Store, UpdateDeadline};
 
-use crate::bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};
+use crate::bindings::exports::runtara::agent::capabilities::ErrorInfo;
 use crate::engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 use crate::host_state::{
     CallContext, DEFAULT_GUEST_MEMORY_MAX_BYTES, DEFAULT_GUEST_TABLE_MAX_ELEMENTS, HostState,
@@ -246,17 +246,31 @@ impl ComponentDispatcherService {
             .get(&canonical_agent_id(&req.agent_id))
             .with_context(|| format!("unknown agent `{}`", req.agent_id))?;
 
-        let conn = req.connection.as_ref().map(|c| ConnectionInfo {
-            connection_id: c.connection_id.clone(),
-            integration_id: c.integration_id.clone(),
-            connection_subtype: c.connection_subtype.clone(),
-            parameters: serde_json::to_string(&c.parameters).unwrap_or_else(|_| "{}".into()),
-            rate_limit_config: c
-                .rate_limit_config
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into())),
-        });
-        let input_bytes = serde_json::to_vec(&req.input)?;
+        // Inject the connection id into the input under `_connection` — the
+        // single connection channel now that `invoke` has no out-of-band
+        // connection argument. Id-only, exactly like the composed-workflow
+        // path (stdlib `agent-connection-input`): a connection is an opaque id,
+        // and the proxy resolves credentials by (id, tenant), so nothing secret
+        // rides the input. This also retires the old secret-materialization
+        // here (`parameters` used to carry the real connection params).
+        let mut input_value = req.input.clone();
+        if let Some(c) = req.connection.as_ref()
+            && let serde_json::Value::Object(ref mut obj) = input_value
+        {
+            obj.insert(
+                "connection_id".into(),
+                serde_json::Value::String(c.connection_id.clone()),
+            );
+            obj.insert(
+                "_connection".into(),
+                serde_json::json!({
+                    "connection_id": c.connection_id,
+                    "integration_id": "",
+                    "parameters": {}
+                }),
+            );
+        }
+        let input_bytes = serde_json::to_vec(&input_value)?;
 
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
@@ -292,10 +306,8 @@ impl ComponentDispatcherService {
                     agent.capabilities_iface
                 )
             })?;
-        type InvokeFunc = wasmtime::component::TypedFunc<
-            (String, Vec<u8>, Option<ConnectionInfo>),
-            (Result<Vec<u8>, ErrorInfo>,),
-        >;
+        type InvokeFunc =
+            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, ErrorInfo>,)>;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
 
         let started = Instant::now();
@@ -303,7 +315,7 @@ impl ComponentDispatcherService {
             &mut store,
             self.test_timeout,
             invoke,
-            (req.capability_id.clone(), input_bytes, conn),
+            (req.capability_id.clone(), input_bytes),
         )
         .await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;

@@ -6221,7 +6221,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         "agent-shaped workflow must import no runtime:\n{world}"
     );
 
-    // Invoke it AS an agent: capabilities.invoke(cap-id, input, connection).
+    // Invoke it AS an agent: capabilities.invoke(cap-id, input).
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = runtime.block_on(async {
@@ -6235,7 +6235,6 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
                 "runtara:agent-workflow-agent/capabilities@0.3.0",
                 "invoke",
                 br#"{"input":"as-agent"}"#.to_vec(),
-                None,
             )
             .await
             .expect("capability invocation runs")
