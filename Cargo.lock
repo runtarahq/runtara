@@ -4653,6 +4653,7 @@ name = "runtara-component-host"
 version = "8.2.11"
 dependencies = [
  "anyhow",
+ "async-trait",
  "http",
  "runtara-agent-crypto",
  "runtara-agent-wit",
@@ -4987,6 +4988,7 @@ dependencies = [
 name = "runtara-workflows"
 version = "8.2.11"
 dependencies = [
+ "async-trait",
  "base64",
  "minijinja",
  "runtara-agents",

@@ -1,6 +1,7 @@
 {
   "name": "While Timeout",
   "description": "Direct-emitter fixture: a While loop whose per-iteration body delay drives the loop past its configured wall-clock timeout, so the step fails with WHILE_TIMEOUT. Generated Rust parses the timeout but does not enforce it; direct mode is the first to honor the documented behavior.",
+  "durable": false,
   "steps": {
     "loop": {
       "stepType": "While",
@@ -10,8 +11,14 @@
         "type": "operation",
         "op": "LT",
         "arguments": [
-          { "valueType": "reference", "value": "loop.index" },
-          { "valueType": "immediate", "value": 10 }
+          {
+            "valueType": "reference",
+            "value": "loop.index"
+          },
+          {
+            "valueType": "immediate",
+            "value": 10
+          }
         ]
       },
       "subgraph": {
@@ -22,21 +29,33 @@
             "stepType": "Delay",
             "id": "tick",
             "name": "Slow step",
-            "durationMs": { "valueType": "immediate", "value": 50 }
+            "durationMs": {
+              "valueType": "immediate",
+              "value": 50
+            }
           },
           "finish": {
             "stepType": "Finish",
             "id": "finish",
             "inputMapping": {
-              "index": { "valueType": "reference", "value": "variables._index" }
+              "index": {
+                "valueType": "reference",
+                "value": "variables._index"
+              }
             }
           }
         },
         "executionPlan": [
-          { "fromStep": "tick", "toStep": "finish" }
+          {
+            "fromStep": "tick",
+            "toStep": "finish"
+          }
         ]
       },
-      "config": { "maxIterations": 10, "timeout": 10 }
+      "config": {
+        "maxIterations": 10,
+        "timeout": 10
+      }
     },
     "finish": {
       "stepType": "Finish",
@@ -51,7 +70,10 @@
   },
   "entryPoint": "loop",
   "executionPlan": [
-    { "fromStep": "loop", "toStep": "finish" }
+    {
+      "fromStep": "loop",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
   "inputSchema": {},

@@ -882,7 +882,9 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     );
     assert_eq!(metadata.workflow_logic_wasm.size_bytes, wasm.len() as u64);
     assert!(metadata.composed_wasm.is_none());
-    assert_eq!(metadata.shared_components.len(), 2);
+    // HostImport default: only the stdlib is a compose-time dependency — the
+    // runtime interface is satisfied by the host at run time.
+    assert_eq!(metadata.shared_components.len(), 1);
     assert!(
         metadata
             .shared_components
@@ -10095,7 +10097,9 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
     assert!(world_wit.contains("export wasi:cli/run@0.2.3;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
-    assert!(wac.contains("new runtara:workflow-runtime"));
+    // HostImport default: the runtime component is neither instantiated nor
+    // spread — its interface bubbles to the composed artifact's imports.
+    assert!(!wac.contains("new runtara:workflow-runtime"));
     assert!(wac.contains("new runtara:workflow-logic"));
     assert!(wac.contains("export wf...;"));
 }

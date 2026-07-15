@@ -622,6 +622,37 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
+/// [`compile_direct_workflow_composed`] with an explicit [`RuntimeBinding`],
+/// re-emitting the component scaffolding under `binding` before composing.
+///
+/// Used where the default (HostImport) binding cannot run: the wasmtime-CLI
+/// A/B reference axis has no way to satisfy host imports, so it composes the
+/// legacy runtime component in — and by binding-differential tests comparing
+/// the two artifact shapes.
+pub fn compile_direct_workflow_composed_with_binding(
+    input: DirectCompilationInput,
+    components_dir: impl AsRef<Path>,
+    binding: super::component::RuntimeBinding,
+) -> Result<DirectCompilationResult, DirectCompileError> {
+    let mut result = compile_direct_workflow(input)?;
+    let agent_ids: Vec<String> = result
+        .component_artifacts
+        .agent_components
+        .iter()
+        .map(|component| component.agent_id.clone())
+        .collect();
+    result.component_artifacts =
+        super::component::emit_direct_component_artifacts_with_binding(&agent_ids, binding);
+    // Keep the on-disk scaffolding consistent with what is composed.
+    fs::write(
+        &result.world_wit_path,
+        &result.component_artifacts.world_wit,
+    )?;
+    fs::write(&result.wac_path, &result.component_artifacts.wac_source)?;
+    compose_direct_workflow(&mut result, components_dir)?;
+    Ok(result)
+}
+
 /// Stack size for the dedicated compile thread.
 ///
 /// Run-plan construction, Wasm emission, and the run-plan drop all recurse

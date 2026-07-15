@@ -1,13 +1,17 @@
 {
   "name": "Split Timeout",
   "description": "Direct-emitter fixture: a sequential Split whose per-item body delay drives it past its configured wall-clock timeout, so the step fails with SPLIT_TIMEOUT. Generated Rust parses SplitConfig.timeout but does not enforce it; direct mode is the first to honor the documented behavior.",
+  "durable": false,
   "steps": {
     "split": {
       "stepType": "Split",
       "id": "split",
       "name": "Slow Split",
       "config": {
-        "value": { "valueType": "reference", "value": "data.items" },
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
         "sequential": true,
         "timeout": 10
       },
@@ -19,18 +23,27 @@
             "stepType": "Delay",
             "id": "tick",
             "name": "Slow step",
-            "durationMs": { "valueType": "immediate", "value": 50 }
+            "durationMs": {
+              "valueType": "immediate",
+              "value": 50
+            }
           },
           "finish": {
             "stepType": "Finish",
             "id": "finish",
             "inputMapping": {
-              "item": { "valueType": "reference", "value": "data.item" }
+              "item": {
+                "valueType": "reference",
+                "value": "data.item"
+              }
             }
           }
         },
         "executionPlan": [
-          { "fromStep": "tick", "toStep": "finish" }
+          {
+            "fromStep": "tick",
+            "toStep": "finish"
+          }
         ]
       }
     },
@@ -38,15 +51,25 @@
       "stepType": "Finish",
       "id": "finish",
       "inputMapping": {
-        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+        "results": {
+          "valueType": "reference",
+          "value": "steps.split.outputs"
+        }
       }
     }
   },
   "entryPoint": "split",
   "executionPlan": [
-    { "fromStep": "split", "toStep": "finish" }
+    {
+      "fromStep": "split",
+      "toStep": "finish"
+    }
   ],
   "variables": {},
-  "inputSchema": { "items": { "type": "array" } },
+  "inputSchema": {
+    "items": {
+      "type": "array"
+    }
+  },
   "outputSchema": {}
 }

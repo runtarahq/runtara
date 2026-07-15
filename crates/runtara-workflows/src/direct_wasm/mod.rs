@@ -39,7 +39,8 @@ pub use compile::{
     DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
     DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
     DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
-    compile_direct_workflow, compile_direct_workflow_composed, compose_direct_workflow,
+    compile_direct_workflow, compile_direct_workflow_composed,
+    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

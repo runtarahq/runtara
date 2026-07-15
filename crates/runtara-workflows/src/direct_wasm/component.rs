@@ -29,17 +29,20 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = "0.3.0";
 /// - [`Composed`](Self::Composed): the prebuilt `runtara-workflow-runtime`
 ///   guest component is instantiated and spread into the workflow instance, so
 ///   the composed artifact satisfies the interface internally and the guest
-///   reaches core over `wasi:http` (the legacy loopback).
+///   reaches core over `wasi:http` (the legacy loopback). Retained for the
+///   wasmtime-CLI A/B reference axis and for already-compiled artifacts;
+///   the in-process runner supports both bindings side by side.
 /// - [`HostImport`](Self::HostImport): the interface is left unbound and
 ///   surfaces as a component-level import of the composed artifact — exactly
 ///   like the WASI interfaces already do — for the embedding host to satisfy
-///   natively via `add_to_linker` (no HTTP loopback).
+///   natively via `add_to_linker` (no HTTP loopback). The production default
+///   since Phase 2 of docs/unify-agents-workflows-plan.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeBinding {
     /// Compose the prebuilt runtime component in (guest does HTTP to core).
-    #[default]
     Composed,
     /// Surface `runtara:workflow-runtime/runtime` as a host-satisfied import.
+    #[default]
     HostImport,
 }
 
@@ -248,8 +251,11 @@ mod tests {
 
     #[test]
     fn direct_wac_statically_composes_stdlib_runtime_and_agents() {
-        let artifacts =
-            emit_direct_component_artifacts(&["crypto".to_string(), "object-model".to_string()]);
+        // The Composed (legacy) binding: runtime instantiated + spread.
+        let artifacts = emit_direct_component_artifacts_with_binding(
+            &["crypto".to_string(), "object-model".to_string()],
+            RuntimeBinding::Composed,
+        );
 
         assert!(
             artifacts
@@ -343,19 +349,25 @@ mod tests {
     }
 
     #[test]
-    fn default_binding_is_composed_and_unchanged() {
+    fn default_binding_is_host_import() {
+        // Phase 2 of docs/unify-agents-workflows-plan.md: new compiles
+        // surface the runtime interface as a host-satisfied import; the
+        // Composed binding stays available for the CLI A/B axis and old
+        // artifacts keep running unchanged (they carry their own runtime).
         let with_default = emit_direct_component_artifacts(&["crypto".to_string()]);
         let explicit = emit_direct_component_artifacts_with_binding(
             &["crypto".to_string()],
-            RuntimeBinding::Composed,
+            RuntimeBinding::HostImport,
         );
         assert_eq!(with_default, explicit);
-        assert_eq!(with_default.runtime_binding, RuntimeBinding::Composed);
+        assert_eq!(with_default.runtime_binding, RuntimeBinding::HostImport);
     }
 
     #[test]
     fn direct_shared_component_requirements_match_bundle_outputs() {
-        let artifacts = emit_direct_component_artifacts(&[]);
+        // The Composed (legacy) binding needs both bundle components on disk;
+        // the HostImport default needs only the stdlib.
+        let artifacts = emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::Composed);
 
         assert_eq!(
             artifacts.shared_components,
@@ -380,6 +392,16 @@ mod tests {
                     cas_wasm_filename: "runtara-workflow-runtime.wasm",
                 },
             ]
+        );
+
+        let host_import = emit_direct_component_artifacts(&[]);
+        assert_eq!(
+            host_import
+                .shared_components
+                .iter()
+                .map(|component| component.package)
+                .collect::<Vec<_>>(),
+            vec!["runtara:workflow-stdlib"],
         );
     }
 }

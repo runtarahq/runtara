@@ -17,7 +17,8 @@ use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
     RuntimeBinding, compile_direct_workflow, compile_direct_workflow_composed,
-    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
+    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
+    emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -1178,7 +1179,8 @@ fn run_direct_workflow_capture_attempt(
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
-    let compiled = compile_direct_workflow_composed(
+    let binding = runtime_binding_mode();
+    let compiled = compile_direct_workflow_composed_with_binding(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: 1,
@@ -1190,6 +1192,7 @@ fn run_direct_workflow_capture_attempt(
             agent_catalog: None,
         },
         components_dir,
+        binding,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
@@ -1209,6 +1212,8 @@ fn run_direct_workflow_capture_attempt(
         custom_signal_polls: Mutex::new(0),
     });
     let server_state_for_assertions = server_state.clone();
+    let capture_tx_for_host = capture_tx.clone();
+    let workflow_input_for_host = Arc::clone(&workflow_input);
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
@@ -1233,8 +1238,26 @@ fn run_direct_workflow_capture_attempt(
     ];
     env_pairs.extend(extra_env.iter().cloned());
 
+    // Under HostImport, the runtime interface is served by the capturing host
+    // (same ServerState + capture sink as the mock server, so assertions see
+    // one uniform CapturedRun shape); the mock keeps serving the wasi:http
+    // traffic that stays real under both bindings (LLM proxy, object-model).
+    let runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>> =
+        (binding == RuntimeBinding::HostImport).then(|| {
+            let debug_mode = env_pairs
+                .iter()
+                .any(|(key, value)| key == "DEBUG_MODE" && value == "true");
+            Arc::new(CapturingRuntimeHost {
+                instance_id: workflow_id.to_string(),
+                debug_mode,
+                input: Arc::clone(&workflow_input_for_host),
+                sink: Mutex::new(capture_tx_for_host.clone()),
+                state: server_state_for_assertions.clone(),
+            }) as Arc<dyn runtara_component_host::runtime_host::RuntimeHost>
+        });
+
     let (status_success, stderr, memory_peak_bytes) = if embedded_executor_mode() {
-        execute_via_embedded(&compiled.wasm_path, &env_pairs)
+        execute_via_embedded(&compiled.wasm_path, &env_pairs, runtime_host)
     } else {
         let (ok, err) = execute_via_cli(&compiled.wasm_path, &env_pairs);
         (ok, err, None)
@@ -1293,6 +1316,195 @@ fn embedded_executor_mode() -> bool {
     std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() != Ok("cli")
 }
 
+/// Battery-wide runtime-binding selection. HostImport (the production
+/// default) satisfies the runtime interface natively via a capturing
+/// RuntimeHost; `RUNTARA_DIRECT_RUNTIME_BINDING=composed` re-runs the whole
+/// battery through the legacy composed runtime + mock HTTP core — the
+/// binding-differential axis. The CLI executor always forces Composed (the
+/// wasmtime CLI has no way to satisfy host imports).
+fn runtime_binding_mode() -> RuntimeBinding {
+    if !embedded_executor_mode() {
+        return RuntimeBinding::Composed;
+    }
+    match std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING").as_deref() {
+        Ok("composed") => RuntimeBinding::Composed,
+        _ => RuntimeBinding::HostImport,
+    }
+}
+
+/// RuntimeHost that mirrors the mock core server route-for-route, sharing the
+/// SAME `ServerState` and capture sink — so a HostImport run produces the
+/// exact `CapturedRun` shape a Composed run produces over HTTP, and every
+/// existing assertion applies unchanged to both bindings.
+struct CapturingRuntimeHost {
+    instance_id: String,
+    debug_mode: bool,
+    input: Arc<Vec<u8>>,
+    /// `mpsc::Sender` is `!Sync`; the host must be `Sync`.
+    sink: Mutex<mpsc::Sender<CapturedMessage>>,
+    state: Arc<ServerState>,
+}
+
+impl CapturingRuntimeHost {
+    fn send(&self, message: CapturedMessage) {
+        let _ = self.sink.lock().expect("capture sink lock").send(message);
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost {
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(Some(self.input.as_ref().clone()))
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok(self.instance_id.clone())
+    }
+    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        // Mirror capture_completed: only JSON outputs are recorded.
+        if let Ok(output_json) = serde_json::from_slice::<Value>(&output) {
+            self.send(CapturedMessage::Completed(Completed { output_json }));
+        }
+        Ok(())
+    }
+    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        // Mirror capture_failed: JSON errors parse, everything else is a string.
+        let error_str = String::from_utf8_lossy(&error);
+        let error_json = serde_json::from_str::<Value>(&error_str)
+            .unwrap_or_else(|_| Value::String(error_str.clone().into_owned()));
+        self.send(CapturedMessage::Failed(Failed { error_json }));
+        Ok(())
+    }
+    async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        // Mirror capture_event: only custom events with JSON payloads are
+        // recorded (every guest custom-event is event_type=custom over HTTP).
+        if let Ok(payload_json) = serde_json::from_slice::<Value>(&payload) {
+            self.send(CapturedMessage::Event(RuntimeEvent {
+                subtype: kind,
+                payload_json,
+            }));
+        }
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(self.debug_mode)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        // The mock records nothing for signals/ack + /suspended.
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        // Mirror: heartbeat events are filtered out by capture_event.
+        Ok(())
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        // Mirror GET /signals: no drain is injected in these tests.
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        // Mirror GET signals/{id}: peek the front NON-destructively (a
+        // replayed wait re-reads the same signal) and count answered polls.
+        let custom = self
+            .state
+            .custom_signals
+            .lock()
+            .expect("custom_signals lock")
+            .first()
+            .cloned();
+        Ok(custom.map(|payload| {
+            *self
+                .state
+                .custom_signal_polls
+                .lock()
+                .expect("custom_signal_polls lock") += 1;
+            serde_json::to_vec(&payload).expect("payload serializes")
+        }))
+    }
+    async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        // The HTTP SDK routes get_checkpoint through POST /checkpoint with
+        // empty state, so the mock records an empty-state Checkpoint capture;
+        // mirror both the capture and the read-only lookup.
+        self.send(CapturedMessage::Checkpoint(CheckpointRequest {
+            checkpoint_id: checkpoint_id.clone(),
+            state: Vec::new(),
+        }));
+        Ok(self
+            .state
+            .checkpoints
+            .lock()
+            .expect("checkpoint state lock")
+            .get(&checkpoint_id)
+            .cloned())
+    }
+    async fn checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        // Mirror checkpoint_response: always capture, hit returns the stored
+        // state, miss saves only non-empty state (the read-only-probe rule).
+        self.send(CapturedMessage::Checkpoint(CheckpointRequest {
+            checkpoint_id: checkpoint_id.clone(),
+            state: state.clone(),
+        }));
+        let mut checkpoints = self
+            .state
+            .checkpoints
+            .lock()
+            .expect("checkpoint state lock");
+        if let Some(existing) = checkpoints.get(&checkpoint_id) {
+            return Ok(
+                runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                    found: true,
+                    state: existing.clone(),
+                    pending_signal: None,
+                    custom_signal: None,
+                },
+            );
+        }
+        if !state.is_empty() {
+            checkpoints.insert(checkpoint_id, state);
+        }
+        Ok(
+            runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                found: false,
+                state: Vec::new(),
+                pending_signal: None,
+                custom_signal: None,
+            },
+        )
+    }
+    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        // Mirror: POST /retry falls to the mock's generic success catch-all.
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+        ms: u64,
+    ) -> Result<(), String> {
+        // Mirror POST /sleep: capture only — the mock neither persists the
+        // checkpoint nor sleeps, keeping delay-heavy fixtures fast.
+        self.send(CapturedMessage::Sleep(SleepRequest {
+            checkpoint_id,
+            duration_ms: ms,
+            state,
+        }));
+        Ok(())
+    }
+}
+
 /// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.
 fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
     let mut command = Command::new(wasmtime_binary());
@@ -1323,6 +1535,7 @@ fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, S
 fn execute_via_embedded(
     wasm_path: &Path,
     env_pairs: &[(String, String)],
+    runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>>,
 ) -> (bool, String, Option<u64>) {
     let executor = embedded_executor();
     let mut limits = runtara_component_host::WorkflowLimits::default();
@@ -1351,7 +1564,7 @@ fn execute_via_embedded(
                     timeout: Duration::from_secs(300),
                     cancel: None,
                     limits,
-                    runtime: None,
+                    runtime: runtime_host,
                 },
             )
             .await
@@ -1532,8 +1745,17 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     })
     .expect("direct emit succeeds");
 
-    // Control: the default (Composed) binding satisfies the runtime interface
+    let agent_ids: Vec<String> = result
+        .component_artifacts
+        .agent_components
+        .iter()
+        .map(|component| component.agent_id.clone())
+        .collect();
+
+    // Control: the legacy Composed binding satisfies the runtime interface
     // internally — it must NOT appear among the composed artifact's imports.
+    result.component_artifacts =
+        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::Composed);
     compose_direct_workflow(&mut result, &components_dir).expect("composed-binding compose");
     let composed_bytes = fs::read(&result.wasm_path).expect("read composed artifact");
     let composed_imports = top_level_component_imports(&composed_bytes);
@@ -1550,15 +1772,10 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         "WASI must bubble as imports under both bindings; imports: {composed_imports:?}"
     );
 
-    // Spike: re-emit the scaffolding under HostImport and recompose. wac must
-    // type-check + encode (validate: true inside compose) with the runtime
-    // interface unbound, and the interface must surface as a top-level import.
-    let agent_ids: Vec<String> = result
-        .component_artifacts
-        .agent_components
-        .iter()
-        .map(|component| component.agent_id.clone())
-        .collect();
+    // Spike: re-emit the scaffolding under HostImport (the default) and
+    // recompose. wac must type-check + encode (validate: true inside compose)
+    // with the runtime interface unbound, and the interface must surface as a
+    // top-level import.
     result.component_artifacts =
         emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::HostImport);
     compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
@@ -4799,7 +5016,10 @@ fn run_direct_workflow_embedded(
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
-    let compiled = compile_direct_workflow_composed(
+    // This section A/Bs the SAME artifact between the embedded executor and
+    // the wasmtime CLI, so it pins the legacy Composed binding — the only
+    // shape the CLI can run.
+    let compiled = compile_direct_workflow_composed_with_binding(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: 1,
@@ -4811,6 +5031,7 @@ fn run_direct_workflow_embedded(
             agent_catalog: None,
         },
         components_dir,
+        RuntimeBinding::Composed,
     )
     .expect("direct composed compile");
 

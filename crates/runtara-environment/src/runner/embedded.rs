@@ -54,6 +54,9 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
+    /// native runtime interface for HostImport-composed artifacts.
+    handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
 impl EmbeddedWasmRunner {
@@ -64,12 +67,16 @@ impl EmbeddedWasmRunner {
         spawn_epoch_ticker(Arc::clone(&engine));
         let executor = WorkflowExecutor::new(engine)
             .map_err(|e| RunnerError::Other(format!("build workflow executor: {e:#}")))?;
+        let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
+            Arc::clone(&persistence),
+        ));
         Ok(Self {
             config,
             limits: limits_from_env(),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            handler_state,
         })
     }
 
@@ -87,22 +94,30 @@ impl EmbeddedWasmRunner {
 
     fn run_spec(
         &self,
+        options: &LaunchOptions,
         env: HashMap<String, String>,
         stderr: Option<std::fs::File>,
         timeout: Duration,
         cancel: Option<CancelToken>,
     ) -> WorkflowRunSpec {
+        // Always attach the native runtime host. A HostImport-composed
+        // artifact consumes it; a legacy composed artifact satisfies the
+        // runtime interface internally (HTTP loopback) and never calls it —
+        // that indifference is the dual-ABI story: old workflows run
+        // unchanged, without a rebuild, through the same spec.
+        let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
+        let runtime = Arc::new(crate::runtime_host::PersistenceRuntimeHost::new(
+            Arc::clone(&self.handler_state),
+            options.instance_id.clone(),
+            debug_mode,
+        ));
         WorkflowRunSpec {
             env,
             stderr,
             timeout,
             cancel,
             limits: self.limits.clone(),
-            // Legacy composed artifacts satisfy the runtime interface
-            // internally (HTTP loopback); the native RuntimeHost is wired
-            // when the execute path adopts HostImport composition (Phase 2 of
-            // docs/unify-agents-workflows-plan.md).
-            runtime: None,
+            runtime: Some(runtime),
         }
     }
 
@@ -182,7 +197,7 @@ impl Runner for EmbeddedWasmRunner {
             .executor
             .execute(
                 &pre,
-                self.run_spec(env, None, options.timeout, cancel_token),
+                self.run_spec(options, env, None, options.timeout, cancel_token),
             )
             .await;
         let metrics = metrics_of(&run);
@@ -284,7 +299,7 @@ impl Runner for EmbeddedWasmRunner {
         // Timeout is enforced by the container monitor via `stop()`, exactly
         // as it is for the detached CLI runner (which spawns with no timeout
         // of its own). MAX keeps the internal rings cancel-only.
-        let spec = self.run_spec(env, stderr_file, Duration::MAX, Some(cancel));
+        let spec = self.run_spec(options, env, stderr_file, Duration::MAX, Some(cancel));
 
         let executor = Arc::clone(&self.executor);
         let metrics_for_task = Arc::clone(&metrics);
