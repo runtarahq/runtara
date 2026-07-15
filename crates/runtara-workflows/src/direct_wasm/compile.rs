@@ -372,6 +372,12 @@ const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
 const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
 const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 
+/// Scratch holding the connection id (ptr/len) resolved at the invoke boundary
+/// by `resolve-connection-id`, stashed out of the shared retptr before it is
+/// written into the agent-invoke `connection` argument. All i32.
+const DIRECT_AGENT_CONN_ID_PTR_LOCAL: u32 = 116;
+const DIRECT_AGENT_CONN_ID_LEN_LOCAL: u32 = 117;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {

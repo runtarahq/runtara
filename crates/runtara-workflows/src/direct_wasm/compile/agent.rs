@@ -248,12 +248,15 @@ pub(super) fn emit_agent_plan(
             // MISS: this attempt has not run. Invoke, then persist its outcome.
             emit_agent_invoke(
                 body,
+                indices,
                 invoke,
                 capability_id,
                 static_data,
                 agent_id,
                 output_ptr_local,
                 output_len_local,
+                source_ptr_local,
+                source_len_local,
             );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -311,12 +314,15 @@ pub(super) fn emit_agent_plan(
             // to before this change.
             emit_agent_invoke(
                 body,
+                indices,
                 invoke,
                 capability_id,
                 static_data,
                 agent_id,
                 output_ptr_local,
                 output_len_local,
+                source_ptr_local,
+                source_len_local,
             );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -430,12 +436,15 @@ pub(super) fn emit_agent_plan(
     } else {
         emit_agent_invoke(
             body,
+            indices,
             invoke,
             capability_id,
             static_data,
             agent_id,
             output_ptr_local,
             output_len_local,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,

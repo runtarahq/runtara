@@ -13,7 +13,7 @@
 //! `memory_min_pages`, telling the module how much memory to declare and where its
 //! runtime bump heap may safely begin.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::DirectCompileError;
 use super::manifest::{DirectChildWorkflowGraphManifest, DirectGraphManifest};
@@ -134,6 +134,10 @@ pub(super) struct DirectCoreStaticData {
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
+    /// Agents whose connection is a resolvable `connection_ref` (evaluated at
+    /// runtime), not a baked literal. The invoke path resolves these via the
+    /// stdlib `resolve-connection-id` instead of reading a static segment.
+    agent_connection_refs: BTreeSet<u32>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -257,11 +261,13 @@ impl DirectCoreStaticData {
 
         let mut agent_capability_ids = BTreeMap::new();
         let mut agent_connection_ids = BTreeMap::new();
+        let mut agent_connection_refs = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
             &mut agent_capability_ids,
             &mut agent_connection_ids,
+            &mut agent_connection_refs,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
@@ -269,6 +275,7 @@ impl DirectCoreStaticData {
                 &mut offset,
                 &mut agent_capability_ids,
                 &mut agent_connection_ids,
+                &mut agent_connection_refs,
             )?;
         }
 
@@ -294,6 +301,7 @@ impl DirectCoreStaticData {
             step_ids,
             agent_capability_ids,
             agent_connection_ids,
+            agent_connection_refs,
             heap_base: offset,
             memory_min_pages,
         })
@@ -318,6 +326,12 @@ impl DirectCoreStaticData {
 
     pub(super) fn agent_connection_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
         self.agent_connection_ids.get(&agent_id)
+    }
+
+    /// True when the Agent's connection is a resolvable `connection_ref` (must be
+    /// resolved at runtime via `resolve-connection-id`, not read from a segment).
+    pub(super) fn agent_has_connection_ref(&self, agent_id: u32) -> bool {
+        self.agent_connection_refs.contains(&agent_id)
     }
 
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
@@ -382,12 +396,20 @@ fn collect_static_agent_data(
     offset: &mut i32,
     agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
     agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
+    agent_connection_refs: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
         *offset = align_i32(checked_offset_add(*offset, agent.capability_id.len())?, 16);
         agent_capability_ids.insert(agent.id, segment);
 
+        // A resolvable `connection_ref` is evaluated at runtime, so it is NOT
+        // baked into a segment; record the agent id so the invoke path resolves
+        // it via `resolve-connection-id`. A literal `connection_id` is baked as
+        // before (the fast path). Both may be present; the ref wins at runtime.
+        if agent.connection_ref.is_some() {
+            agent_connection_refs.insert(agent.id);
+        }
         if let Some(connection_id) = agent.connection_id.as_deref() {
             let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
             *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
@@ -401,6 +423,7 @@ fn collect_static_agent_data(
                 offset,
                 agent_capability_ids,
                 agent_connection_ids,
+                agent_connection_refs,
             )?;
         }
     }
@@ -627,6 +650,7 @@ mod tests {
             agent_id: "utils".to_string(),
             capability_id: capability_id.to_string(),
             connection_id: connection_id.map(ToOwned::to_owned),
+            connection_ref: None,
             durable: false,
             rate_limited: false,
             input_mapping_id: 0,

@@ -2517,6 +2517,7 @@ mod tests {
             agent_id: "utils".to_string(),
             capability_id: "normalize".to_string(),
             connection_id: None,
+            connection_ref: None,
             durable: true,
             rate_limited,
             input_mapping_id: 0,

@@ -128,6 +128,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_summarize_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
+    stdlib_resolve_connection_id: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_retry_sleep_key: Option<u32>,
     stdlib_agent_attempt_result_key: Option<u32>,
@@ -541,6 +542,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_connection_input,
                 "stdlib.agent-connection-input",
             )?,
+            stdlib_resolve_connection_id: require_import(
+                self.stdlib_resolve_connection_id,
+                "stdlib.resolve-connection-id",
+            )?,
             stdlib_agent_cache_key: require_import(
                 self.stdlib_agent_cache_key,
                 "stdlib.agent-cache-key",
@@ -717,6 +722,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_summarize_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
+    pub(super) stdlib_resolve_connection_id: u32,
     pub(super) stdlib_agent_cache_key: u32,
     pub(super) stdlib_agent_retry_sleep_key: u32,
     pub(super) stdlib_agent_attempt_result_key: u32,
@@ -1082,6 +1088,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {
         import_indices.stdlib_agent_connection_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "resolve-connection-id") {
+        import_indices.stdlib_resolve_connection_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {
         import_indices.stdlib_agent_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-sleep-key") {

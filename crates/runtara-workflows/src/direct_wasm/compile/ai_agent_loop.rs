@@ -184,12 +184,15 @@ pub(super) fn emit_ai_agent_loop_plan(
             .expect("AiAgent memory load has a static capability id");
         emit_agent_invoke(
             body,
+            indices,
             load_invoke,
             load_capability,
             static_data,
             memory.load_agent_id,
             DIRECT_AI_CONV_PTR_LOCAL,
             DIRECT_AI_CONV_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,
@@ -434,12 +437,15 @@ pub(super) fn emit_ai_agent_loop_plan(
     // turn_out = invoke chat-turn(turn_input)
     emit_agent_invoke(
         body,
+        indices,
         turn_invoke,
         turn_capability,
         static_data,
         agent_id,
         DIRECT_AI_TURN_INPUT_PTR_LOCAL,
         DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        source_ptr_local,
+        source_len_local,
     );
     emit_agent_invoke_error_branch(
         body,
@@ -654,12 +660,15 @@ pub(super) fn emit_ai_agent_loop_plan(
                 }
                 emit_agent_invoke(
                     body,
+                    indices,
                     tool_invoke,
                     tool_capability,
                     static_data,
                     *agent_id,
                     DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
                     DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                    source_ptr_local,
+                    source_len_local,
                 );
                 // A tool failure is fed back to the LLM as the tool result (the
                 // error envelope) and the loop continues, rather than failing the
@@ -886,12 +895,15 @@ pub(super) fn emit_ai_agent_loop_plan(
                 .expect("AiAgent summarize has a static capability id");
             emit_agent_invoke(
                 body,
+                indices,
                 summarize_invoke,
                 summarize_capability,
                 static_data,
                 summarize.agent_id,
                 DIRECT_AI_TURN_INPUT_PTR_LOCAL,
                 DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+                source_ptr_local,
+                source_len_local,
             );
             emit_agent_invoke_error_branch(
                 body,
@@ -1005,12 +1017,15 @@ pub(super) fn emit_ai_agent_loop_plan(
             .expect("AiAgent memory save has a static capability id");
         emit_agent_invoke(
             body,
+            indices,
             save_invoke,
             save_capability,
             static_data,
             memory.save_agent_id,
             DIRECT_AI_TURN_INPUT_PTR_LOCAL,
             DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,

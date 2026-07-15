@@ -399,9 +399,14 @@ pub struct DirectAgentManifest {
     pub agent_id: String,
     /// Capability id passed to the agent component.
     pub capability_id: String,
-    /// Optional workflow connection id.
+    /// Optional workflow connection id (same-tenant literal binding).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Optional resolvable connection binding (a `MappingValue`), evaluated
+    /// against the execution source at runtime by the stdlib
+    /// `resolve-connection-id`; wins over `connection_id` when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<serde_json::Value>,
     /// Effective Agent durability after graph-level inheritance is applied.
     pub durable: bool,
     /// Whether the referenced capability is marked rate-limited in the Agent catalog.
@@ -961,13 +966,6 @@ fn step_manifest(
                     serde_json::json!({ "valueType": "immediate", "value": timeout }),
                 );
             }
-            // A resolvable connection binding is lowered into the input mapping:
-            // it resolves against the runtime source to the injected `_connection`
-            // (see `connection_ref_input_entries`), and the manifest
-            // `connection_id` is left `None` so the literal path is bypassed.
-            if let serde_json::Value::Object(map) = &mut input_mapping {
-                apply_connection_ref_entries(map, step.connection_ref.as_ref())?;
-            }
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -984,10 +982,8 @@ fn step_manifest(
                 purpose: "agent.config".to_string(),
                 agent_id: agent_id.clone(),
                 capability_id: step.capability_id.clone(),
-                connection_id: manifest_connection_id(
-                    step.connection_ref.as_ref(),
-                    &step.connection_id,
-                ),
+                connection_id: step.connection_id.clone(),
+                connection_ref: connection_ref_json(step.connection_ref.as_ref())?,
                 durable: inherited_durable && step.durable.unwrap_or(true),
                 rate_limited: agent_capability_rate_limited(
                     agent_catalog,
@@ -1105,7 +1101,7 @@ fn step_manifest(
                 // MCP toolsets each advertise two synthetic meta-tools, appended
                 // after the Agent tools (the LLM's tool_index resolves by this
                 // order, which the run plan's tool list mirrors exactly).
-                for (toolset, _target, _conn) in &mcp_edges {
+                for (toolset, _target, _conn, _conn_ref) in &mcp_edges {
                     tool_defs.extend(ai_agent_mcp_tool_defs(toolset));
                 }
                 mapping.insert(
@@ -1115,7 +1111,7 @@ fn step_manifest(
                 if has_mcp {
                     let toolsets = mcp_edges
                         .iter()
-                        .map(|(toolset, _, _)| toolset.clone())
+                        .map(|(toolset, _, _, _)| toolset.clone())
                         .collect::<Vec<_>>();
                     mapping.insert(
                         "system_prompt_suffix".to_string(),
@@ -1127,10 +1123,6 @@ fn step_manifest(
                 }
                 "chat-turn"
             };
-            // The AiAgent's provider connection may be a resolvable ref: lower it
-            // into the chat input mapping just like an Agent step, with the
-            // manifest `connection_id` left `None` below.
-            apply_connection_ref_entries(&mut mapping, step.connection_ref.as_ref())?;
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -1147,10 +1139,8 @@ fn step_manifest(
                 purpose: "agent.config".to_string(),
                 agent_id: "ai-tools".to_string(),
                 capability_id: capability_id.to_string(),
-                connection_id: manifest_connection_id(
-                    step.connection_ref.as_ref(),
-                    &step.connection_id,
-                ),
+                connection_id: step.connection_id.clone(),
+                connection_ref: connection_ref_json(step.connection_ref.as_ref())?,
                 durable: inherited_durable && step.durable.unwrap_or(true),
                 rate_limited: agent_capability_rate_limited(
                     agent_catalog,
@@ -1168,7 +1158,7 @@ fn step_manifest(
             // Conversation memory: record the provider agent's load-memory and
             // save-memory entries plus a conversation-id mapping. The loop loads
             // history before the turns and saves the final history after.
-            if let (true, Some((mem_agent, mem_conn))) =
+            if let (true, Some((mem_agent, mem_conn, mem_conn_ref))) =
                 (has_memory, ai_agent_memory_provider(graph, &step.id))
             {
                 let memory = step.config.as_ref().and_then(|c| c.memory.as_ref());
@@ -1201,6 +1191,7 @@ fn step_manifest(
                         agent_id: mem_agent.clone(),
                         capability_id: capability.to_string(),
                         connection_id: mem_conn.clone(),
+                        connection_ref: connection_ref_json(mem_conn_ref.as_ref())?,
                         durable: inherited_durable && step.durable.unwrap_or(true),
                         rate_limited: false,
                         input_mapping_id: conversation_mapping_id,
@@ -1222,38 +1213,9 @@ fn step_manifest(
                         matches!(strategy, runtara_dsl::CompactionStrategy::Summarize)
                     });
                 if use_summarize {
-                    // Summarize reuses the AiAgent's own provider connection.
-                    // With a resolvable ref, give summarize a DEDICATED input
-                    // mapping carrying the ref-injected `_connection` (so the
-                    // memory load/save agents that share `conversation_mapping_id`
-                    // keep their own literal connection untouched), and leave its
-                    // manifest `connection_id` None. With a literal, reuse the
-                    // shared conversation mapping unchanged.
-                    let (summarize_mapping_id, summarize_connection_id) =
-                        if let Some(connection_ref) = step.connection_ref.as_ref() {
-                            let mut summarize_input = serde_json::Map::new();
-                            if let Some(memory) = memory {
-                                summarize_input.insert(
-                                    "conversation_id".to_string(),
-                                    canonical_json(&memory.conversation_id)?,
-                                );
-                            }
-                            apply_connection_ref_entries(
-                                &mut summarize_input,
-                                Some(connection_ref),
-                            )?;
-                            let id = state.allocate_mapping_id();
-                            collections.mappings.push(DirectMappingManifest {
-                                id,
-                                step_id: step.id.clone(),
-                                step_type: "AiAgent".to_string(),
-                                purpose: "memory.summarize.inputMapping".to_string(),
-                                value: serde_json::Value::Object(summarize_input),
-                            });
-                            (id, None)
-                        } else {
-                            (conversation_mapping_id, step.connection_id.clone())
-                        };
+                    // Summarize reuses the AiAgent's own provider connection —
+                    // literal or resolvable ref — resolved uniformly at the
+                    // invoke boundary, so it shares the conversation mapping.
                     collections.agents.push(DirectAgentManifest {
                         id: state.allocate_agent_id(),
                         step_id: step.id.clone(),
@@ -1262,14 +1224,15 @@ fn step_manifest(
                         purpose: "memory.summarize".to_string(),
                         agent_id: "ai-tools".to_string(),
                         capability_id: "summarize-memory".to_string(),
-                        connection_id: summarize_connection_id,
+                        connection_id: step.connection_id.clone(),
+                        connection_ref: connection_ref_json(step.connection_ref.as_ref())?,
                         durable: inherited_durable && step.durable.unwrap_or(true),
                         rate_limited: agent_capability_rate_limited(
                             agent_catalog,
                             "ai-tools",
                             "summarize-memory",
                         ),
-                        input_mapping_id: summarize_mapping_id,
+                        input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
@@ -1282,7 +1245,7 @@ fn step_manifest(
             // mcp-tool-invoke capabilities), named after the synthetic tools so
             // the run plan can resolve each advertised tool to its provider.
             // Order matches `ai_agent_mcp_tool_defs`: search then invoke.
-            for (toolset, _target, connection_id) in &mcp_edges {
+            for (toolset, _target, connection_id, connection_ref) in &mcp_edges {
                 for (role, capability) in
                     [("search", "mcp-tool-search"), ("invoke", "mcp-tool-invoke")]
                 {
@@ -1295,6 +1258,7 @@ fn step_manifest(
                         agent_id: "mcp".to_string(),
                         capability_id: capability.to_string(),
                         connection_id: connection_id.clone(),
+                        connection_ref: connection_ref_json(connection_ref.as_ref())?,
                         durable: inherited_durable && step.durable.unwrap_or(true),
                         rate_limited: agent_capability_rate_limited(
                             agent_catalog,
@@ -1401,88 +1365,45 @@ fn canonicalize_direct_agent_id(agent_id: &str) -> String {
     agent_id.to_lowercase().replace('_', "-")
 }
 
-/// The manifest `connection_id` for a step: a same-tenant literal, but `None`
-/// when a `connection_ref` is present so the static-segment / stdlib literal
-/// injection path is bypassed and the resolvable ref (lowered into the input
-/// mapping by [`connection_ref_input_entries`]) is the sole connection source.
-fn manifest_connection_id(
+/// Canonicalize a step's resolvable `connection_ref` (a `MappingValue`) into the
+/// manifest `Value` the stdlib `resolve-connection-id` evaluates against the
+/// execution source. `None` for a literal / connectionless step — the manifest
+/// `connection_id` literal then carries the (same-tenant) binding as before.
+fn connection_ref_json(
     connection_ref: Option<&MappingValue>,
-    connection_id: &Option<String>,
-) -> Option<String> {
-    if connection_ref.is_some() {
-        None
-    } else {
-        connection_id.clone()
-    }
+) -> Result<Option<serde_json::Value>, DirectManifestError> {
+    connection_ref.map(canonical_json).transpose()
 }
 
-/// Lower a step's `connection_ref` into input-mapping entries that resolve, at
-/// runtime, to the same injected connection the stdlib produces for a literal
-/// id — a `_connection` object plus a top-level `connection_id` — but sourced
-/// from the resolvable ref (a `connection` input, a rotated value, a per-record
-/// selection) instead of a compile-time-pinned segment.
-///
-/// The referenced value is an opaque connection id; `integration_id` and
-/// `parameters` stay empty exactly as the stdlib literal path does
-/// (`agent_connection_input`) — the proxy resolves the real integration and
-/// credentials by `(connection_id, tenant_id)` server-side. Because the entries
-/// ride the input mapping, `apply_input_mapping` resolves the ref against the
-/// execution source with no new host call, WIT change, or stdlib change.
-fn connection_ref_input_entries(
-    connection_ref: &MappingValue,
-) -> Result<[(String, serde_json::Value); 2], DirectManifestError> {
-    let ref_value = canonical_json(connection_ref)?;
-    let connection = serde_json::json!({
-        "valueType": "composite",
-        "value": {
-            "connection_id": ref_value.clone(),
-            "integration_id": { "valueType": "immediate", "value": "" },
-            "parameters": { "valueType": "immediate", "value": {} },
-        }
-    });
-    Ok([
-        ("_connection".to_string(), connection),
-        ("connection_id".to_string(), ref_value),
-    ])
-}
+/// The AiAgent's memory provider: the agent id, literal connection id, and
+/// resolvable `connection_ref` of the Agent step on the `memory`-labelled edge,
+/// if any. Both connection forms are carried so a memory-storage connection can
+/// be a caller-supplied / rotated ref, not only a compile-time literal.
+type MemoryProvider = (String, Option<String>, Option<MappingValue>);
 
-/// Insert the `connection_ref` mapping entries into an input-mapping object when
-/// a ref is present. No-op for literal / connectionless steps.
-fn apply_connection_ref_entries(
-    mapping: &mut serde_json::Map<String, serde_json::Value>,
-    connection_ref: Option<&MappingValue>,
-) -> Result<(), DirectManifestError> {
-    if let Some(connection_ref) = connection_ref {
-        for (key, value) in connection_ref_input_entries(connection_ref)? {
-            mapping.insert(key, value);
-        }
-    }
-    Ok(())
-}
-
-/// The AiAgent's memory provider: the agent id and connection id of the Agent
-/// step on the `memory`-labelled edge, if any.
-fn ai_agent_memory_provider(
-    graph: &ExecutionGraph,
-    step_id: &str,
-) -> Option<(String, Option<String>)> {
+fn ai_agent_memory_provider(graph: &ExecutionGraph, step_id: &str) -> Option<MemoryProvider> {
     let edge = graph
         .execution_plan
         .iter()
         .find(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("memory"))?;
     match graph.steps.get(&edge.to_step) {
-        Some(Step::Agent(agent)) => Some((agent.agent_id.clone(), agent.connection_id.clone())),
+        Some(Step::Agent(agent)) => Some((
+            agent.agent_id.clone(),
+            agent.connection_id.clone(),
+            agent.connection_ref.clone(),
+        )),
         _ => None,
     }
 }
 
-/// The AiAgent's MCP tool edges as `(toolset_id, target_step_id, connection_id)`.
-/// An `mcp.<toolset>` edge targets an Agent step with `agent_id == "mcp"`; each
-/// becomes two synthetic LLM tools (`<toolset>_search` / `<toolset>_invoke`).
-fn ai_agent_mcp_edges(
-    graph: &ExecutionGraph,
-    step_id: &str,
-) -> Vec<(String, String, Option<String>)> {
+/// The AiAgent's MCP tool edges as `(toolset_id, target_step_id, connection_id,
+/// connection_ref)`. An `mcp.<toolset>` edge targets an Agent step with
+/// `agent_id == "mcp"`; each becomes two synthetic LLM tools
+/// (`<toolset>_search` / `<toolset>_invoke`). The provider's connection may be a
+/// literal or a resolvable ref.
+type McpEdge = (String, String, Option<String>, Option<MappingValue>);
+
+fn ai_agent_mcp_edges(graph: &ExecutionGraph, step_id: &str) -> Vec<McpEdge> {
     graph
         .execution_plan
         .iter()
@@ -1490,11 +1411,18 @@ fn ai_agent_mcp_edges(
         .filter_map(|edge| {
             let label = edge.label.as_deref()?;
             let toolset = label.strip_prefix("mcp.").filter(|s| !s.is_empty())?;
-            let connection_id = match graph.steps.get(&edge.to_step) {
-                Some(Step::Agent(agent)) => agent.connection_id.clone(),
+            let (connection_id, connection_ref) = match graph.steps.get(&edge.to_step) {
+                Some(Step::Agent(agent)) => {
+                    (agent.connection_id.clone(), agent.connection_ref.clone())
+                }
                 _ => return None,
             };
-            Some((toolset.to_string(), edge.to_step.clone(), connection_id))
+            Some((
+                toolset.to_string(),
+                edge.to_step.clone(),
+                connection_id,
+                connection_ref,
+            ))
         })
         .collect()
 }
@@ -2150,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_connection_ref_lowers_into_input_mapping_and_clears_literal() {
+    fn agent_connection_ref_lands_in_manifest() {
         let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "call",
@@ -2175,34 +2103,27 @@ mod tests {
             .iter()
             .find(|agent| agent.step_id == "call")
             .expect("agent entry");
-        // The literal path is bypassed: no baked connection id.
+        // The ref rides the manifest verbatim (the stdlib resolves it against the
+        // execution source at the invoke boundary); no literal id here.
         assert_eq!(agent.connection_id, None);
+        let connection_ref = agent.connection_ref.as_ref().expect("connection_ref");
+        assert_eq!(connection_ref["valueType"], "reference");
+        assert_eq!(connection_ref["value"], "data.crm");
 
+        // The ref is NOT injected into the input mapping — the author's own
+        // mapping is untouched.
         let mapping = manifest
             .graph
             .mappings
             .iter()
             .find(|mapping| mapping.id == agent.input_mapping_id)
             .expect("input mapping");
-        // The ref is lowered into the input mapping as a resolvable
-        // `connection_id` plus the `_connection` object the agent reads.
-        assert_eq!(mapping.value["connection_id"]["valueType"], "reference");
-        assert_eq!(mapping.value["connection_id"]["value"], "data.crm");
-        assert_eq!(mapping.value["_connection"]["valueType"], "composite");
-        assert_eq!(
-            mapping.value["_connection"]["value"]["connection_id"]["value"],
-            "data.crm"
-        );
-        assert_eq!(
-            mapping.value["_connection"]["value"]["integration_id"]["value"],
-            ""
-        );
-        // The author's own mapped input survives untouched.
         assert_eq!(mapping.value["url"]["value"], "https://example.test");
+        assert!(mapping.value.get("_connection").is_none());
     }
 
     #[test]
-    fn literal_connection_id_leaves_input_mapping_free_of_connection_keys() {
+    fn literal_connection_id_leaves_manifest_ref_unset() {
         let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "call",
@@ -2224,21 +2145,13 @@ mod tests {
             .iter()
             .find(|agent| agent.step_id == "call")
             .expect("agent entry");
-        // Back-compat: the literal id still rides the manifest, and the input
-        // mapping is untouched (the stdlib injects `_connection` post-mapping).
+        // Back-compat: the literal id rides the manifest, no ref.
         assert_eq!(agent.connection_id.as_deref(), Some("conn-123"));
-        let mapping = manifest
-            .graph
-            .mappings
-            .iter()
-            .find(|mapping| mapping.id == agent.input_mapping_id)
-            .expect("input mapping");
-        assert!(mapping.value.get("_connection").is_none());
-        assert!(mapping.value.get("connection_id").is_none());
+        assert!(agent.connection_ref.is_none());
     }
 
     #[test]
-    fn ai_agent_connection_ref_lowers_into_chat_mapping() {
+    fn ai_agent_connection_ref_lands_in_manifest() {
         let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "ai",
@@ -2268,13 +2181,71 @@ mod tests {
             .find(|agent| agent.step_id == "ai")
             .expect("ai agent entry");
         assert_eq!(agent.connection_id, None);
-        let mapping = manifest
-            .graph
-            .mappings
-            .iter()
-            .find(|mapping| mapping.id == agent.input_mapping_id)
-            .expect("chat input mapping");
-        assert_eq!(mapping.value["connection_id"]["value"], "data.llm");
-        assert_eq!(mapping.value["_connection"]["valueType"], "composite");
+        let connection_ref = agent.connection_ref.as_ref().expect("connection_ref");
+        assert_eq!(connection_ref["value"], "data.llm");
+    }
+
+    #[test]
+    fn memory_and_mcp_provider_connection_refs_land_in_manifest() {
+        // An AiAgent whose OWN connection is a ref, plus a memory-storage
+        // provider and an MCP-tool provider each bound via their own ref. All
+        // three must ride the manifest so they resolve uniformly at the invoke
+        // boundary — the memory/MCP agents' input is not a mapping, so this is
+        // the only way their connection can be a caller-supplied / rotated ref.
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {"fromStep":"ai","toStep":"finish","label":"next"},
+                {"fromStep":"ai","toStep":"mem","label":"memory"},
+                {"fromStep":"ai","toStep":"mcp1","label":"mcp.tools"}
+              ],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent",
+                  "connectionRef":{"valueType":"reference","value":"data.llm"},
+                  "config":{
+                    "systemPrompt":{"valueType":"immediate","value":"sys"},
+                    "userPrompt":{"valueType":"immediate","value":"go"},
+                    "provider":"openai",
+                    "memory":{
+                      "conversationId":{"valueType":"immediate","value":"c1"},
+                      "compaction":{"maxMessages":2,"strategy":"summarize"}
+                    }
+                  }},
+                "mem": {"id":"mem","stepType":"Agent","agentId":"object_model",
+                  "capabilityId":"load-memory",
+                  "connectionRef":{"valueType":"reference","value":"data.memconn"}},
+                "mcp1": {"id":"mcp1","stepType":"Agent","agentId":"mcp",
+                  "capabilityId":"mcp-tool-search",
+                  "connectionRef":{"valueType":"reference","value":"data.mcpconn"}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let ref_value = |purpose: &str| -> String {
+            manifest
+                .graph
+                .agents
+                .iter()
+                .find(|a| a.purpose == purpose)
+                .unwrap_or_else(|| panic!("agent with purpose {purpose}"))
+                .connection_ref
+                .as_ref()
+                .unwrap_or_else(|| panic!("connection_ref for {purpose}"))["value"]
+                .as_str()
+                .expect("string")
+                .to_string()
+        };
+
+        // Memory load/save resolve the memory provider's ref…
+        assert_eq!(ref_value("memory.load"), "data.memconn");
+        assert_eq!(ref_value("memory.save"), "data.memconn");
+        // …summarize reuses the AiAgent's own provider ref…
+        assert_eq!(ref_value("memory.summarize"), "data.llm");
+        // …and each MCP tool provider resolves the MCP provider's ref.
+        assert_eq!(ref_value("agent.tool.mcp"), "data.mcpconn");
     }
 }

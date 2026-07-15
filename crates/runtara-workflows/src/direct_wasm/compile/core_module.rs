@@ -476,7 +476,9 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
-    (12, ValType::I32),
+    // Trailing i32 scratch group. 116/117 (DIRECT_AGENT_CONN_ID_PTR/LEN) stash
+    // the runtime-resolved connection id at the agent-invoke boundary.
+    (14, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
