@@ -77,9 +77,7 @@ use artifact_metadata::{
 use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
 use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
 
-use super::component::{
-    DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts, emit_direct_component_artifacts,
-};
+use super::component::{DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts};
 use super::error::DirectCompileError;
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestChildWorkflowInput, DirectWorkflowManifest,
@@ -622,6 +620,28 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
+/// Runtime binding for production compiles, from
+/// `RUNTARA_DIRECT_RUNTIME_BINDING` — the operational rollback lever.
+///
+/// Default (unset or anything else): `HostImport`. `composed` reverts new
+/// compiles to the legacy composed-runtime shape (guest HTTP loopback), which
+/// the runner still executes fully — set it on the server and recompile if a
+/// host-import regression ever needs a same-day escape hatch.
+fn runtime_binding_from_env() -> super::component::RuntimeBinding {
+    runtime_binding_from_raw(
+        std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn runtime_binding_from_raw(raw: Option<&str>) -> super::component::RuntimeBinding {
+    match raw {
+        Some("composed") => super::component::RuntimeBinding::Composed,
+        _ => super::component::RuntimeBinding::HostImport,
+    }
+}
+
 /// [`compile_direct_workflow_composed`] with an explicit [`RuntimeBinding`],
 /// re-emitting the component scaffolding under `binding` before composing.
 ///
@@ -741,7 +761,10 @@ fn compile_direct_workflow_inner(
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
-    let component_artifacts = emit_direct_component_artifacts(&manifest.feature_summary.agent_ids);
+    let component_artifacts = super::component::emit_direct_component_artifacts_with_binding(
+        &manifest.feature_summary.agent_ids,
+        runtime_binding_from_env(),
+    );
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",

@@ -10472,3 +10472,25 @@ fn direct_compile_supports_agent_chain_without_finish() {
         result.support_report.unsupported
     );
 }
+
+#[test]
+fn runtime_binding_env_lever_defaults_host_import() {
+    use crate::direct_wasm::component::RuntimeBinding;
+    // The operational rollback lever: only the literal "composed" reverts.
+    assert_eq!(
+        super::runtime_binding_from_raw(None),
+        RuntimeBinding::HostImport
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("composed")),
+        RuntimeBinding::Composed
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("host-import")),
+        RuntimeBinding::HostImport
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("")),
+        RuntimeBinding::HostImport
+    );
+}
