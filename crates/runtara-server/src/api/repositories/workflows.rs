@@ -71,14 +71,15 @@ impl WorkflowRepository {
         tenant_id: &str,
         workflow_id: &str,
         created_by: Option<&str>,
+        slug: &str,
     ) -> Result<(DateTime<Utc>, DateTime<Utc>), sqlx::Error> {
-        // Runtime query (not the `query!` macro) so adding `created_by` needs no offline
-        // sqlx cache regeneration. `created_by` is only set on insert — the ON CONFLICT
-        // branch leaves an existing owner untouched.
+        // Runtime query (not the `query!` macro) so adding `created_by`/`slug` needs no
+        // offline sqlx cache regeneration. `created_by`/`slug` are only set on insert —
+        // the ON CONFLICT branch leaves an existing row's identity untouched.
         let row: (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
             r#"
-            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version, created_by)
-            VALUES ($1, $2, 0, 0, $3)
+            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version, created_by, slug)
+            VALUES ($1, $2, 0, 0, $3, $4)
             ON CONFLICT (tenant_id, workflow_id) DO UPDATE
             SET updated_at = NOW()
             RETURNING created_at, updated_at
@@ -87,10 +88,84 @@ impl WorkflowRepository {
         .bind(tenant_id)
         .bind(workflow_id)
         .bind(created_by)
+        .bind(slug)
         .fetch_one(&self.pool)
         .await?;
 
         Ok((row.0, row.1))
+    }
+
+    /// Whether `slug` is already taken by ANY workflow row in the tenant —
+    /// including soft-deleted ones: a deleted workflow reserves its slug (a
+    /// published capability id must not be silently reusable).
+    pub async fn slug_exists(&self, tenant_id: &str, slug: &str) -> Result<bool, sqlx::Error> {
+        let row: (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM workflows WHERE tenant_id = $1 AND slug = $2)",
+        )
+        .bind(tenant_id)
+        .bind(slug)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Read a workflow's slug from the identity row.
+    pub async fn get_slug(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT slug FROM workflows WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(slug,)| slug))
+    }
+
+    /// Write a workflow's slug (identity-level; never rides the graph-JSON
+    /// write path). The unique index `idx_workflows_tenant_slug` enforces
+    /// per-tenant uniqueness — a violation surfaces as a database error the
+    /// service maps to Conflict.
+    pub async fn set_slug(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        slug: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE workflows SET slug = $3, updated_at = NOW() WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(slug)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Rows still missing a slug, with the name from their current-or-latest
+    /// definition — the startup backfill's work list. Soft-deleted rows are
+    /// left NULL (they never published a capability id).
+    pub async fn list_missing_slugs(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>)>, sqlx::Error> {
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT w.tenant_id, w.workflow_id, wd.definition->>'name'
+            FROM workflows w
+            LEFT JOIN workflow_definitions wd
+              ON wd.tenant_id = w.tenant_id
+             AND wd.workflow_id = w.workflow_id
+             AND wd.version = COALESCE(w.current_version, w.latest_version)
+            WHERE w.slug IS NULL AND w.deleted_at IS NULL
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Create an initial version (version 1) for a new workflow with an empty graph
@@ -382,7 +457,7 @@ impl WorkflowRepository {
             SELECT s.workflow_id, s.latest_version, s.current_version, s.created_at, s.updated_at,
                    sd.memory_tier, sd.track_events,
                    sd.definition,
-                   s.path
+                   s.path, s.slug
             FROM workflows s
             LEFT JOIN workflow_definitions sd ON s.tenant_id = sd.tenant_id
                 AND s.workflow_id = sd.workflow_id
@@ -415,6 +490,7 @@ impl WorkflowRepository {
             Option<bool>,   // track_events
             Option<Value>,  // definition (execution_graph)
             String,         // path
+            Option<String>, // slug
         )> = main_q.fetch_all(&self.pool).await?;
 
         tracing::debug!(
@@ -484,6 +560,7 @@ impl WorkflowRepository {
                         track_events: row.6.unwrap_or(false),
                         notes: Vec::new(), // Empty for list view (no execution graph loaded)
                         path: row.8.clone(),
+                        slug: row.9.clone(),
                     }
                 })
                 .collect();
@@ -519,18 +596,19 @@ impl WorkflowRepository {
         // The definition column in workflow_definitions IS the execution_graph
         // name/description are now extracted from the definition JSON
         let row: Option<(
-            Value,         // definition (execution_graph)
-            DateTime<Utc>, // created_at
-            DateTime<Utc>, // updated_at
-            String,        // memory_tier
-            bool,          // track_events
-            Option<i32>,   // latest_version
-            Option<i32>,   // current_version
-            String,        // path
+            Value,          // definition (execution_graph)
+            DateTime<Utc>,  // created_at
+            DateTime<Utc>,  // updated_at
+            String,         // memory_tier
+            bool,           // track_events
+            Option<i32>,    // latest_version
+            Option<i32>,    // current_version
+            String,         // path
+            Option<String>, // slug
         )> = sqlx::query_as(
             r#"
             SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_tier, sd.track_events,
-                   s.latest_version, s.current_version, s.path
+                   s.latest_version, s.current_version, s.path, s.slug
             FROM workflow_definitions sd
             JOIN workflows s ON sd.tenant_id = s.tenant_id AND sd.workflow_id = s.workflow_id
             WHERE sd.tenant_id = $1 AND sd.workflow_id = $2 AND sd.version = $3
@@ -598,6 +676,7 @@ impl WorkflowRepository {
                 track_events: r.4,
                 notes: Note::extract_from_execution_graph(&r.0),
                 path: r.7.clone(),
+                slug: r.8.clone(),
             }
         }))
     }

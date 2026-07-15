@@ -269,6 +269,21 @@ pub struct CreateWorkflowParams {
     pub name: String,
     #[schemars(description = "Workflow description")]
     pub description: String,
+    #[schemars(
+        description = "Capability id override (lowercase kebab, max 64 chars). \
+                       Auto-derived from the name when omitted. This is the id a \
+                       workflow-as-agent exports as runtara:agent-<slug>."
+    )]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetWorkflowSlugParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "New slug (lowercase kebab, max 64 chars, per-tenant unique)")]
+    pub slug: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -750,11 +765,31 @@ pub async fn create_workflow(
     server: &SmoMcpServer,
     params: CreateWorkflowParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "name": params.name,
         "description": params.description,
     });
+    if let Some(slug) = params.slug
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert("slug".to_string(), serde_json::json!(slug));
+    }
     let result = api_post(server, "/api/runtime/workflows/create", Some(body)).await?;
+    json_result(result)
+}
+
+pub async fn set_workflow_slug(
+    server: &SmoMcpServer,
+    params: SetWorkflowSlugParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let body = serde_json::json!({ "slug": params.slug });
+    let result = api_put(
+        server,
+        &format!("/api/runtime/workflows/{}/slug", params.workflow_id),
+        Some(body),
+    )
+    .await?;
     json_result(result)
 }
 

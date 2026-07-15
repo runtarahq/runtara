@@ -129,6 +129,7 @@ impl WorkflowService {
 
     /// Create a new workflow with metadata
     /// Note: name/description are stored in the execution graph, not in the workflows table
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_workflow(
         &self,
         tenant_id: &str,
@@ -137,6 +138,7 @@ impl WorkflowService {
         memory_tier: Option<MemoryTier>,
         track_events: Option<bool>,
         created_by: &str,
+        requested_slug: Option<String>,
     ) -> Result<WorkflowDto, ServiceError> {
         // Validation: name should not be empty
         if name.trim().is_empty() {
@@ -183,12 +185,18 @@ impl WorkflowService {
         // Generate new workflow ID
         let workflow_id = Uuid::new_v4().to_string();
 
+        // Resolve the slug: a supplied one is validated + must be free; an
+        // auto-derived one disambiguates on collision instead of failing.
+        let slug = self
+            .resolve_new_slug(tenant_id, requested_slug, &name, &workflow_id)
+            .await?;
+
         // Create workflow metadata entry (name/description are now in execution graph)
         let (created_at, updated_at) = self
             .repository
-            .create(tenant_id, &workflow_id, Some(created_by))
+            .create(tenant_id, &workflow_id, Some(created_by), &slug)
             .await
-            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+            .map_err(map_slug_db_error)?;
 
         // Use provided memory tier or default to XL
         let memory_tier = memory_tier.unwrap_or_default();
@@ -238,7 +246,173 @@ impl WorkflowService {
             track_events,
             notes: Vec::new(),     // Empty notes for new workflow
             path: "/".to_string(), // Default to root folder
+            slug: Some(slug),
         })
+    }
+
+    /// Resolve the slug for a NEW workflow row. A user-supplied slug is
+    /// validated and must be free (reserved/taken → error); an auto-derived
+    /// slug never fails the create — collisions get a deterministic
+    /// `-<hex-of-workflow-id>` disambiguator.
+    async fn resolve_new_slug(
+        &self,
+        tenant_id: &str,
+        requested: Option<String>,
+        name: &str,
+        workflow_id: &str,
+    ) -> Result<String, ServiceError> {
+        use runtara_dsl::agent_meta::{WORKFLOW_SLUG_MAX_LEN, generate_workflow_slug};
+
+        if let Some(raw) = requested {
+            let slug = raw.trim().to_string();
+            self.ensure_slug_available(tenant_id, &slug).await?;
+            return Ok(slug);
+        }
+
+        let slug = generate_workflow_slug(name, workflow_id);
+        if !self.slug_taken_or_reserved(tenant_id, &slug).await? {
+            return Ok(slug);
+        }
+        // Deterministic disambiguation: append hex of the workflow id, keeping
+        // within the length cap. 4 hex chars, then 8 if a tenant is unlucky.
+        let hex: String = workflow_id
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .take(8)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        for take in [4usize, 8] {
+            let suffix = &hex[..take.min(hex.len())];
+            let mut base = slug.clone();
+            base.truncate(WORKFLOW_SLUG_MAX_LEN.saturating_sub(suffix.len() + 1));
+            while base.ends_with('-') {
+                base.pop();
+            }
+            let candidate = format!("{base}-{suffix}");
+            if !self.slug_taken_or_reserved(tenant_id, &candidate).await? {
+                return Ok(candidate);
+            }
+        }
+        Err(ServiceError::Conflict(format!(
+            "Could not derive a unique slug for workflow '{name}'; supply one explicitly"
+        )))
+    }
+
+    /// Validate a user-supplied slug and error if it is reserved or taken.
+    async fn ensure_slug_available(&self, tenant_id: &str, slug: &str) -> Result<(), ServiceError> {
+        use runtara_dsl::agent_meta::validate_workflow_slug;
+        validate_workflow_slug(slug)
+            .map_err(|e| ServiceError::ValidationError(format!("Invalid slug: {e}")))?;
+        if self.slug_reserved(slug) {
+            return Err(ServiceError::Conflict(format!(
+                "Slug '{slug}' collides with a native agent id"
+            )));
+        }
+        if self
+            .repository
+            .slug_exists(tenant_id, slug)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+        {
+            return Err(ServiceError::Conflict(format!(
+                "A workflow with slug '{slug}' already exists"
+            )));
+        }
+        Ok(())
+    }
+
+    fn slug_reserved(&self, slug: &str) -> bool {
+        use runtara_dsl::agent_meta::canonical_agent_id;
+        // A slug that folds onto a live native agent id would collide with the
+        // real `runtara:agent-<id>` package at composition time; the legacy
+        // "workflow-agent" placeholder stays reserved too.
+        let canonical = canonical_agent_id(slug);
+        canonical == "workflow-agent" || self.agent_catalog.has_agent(&canonical)
+    }
+
+    async fn slug_taken_or_reserved(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<bool, ServiceError> {
+        if self.slug_reserved(slug) {
+            return Ok(true);
+        }
+        self.repository
+            .slug_exists(tenant_id, slug)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))
+    }
+
+    /// Startup backfill: derive slugs for rows created before the slug column
+    /// existed. Idempotent (guarded by `slug IS NULL`); per-row failures are
+    /// logged and skipped so a bad legacy row never bricks boot. Returns the
+    /// number of rows filled.
+    pub async fn backfill_workflow_slugs(&self) -> Result<usize, ServiceError> {
+        let missing = self
+            .repository
+            .list_missing_slugs()
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+        let mut filled = 0usize;
+        for (tenant_id, workflow_id, name) in missing {
+            let name = name.unwrap_or_default();
+            let slug = match self
+                .resolve_new_slug(&tenant_id, None, &name, &workflow_id)
+                .await
+            {
+                Ok(slug) => slug,
+                Err(e) => {
+                    tracing::warn!(%tenant_id, %workflow_id, error = %e, "slug backfill: could not derive slug");
+                    continue;
+                }
+            };
+            match self
+                .repository
+                .set_slug(&tenant_id, &workflow_id, &slug)
+                .await
+            {
+                Ok(true) => filled += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(%tenant_id, %workflow_id, %slug, error = %e, "slug backfill: write failed");
+                }
+            }
+        }
+        Ok(filled)
+    }
+
+    /// Update a workflow's slug (identity-level; always allowed — a parent
+    /// that composed `agent-<oldslug>` keeps that pin until it recompiles).
+    pub async fn update_workflow_slug(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        slug: &str,
+    ) -> Result<String, ServiceError> {
+        let slug = slug.trim();
+        // Editing to the workflow's own current slug is a no-op, not a conflict.
+        if let Some(current) = self
+            .repository
+            .get_slug(tenant_id, workflow_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+            && current == slug
+        {
+            return Ok(current);
+        }
+        self.ensure_slug_available(tenant_id, slug).await?;
+        let updated = self
+            .repository
+            .set_slug(tenant_id, workflow_id, slug)
+            .await
+            .map_err(map_slug_db_error)?;
+        if !updated {
+            return Err(ServiceError::NotFound(format!(
+                "Workflow {workflow_id} not found"
+            )));
+        }
+        Ok(slug.to_string())
     }
 
     /// List workflows with pagination and optional folder filtering
@@ -833,6 +1007,16 @@ impl WorkflowService {
             ));
         }
 
+        // A clone is a NEW workflow — derive its own slug from the new name
+        // (never inherit the source's; slugs are per-tenant unique).
+        let slug = self
+            .resolve_new_slug(tenant_id, None, new_name, &new_workflow_id)
+            .await?;
+        self.repository
+            .set_slug(tenant_id, &new_workflow_id, &slug)
+            .await
+            .map_err(map_slug_db_error)?;
+
         Ok((new_workflow_id, versions_cloned))
     }
 
@@ -1117,6 +1301,20 @@ impl WorkflowService {
 }
 
 use crate::api::dto::workflows::ValidationErrorDto;
+
+/// Map a workflows-table write error to a ServiceError, folding a violation of
+/// the `idx_workflows_tenant_slug` unique index into a 409-able Conflict (the
+/// pre-checks race with concurrent writers; the index is the authority).
+fn map_slug_db_error(error: sqlx::Error) -> ServiceError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error
+            .constraint()
+            .is_some_and(|c| c == "idx_workflows_tenant_slug")
+    {
+        return ServiceError::Conflict("A workflow with this slug already exists".to_string());
+    }
+    ServiceError::DatabaseError(error.to_string())
+}
 
 #[derive(Debug)]
 #[allow(dead_code)]
