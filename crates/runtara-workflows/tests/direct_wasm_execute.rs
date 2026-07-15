@@ -1198,6 +1198,8 @@ fn run_direct_workflow_capture_attempt(
         // The battery axis exercises the blocking durable-sleep path; the
         // store-freeing lowering has its own dedicated suspend/resume test.
         false,
+        // Runtime import kept — omit-runtime has its own dedicated test.
+        false,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
@@ -2000,6 +2002,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             agent_catalog: None,
         },
         WorkflowAbi::CliRunHttp,
+        false,
         false,
     )
     .expect("direct emit succeeds");
@@ -5993,6 +5996,22 @@ fn compile_invoke_abi_artifact_configured(
     graph_json: &str,
     store_freeing_sleep: bool,
 ) -> runtara_workflows::direct_wasm::DirectCompilationResult {
+    compile_invoke_abi_artifact_full(
+        components_dir,
+        workflow_id,
+        graph_json,
+        store_freeing_sleep,
+        false,
+    )
+}
+
+fn compile_invoke_abi_artifact_full(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    store_freeing_sleep: bool,
+    omit_runtime: bool,
+) -> runtara_workflows::direct_wasm::DirectCompilationResult {
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
     // Pin BOTH knobs: these tests assert the HostImport+invoke shape and
@@ -6012,12 +6031,136 @@ fn compile_invoke_abi_artifact_configured(
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         store_freeing_sleep,
+        omit_runtime,
     )
     .expect("invoke-abi compile+compose succeeds");
     // Keep the tempdir alive by leaking it — the executor reads the artifact
     // lazily and the test owns the whole lifetime anyway.
     std::mem::forget(temp);
     result
+}
+
+/// A pure, non-durable workflow — a single Finish echoing the input, no
+/// runtime-requiring feature. The degenerate agent case.
+const PURE_PASSTHROUGH: &str = r#"{
+  "name": "Pure Passthrough",
+  "durable": false,
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "result": { "valueType": "reference", "value": "data.input" } }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+/// Workflow-as-agent slice d: a PURE, non-durable, invoke-ABI workflow compiled
+/// with the omit-runtime gate drops the `runtara:workflow-runtime/runtime`
+/// import entirely and executes with NO runtime host attached — its terminal
+/// result travels solely in-band. This is the composition-safe, agent-shaped
+/// artifact the workflow-as-agent path builds on.
+#[test]
+fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_host() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled = compile_invoke_abi_artifact_full(
+        &components_dir,
+        "omit-runtime-pure",
+        PURE_PASSTHROUGH,
+        false,
+        true,
+    );
+
+    // Compile-side proof: the omit decision took, and the world imports no runtime.
+    assert!(
+        compiled.omit_runtime,
+        "a pure durable:false invoke workflow must omit the runtime import"
+    );
+    assert!(
+        !compiled
+            .component_artifacts
+            .world_wit
+            .contains("workflow-runtime/runtime"),
+        "world must not import the runtime:\n{}",
+        compiled.component_artifacts.world_wit
+    );
+
+    // Runtime-side proof: it executes with NO runtime host attached, completing
+    // in-band (no runtime.complete fires). Had any runtime.* call been emitted,
+    // the composed artifact would reference a poisoned import index and fail
+    // ComponentEncoder validation at compile — so reaching here already proves
+    // zero runtime calls; running with `runtime: None` proves it at execution.
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load omit-runtime artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: None,
+                },
+                br#"{"input":"agent-shaped"}"#.to_vec(),
+            )
+            .await
+    });
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("omit-runtime workflow must complete in-band, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "result": "agent-shaped" })
+    );
+
+    // Control: the SAME workflow with the runtime kept still imports it and
+    // returns the same output — the omit is purely a shape/side-effect change.
+    let kept = compile_invoke_abi_artifact_full(
+        &components_dir,
+        "omit-runtime-off",
+        PURE_PASSTHROUGH,
+        false,
+        false,
+    );
+    assert!(!kept.omit_runtime);
+    assert!(
+        kept.component_artifacts
+            .world_wit
+            .contains("workflow-runtime/runtime"),
+        "control artifact must keep the runtime import"
+    );
+
+    // Soundness: a workflow that WOULD call runtime keeps the import even when
+    // omit is requested — the needs_runtime guard makes the effective decision.
+    let agentful = compile_invoke_abi_artifact_full(
+        &components_dir,
+        "omit-runtime-guarded",
+        AGENT_CACHED_REPLAY,
+        false,
+        true,
+    );
+    assert!(
+        !agentful.omit_runtime,
+        "a runtime-needing workflow must keep the runtime import despite the omit request"
+    );
+    assert!(
+        agentful
+            .component_artifacts
+            .world_wit
+            .contains("workflow-runtime/runtime")
+    );
 }
 
 #[test]

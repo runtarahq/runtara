@@ -149,66 +149,100 @@ impl DirectCoreImportIndices {
         self,
         abi: crate::direct_wasm::component::WorkflowAbi,
         store_freeing_sleep: bool,
+        omit_runtime: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
             abi,
             store_freeing_sleep,
-            runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
-            runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
-            runtime_fail: require_import(self.runtime_fail, "runtime.fail")?,
-            runtime_custom_event: require_import(
+            omit_runtime,
+            runtime_load_input: require_runtime(
+                self.runtime_load_input,
+                "runtime.load-input",
+                omit_runtime,
+            )?,
+            runtime_complete: require_runtime(
+                self.runtime_complete,
+                "runtime.complete",
+                omit_runtime,
+            )?,
+            runtime_fail: require_runtime(self.runtime_fail, "runtime.fail", omit_runtime)?,
+            runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
+                omit_runtime,
             )?,
-            runtime_debug_mode_enabled: require_import(
+            runtime_debug_mode_enabled: require_runtime(
                 self.runtime_debug_mode_enabled,
                 "runtime.debug-mode-enabled",
+                omit_runtime,
             )?,
-            runtime_breakpoint_pause: require_import(
+            runtime_breakpoint_pause: require_runtime(
                 self.runtime_breakpoint_pause,
                 "runtime.breakpoint-pause",
+                omit_runtime,
             )?,
-            runtime_heartbeat: require_import(self.runtime_heartbeat, "runtime.heartbeat")?,
-            runtime_instance_id: require_import(self.runtime_instance_id, "runtime.instance-id")?,
-            runtime_is_cancelled: require_import(
+            runtime_heartbeat: require_runtime(
+                self.runtime_heartbeat,
+                "runtime.heartbeat",
+                omit_runtime,
+            )?,
+            runtime_instance_id: require_runtime(
+                self.runtime_instance_id,
+                "runtime.instance-id",
+                omit_runtime,
+            )?,
+            runtime_is_cancelled: require_runtime(
                 self.runtime_is_cancelled,
                 "runtime.is-cancelled",
+                omit_runtime,
             )?,
-            runtime_check_signals: require_import(
+            runtime_check_signals: require_runtime(
                 self.runtime_check_signals,
                 "runtime.check-signals",
+                omit_runtime,
             )?,
-            runtime_poll_custom_signal: require_import(
+            runtime_poll_custom_signal: require_runtime(
                 self.runtime_poll_custom_signal,
                 "runtime.poll-custom-signal",
+                omit_runtime,
             )?,
-            runtime_now_ms: require_import(self.runtime_now_ms, "runtime.now-ms")?,
-            runtime_get_checkpoint: require_import(
+            runtime_now_ms: require_runtime(self.runtime_now_ms, "runtime.now-ms", omit_runtime)?,
+            runtime_get_checkpoint: require_runtime(
                 self.runtime_get_checkpoint,
                 "runtime.get-checkpoint",
+                omit_runtime,
             )?,
-            runtime_checkpoint: require_import(self.runtime_checkpoint, "runtime.checkpoint")?,
-            runtime_handle_checkpoint_signal: require_import(
+            runtime_checkpoint: require_runtime(
+                self.runtime_checkpoint,
+                "runtime.checkpoint",
+                omit_runtime,
+            )?,
+            runtime_handle_checkpoint_signal: require_runtime(
                 self.runtime_handle_checkpoint_signal,
                 "runtime.handle-checkpoint-signal",
+                omit_runtime,
             )?,
-            runtime_record_retry_attempt: require_import(
+            runtime_record_retry_attempt: require_runtime(
                 self.runtime_record_retry_attempt,
                 "runtime.record-retry-attempt",
+                omit_runtime,
             )?,
-            runtime_durable_sleep: require_import(
+            runtime_durable_sleep: require_runtime(
                 self.runtime_durable_sleep,
                 "runtime.durable-sleep",
+                omit_runtime,
             )?,
-            runtime_blocking_sleep: require_import(
+            runtime_blocking_sleep: require_runtime(
                 self.runtime_blocking_sleep,
                 "runtime.blocking-sleep",
+                omit_runtime,
             )?,
-            runtime_durable_sleep_checkpoint: require_import(
+            runtime_durable_sleep_checkpoint: require_runtime(
                 self.runtime_durable_sleep_checkpoint,
                 "runtime.durable-sleep-checkpoint",
+                omit_runtime,
             )?,
             stdlib_init_manifest: require_import(
                 self.stdlib_init_manifest,
@@ -572,6 +606,11 @@ pub(super) struct DirectCoreFunctionIndices {
     /// Store and reschedules a relaunch. Only meaningful under the invoke
     /// export (the only shape whose success arm can carry a wake).
     pub(super) store_freeing_sleep: bool,
+    /// When true, the component imports no runtime; the terminal `complete`/
+    /// `fail` are NOT lowered and the result travels solely via the invoke
+    /// return value. Runtime index fields hold a poison sentinel and must never
+    /// be called (see [`RUNTIME_OMITTED_POISON`]).
+    pub(super) omit_runtime: bool,
     pub(super) runtime_load_input: u32,
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,
@@ -703,6 +742,28 @@ fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileEr
     value.ok_or_else(|| {
         DirectCompileError::Component(format!("missing {name} import in direct world"))
     })
+}
+
+/// Poison function index for a `runtime.*` slot when the component omits the
+/// runtime import. The omit path (a pure, agent-shaped workflow) lowers NO
+/// `runtime.*` call, so these slots are never referenced; if a lowerer emits
+/// one anyway, the call targets an out-of-bounds function index and the
+/// `ComponentEncoder::validate(true)` pass fails loudly at compile — a safety
+/// net for a `needs_runtime` misclassification, never a silent miscompile.
+const RUNTIME_OMITTED_POISON: u32 = u32::MAX;
+
+/// `require_import` for a runtime function, tolerant of its absence under
+/// `omit_runtime` (returns the poison index instead of erroring).
+fn require_runtime(
+    value: Option<u32>,
+    name: &str,
+    omit_runtime: bool,
+) -> Result<u32, DirectCompileError> {
+    if omit_runtime {
+        Ok(value.unwrap_or(RUNTIME_OMITTED_POISON))
+    } else {
+        require_import(value, name)
+    }
 }
 
 fn is_runtime_import(

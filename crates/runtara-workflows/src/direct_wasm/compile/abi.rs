@@ -532,9 +532,16 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
+            // Additive host-side `runtime.fail` unless the runtime is omitted
+            // (agent-shaped component) — then the Err return value is authoritative.
+            let fail_index = if indices.omit_runtime {
+                None
+            } else {
+                Some(indices.runtime_fail)
+            };
             emit_invoke_err_return_from_retptr(
                 function,
-                Some(indices.runtime_fail),
+                fail_index,
                 indices.stdlib_invoke_error_fields,
             );
             function.instruction(&Instruction::End);

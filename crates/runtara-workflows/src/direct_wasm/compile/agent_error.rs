@@ -581,11 +581,14 @@ fn emit_terminal_run_plan_mapping(
         body.instruction(&Instruction::Br(branch_depth));
     } else {
         // Terminal completion from an onError handler — same per-ABI exit
-        // shape as the entry function's own tail.
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_complete));
+        // shape as the entry function's own tail, including the omit-runtime
+        // suppression of the additive `runtime.complete`.
+        if !indices.omit_runtime {
+            body.instruction(&Instruction::LocalGet(output_ptr_local));
+            body.instruction(&Instruction::LocalGet(output_len_local));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.runtime_complete));
+        }
         match indices.abi {
             crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
                 load_retptr_tag(body);

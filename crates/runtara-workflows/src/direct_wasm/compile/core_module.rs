@@ -51,6 +51,12 @@ pub(super) struct DirectCoreConfig {
     /// the blocking, byte-preserved path — and is set via
     /// [`Self::with_store_freeing_sleep`].
     pub(super) store_freeing_sleep: bool,
+    /// When true, the component imports no `runtara:workflow-runtime/runtime`,
+    /// so the emitter must NOT lower any `runtime.*` call — the terminal
+    /// `complete`/`fail` are dropped and the result travels solely in-band via
+    /// the invoke return value. Only valid for a pure workflow under the invoke
+    /// export (see [`Self::with_omit_runtime`]).
+    pub(super) omit_runtime: bool,
 }
 
 impl DirectCoreConfig {
@@ -89,6 +95,12 @@ impl DirectCoreConfig {
         self
     }
 
+    /// Compile with no runtime import (agent-shaped; opt-in, default off).
+    pub(super) fn with_omit_runtime(mut self, enabled: bool) -> Self {
+        self.omit_runtime = enabled;
+        self
+    }
+
     fn new_inner(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
@@ -99,6 +111,7 @@ impl DirectCoreConfig {
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
             store_freeing_sleep: false,
+            omit_runtime: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -172,7 +185,8 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    let import_indices = import_indices.require_all(config.abi, config.store_freeing_sleep)?;
+    let import_indices =
+        import_indices.require_all(config.abi, config.store_freeing_sleep, config.omit_runtime)?;
 
     for (name, export) in &world.exports {
         match export {
@@ -537,19 +551,24 @@ fn direct_run_function(
         None,
     );
 
-    body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));
-    push_retptr_arg(&mut body);
-    body.instruction(&Instruction::Call(indices.runtime_complete));
+    // The additive `runtime.complete` records terminal status/output host-side
+    // during the migration. An omit-runtime (agent-shaped) component has no
+    // runtime import to call, so it is suppressed and the invoke return value
+    // is the SOLE authoritative terminal result. Only valid under the invoke
+    // export (omit_runtime is never set for CliRunHttp).
+    if !config.omit_runtime {
+        body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));
+        push_retptr_arg(&mut body);
+        body.instruction(&Instruction::Call(indices.runtime_complete));
+    }
     match config.abi {
         WorkflowAbi::CliRunHttp => {
             load_retptr_tag(&mut body);
         }
         WorkflowAbi::InvokeHostImports => {
-            // runtime.complete still fires above (additive host-side status
-            // recording during the migration; its retptr result is ignored —
-            // the return value below is authoritative). The terminal result
-            // travels as the return value: Ok(outcome::completed(output)).
+            // The terminal result travels as the return value:
+            // Ok(outcome::completed(output)).
             emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
         }
     }
