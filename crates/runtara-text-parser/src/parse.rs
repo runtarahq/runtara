@@ -13,6 +13,7 @@ fn plain_string_field() -> SchemaField {
         example: None,
         items: None,
         enum_values: None,
+        integration: None,
         label: None,
         placeholder: None,
         order: None,
@@ -49,6 +50,8 @@ pub fn parse_text(input: &str, field: &SchemaField) -> ParseResult {
         SchemaFieldType::File => ParseResult::Retry(
             "File upload is not supported in text channels. Please use the web interface.".into(),
         ),
+        // A connection binding is a connection-id string; parse it as text.
+        SchemaFieldType::Connection => parse_string(trimmed, field),
     }
 }
 

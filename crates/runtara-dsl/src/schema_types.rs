@@ -1702,6 +1702,14 @@ pub enum SchemaFieldType {
     Object,
     /// Base64-encoded file data (FileData structure with content, filename, mimeType)
     File,
+    /// A connection binding: the field value is a connection id (an opaque,
+    /// per-tenant handle the host resolves to credentials at outbound-call
+    /// time — never a secret). Use `integration` to constrain which integration
+    /// the bound connection must belong to. This is how a workflow declares the
+    /// connections a CALLER must supply — including a workflow compiled as an
+    /// agent, whose `connection`-typed inputs ARE its capability's connection
+    /// requirements. See docs/workflow-agent-connections.md.
+    Connection,
 }
 
 /// A typed variable definition with its value.
@@ -1771,6 +1779,12 @@ pub struct SchemaField {
     /// Allowed values (enum)
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<serde_json::Value>>,
+
+    /// For `type: "connection"` — the integration id the bound connection must
+    /// belong to (e.g. `hubspot`, `s3`). Drives the connection-picker filter in
+    /// the editor and tenant-ownership + integration validation at bind time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration: Option<String>,
 
     // -- Form rendering extensions (all optional, backward-compatible) --
 
@@ -2151,4 +2165,72 @@ pub struct SplitConfig {
     /// subgraph receives an array value instead of an individual element.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<u32>,
+}
+
+#[cfg(test)]
+mod connection_field_tests {
+    use super::*;
+
+    #[test]
+    fn connection_field_parses_with_integration() {
+        let field: SchemaField = serde_json::from_str(
+            r#"{ "type": "connection", "integration": "hubspot", "required": true }"#,
+        )
+        .expect("connection field parses");
+        assert!(matches!(field.field_type, SchemaFieldType::Connection));
+        assert_eq!(field.integration.as_deref(), Some("hubspot"));
+        assert!(field.required);
+    }
+
+    #[test]
+    fn connection_field_round_trips_and_type_name_is_connection() {
+        let field = SchemaField {
+            field_type: SchemaFieldType::Connection,
+            integration: Some("s3".to_string()),
+            required: true,
+            description: None,
+            default: None,
+            example: None,
+            items: None,
+            enum_values: None,
+            label: None,
+            placeholder: None,
+            order: None,
+            format: None,
+            min: None,
+            max: None,
+            pattern: None,
+            properties: None,
+            visible_when: None,
+            nullable: None,
+        };
+        let json = serde_json::to_value(&field).expect("serializes");
+        assert_eq!(json["type"], "connection");
+        assert_eq!(json["integration"], "s3");
+        assert_eq!(SchemaFieldType::Connection.as_str(), "connection");
+        // A non-connection field omits `integration`.
+        assert!(serde_json::to_value(SchemaField {
+            field_type: SchemaFieldType::String,
+            integration: None,
+            required: false,
+            description: None,
+            default: None,
+            example: None,
+            items: None,
+            enum_values: None,
+            label: None,
+            placeholder: None,
+            order: None,
+            format: None,
+            min: None,
+            max: None,
+            pattern: None,
+            properties: None,
+            visible_when: None,
+            nullable: None,
+        })
+        .expect("serializes")
+        .get("integration")
+        .is_none());
+    }
 }

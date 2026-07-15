@@ -4901,6 +4901,7 @@ fn schema_field_type_name(field_type: &SchemaFieldType) -> &'static str {
         SchemaFieldType::Array => "array",
         SchemaFieldType::Object => "object",
         SchemaFieldType::File => "file",
+        SchemaFieldType::Connection => "connection",
     }
 }
 
@@ -5994,6 +5995,7 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            integration: None,
             label: None,
             placeholder: None,
             order: None,
