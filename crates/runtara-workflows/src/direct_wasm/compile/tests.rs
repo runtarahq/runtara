@@ -10516,3 +10516,29 @@ fn workflow_abi_env_lever_defaults_invoke() {
         WorkflowAbi::InvokeHostImports
     );
 }
+
+#[test]
+fn generated_workflow_slugs_are_wit_valid_packages() {
+    // The slug plan allows leading digits (docs/workflow-slug-plan.md,
+    // decision 3) on the premise that wit-parser accepts digit-led words in
+    // package names. This asserts that premise against the REAL parser via
+    // the same `agent_wit_package` template the composition path uses — if a
+    // wit-parser upgrade tightens the grammar, this fails here instead of as
+    // an opaque compile error on a user's workflow.
+    for name in ["2FA Sync", "My 2nd Flow", "Order Sync", "", "123 steps"] {
+        let slug = runtara_dsl::agent_meta::generate_workflow_slug(
+            name,
+            "a1b2c3d4-e5f6-7890-abcd-ef0123456789",
+        );
+        runtara_dsl::agent_meta::validate_workflow_slug(&slug)
+            .unwrap_or_else(|e| panic!("slug {slug:?} from {name:?} invalid: {e}"));
+        let wit = super::agent_wit_package(&slug);
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str("runtara-agent-types.wit", super::AGENT_TYPES_WIT)
+            .expect("agent types WIT parses");
+        resolve
+            .push_str(format!("runtara-agent-{slug}.wit"), &wit)
+            .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
+    }
+}

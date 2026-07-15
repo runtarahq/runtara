@@ -1826,6 +1826,127 @@ pub fn canonical_agent_id(id: &str) -> String {
     id.to_ascii_lowercase().replace('_', "-")
 }
 
+/// Maximum length of a workflow slug (the capability id of a
+/// workflow-as-agent). WIT imposes no cap; this protects the
+/// `runtara_agent_<snake>.wasm` staging filenames and keeps ids readable.
+pub const WORKFLOW_SLUG_MAX_LEN: usize = 64;
+
+/// Why a user-supplied workflow slug was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlugError {
+    /// The slug is empty.
+    Empty,
+    /// The slug exceeds [`WORKFLOW_SLUG_MAX_LEN`].
+    TooLong { len: usize },
+    /// The slug contains a character outside `[a-z0-9-]`.
+    InvalidChar(char),
+    /// The slug has a leading/trailing hyphen or a `--` run (every
+    /// hyphen-separated part must be non-empty — wit-parser's rule).
+    EdgeOrDoubleHyphen,
+}
+
+impl std::fmt::Display for SlugError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "slug must not be empty"),
+            Self::TooLong { len } => write!(
+                f,
+                "slug is {len} characters; the maximum is {WORKFLOW_SLUG_MAX_LEN}"
+            ),
+            Self::InvalidChar(ch) => write!(
+                f,
+                "slug may only contain lowercase letters, digits, and hyphens (found {ch:?})"
+            ),
+            Self::EdgeOrDoubleHyphen => write!(
+                f,
+                "slug must not start or end with a hyphen or contain consecutive hyphens"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SlugError {}
+
+/// Derive a workflow's slug from its name — the WIT-safe capability id a
+/// workflow-as-agent exports as `runtara:agent-<slug>/capabilities`.
+///
+/// Transform: lowercase; every run of characters outside `[a-z0-9]` collapses
+/// to a single `-`; edge hyphens trimmed; capped at
+/// [`WORKFLOW_SLUG_MAX_LEN`] (re-trimming a hyphen exposed by truncation).
+/// An un-nameable result falls back to `wf-<first 8 hex of workflow_id>`.
+///
+/// Leading digits are allowed (`2fa-sync` is a valid slug): wit-parser
+/// accepts digit-led words in package names — asserted by a test in
+/// `runtara-workflows` against the real parser. The output is always
+/// idempotent under [`canonical_agent_id`] and passes
+/// [`validate_workflow_slug`].
+pub fn generate_workflow_slug(name: &str, workflow_id: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut pending_hyphen = false;
+    for ch in name.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            if pending_hyphen && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch);
+            pending_hyphen = false;
+        } else {
+            pending_hyphen = true;
+        }
+    }
+
+    if slug.len() > WORKFLOW_SLUG_MAX_LEN {
+        // Only ASCII `[a-z0-9-]` ever reaches here, so byte truncation is safe.
+        slug.truncate(WORKFLOW_SLUG_MAX_LEN);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+
+    if slug.is_empty() {
+        let hex: String = workflow_id
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .take(8)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        slug = if hex.is_empty() {
+            "wf".to_string()
+        } else {
+            format!("wf-{hex}")
+        };
+    }
+
+    slug
+}
+
+/// Validate a user-supplied workflow slug (author/edit-time gate).
+///
+/// Rules: non-empty; at most [`WORKFLOW_SLUG_MAX_LEN`] characters; only
+/// `[a-z0-9-]`; no leading/trailing hyphen and no `--` run (each
+/// hyphen-separated part non-empty — exactly wit-parser's rule, so
+/// `agent-<slug>` is a valid WIT package name and
+/// `canonical_agent_id(slug) == slug`). Leading digits are allowed.
+pub fn validate_workflow_slug(slug: &str) -> Result<(), SlugError> {
+    if slug.is_empty() {
+        return Err(SlugError::Empty);
+    }
+    if slug.len() > WORKFLOW_SLUG_MAX_LEN {
+        return Err(SlugError::TooLong { len: slug.len() });
+    }
+    if let Some(ch) = slug
+        .chars()
+        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+    {
+        return Err(SlugError::InvalidChar(ch));
+    }
+    if slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
+        return Err(SlugError::EdgeOrDoubleHyphen);
+    }
+    Ok(())
+}
+
 /// A snapshot of every agent the runtime knows about, indexed by id.
 ///
 /// The catalog is the runtime replacement for `runtara-agents::static_registry`
@@ -2429,6 +2550,104 @@ mod catalog_tests {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod slug_tests {
+    use super::*;
+
+    const WF_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
+
+    #[test]
+    fn generate_slugifies_names() {
+        assert_eq!(generate_workflow_slug("Order Sync", WF_ID), "order-sync");
+        assert_eq!(
+            generate_workflow_slug("  HubSpot -> S3 (nightly!) ", WF_ID),
+            "hubspot-s3-nightly"
+        );
+        // Leading digits survive — wit-parser accepts digit-led words
+        // (asserted against the real parser in runtara-workflows).
+        assert_eq!(generate_workflow_slug("2FA Sync", WF_ID), "2fa-sync");
+        assert_eq!(generate_workflow_slug("My 2nd Flow", WF_ID), "my-2nd-flow");
+        // Non-ASCII collapses into hyphens, never leaks through.
+        assert_eq!(generate_workflow_slug("café Ünïcode", WF_ID), "caf-n-code");
+    }
+
+    #[test]
+    fn generate_caps_length_and_retrims() {
+        let long = "a".repeat(60) + " tail-of-name-that-overflows";
+        let slug = generate_workflow_slug(&long, WF_ID);
+        assert!(slug.len() <= WORKFLOW_SLUG_MAX_LEN, "{slug}");
+        assert!(!slug.ends_with('-'), "truncation must re-trim: {slug}");
+        // A hyphen landing exactly on the cap boundary is trimmed.
+        let boundary = "a".repeat(WORKFLOW_SLUG_MAX_LEN - 1) + " b";
+        let slug = generate_workflow_slug(&boundary, WF_ID);
+        assert_eq!(slug, "a".repeat(WORKFLOW_SLUG_MAX_LEN - 1));
+    }
+
+    #[test]
+    fn generate_falls_back_for_unnameable() {
+        assert_eq!(generate_workflow_slug("", WF_ID), "wf-a1b2c3d4");
+        assert_eq!(generate_workflow_slug("!!! ***", WF_ID), "wf-a1b2c3d4");
+        // Even a hex-free workflow id yields something non-empty.
+        assert_eq!(generate_workflow_slug("", "zzzz"), "wf");
+    }
+
+    #[test]
+    fn generated_slugs_validate_and_are_canonical_fixpoints() {
+        for name in [
+            "Order Sync",
+            "2FA sync",
+            "",
+            "!!!",
+            "x",
+            "A--B__C  D",
+            "Ünïcode Überflow",
+            &("very long ".repeat(30)),
+        ] {
+            let slug = generate_workflow_slug(name, WF_ID);
+            validate_workflow_slug(&slug)
+                .unwrap_or_else(|e| panic!("generated slug {slug:?} from {name:?} invalid: {e}"));
+            assert_eq!(
+                canonical_agent_id(&slug),
+                slug,
+                "slug must be a canonical_agent_id fixpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_shapes() {
+        assert_eq!(validate_workflow_slug(""), Err(SlugError::Empty));
+        assert_eq!(
+            validate_workflow_slug("has_underscore"),
+            Err(SlugError::InvalidChar('_'))
+        );
+        assert_eq!(
+            validate_workflow_slug("Upper-Case"),
+            Err(SlugError::InvalidChar('U'))
+        );
+        assert_eq!(
+            validate_workflow_slug("-edge"),
+            Err(SlugError::EdgeOrDoubleHyphen)
+        );
+        assert_eq!(
+            validate_workflow_slug("edge-"),
+            Err(SlugError::EdgeOrDoubleHyphen)
+        );
+        assert_eq!(
+            validate_workflow_slug("dou--ble"),
+            Err(SlugError::EdgeOrDoubleHyphen)
+        );
+        let too_long = "a".repeat(WORKFLOW_SLUG_MAX_LEN + 1);
+        assert!(matches!(
+            validate_workflow_slug(&too_long),
+            Err(SlugError::TooLong { .. })
+        ));
+        // Leading digits are explicitly allowed.
+        assert_eq!(validate_workflow_slug("2fa-sync"), Ok(()));
+        assert_eq!(validate_workflow_slug("order-sync"), Ok(()));
+    }
+}
 
 #[cfg(test)]
 mod tests {
