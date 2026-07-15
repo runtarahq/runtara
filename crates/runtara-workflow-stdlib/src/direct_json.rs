@@ -2275,6 +2275,49 @@ impl DirectJsonManifest {
         serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
     }
 
+    /// Resolve an Agent's connection to ONE concrete connection id, evaluated
+    /// against the execution `source`.
+    ///
+    /// A resolvable `connection_ref` (a `MappingValue`) wins over the literal
+    /// `connection_id`: it lets a step bind to a caller-supplied `connection`
+    /// input, rotate connections, or select one per record. Returns the id as
+    /// UTF-8 bytes, or an EMPTY vec when the agent has no connection or the ref
+    /// resolves to null/absent — the caller then writes no connection argument.
+    ///
+    /// This is the runtime source for the agent-invoke `connection` argument,
+    /// which every agent's `invoke` glue merges into `input._connection`; using
+    /// it uniformly means memory and MCP-tool agents (whose input is not a
+    /// mapping) honor refs just like a primary Agent step.
+    pub fn resolve_connection_id(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+
+        if let Some(connection_ref) = agent.connection_ref.as_ref() {
+            let source: Value = serde_json::from_slice(source).map_err(|err| {
+                format!("failed to parse source for connection resolution: {err}")
+            })?;
+            let resolved = apply_mapping_value(connection_ref, &source)?;
+            return Ok(match resolved {
+                Value::String(id) => id.into_bytes(),
+                // A ref that resolves to null/absent (e.g. an optional input the
+                // caller did not supply) yields no connection.
+                Value::Null => Vec::new(),
+                other => {
+                    return Err(format!(
+                        "connection_ref for Agent {agent_id} must resolve to a string id, got {other}"
+                    ));
+                }
+            });
+        }
+
+        Ok(match agent.connection_id.as_deref() {
+            Some(id) if !id.is_empty() => id.as_bytes().to_vec(),
+            _ => Vec::new(),
+        })
+    }
+
     /// Build the generated-code-compatible durable cache key for an Agent step.
     pub fn agent_cache_key(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
@@ -3563,6 +3606,7 @@ fn collect_graph_manifest(
                     agent_id: agent.agent_id.clone(),
                     capability_id: agent.capability_id.clone(),
                     connection_id: agent.connection_id.clone(),
+                    connection_ref: agent.connection_ref.clone(),
                     input_mapping_id: agent.input_mapping_id,
                     required_inputs: agent.required_inputs.clone(),
                 },
@@ -6611,6 +6655,10 @@ struct AgentWire {
     capability_id: String,
     #[serde(default)]
     connection_id: Option<String>,
+    /// Resolvable connection binding (a `MappingValue`), evaluated against the
+    /// execution source at runtime; wins over `connection_id` when present.
+    #[serde(default)]
+    connection_ref: Option<Value>,
     input_mapping_id: u32,
     #[serde(default)]
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
@@ -6712,6 +6760,7 @@ struct DirectJsonAgent {
     agent_id: String,
     capability_id: String,
     connection_id: Option<String>,
+    connection_ref: Option<Value>,
     input_mapping_id: u32,
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
 }
@@ -7862,41 +7911,62 @@ mod tests {
     }
 
     #[test]
-    fn resolvable_connection_ref_mapping_resolves_to_injected_connection() {
-        // The exact input-mapping shape the emitter produces for a step whose
-        // connection is a `connection_ref` (see
-        // `connection_ref_input_entries` in runtara-workflows): a `_connection`
-        // composite plus a top-level `connection_id`, both pointing at a
-        // caller-supplied `connection` input in `data`. This proves the id is
-        // resolved from the runtime source into the shape the agent reads
-        // (`RawConnection`) — the same shape the stdlib injects for a literal.
-        let manifest = DirectJsonManifest::parse(&manifest(json!({
-            "_connection": {
-                "valueType": "composite",
-                "value": {
-                    "connection_id": { "valueType": "reference", "value": "data.crm" },
-                    "integration_id": { "valueType": "immediate", "value": "" },
-                    "parameters": { "valueType": "immediate", "value": {} }
-                }
-            },
-            "connection_id": { "valueType": "reference", "value": "data.crm" }
-        })))
-        .expect("manifest");
+    fn resolve_connection_id_prefers_ref_then_literal_then_none() {
+        // Three agents: one bound via a resolvable `connection_ref` to a
+        // caller-supplied `connection` input, one with a literal id, one with
+        // no connection. `resolve_connection_id` is the runtime source for the
+        // agent-invoke `connection` argument, so this is what threads a rotated
+        // / caller-supplied id to every agent kind uniformly.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "agents": [
+                    { "id": 0, "stepId": "a0", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "hubspot", "capabilityId": "create-contact", "inputMappingId": 0,
+                      "connectionRef": { "valueType": "reference", "value": "data.crm" } },
+                    { "id": 1, "stepId": "a1", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "hubspot", "capabilityId": "create-contact", "inputMappingId": 0,
+                      "connectionId": "conn-literal" },
+                    { "id": 2, "stepId": "a2", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "utils", "capabilityId": "noop", "inputMappingId": 0 }
+                ],
+                "mappings": [{ "id": 0, "stepId": "a0", "stepType": "Agent",
+                    "purpose": "agent.inputMapping", "value": {} }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
         let source = build_source(br#"{"crm":"conn-live-42"}"#, b"{}", b"{}").expect("source");
 
-        let output = manifest.apply_mapping(0, &source).expect("mapping output");
-        let output: Value = serde_json::from_slice(&output).expect("output json");
-
+        // Ref resolves from the runtime input.
         assert_eq!(
-            output,
-            json!({
-                "_connection": {
-                    "connection_id": "conn-live-42",
-                    "integration_id": "",
-                    "parameters": {}
-                },
-                "connection_id": "conn-live-42"
-            })
+            manifest
+                .resolve_connection_id(0, &source)
+                .expect("resolve ref"),
+            b"conn-live-42".to_vec()
+        );
+        // Literal id passes through.
+        assert_eq!(
+            manifest
+                .resolve_connection_id(1, &source)
+                .expect("resolve literal"),
+            b"conn-literal".to_vec()
+        );
+        // No connection → empty (caller writes no connection argument).
+        assert!(
+            manifest
+                .resolve_connection_id(2, &source)
+                .expect("resolve none")
+                .is_empty()
+        );
+
+        // A ref that resolves to an absent input yields no connection.
+        let empty_source = build_source(b"{}", b"{}", b"{}").expect("source");
+        assert!(
+            manifest
+                .resolve_connection_id(0, &empty_source)
+                .expect("resolve absent")
+                .is_empty()
         );
     }
 
