@@ -216,7 +216,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_result_key));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             load_retptr_list(
                 body,
                 DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
@@ -285,7 +285,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_envelope));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             load_retptr_list(
                 body,
                 DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
@@ -302,7 +302,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             body.instruction(&Instruction::End); // fresh-failure If
             body.instruction(&Instruction::End); // hit/miss If
         } else {

@@ -1004,7 +1004,7 @@ fn emit_split_durable_output_from_result(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_output_from_result));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 }
 
@@ -1124,7 +1124,7 @@ pub(super) fn emit_split_append_error_payload_and_continue(
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_split_append_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(
         body,
         DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,

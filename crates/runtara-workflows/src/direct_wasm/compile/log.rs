@@ -92,14 +92,14 @@ pub(super) fn emit_log_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::I32Const(log_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_log));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
     emit_build_source(

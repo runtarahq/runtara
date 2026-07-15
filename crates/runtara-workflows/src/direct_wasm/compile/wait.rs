@@ -74,7 +74,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     // instance_id = runtime.instance-id()
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_instance_id));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     // signal_id = ai-wait-tool-signal-id(ai_step, instance, label, counter, source)
@@ -87,7 +87,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_ai_wait_tool_signal_id));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(
         body,
         DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
@@ -102,20 +102,20 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
     push_segment_args(body, &static_data.external_input_requested_kind);
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     // poll_interval = wait-poll-interval-ms(wait_step)
     push_segment_args(body, wait_step_segment);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
 
@@ -125,29 +125,29 @@ pub(super) fn emit_ai_wait_tool_arm(
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_poll_custom_signal));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
     body.instruction(&Instruction::BrIf(1));
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::Br(0));
     body.instruction(&Instruction::End);
@@ -161,7 +161,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_ai_wait_tool_result));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, tool_result_ptr_local, tool_result_len_local);
 }
 
@@ -185,7 +185,7 @@ pub(super) fn emit_wait_on_wait_error_and_fail(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_on_wait_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, error_ptr_local, error_len_local);
     emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
 }
@@ -237,7 +237,7 @@ pub(super) fn emit_wait_for_signal_plan(
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_instance_id));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, step_id_segment);
@@ -298,7 +298,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::Else);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::I64Add);
@@ -391,7 +391,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     push_segment_args(body, step_id_segment);
     push_retptr_arg(body);
@@ -411,24 +411,24 @@ pub(super) fn emit_wait_for_signal_plan(
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_poll_custom_signal));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
     body.instruction(&Instruction::BrIf(1));
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     emit_wait_timeout_check(
         body,
@@ -458,7 +458,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::Br(0));
     body.instruction(&Instruction::End);
@@ -703,7 +703,7 @@ fn emit_wait_timeout_check(
     body.instruction(&Instruction::If(BlockType::Empty));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::I64GeU);
@@ -722,7 +722,7 @@ fn emit_wait_timeout_check(
     } else {
         body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_error));
     }
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, error_ptr_local, error_len_local);
     if error_plan.is_some() {
         // GAP-14: route the WAIT_TIMEOUT error to the step's onError handler.

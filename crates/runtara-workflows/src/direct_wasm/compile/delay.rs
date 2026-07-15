@@ -117,7 +117,7 @@ pub(super) fn emit_delay_plan(
     } else {
         indices.runtime_blocking_sleep
     }));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::I32Const(delay_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
@@ -125,7 +125,7 @@ pub(super) fn emit_delay_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_delay));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 
     emit_step_debug_event(

@@ -105,7 +105,7 @@ pub(super) fn emit_agent_retry_delay(
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_retry_delay_ms));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
 }
@@ -129,7 +129,7 @@ pub(super) fn emit_agent_retry_sleep(
         body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
         load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
 
         body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
@@ -140,11 +140,11 @@ pub(super) fn emit_agent_retry_sleep(
     if durable_checkpoint {
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
     } else {
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
     }
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
@@ -154,7 +154,7 @@ pub(super) fn emit_agent_retry_sleep(
     } else {
         indices.runtime_blocking_sleep
     }));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -174,7 +174,7 @@ pub(super) fn emit_agent_record_retry_attempt(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_record_retry_attempt));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 }
 
 pub(super) fn emit_agent_retry_error_info(
@@ -199,7 +199,7 @@ pub(super) fn emit_agent_retry_error_info(
     push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_retry_error_info));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i32_load(body, DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET);
     body.instruction(&Instruction::LocalSet(output_ptr_local));
     push_retptr_i32_load(body, DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET);

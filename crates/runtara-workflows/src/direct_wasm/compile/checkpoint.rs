@@ -66,11 +66,11 @@ fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCore
     push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);

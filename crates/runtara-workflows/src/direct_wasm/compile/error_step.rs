@@ -63,7 +63,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_error_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, workflow_error_kind);
@@ -71,7 +71,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     emit_step_debug_event(
         body,
@@ -91,7 +91,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     if let Some(failure_target) = failure_target {

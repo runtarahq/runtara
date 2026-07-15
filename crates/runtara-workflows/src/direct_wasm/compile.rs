@@ -659,7 +659,24 @@ pub fn compile_direct_workflow_composed_with_binding(
     components_dir: impl AsRef<Path>,
     binding: super::component::RuntimeBinding,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    let mut result = compile_direct_workflow(input)?;
+    compile_direct_workflow_composed_configured(
+        input,
+        components_dir,
+        binding,
+        super::component::WorkflowAbi::default(),
+    )
+}
+
+/// Fully-configured compile+compose: explicit [`RuntimeBinding`] AND
+/// [`super::component::WorkflowAbi`] — the entry the ABI-differential test
+/// axis drives.
+pub fn compile_direct_workflow_composed_configured(
+    input: DirectCompilationInput,
+    components_dir: impl AsRef<Path>,
+    binding: super::component::RuntimeBinding,
+    abi: super::component::WorkflowAbi,
+) -> Result<DirectCompilationResult, DirectCompileError> {
+    let mut result = compile_direct_workflow_with_abi(input, abi)?;
     let agent_ids: Vec<String> = result
         .component_artifacts
         .agent_components
@@ -667,7 +684,7 @@ pub fn compile_direct_workflow_composed_with_binding(
         .map(|component| component.agent_id.clone())
         .collect();
     result.component_artifacts =
-        super::component::emit_direct_component_artifacts_with_binding(&agent_ids, binding);
+        super::component::emit_direct_component_artifacts_configured(&agent_ids, binding, abi);
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
         &result.world_wit_path,

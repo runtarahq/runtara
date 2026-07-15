@@ -93,12 +93,191 @@ pub(super) fn push_retptr_arg(function: &mut WasmFunction) {
     function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
 }
 
-pub(super) fn return_if_retptr_error(function: &mut WasmFunction) {
+fn return_if_retptr_error_tag(function: &mut WasmFunction) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
+}
+
+/// "Check the retptr tag; on error, exit the entry function" — ABI-aware:
+/// under `wasi:cli/run` the classic bare `Err` tag; under the invoke export a
+/// bare tag would be lifted as a result-area POINTER, so the retptr error
+/// bytes are wrapped as `Err(error-info)` instead. No locals needed — the
+/// message ptr/len are copied out of the retptr region before it is
+/// clobbered.
+pub(super) fn return_if_retptr_error(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            return_if_retptr_error_tag(function);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            emit_invoke_err_return_from_retptr(function, None);
+            function.instruction(&Instruction::End);
+        }
+    }
+}
+
+/// Write `Err(error-info)` into the fixed invoke result area at offset 0 and
+/// `Return` its pointer, sourcing the message string from the retptr error
+/// payload (ptr @+4, len @+8). When `fail_index` is given, `runtime.fail`
+/// fires additively with the same bytes first. Free of locals by design (some
+/// call sites have none): the message ptr/len are staged into their final
+/// slots (@16/@20 — beyond every host call's ≤12-byte retptr write) BEFORE
+/// anything clobbers the retptr, then every other field is stored explicitly
+/// (option tags included — a garbage tag is exactly the
+/// "unexpected discriminant" lift trap).
+pub(super) fn emit_invoke_err_return_from_retptr(
+    function: &mut WasmFunction,
+    fail_index: Option<u32>,
+) {
+    // Stage message ptr/len into their final Err-record slots.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 20,
+        align: 2,
+        memory_index: 0,
+    }));
+    if let Some(fail) = fail_index {
+        // Additive host-side recording; its retptr write (≤12 bytes) cannot
+        // reach the staged slots.
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: 16,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: 20,
+            align: 2,
+            memory_index: 0,
+        }));
+        push_retptr_arg(function);
+        function.instruction(&Instruction::Call(fail));
+    }
+    emit_invoke_err_return_fixed_fields(function);
+}
+
+/// Write the non-message fields of the invoke `Err(error-info)` area (message
+/// ptr/len must already sit at @16/@20) and `Return` the area pointer.
+pub(super) fn emit_invoke_err_return_fixed_fields(function: &mut WasmFunction) {
+    // result disc = 1 (err).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    // code / category / severity: empty strings (ptr 0, len 0).
+    for offset in [8u64, 12, 24, 28, 32, 36] {
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+    // retryable = false; option tags (retry-after-ms @48, attributes @64) = none.
+    for offset in [40u64, 48, 64] {
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Store8(MemArg {
+            offset,
+            align: 0,
+            memory_index: 0,
+        }));
+    }
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+}
+
+/// Suspend-and-exit for the entry function: the run stops early because a
+/// lifecycle signal (pause/shutdown/breakpoint) was handled and the instance
+/// will be re-invoked on relaunch.
+///
+/// - `wasi:cli/run`: the classic clean-exit `Ok` tag; the suspended status
+///   was already recorded host-side by the signal ack / suspended event.
+/// - invoke export: `Ok(outcome::suspended([wake::on-resume]))` — the first
+///   real emission of the suspended arm. The single-element wake list lives
+///   at offset 88 (past the 80-byte result area, inside the reserved
+///   low-scratch region, 8-aligned; wake element stride is 32).
+pub(super) fn emit_entry_suspend_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            // Zero result area + wake element (0..120).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(120));
+            function.instruction(&Instruction::MemoryFill(0));
+            // result disc = 0 (ok, zeroed); outcome disc @8 = 1 (suspended).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 8,
+                align: 0,
+                memory_index: 0,
+            }));
+            // list<wake> @12: ptr = 88, len = 1.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(88));
+            function.instruction(&Instruction::I32Store(MemArg {
+                offset: 12,
+                align: 2,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store(MemArg {
+                offset: 16,
+                align: 2,
+                memory_index: 0,
+            }));
+            // wake element @88: disc = 2 (on-resume), no payload.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(2));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 88,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+    }
 }
 
 /// Like `emit_fail_if_retptr_error` but reads the error list directly from the
@@ -107,25 +286,35 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    load_retptr_tag(function);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-    function.instruction(&Instruction::I32Load(MemArg {
-        offset: 4,
-        align: 2,
-        memory_index: 0,
-    }));
-    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-    function.instruction(&Instruction::I32Load(MemArg {
-        offset: 8,
-        align: 2,
-        memory_index: 0,
-    }));
-    push_retptr_arg(function);
-    function.instruction(&Instruction::Call(indices.runtime_fail));
-    function.instruction(&Instruction::I32Const(1));
-    function.instruction(&Instruction::Return);
-    function.instruction(&Instruction::End);
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            function.instruction(&Instruction::I32Load(MemArg {
+                offset: 4,
+                align: 2,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            function.instruction(&Instruction::I32Load(MemArg {
+                offset: 8,
+                align: 2,
+                memory_index: 0,
+            }));
+            push_retptr_arg(function);
+            function.instruction(&Instruction::Call(indices.runtime_fail));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::Return);
+            function.instruction(&Instruction::End);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            emit_invoke_err_return_from_retptr(function, Some(indices.runtime_fail));
+            function.instruction(&Instruction::End);
+        }
+    }
 }
 
 /// Like `return_if_retptr_error`, but reports the error via `runtime.fail`

@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    RuntimeBinding, compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
-    emit_direct_component_artifacts_with_binding,
+    RuntimeBinding, WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed,
+    compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
+    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -1180,7 +1180,8 @@ fn run_direct_workflow_capture_attempt(
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let binding = runtime_binding_mode();
-    let compiled = compile_direct_workflow_composed_with_binding(
+    let abi = workflow_abi_mode();
+    let compiled = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: 1,
@@ -1193,6 +1194,7 @@ fn run_direct_workflow_capture_attempt(
         },
         components_dir,
         binding,
+        abi,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
@@ -1256,11 +1258,18 @@ fn run_direct_workflow_capture_attempt(
             }) as Arc<dyn runtara_component_host::runtime_host::RuntimeHost>
         });
 
-    let (status_success, stderr, memory_peak_bytes) = if embedded_executor_mode() {
-        execute_via_embedded(&compiled.wasm_path, &env_pairs, runtime_host)
-    } else {
+    let (status_success, stderr, memory_peak_bytes) = if !embedded_executor_mode() {
         let (ok, err) = execute_via_cli(&compiled.wasm_path, &env_pairs);
         (ok, err, None)
+    } else if abi == WorkflowAbi::InvokeHostImports {
+        execute_via_embedded_invoke(
+            &compiled.wasm_path,
+            &env_pairs,
+            runtime_host.expect("invoke ABI requires the capturing host"),
+            workflow_input_for_host.as_ref().clone(),
+        )
+    } else {
+        execute_via_embedded(&compiled.wasm_path, &env_pairs, runtime_host)
     };
     let _ = stop_tx.send(());
     let _ = server_handle.join();
@@ -1329,6 +1338,21 @@ fn runtime_binding_mode() -> RuntimeBinding {
     match std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING").as_deref() {
         Ok("composed") => RuntimeBinding::Composed,
         _ => RuntimeBinding::HostImport,
+    }
+}
+
+/// Battery-wide export-shape selection. `RUNTARA_DIRECT_WORKFLOW_ABI=invoke`
+/// re-runs the whole battery through the invoke export (input as the call
+/// argument, terminal result in-band) — the ABI-differential axis. Requires
+/// the embedded executor + HostImport binding; the legacy shape is the
+/// default.
+fn workflow_abi_mode() -> WorkflowAbi {
+    if !embedded_executor_mode() || runtime_binding_mode() == RuntimeBinding::Composed {
+        return WorkflowAbi::CliRunHttp;
+    }
+    match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").as_deref() {
+        Ok("invoke") => WorkflowAbi::InvokeHostImports,
+        _ => WorkflowAbi::CliRunHttp,
     }
 }
 
@@ -1532,6 +1556,64 @@ fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, S
 /// Embedded path: same component, same env, executed in-process. Returns the
 /// status, the failure reason (empty on success/guest-error), and the exact guest
 /// linear-memory peak from the executor's limiter.
+/// Invoke-ABI path: same env and limits, but input travels as the call
+/// argument and the terminal result is the lifted return value. The captures
+/// keep flowing through the additive complete/fail recordings the
+/// CapturingRuntimeHost already mirrors — the CapturedRun shape is identical
+/// across all three execution paths.
+fn execute_via_embedded_invoke(
+    wasm_path: &Path,
+    env_pairs: &[(String, String)],
+    runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
+    input: Vec<u8>,
+) -> (bool, String, Option<u64>) {
+    let executor = embedded_executor();
+    let mut limits = runtara_component_host::WorkflowLimits::default();
+    if let Some(max) = env_pairs
+        .iter()
+        .find(|(key, _)| key == "RUNTARA_INSTANCE_MEMORY_MAX_BYTES")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+    {
+        limits.max_memory_bytes = max;
+    }
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(wasm_path)
+            .await
+            .expect("load invoke-shaped workflow component");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: env_pairs.iter().cloned().collect(),
+                    stderr: None,
+                    timeout: Duration::from_secs(300),
+                    cancel: None,
+                    limits,
+                    runtime: Some(runtime_host),
+                },
+                input,
+            )
+            .await
+    });
+    let peak = Some(result.memory_peak_bytes);
+    match result.exit {
+        runtara_component_host::InvokeExit::Completed(_) => (true, String::new(), peak),
+        // The additive fail recording carries the error payload for the
+        // assertions; status mirrors the legacy non-zero exit.
+        runtara_component_host::InvokeExit::Failed(_) => (false, String::new(), peak),
+        // A lifecycle suspension is the clean exit the legacy run reported as
+        // Ok — the suspended status was recorded host-side by the ack.
+        runtara_component_host::InvokeExit::Suspended(_) => (true, String::new(), peak),
+        runtara_component_host::InvokeExit::Trapped { reason } => (false, reason, peak),
+        runtara_component_host::InvokeExit::Timeout => (false, "invoke timeout".to_string(), peak),
+        runtara_component_host::InvokeExit::Cancelled => {
+            (false, "invoke cancelled".to_string(), peak)
+        }
+    }
+}
+
 fn execute_via_embedded(
     wasm_path: &Path,
     env_pairs: &[(String, String)],
