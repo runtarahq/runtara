@@ -26,6 +26,14 @@
 #   2. Execute twice with two distinct connection ids in `data.conn`.
 #   3. Assert each run's proxy error names EXACTLY the id that run supplied.
 #
+# Part 2 (nested scope): a Split iterates a list of items and its subgraph's
+# http step binds connectionRef=data.conn — where `data` is the CURRENT ITEM,
+# not the top level (which has no `conn`). Feeding items whose `conn` id exists
+# ONLY inside the item proves the ref resolves against the iteration scope: if
+# it wrongly used the top-level source, `data.conn` would be absent and the
+# proxy would never name that id. This exercises the uniform resolution's
+# per-scope `source` threading.
+#
 # Prerequisites: Postgres + docker (for an isolated Valkey) and the agent /
 # shared workflow components in target/wasm32-wasip2/release (see
 # scripts/build-agent-components.sh).
@@ -271,4 +279,89 @@ echo "  Compiled ✓"
 assert_ref_resolves_to "conn-ref-probe-ALPHA-$$"
 assert_ref_resolves_to "conn-ref-probe-BETA-$$"
 
-print_success "connectionRef resolved data.conn to the injected connection at runtime (both runs)"
+#-------------------------------------------------------------------------
+# Part 2 — nested (Split) scope: the ref must resolve against the ITERATION
+# item, not the top-level source.
+print_step "Creating Split workflow: subgraph http step binds connectionRef=data.conn (item)..."
+RESP=$(api_post /workflows/create '{"name":"conn-ref-split-e2e","description":"nested connectionRef scope"}')
+SPLIT_WF_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+if [ -z "${SPLIT_WF_ID}" ]; then
+    print_error "Split workflow create failed: ${RESP}"
+    exit 1
+fi
+SPLIT_GRAPH='{
+  "name": "conn-ref-split-e2e",
+  "steps": {
+    "split": {
+      "stepType": "Split", "id": "split",
+      "config": { "value": { "valueType": "reference", "value": "data.items" }, "sequential": true },
+      "inputSchema": { "conn": { "type": "connection", "integration": "api_key", "required": true } },
+      "subgraph": {
+        "steps": {
+          "call": {
+            "stepType": "Agent", "id": "call", "agentId": "http", "capabilityId": "http-request",
+            "connectionRef": { "valueType": "reference", "value": "data.conn" },
+            "inputMapping": {
+              "url": { "valueType": "immediate", "value": "https://example.com/probe" },
+              "method": { "valueType": "immediate", "value": "GET" }
+            }
+          },
+          "sfinish": { "stepType": "Finish", "id": "sfinish",
+            "inputMapping": { "out": { "valueType": "reference", "value": "steps.call.outputs" } } }
+        },
+        "entryPoint": "call",
+        "executionPlan": [{ "fromStep": "call", "toStep": "sfinish" }]
+      }
+    },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": { "results": { "valueType": "reference", "value": "steps.split.outputs" } } }
+  },
+  "entryPoint": "split",
+  "executionPlan": [{ "fromStep": "split", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": { "items": { "type": "array", "required": true } },
+  "outputSchema": {}
+}'
+RESP=$(api_post "/workflows/${SPLIT_WF_ID}/update" "{\"executionGraph\": ${SPLIT_GRAPH}}")
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "Split update/validate failed: ${RESP}"
+    exit 1
+fi
+SPLIT_VERSION=$(curl -sS "${API}/workflows/${SPLIT_WF_ID}/versions" \
+    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${SPLIT_WF_ID}/versions/${SPLIT_VERSION}/compile" '{}' 900)
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "Split compile failed: ${RESP}"
+    tail -40 "${TEST_LOG}"
+    exit 1
+fi
+echo "  Split compiled ✓"
+
+# The first item's `conn` id exists ONLY inside data.items[0].conn — never at
+# top-level `data.conn`. A sequential Split fails-fast on item 0, so the proxy
+# error must name that item-scoped id.
+ITEM_ID="split-item-conn-${$}"
+print_step "Executing Split with items[0].conn='${ITEM_ID}'..."
+RESP=$(api_post "/workflows/${SPLIT_WF_ID}/execute" \
+    "{\"inputs\": {\"data\": {\"items\": [{\"conn\": \"${ITEM_ID}\"}, {\"conn\": \"split-item-2\"}]}}}")
+SPLIT_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+SPLIT_STATUS=""
+for _ in {1..90}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${SPLIT_INSTANCE}")
+    SPLIT_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${SPLIT_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+SPLIT_ERR=$(echo "${RESP}" | jq -r '.data.error // .error // empty')
+SPLIT_RESOLVED=$(printf '%s' "${SPLIT_ERR}" | sed -n "s/.*Connection '\([^']*\)' not found.*/\1/p")
+if [ "${SPLIT_RESOLVED}" != "${ITEM_ID}" ]; then
+    print_error "Nested ref did not resolve against the iteration item."
+    print_error "  item[0].conn : ${ITEM_ID}"
+    print_error "  in error     : ${SPLIT_RESOLVED:-<none>}"
+    print_error "  error        : ${SPLIT_ERR}"
+    tail -40 "${TEST_LOG}"
+    exit 1
+fi
+echo "  Proxy saw item-scoped id '${SPLIT_RESOLVED}' — resolved against the Split iteration ✓"
+
+print_success "connectionRef resolves at runtime — top-level input and per-iteration Split scope"
