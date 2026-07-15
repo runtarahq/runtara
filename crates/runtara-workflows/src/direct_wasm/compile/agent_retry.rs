@@ -11,22 +11,24 @@
 //! durable per-attempt checkpoint keys so a resumed instance doesn't re-sleep an
 //! already-elapsed delay.
 
-use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
+use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg, ValType};
 
 use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
     push_retptr_u8_load, push_segment_args, return_if_retptr_error,
 };
 use super::{
-    DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL, DIRECT_AGENT_RATE_LIMITED_LOCAL,
-    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
+    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
     DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET,
     DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET,
-    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET,
+    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET,
     DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET, DIRECT_AGENT_RETRY_INFO_RATE_LIMITED_OFFSET,
     DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
     DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL, DIRECT_RET_U64_OK_OFFSET,
@@ -206,4 +208,60 @@ pub(super) fn emit_agent_retry_error_info(
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRYABLE_LOCAL));
     push_retptr_u8_load(body, DIRECT_AGENT_RETRY_INFO_RATE_LIMITED_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RATE_LIMITED_LOCAL));
+}
+
+/// Decode a per-attempt result envelope (see
+/// [`crate::direct_wasm`]'s `DirectJsonManifest::agent_attempt_envelope`) from the
+/// checkpoint buffer at `env_ptr_local`/`env_len_local` into the retry
+/// state-machine locals, so a replayed (checkpoint-hit) attempt drives the exact
+/// same retry decision as the original invoke without re-firing it. The fixed
+/// 12-byte header is: `[tag:u8][retryable:u8][rate_limited:u8][retry_after_tag:u8]
+/// [retry_after_ms:u64 le]`, followed by the raw error-info payload.
+pub(super) fn emit_agent_attempt_decode(
+    body: &mut WasmFunction,
+    env_ptr_local: u32,
+    env_len_local: u32,
+) {
+    // tag (offset 0) -> ERR_FLAG. Only `err` envelopes are stored today (a
+    // successful attempt is covered by the outer step-success checkpoint), so a
+    // hit always means this attempt failed; the tag byte keeps that explicit.
+    load_u8_from_ptr(body, env_ptr_local, 0);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+    // retryable (offset 1)
+    load_u8_from_ptr(body, env_ptr_local, 1);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRYABLE_LOCAL));
+    // rate_limited (offset 2)
+    load_u8_from_ptr(body, env_ptr_local, 2);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RATE_LIMITED_LOCAL));
+    // retry_after_tag (offset 3)
+    load_u8_from_ptr(body, env_ptr_local, 3);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
+    // retry_after_ms (offset 4, u64 little-endian) — the RAW captured value the
+    // rate-limit budget accumulates, not the clamped backoff delay.
+    body.instruction(&Instruction::LocalGet(env_ptr_local));
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+    // payload_ptr = env_ptr + 12 (header stripped)
+    body.instruction(&Instruction::LocalGet(env_ptr_local));
+    body.instruction(&Instruction::I32Const(12));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL));
+    // payload_len = env_len - 12
+    body.instruction(&Instruction::LocalGet(env_len_local));
+    body.instruction(&Instruction::I32Const(12));
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL));
+}
+
+fn load_u8_from_ptr(body: &mut WasmFunction, ptr_local: u32, offset: u64) {
+    body.instruction(&Instruction::LocalGet(ptr_local));
+    body.instruction(&Instruction::I32Load8U(MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    }));
 }

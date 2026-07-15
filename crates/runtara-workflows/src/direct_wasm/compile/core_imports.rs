@@ -128,6 +128,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_retry_sleep_key: Option<u32>,
+    stdlib_agent_attempt_result_key: Option<u32>,
+    stdlib_agent_attempt_envelope: Option<u32>,
     stdlib_agent_retry_delay_ms: Option<u32>,
     stdlib_agent_error_info: Option<u32>,
     stdlib_agent_retry_error_info: Option<u32>,
@@ -497,6 +499,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_retry_sleep_key,
                 "stdlib.agent-retry-sleep-key",
             )?,
+            stdlib_agent_attempt_result_key: require_import(
+                self.stdlib_agent_attempt_result_key,
+                "stdlib.agent-attempt-result-key",
+            )?,
+            stdlib_agent_attempt_envelope: require_import(
+                self.stdlib_agent_attempt_envelope,
+                "stdlib.agent-attempt-envelope",
+            )?,
             stdlib_agent_retry_delay_ms: require_import(
                 self.stdlib_agent_retry_delay_ms,
                 "stdlib.agent-retry-delay-ms",
@@ -639,6 +649,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_cache_key: u32,
     pub(super) stdlib_agent_retry_sleep_key: u32,
+    pub(super) stdlib_agent_attempt_result_key: u32,
+    pub(super) stdlib_agent_attempt_envelope: u32,
     pub(super) stdlib_agent_retry_delay_ms: u32,
     pub(super) stdlib_agent_retry_error_info: u32,
     pub(super) stdlib_agent_error: u32,
@@ -949,6 +961,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-sleep-key") {
         import_indices.stdlib_agent_retry_sleep_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-attempt-result-key") {
+        import_indices.stdlib_agent_attempt_result_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-attempt-envelope") {
+        import_indices.stdlib_agent_attempt_envelope = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-delay-ms") {
         import_indices.stdlib_agent_retry_delay_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error-info") {

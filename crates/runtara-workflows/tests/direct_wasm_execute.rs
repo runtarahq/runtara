@@ -2335,6 +2335,273 @@ fn direct_wasm_execute_ai_agent_single_shot_retries_transient_provider_errors() 
 }
 
 #[test]
+fn direct_wasm_execute_durable_agent_retry_replays_attempts_across_resume() {
+    // Bug fix: a durable agent step drained/restarted mid-retry must NOT
+    // re-invoke attempts that already ran. Each FAILED attempt is checkpointed
+    // under `{cache_key}::attempt::{N}`; on replay-from-start a per-attempt hit
+    // short-circuits the invoke. "Resume" is simulated the same way as the
+    // tool-loop replay test: replay against a preloaded /checkpoint store keyed by
+    // the same instance_id, so the per-attempt keys match and are served back.
+    let components_dir = direct_e2e_components_dir();
+    let graph = single_shot_ai_agent_graph_json(r#","maxRetries":2,"retryDelay":10"#);
+
+    // RUN 1 (original process): two transient 500s then success. Attempts 1 and 2
+    // fail retryably (each persisted under `::attempt::N`); attempt 3 succeeds.
+    // The `answer == "recovered"` assertion also guards the success path — if the
+    // MISS path wrongly ran the error-info builder on a successful invoke it would
+    // read the error struct off an ok retptr and corrupt the output.
+    let run1 = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "durable-retry-resume",
+        &graph,
+        br#"{}"#,
+        vec![llm_http_500(), llm_http_500(), llm_ok("recovered")],
+    );
+    assert!(
+        run1.status_success,
+        "run 1 completes after retries; stderr: {}",
+        run1.stderr
+    );
+    assert_eq!(
+        run1.output_json
+            .as_ref()
+            .and_then(|o| o.get("answer"))
+            .and_then(Value::as_str),
+        Some("recovered"),
+        "successful attempt output must be intact: {:?}",
+        run1.output_json
+    );
+    assert_eq!(
+        run1.llm_requests.len(),
+        3,
+        "att1(500) + att2(500) + att3(ok)"
+    );
+
+    // Tripwire: the two FAILED attempts are durably checkpointed. On UNFIXED code
+    // no `::attempt::` checkpoints are written, so this harvest is empty. The
+    // successful attempt 3 is NOT stored here (the outer step-success checkpoint
+    // covers success) — only failures, keeping the extra write cost to retries.
+    let attempt_checkpoints: Vec<(String, Vec<u8>)> = run1
+        .checkpoints
+        .iter()
+        .filter(|c| c.checkpoint_id.contains("::attempt::") && !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+    assert_eq!(
+        attempt_checkpoints.len(),
+        2,
+        "both failed attempts must be persisted (empty on unfixed code): {:?}",
+        run1.checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+
+    // RUN 2a (resume after a drain following attempt 2 — the frontier fails):
+    // preload the two failed-attempt envelopes and give the resume NO live model
+    // responses. A correct fix replays attempts 1 and 2 from checkpoint (zero
+    // invokes) and fires ONLY the un-attempted frontier (attempt 3), which
+    // exhausts the empty script and — being the last attempt (maxRetries:2) —
+    // fails the workflow. On unfixed code (or a broken hit-skip) attempts 1..3 all
+    // re-invoke, so this count is 3, not 1 — the direct no-re-invoke assertion.
+    let resume_fail = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "durable-retry-resume",
+        &graph,
+        br#"{}"#,
+        false,
+        attempt_checkpoints.clone(),
+        vec![],
+    );
+    assert!(
+        !resume_fail.status_success,
+        "the frontier attempt exhausts the empty script and is terminal"
+    );
+    assert_eq!(
+        resume_fail.llm_requests.len(),
+        1,
+        "attempts 1-2 are replayed from checkpoint, not re-invoked; only the frontier fires"
+    );
+
+    // RUN 2b (resume after the same drain — the frontier succeeds): identical
+    // preloaded state, one live success. Attempts 1 and 2 are replayed (no
+    // invoke); attempt 3 succeeds on its first and only live call.
+    let resume_ok = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "durable-retry-resume",
+        &graph,
+        br#"{}"#,
+        false,
+        attempt_checkpoints,
+        vec![llm_ok("resumed")],
+    );
+    assert!(
+        resume_ok.status_success,
+        "resume completes on the frontier attempt; stderr: {}",
+        resume_ok.stderr
+    );
+    assert_eq!(
+        resume_ok
+            .output_json
+            .as_ref()
+            .and_then(|o| o.get("answer"))
+            .and_then(Value::as_str),
+        Some("resumed"),
+        "{:?}",
+        resume_ok.output_json
+    );
+    assert_eq!(
+        resume_ok.llm_requests.len(),
+        1,
+        "attempts 1-2 replayed from checkpoint; only the frontier attempt 3 invokes"
+    );
+}
+
+/// A Split over its input list, each item running one durable AiAgent step with
+/// `maxRetries:2`. The per-item agent's cache key folds the iteration index, so
+/// its per-attempt checkpoints are `{...::[i]}::attempt::{N}` — distinct per item.
+fn split_durable_agent_graph_json() -> String {
+    let graph = serde_json::json!({
+        "steps": {
+            "split": {
+                "stepType": "Split",
+                "id": "split",
+                "config": {
+                    "value": { "valueType": "reference", "value": "data.items" },
+                    "sequential": true
+                },
+                "subgraph": {
+                    "name": "Item",
+                    "entryPoint": "ai",
+                    "steps": {
+                        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                            "systemPrompt":{"valueType":"immediate","value":"You are a test stub caller"},
+                            "userPrompt":{"valueType":"immediate","value":"Say hello"},
+                            "provider":"openai","model":"gpt-4o",
+                            "maxRetries":2,"retryDelay":10
+                        }},
+                        "itemfinish": {"id":"itemfinish","stepType":"Finish","inputMapping":{
+                            "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
+                        }}
+                    },
+                    "executionPlan": [ {"fromStep":"ai","toStep":"itemfinish","label":"next"} ]
+                }
+            },
+            "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+                "results": {"valueType":"reference","value":"steps.split.outputs"}
+            }}
+        },
+        "entryPoint": "split",
+        "executionPlan": [ {"fromStep":"split","toStep":"finish"} ],
+        "variables": {},
+        "inputSchema": { "items": { "type": "array" } },
+        "outputSchema": {}
+    });
+    serde_json::to_string(&graph).expect("graph serializes")
+}
+
+#[test]
+fn direct_wasm_execute_durable_agent_retry_per_iteration_isolation_across_resume() {
+    // Bug-fix hardening: a durable agent retried inside a Split loop must key its
+    // per-attempt checkpoints by iteration, so one iteration's stored failures can
+    // never short-circuit another iteration's invoke. If `::attempt::{N}` did NOT
+    // fold the loop index, item 1's attempt 1 would hit item 0's envelope.
+    let components_dir = direct_e2e_components_dir();
+    let graph = split_durable_agent_graph_json();
+    let input = br#"{"data":{"items":[0,1]},"variables":{}}"#;
+
+    // RUN 1: both items run sequentially; each agent fails twice then succeeds.
+    // The shared FIFO model script is consumed item 0 first, then item 1. If the
+    // per-attempt keys collided across iterations, item 1's early attempts would
+    // hit item 0's checkpoints and fire fewer calls — so `llm_requests == 6`
+    // itself proves the two iterations invoked independently.
+    let run1 = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "split-durable-retry-resume",
+        &graph,
+        input,
+        vec![
+            llm_http_500(),
+            llm_http_500(),
+            llm_ok("item0"),
+            llm_http_500(),
+            llm_http_500(),
+            llm_ok("item1"),
+        ],
+    );
+    assert!(
+        run1.status_success,
+        "run 1 completes both items after retries; stderr: {}",
+        run1.stderr
+    );
+    assert_eq!(
+        run1.llm_requests.len(),
+        6,
+        "2 items x (2 failed + 1 success); a per-iteration key collision would lower this"
+    );
+
+    let attempt_checkpoints: Vec<(String, Vec<u8>)> = run1
+        .checkpoints
+        .iter()
+        .filter(|c| c.checkpoint_id.contains("::attempt::") && !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+    // Four distinct failed-attempt checkpoints: two per iteration, iteration index
+    // folded into the key so item 0 and item 1 never collide.
+    assert_eq!(
+        attempt_checkpoints.len(),
+        4,
+        "two failed attempts per item, iteration-scoped: {:?}",
+        run1.checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+    let item0_keys = attempt_checkpoints
+        .iter()
+        .filter(|(id, _)| id.contains("[0]"))
+        .count();
+    let item1_keys = attempt_checkpoints
+        .iter()
+        .filter(|(id, _)| id.contains("[1]"))
+        .count();
+    assert_eq!(
+        (item0_keys, item1_keys),
+        (2, 2),
+        "each iteration must own two distinct per-attempt keys: {:?}",
+        attempt_checkpoints
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    );
+
+    // RUN 2 (resume after a drain mid-retry across the loop): preload all four
+    // per-iteration envelopes and give exactly one live success per item. Each
+    // iteration replays its OWN two failed attempts (zero invokes) and fires only
+    // its frontier — 2 live calls total. A collision would make one item consume
+    // the other's checkpoints and diverge from this count.
+    let resume = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "split-durable-retry-resume",
+        &graph,
+        input,
+        false,
+        attempt_checkpoints,
+        vec![llm_ok("item0-resumed"), llm_ok("item1-resumed")],
+    );
+    assert!(
+        resume.status_success,
+        "resume completes both items on their frontier attempts; stderr: {}",
+        resume.stderr
+    );
+    assert_eq!(
+        resume.llm_requests.len(),
+        2,
+        "each iteration replays its own 2 attempts and fires only its frontier"
+    );
+}
+
+#[test]
 fn direct_wasm_execute_ai_agent_single_shot_default_does_not_retry() {
     let components_dir = direct_e2e_components_dir();
 
