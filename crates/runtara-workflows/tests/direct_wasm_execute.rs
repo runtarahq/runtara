@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    compile_direct_workflow, compile_direct_workflow_composed, compose_direct_workflow,
+    RuntimeBinding, compile_direct_workflow, compile_direct_workflow_composed,
+    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -1478,6 +1479,100 @@ fn direct_compile_measures_json_to_ready_bundle_latency() {
         compose_elapsed.as_secs_f64() * 1000.0,
         total_elapsed.as_secs_f64() * 1000.0,
         result.wasm_size,
+    );
+}
+
+/// Top-level component imports of a composed `workflow.wasm`, by name.
+///
+/// Tracks nesting depth (every module/component start emits `Version`, every
+/// end emits `End`) so only the OUTER component's import section is collected —
+/// `define_components: true` embeds the stdlib/agent components as nested
+/// binaries whose own imports must not be confused with the artifact's.
+fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
+    use wasmparser::{Parser, Payload};
+    let mut depth = 0usize;
+    let mut imports = Vec::new();
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.expect("parse composed component") {
+            Payload::Version { .. } => depth += 1,
+            Payload::End(_) => depth -= 1,
+            Payload::ComponentImportSection(reader) if depth == 1 => {
+                for import in reader {
+                    imports.push(import.expect("component import").name.0.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    imports
+}
+
+/// Spike B of docs/unify-agents-workflows-plan.md: wac-graph must compose a
+/// workflow whose directly-declared `runtara:workflow-runtime/runtime` import
+/// is left unsatisfied (no runtime component instantiated), surfacing it as a
+/// component-level import — the same path WASI interfaces already ride. This
+/// is the load-bearing assumption of the host-import migration: proven here
+/// for a DIRECT workflow-logic import, not just transitive WASI ones.
+#[test]
+fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "spike-b-host-import-runtime".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct emit succeeds");
+
+    // Control: the default (Composed) binding satisfies the runtime interface
+    // internally — it must NOT appear among the composed artifact's imports.
+    compose_direct_workflow(&mut result, &components_dir).expect("composed-binding compose");
+    let composed_bytes = fs::read(&result.wasm_path).expect("read composed artifact");
+    let composed_imports = top_level_component_imports(&composed_bytes);
+    assert!(
+        !composed_imports
+            .iter()
+            .any(|name| name.starts_with("runtara:workflow-runtime/runtime")),
+        "composed binding must satisfy runtime internally; imports: {composed_imports:?}"
+    );
+    assert!(
+        composed_imports
+            .iter()
+            .any(|name| name.starts_with("wasi:")),
+        "WASI must bubble as imports under both bindings; imports: {composed_imports:?}"
+    );
+
+    // Spike: re-emit the scaffolding under HostImport and recompose. wac must
+    // type-check + encode (validate: true inside compose) with the runtime
+    // interface unbound, and the interface must surface as a top-level import.
+    let agent_ids: Vec<String> = result
+        .component_artifacts
+        .agent_components
+        .iter()
+        .map(|component| component.agent_id.clone())
+        .collect();
+    result.component_artifacts =
+        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::HostImport);
+    compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
+
+    let host_import_bytes = fs::read(&result.wasm_path).expect("read host-import artifact");
+    let host_imports = top_level_component_imports(&host_import_bytes);
+    assert!(
+        host_imports
+            .iter()
+            .any(|name| name == "runtara:workflow-runtime/runtime@0.1.0"),
+        "host-import binding must surface the runtime interface; imports: {host_imports:?}"
+    );
+    assert!(
+        host_imports.iter().any(|name| name.starts_with("wasi:")),
+        "WASI imports must survive the binding change; imports: {host_imports:?}"
     );
 }
 

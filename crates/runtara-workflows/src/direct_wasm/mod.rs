@@ -45,7 +45,7 @@ pub use compile::{
 pub use component::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
-    emit_direct_component_artifacts,
+    RuntimeBinding, emit_direct_component_artifacts, emit_direct_component_artifacts_with_binding,
 };
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;
