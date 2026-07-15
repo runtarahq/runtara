@@ -216,32 +216,36 @@ fn earliest_wake_deadline_ms(
         .min()
 }
 
-/// Park an invoke-shaped instance that returned `outcome::suspended` with a
-/// TIMED wake (the store-freeing durable-sleep path): stamp `status=suspended`
-/// and `sleep_until=deadline` so the wake scheduler relaunches it. The guest
-/// already persisted its resume checkpoint before exiting, so there is no
-/// output/checkpoint work here.
+/// True when any wake is an `on-signal` — the instance is parked waiting for an
+/// externally-delivered custom signal (the store-freeing Wait path).
+fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake]) -> bool {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes.iter().any(|w| matches!(w, WorkflowWake::OnSignal(_)))
+}
+
+/// Park an invoke-shaped instance that returned `outcome::suspended` (the
+/// store-freeing durable-sleep / wait-for-signal paths). Stamps
+/// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
+/// (`at`, or `on-signal` with a timeout). The guest already persisted its resume
+/// checkpoint before exiting, so there is no output/checkpoint work here.
 ///
-/// Deadline-less suspends (`on-resume` from a breakpoint/drain-signal pause)
-/// are NOT handled here: those already recorded `status=suspended` inline via
-/// their host-import ack, and the drain path stamps its own restart wake —
-/// touching `sleep_until` for them would wrongly schedule an immediate wake.
+/// - `at(deadline)` / `on-signal{deadline}` → suspended + `sleep_until=deadline`
+///   (the wake scheduler relaunches at the deadline).
+/// - `on-signal` with NO deadline → suspended, `sleep_until` left NULL; the
+///   custom-signal waker stamps it when the signal arrives (the only wake path).
+/// - only `on-resume` (breakpoint/drain pause) → left untouched: those recorded
+///   `status=suspended` inline via their ack, and stamping `sleep_until` would
+///   wrongly schedule an immediate wake.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
 ) {
-    let Some(deadline_ms) = earliest_wake_deadline_ms(wakes) else {
+    let deadline_ms = earliest_wake_deadline_ms(wakes);
+    if deadline_ms.is_none() && !has_on_signal_wake(wakes) {
+        // Pure on-resume: already handled by the ack path.
         return;
-    };
-    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
-    else {
-        warn!(
-            instance_id,
-            deadline_ms, "Suspend deadline out of range; not parking"
-        );
-        return;
-    };
+    }
     // status first, then sleep_until: the wake scan requires BOTH
     // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
     // exposes a half-parked instance to a premature claim.
@@ -251,6 +255,18 @@ async fn park_invoke_suspend(
     {
         warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
     }
+    let Some(deadline_ms) = deadline_ms else {
+        // Deadline-less on-signal: parked as suspended; the waker relaunches it.
+        return;
+    };
+    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
+    else {
+        warn!(
+            instance_id,
+            deadline_ms, "Suspend deadline out of range; leaving sleep_until unset"
+        );
+        return;
+    };
     if let Err(e) = persistence.set_instance_sleep(instance_id, deadline).await {
         warn!(instance_id, error = %e, "Failed to set sleep_until after invoke suspend");
     }
@@ -754,6 +770,60 @@ mod tests {
         assert!(
             inst.sleep_until.is_none(),
             "no timed wake => no sleep_until stamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_marks_deadline_less_on_signal_suspended_without_sleep() {
+        // A no-timeout wait: parked suspended so the custom-signal waker can
+        // find it, but with NO sleep_until (the waker stamps it on arrival).
+        let (persistence, instance_id, _dir) = running_instance().await;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "wait-sig".into(),
+                deadline_ms: None,
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended", "on-signal parks as suspended");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a deadline-less on-signal wait relies on the waker, not sleep_until"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_stamps_on_signal_timeout_deadline_as_the_fallback() {
+        let (persistence, instance_id, _dir) = running_instance().await;
+        let deadline_ms = 1_950_000_000_000u64;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "wait-sig".into(),
+                deadline_ms: Some(deadline_ms),
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(
+            inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "an on-signal timeout is the fallback wake if the signal never arrives"
         );
     }
 }

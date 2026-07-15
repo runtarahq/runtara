@@ -1385,7 +1385,10 @@ async fn handle_send_custom_signal(
         .insert_custom_signal(&instance_id, &body.checkpoint_id, &payload)
         .await
     {
-        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Ok(()) => {
+            wake_suspended_on_signal(state.persistence.as_ref(), &instance_id).await;
+            Json(json!({ "success": true })).into_response()
+        }
         Err(e) => {
             error!("Send custom signal error: {}", e);
             error_response_from(
@@ -1395,6 +1398,36 @@ async fn handle_send_custom_signal(
             )
             .into_response()
         }
+    }
+}
+
+/// On-signal waker (store-freeing Wait): a Wait compiled with the store-freeing
+/// gate parks as `status='suspended'` with `sleep_until` = its timeout deadline
+/// (or NULL when the wait has no timeout). The wake scheduler only relaunches on
+/// a due `sleep_until`, so a custom signal for such an instance must stamp
+/// `sleep_until=now` to relaunch it BEFORE the timeout (or at all, when there is
+/// no timeout). The instance replays, re-polls the now-present signal
+/// (non-destructive read), and proceeds.
+///
+/// No-op unless the instance is currently `suspended`: a running instance polls
+/// the signal itself, and the wake scan ignores non-suspended rows anyway.
+async fn wake_suspended_on_signal(
+    persistence: &dyn runtara_core::persistence::Persistence,
+    instance_id: &str,
+) {
+    match persistence.get_instance(instance_id).await {
+        Ok(Some(inst)) if inst.status == "suspended" => {
+            if let Err(e) = persistence
+                .set_instance_sleep(instance_id, chrono::Utc::now())
+                .await
+            {
+                warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");
+            } else {
+                info!(instance_id, "Woke suspended instance for a custom signal");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!(instance_id, error = %e, "Waker could not read instance status"),
     }
 }
 

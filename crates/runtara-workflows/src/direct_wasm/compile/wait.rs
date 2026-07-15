@@ -15,9 +15,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_retptr_list, load_retptr_option_list, push_i64_load_from_ptr,
-    push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
-    return_if_retptr_error, store_local_i64_at,
+    emit_entry_suspend_on_signal, emit_retptr_error_or_return, load_retptr_list,
+    load_retptr_option_list, push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load,
+    push_retptr_u8_load, push_segment_args, return_if_retptr_error, store_local_i64_at,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
@@ -144,12 +144,27 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
     return_if_retptr_error(body, indices);
 
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body, indices);
+    // Store-freeing (gated; invoke export only): a human-in-the-loop AI tool
+    // wait has no timeout, so it suspends on-signal with NO deadline — the
+    // custom-signal waker is the sole wake path. Default stays the blocking
+    // poll loop (byte-preserved).
+    let store_freeing = indices.store_freeing_sleep
+        && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+    if store_freeing {
+        emit_entry_suspend_on_signal(
+            body,
+            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+            None,
+        );
+    } else {
+        body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
+        return_if_retptr_error(body, indices);
 
-    body.instruction(&Instruction::Br(0));
+        body.instruction(&Instruction::Br(0));
+    }
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 
@@ -455,12 +470,33 @@ pub(super) fn emit_wait_for_signal_plan(
         handled_target,
     );
 
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body, indices);
+    // Store-freeing Wait (gated; invoke export only): after one poll MISS and
+    // the timeout check, EXIT with `suspended(on-signal{signal-id, deadline})`
+    // instead of blocking the Store for the poll interval. The host parks the
+    // instance (sleep_until = timeout deadline, or NULL when there is none) and
+    // the custom-signal waker relaunches it when the signal arrives; the replay
+    // re-polls the now-present signal and continues. Default stays the blocking
+    // poll loop — byte-preserved.
+    let store_freeing = indices.store_freeing_sleep
+        && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+    if store_freeing {
+        emit_entry_suspend_on_signal(
+            body,
+            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+            Some((
+                DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+                DIRECT_WAIT_DEADLINE_MS_LOCAL,
+            )),
+        );
+    } else {
+        body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
+        return_if_retptr_error(body, indices);
 
-    body.instruction(&Instruction::Br(0));
+        body.instruction(&Instruction::Br(0));
+    }
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 

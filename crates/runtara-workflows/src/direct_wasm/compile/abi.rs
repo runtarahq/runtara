@@ -397,6 +397,110 @@ pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local:
     function.instruction(&Instruction::Return);
 }
 
+/// Store-freeing suspend on an external signal (durable Wait under the invoke
+/// export): `Ok(outcome::suspended([wake::on-signal(signal-wait{checkpoint-id,
+/// deadline-ms})]))`.
+///
+/// The host parks the instance `suspended` with `sleep_until` = the timeout
+/// deadline (or NULL when `deadline_local` is `None`); the custom-signal waker
+/// relaunches it when the signal arrives, and the replay re-polls the
+/// (non-destructively read) signal and proceeds. NO-OP under `wasi:cli/run`
+/// (caller only invokes this on the InvokeHostImports arm).
+///
+/// `signal_id_ptr_local`/`len` must reference the deterministic wait signal id
+/// — a heap-allocated string well above the 0..120 result scratch, so the
+/// `MemoryFill` below does not clobber it and wasmtime lifts it intact at the
+/// call boundary.
+///
+/// `deadline` is the timeout fallback: `Some((present_flag_local, value_local))`
+/// writes the `option<u64>` tag from the RUNTIME present flag (a wait's timeout
+/// is dynamic) and the value from `value_local`; `None` is a wait with no
+/// timeout (tag stays 0/none — the custom-signal waker is the only wake path).
+///
+/// wake element layout (past the 80-byte result area): disc u8 @88 = 1
+/// (on-signal); signal-wait record @96 = { checkpoint-id: string (ptr @96,
+/// len @100), deadline-ms: option<u64> (tag @104, value @112) }.
+pub(super) fn emit_entry_suspend_on_signal(
+    function: &mut WasmFunction,
+    signal_id_ptr_local: u32,
+    signal_id_len_local: u32,
+    deadline: Option<(u32, u32)>,
+) {
+    // Zero result area + wake element (0..120).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(120));
+    function.instruction(&Instruction::MemoryFill(0));
+    // result disc = 0 (ok); outcome disc @8 = 1 (suspended).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    // list<wake> @12: ptr = 88, len = 1.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(88));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    // wake element @88: disc = 1 (on-signal).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 88,
+        align: 0,
+        memory_index: 0,
+    }));
+    // signal-wait.checkpoint-id string: ptr @96, len @100.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(signal_id_ptr_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 96,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(signal_id_len_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 100,
+        align: 2,
+        memory_index: 0,
+    }));
+    // signal-wait.deadline-ms option<u64>: tag @104 (runtime present flag),
+    // value @112. When the flag is 0 the value is ignored, so it is written
+    // unconditionally; when there is no timeout at all the tag stays 0 (none).
+    if let Some((present_flag_local, value_local)) = deadline {
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::LocalGet(present_flag_local));
+        function.instruction(&Instruction::I32Store8(MemArg {
+            offset: 104,
+            align: 0,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::LocalGet(value_local));
+        function.instruction(&Instruction::I64Store(MemArg {
+            offset: 112,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
+    // else: tag @104 stays 0 (none), value @112 stays 0 (both zeroed above).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+}
+
 /// Like `emit_fail_if_retptr_error` but reads the error list directly from the
 /// retptr (no scratch locals needed) — for call sites that have no free locals.
 pub(super) fn emit_fail_if_retptr_error_inplace(

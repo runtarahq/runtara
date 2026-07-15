@@ -6312,6 +6312,14 @@ struct CheckpointingRuntimeHost {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
+    /// Externally-delivered custom signals keyed by checkpoint (signal) id —
+    /// the wake-scheduler-side signal store. `poll_custom_signal` reads it
+    /// non-destructively (a replayed wait re-reads the same signal).
+    custom_signals: Mutex<HashMap<String, Vec<u8>>>,
+    /// Fallback payload returned for ANY polled id — for the blocking control,
+    /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
+    /// the run.
+    any_signal: Mutex<Option<Vec<u8>>>,
 }
 
 impl CheckpointingRuntimeHost {
@@ -6321,7 +6329,20 @@ impl CheckpointingRuntimeHost {
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
+            custom_signals: Mutex::new(HashMap::new()),
+            any_signal: Mutex::new(None),
         }
+    }
+
+    fn deliver_signal(&self, checkpoint_id: &str, payload: &[u8]) {
+        self.custom_signals
+            .lock()
+            .unwrap()
+            .insert(checkpoint_id.to_string(), payload.to_vec());
+    }
+
+    fn deliver_signal_any(&self, payload: &[u8]) {
+        *self.any_signal.lock().unwrap() = Some(payload.to_vec());
     }
 }
 
@@ -6358,8 +6379,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     async fn check_signals(&self) -> Result<bool, String> {
         Ok(false)
     }
-    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        // Non-destructive read (mirrors the wait-replay fix): a resumed wait
+        // re-reads the same delivered signal. Falls back to the any-id payload.
+        if let Some(payload) = self.custom_signals.lock().unwrap().get(&checkpoint_id) {
+            return Ok(Some(payload.clone()));
+        }
+        Ok(self.any_signal.lock().unwrap().clone())
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         Ok(self
@@ -6569,5 +6595,117 @@ fn direct_wasm_execute_invoke_store_freeing_delay_suspends_then_resumes() {
     assert_eq!(
         serde_json::from_slice::<Value>(&resumed_output).expect("output is JSON"),
         expected
+    );
+}
+
+/// A bare WaitForSignal (no timeout) then a Finish echoing the signal payload.
+const STORE_FREEING_WAIT: &str = r#"{
+  "name": "Store Freeing Wait",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "responseSchema": { "approved": { "type": "boolean", "required": true } }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "approved": { "valueType": "reference", "value": "steps.wait.outputs.approved" }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [ { "fromStep": "wait", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+/// Store-freeing Slice 2 (on-signal waker half): with the gate ON, a durable
+/// WaitForSignal under the invoke export EXITS with
+/// `suspended(on-signal{signal-id, deadline})` on the first poll MISS (freeing
+/// the Store) instead of blocking the poll loop. On relaunch — the in-process
+/// stand-in for the custom-signal waker delivering the signal then the wake
+/// scheduler relaunching — the wait re-polls the now-present signal and
+/// completes. A no-timeout wait carries NO deadline (the waker is the sole wake
+/// path); the blocking lowering (gate OFF) reaches the same output.
+#[test]
+fn direct_wasm_execute_invoke_store_freeing_wait_suspends_on_signal_then_resumes() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{}"#.to_vec();
+
+    let artifact = compile_invoke_abi_artifact_configured(
+        &components_dir,
+        "store-freeing-wait-on",
+        STORE_FREEING_WAIT,
+        true,
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    // Invoke #1: the signal is absent, so the wait suspends on-signal.
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let wakes = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => wakes,
+        other => panic!("first invoke must suspend, got {other:?}"),
+    };
+    assert_eq!(wakes.len(), 1, "sequential lowering emits one wake");
+    let (checkpoint_id, deadline) = match &wakes[0] {
+        runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => {
+            (wait.checkpoint_id.clone(), wait.deadline_ms)
+        }
+        other => panic!("a WaitForSignal must suspend on-signal, got {other:?}"),
+    };
+    assert!(
+        !checkpoint_id.is_empty(),
+        "on-signal wake carries the deterministic wait signal id"
+    );
+    assert_eq!(
+        deadline, None,
+        "a no-timeout wait suspends without a deadline (waker is the sole wake path)"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "store-freeing wait must not block on the poll interval"
+    );
+    assert!(host.completed.lock().unwrap().is_none());
+
+    // Deliver the signal for the id the wake reported (the waker stand-in),
+    // then relaunch (same host: the signal store + any checkpoints survive).
+    host.deliver_signal(&checkpoint_id, br#"{"approved": true}"#);
+    let second = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let output = match second {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("relaunch after signal must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "approved": true }),
+        "the resumed wait must surface the delivered signal payload"
+    );
+
+    // Control: the blocking lowering (gate OFF) reaches the same output when the
+    // signal is already present (its poll loop finds it on the first pass).
+    let blocking = compile_invoke_abi_artifact_configured(
+        &components_dir,
+        "store-freeing-wait-off",
+        STORE_FREEING_WAIT,
+        false,
+    );
+    let blocking_host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    // The blocking artifact's deterministic signal id is workflow-id-scoped and
+    // differs from the store-freeing one, so pre-deliver for ANY polled id — its
+    // first poll then finds the signal and the loop exits.
+    blocking_host.deliver_signal_any(br#"{"approved": true}"#);
+    let blocking_exit = run_invoke_once(&blocking.wasm_path, blocking_host.clone(), input.clone());
+    let blocking_output = match blocking_exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("blocking wait with a present signal must complete, got {other:?}"),
+    };
+    assert_eq!(
+        blocking_output, output,
+        "store-freeing wait output must byte-match the blocking output"
     );
 }
