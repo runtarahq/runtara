@@ -1351,6 +1351,7 @@ fn execute_via_embedded(
                     timeout: Duration::from_secs(300),
                     cancel: None,
                     limits,
+                    runtime: None,
                 },
             )
             .await
@@ -1574,6 +1575,173 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         host_imports.iter().any(|name| name.starts_with("wasi:")),
         "WASI imports must survive the binding change; imports: {host_imports:?}"
     );
+}
+
+/// In-memory RuntimeHost recording the lifecycle calls a HostImport-composed
+/// artifact makes. Input arrives from memory; output/error are captured from
+/// the return channel — no HTTP anywhere.
+struct RecordingRuntimeHost {
+    input: Vec<u8>,
+    completed: Mutex<Option<Vec<u8>>>,
+    failed: Mutex<Option<Vec<u8>>>,
+}
+
+impl RecordingRuntimeHost {
+    fn new(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            completed: Mutex::new(None),
+            failed: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost {
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(Some(self.input.clone()))
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok("host-import-e2e".to_string())
+    }
+    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        *self.completed.lock().unwrap() = Some(output);
+        Ok(())
+    }
+    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        *self.failed.lock().unwrap() = Some(error);
+        Ok(())
+    }
+    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn checkpoint(
+        &self,
+        _checkpoint_id: String,
+        _state: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        Ok(
+            runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                found: false,
+                state: Vec::new(),
+                pending_signal: None,
+                custom_signal: None,
+            },
+        )
+    }
+    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        _checkpoint_id: String,
+        _state: Vec<u8>,
+        _ms: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Phase-1 acceptance (docs/unify-agents-workflows-plan.md): a HostImport
+/// composition executes end-to-end through the in-process executor with the
+/// runtime interface satisfied by native host functions — input from memory,
+/// output captured from `complete` — zero HTTP. Instantiation type-checks the
+/// FULL host-bound interface (all funcs + the signal/checkpoint records)
+/// against the component's import, so success here proves the marshaling
+/// layer, not just the happy path.
+#[test]
+fn direct_wasm_execute_host_import_runtime_runs_without_http() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "phase1-host-import-exec".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+    })
+    .expect("direct emit succeeds");
+    result.component_artifacts =
+        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
+    compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
+
+    let host = Arc::new(RecordingRuntimeHost::new(br#"{"input":"host-import"}"#));
+    let executor = embedded_executor();
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load(&result.wasm_path)
+            .await
+            .expect("load host-import artifact");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+            )
+            .await
+    });
+
+    assert!(
+        matches!(run.exit, runtara_component_host::WorkflowExit::Completed),
+        "unexpected exit: {:?} (failed: {:?})",
+        run.exit,
+        host.failed
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(String::from_utf8_lossy),
+    );
+    let output = host
+        .completed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("workflow reported completion through the host import");
+    let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
+    assert_eq!(output_json, serde_json::json!({ "result": "host-import" }));
+    assert!(host.failed.lock().unwrap().is_none(), "no failure expected");
 }
 
 #[test]
@@ -4691,6 +4859,7 @@ fn run_direct_workflow_embedded(
                     timeout: Duration::from_secs(120),
                     cancel: None,
                     limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: None,
                 },
             )
             .await

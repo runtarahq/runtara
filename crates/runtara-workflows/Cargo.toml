@@ -55,6 +55,7 @@ wac-resolver = { version = "0.10", default-features = false, optional = true }
 wac-graph = { version = "0.10", optional = true }
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3"
 base64 = { workspace = true }
 wasmparser = "0.247"

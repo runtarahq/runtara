@@ -98,6 +98,11 @@ impl EmbeddedWasmRunner {
             timeout,
             cancel,
             limits: self.limits.clone(),
+            // Legacy composed artifacts satisfy the runtime interface
+            // internally (HTTP loopback); the native RuntimeHost is wired
+            // when the execute path adopts HostImport composition (Phase 2 of
+            // docs/unify-agents-workflows-plan.md).
+            runtime: None,
         }
     }
 

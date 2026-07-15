@@ -205,5 +205,9 @@ pub mod recovery;
 /// Embeddable runtime for runtara-environment.
 pub mod runtime;
 
+/// Persistence-backed implementation of the component host's `RuntimeHost` —
+/// the native replacement for the composed guest runtime's HTTP loopback.
+pub mod runtime_host;
+
 pub use config::Config;
 pub use error::Error;

@@ -23,6 +23,7 @@ pub mod dispatcher;
 pub mod engine;
 pub mod host_state;
 pub mod registry;
+pub mod runtime_host;
 pub mod workflow;
 
 pub use bindings::exports::runtara::agent::capabilities::{ConnectionInfo, ErrorInfo};

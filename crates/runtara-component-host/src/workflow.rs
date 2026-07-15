@@ -108,6 +108,12 @@ pub struct WorkflowRunSpec {
     pub timeout: Duration,
     pub cancel: Option<Arc<AtomicBool>>,
     pub limits: WorkflowLimits,
+    /// Native runtime host for artifacts composed with
+    /// `RuntimeBinding::HostImport` (they import
+    /// `runtara:workflow-runtime/runtime` instead of carrying the composed
+    /// HTTP runtime component). `None` for legacy composed artifacts — a
+    /// HostImport artifact run without a host traps loudly on first use.
+    pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
 /// Marker recorded by the epoch callback so a `Trap::Interrupt` can be told
@@ -180,6 +186,16 @@ pub struct WorkflowState {
     hooks: WorkflowHooks,
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
+    /// Present when the artifact imports the runtime interface (HostImport
+    /// binding); `None` for legacy composed artifacts.
+    runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
+}
+
+impl WorkflowState {
+    /// The run's native runtime host, when configured.
+    pub(crate) fn runtime_host(&self) -> Option<&Arc<dyn crate::runtime_host::RuntimeHost>> {
+        self.runtime.as_ref()
+    }
 }
 
 impl WasiView for WorkflowState {
@@ -222,6 +238,11 @@ impl WorkflowExecutor {
         let mut linker = Linker::<WorkflowState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+        // Native runtime interface for HostImport-composed artifacts. Extra
+        // definitions are invisible to components that don't import them (the
+        // WASI surface above works the same way), so legacy composed artifacts
+        // are unaffected by this registration.
+        crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         Ok(Self {
             engine,
             linker,
@@ -330,6 +351,7 @@ impl WorkflowExecutor {
                 denied_memory_grow: false,
             },
             termination: None,
+            runtime: spec.runtime.clone(),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -521,6 +543,7 @@ mod tests {
             timeout,
             cancel: None,
             limits: WorkflowLimits::default(),
+            runtime: None,
         }
     }
 
