@@ -345,6 +345,58 @@ pub(super) fn emit_entry_suspend_return(
     }
 }
 
+/// Store-freeing suspend at a timed deadline (durable Delay under the invoke
+/// export): `Ok(outcome::suspended([wake::at(deadline)]))`.
+///
+/// The host tears down the Store and schedules a relaunch at `deadline_local`
+/// (ms since epoch) via `sleep_until`; on relaunch the replay re-reaches the
+/// delay, whose sleep checkpoint now HITS and skips. This is a NO-OP under
+/// `wasi:cli/run` — that ABI keeps the blocking `durable-sleep-checkpoint`
+/// (the caller only invokes this on the InvokeHostImports arm).
+///
+/// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
+/// = 0 (at), payload u64 @96 = deadline.
+pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local: u32) {
+    // Zero result area + wake element (0..120).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(120));
+    function.instruction(&Instruction::MemoryFill(0));
+    // result disc = 0 (ok); outcome disc @8 = 1 (suspended).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    // list<wake> @12: ptr = 88, len = 1.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(88));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    // wake element @88: disc = 0 (at, already zeroed); u64 deadline @96.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(deadline_local));
+    function.instruction(&Instruction::I64Store(MemArg {
+        offset: 96,
+        align: 3,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+}
+
 /// Like `emit_fail_if_retptr_error` but reads the error list directly from the
 /// retptr (no scratch locals needed) — for call sites that have no free locals.
 pub(super) fn emit_fail_if_retptr_error_inplace(

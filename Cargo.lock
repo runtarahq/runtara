@@ -4658,6 +4658,7 @@ dependencies = [
  "runtara-agent-crypto",
  "runtara-agent-wit",
  "runtara-dsl",
+ "runtara-workflow-wit",
  "serde",
  "serde_json",
  "tempfile",

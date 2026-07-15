@@ -667,6 +667,8 @@ pub fn compile_direct_workflow_composed_with_binding(
         components_dir,
         binding,
         super::component::WorkflowAbi::CliRunHttp,
+        // Legacy axes keep the blocking durable-sleep path.
+        false,
     )
 }
 
@@ -678,8 +680,9 @@ pub fn compile_direct_workflow_composed_configured(
     components_dir: impl AsRef<Path>,
     binding: super::component::RuntimeBinding,
     abi: super::component::WorkflowAbi,
+    store_freeing_sleep: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    let mut result = compile_direct_workflow_with_abi(input, abi)?;
+    let mut result = compile_direct_workflow_with_abi(input, abi, store_freeing_sleep)?;
     let agent_ids: Vec<String> = result
         .component_artifacts
         .agent_components
@@ -724,7 +727,29 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_abi(input, workflow_abi_from_env())
+    compile_direct_workflow_with_abi(
+        input,
+        workflow_abi_from_env(),
+        store_freeing_sleep_from_env(),
+    )
+}
+
+/// Store-freeing durable-sleep gate for production compiles, from
+/// `RUNTARA_DIRECT_STORE_FREEING_SLEEP`. Default (unset or anything but a
+/// truthy value): OFF — durable Delay blocks in the host, byte-identical to the
+/// legacy path. Set to `1`/`true` to opt a compile into the exit-and-reschedule
+/// lowering (only takes effect under the invoke export). See
+/// [`super::compile::core_imports::DirectCoreFunctionIndices::store_freeing_sleep`].
+fn store_freeing_sleep_from_env() -> bool {
+    store_freeing_sleep_from_raw(
+        std::env::var("RUNTARA_DIRECT_STORE_FREEING_SLEEP")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1") | Some("true"))
 }
 
 /// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
@@ -751,6 +776,7 @@ fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
+    store_freeing_sleep: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
     let handle = std::thread::Builder::new()
@@ -758,7 +784,7 @@ pub fn compile_direct_workflow_with_abi(
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input, abi)
+            compile_direct_workflow_inner(input, abi, store_freeing_sleep)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -770,6 +796,7 @@ pub fn compile_direct_workflow_with_abi(
 fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
+    store_freeing_sleep: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
     // runtime catalog loaded from component `meta.json`). When absent, the
@@ -813,6 +840,7 @@ fn compile_direct_workflow_inner(
         input.track_events,
         &input.workflow_id,
         abi,
+        store_freeing_sleep,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -885,6 +913,7 @@ fn emit_direct_artifact(
     track_events: bool,
     workflow_id: &str,
     abi: super::component::WorkflowAbi,
+    store_freeing_sleep: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = match abi {
         super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
@@ -913,8 +942,14 @@ fn emit_direct_artifact(
         }
     };
 
-    let mut component =
-        emit_direct_component(manifest, manifest_json, track_events, workflow_id, abi)?;
+    let mut component = emit_direct_component(
+        manifest,
+        manifest_json,
+        track_events,
+        workflow_id,
+        abi,
+        store_freeing_sleep,
+    )?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -936,12 +971,14 @@ fn emit_direct_component(
     track_events: bool,
     workflow_id: &str,
     abi: super::component::WorkflowAbi,
+    store_freeing_sleep: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) =
         build_direct_component_resolve_configured(&manifest.feature_summary.agent_ids, abi)?;
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
-            .with_abi(abi);
+            .with_abi(abi)
+            .with_store_freeing_sleep(store_freeing_sleep);
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;

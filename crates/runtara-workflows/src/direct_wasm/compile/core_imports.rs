@@ -148,11 +148,13 @@ impl DirectCoreImportIndices {
     pub(super) fn require_all(
         self,
         abi: crate::direct_wasm::component::WorkflowAbi,
+        store_freeing_sleep: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
             abi,
+            store_freeing_sleep,
             runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
             runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
             runtime_fail: require_import(self.runtime_fail, "runtime.fail")?,
@@ -562,6 +564,14 @@ pub(super) struct DirectCoreFunctionIndices {
     /// the return convention at fail sites depends on it (tag under
     /// `wasi:cli/run`; result-area pointer under the invoke export).
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
+    /// Opt-in gate for the store-freeing durable-sleep lowering. When false
+    /// (the default), a durable Delay blocks in the host on
+    /// `durable-sleep-checkpoint` — byte-identical to the legacy path. When
+    /// true AND `abi == InvokeHostImports`, the Delay checkpoints its deadline
+    /// and exits with `outcome::suspended(at(deadline))` so the host frees the
+    /// Store and reschedules a relaunch. Only meaningful under the invoke
+    /// export (the only shape whose success arm can carry a wake).
+    pub(super) store_freeing_sleep: bool,
     pub(super) runtime_load_input: u32,
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,

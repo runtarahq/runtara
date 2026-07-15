@@ -46,6 +46,11 @@ pub(super) struct DirectCoreConfig {
     /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
     /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
+    /// Opt-in gate for the store-freeing durable-sleep lowering (see
+    /// [`DirectCoreFunctionIndices::store_freeing_sleep`]). Defaults to false —
+    /// the blocking, byte-preserved path — and is set via
+    /// [`Self::with_store_freeing_sleep`].
+    pub(super) store_freeing_sleep: bool,
 }
 
 impl DirectCoreConfig {
@@ -78,6 +83,12 @@ impl DirectCoreConfig {
         self
     }
 
+    /// Enable the store-freeing durable-sleep lowering (opt-in; default off).
+    pub(super) fn with_store_freeing_sleep(mut self, enabled: bool) -> Self {
+        self.store_freeing_sleep = enabled;
+        self
+    }
+
     fn new_inner(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
@@ -87,6 +98,7 @@ impl DirectCoreConfig {
         let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
+            store_freeing_sleep: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -160,7 +172,7 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    let import_indices = import_indices.require_all(config.abi)?;
+    let import_indices = import_indices.require_all(config.abi, config.store_freeing_sleep)?;
 
     for (name, export) in &world.exports {
         match export {

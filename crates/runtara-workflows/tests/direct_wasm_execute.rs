@@ -1195,6 +1195,9 @@ fn run_direct_workflow_capture_attempt(
         components_dir,
         binding,
         abi,
+        // The battery axis exercises the blocking durable-sleep path; the
+        // store-freeing lowering has its own dedicated suspend/resume test.
+        false,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
@@ -1997,6 +2000,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             agent_catalog: None,
         },
         WorkflowAbi::CliRunHttp,
+        false,
     )
     .expect("direct emit succeeds");
     result.component_artifacts =
@@ -5980,6 +5984,15 @@ fn compile_invoke_abi_artifact(
     workflow_id: &str,
     graph_json: &str,
 ) -> runtara_workflows::direct_wasm::DirectCompilationResult {
+    compile_invoke_abi_artifact_configured(components_dir, workflow_id, graph_json, false)
+}
+
+fn compile_invoke_abi_artifact_configured(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    store_freeing_sleep: bool,
+) -> runtara_workflows::direct_wasm::DirectCompilationResult {
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
     // Pin BOTH knobs: these tests assert the HostImport+invoke shape and
@@ -5998,6 +6011,7 @@ fn compile_invoke_abi_artifact(
         components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        store_freeing_sleep,
     )
     .expect("invoke-abi compile+compose succeeds");
     // Keep the tempdir alive by leaking it — the executor reads the artifact
@@ -6256,5 +6270,304 @@ fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
         sleep_keys,
         vec!["tick::0", "tick::1"],
         "per-item durable delays must not collide on one sleep key"
+    );
+}
+
+/// A single durable Delay whose only job downstream is to echo the input, so
+/// the store-freeing (suspend/relaunch) and blocking (in-host sleep) lowerings
+/// are trivially comparable at the output.
+const STORE_FREEING_DELAY: &str = r#"{
+  "name": "Store Freeing Delay",
+  "durable": true,
+  "steps": {
+    "delay": {
+      "stepType": "Delay",
+      "id": "delay",
+      "name": "Wait",
+      "durationMs": { "valueType": "immediate", "value": 3600000 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "echo": { "valueType": "reference", "value": "data.value" }
+      }
+    }
+  },
+  "entryPoint": "delay",
+  "executionPlan": [ { "fromStep": "delay", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": { "value": { "type": "string", "required": true } },
+  "outputSchema": {}
+}"#;
+
+/// Checkpoint-persisting runtime host: unlike [`RecordingRuntimeHost`] its
+/// checkpoint map survives across `execute_invoke` calls (share one `Arc`), so
+/// a store-freeing suspend that checkpoints its deadline on the first invoke
+/// HITS on the second — the in-process stand-in for the wake scheduler
+/// relaunching a parked instance. `sleeps` records blocking
+/// `durable-sleep-checkpoint` calls (never fired on the store-freeing path).
+struct CheckpointingRuntimeHost {
+    input: Vec<u8>,
+    checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    completed: Mutex<Option<Vec<u8>>>,
+    sleeps: Mutex<Vec<String>>,
+}
+
+impl CheckpointingRuntimeHost {
+    fn new(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            checkpoints: Mutex::new(HashMap::new()),
+            completed: Mutex::new(None),
+            sleeps: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeHost {
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(Some(self.input.clone()))
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok("store-freeing-delay".to_string())
+    }
+    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        *self.completed.lock().unwrap() = Some(output);
+        Ok(())
+    }
+    async fn fail(&self, _error: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .checkpoints
+            .lock()
+            .unwrap()
+            .get(&checkpoint_id)
+            .cloned())
+    }
+    async fn checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        // Mirror core `handle_checkpoint`: hit returns the stored state; a miss
+        // saves only non-empty state (empty state is a read-only probe).
+        let mut checkpoints = self.checkpoints.lock().unwrap();
+        if let Some(existing) = checkpoints.get(&checkpoint_id) {
+            return Ok(
+                runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                    found: true,
+                    state: existing.clone(),
+                    pending_signal: None,
+                    custom_signal: None,
+                },
+            );
+        }
+        if !state.is_empty() {
+            checkpoints.insert(checkpoint_id, state);
+        }
+        Ok(
+            runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                found: false,
+                state: Vec::new(),
+                pending_signal: None,
+                custom_signal: None,
+            },
+        )
+    }
+    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+        _ms: u64,
+    ) -> Result<(), String> {
+        // Blocking path: record the key (and persist the checkpoint like core's
+        // handle_sleep) but never actually sleep — keeps the 1h fixture fast.
+        if !state.is_empty() {
+            self.checkpoints
+                .lock()
+                .unwrap()
+                .entry(checkpoint_id.clone())
+                .or_insert(state);
+        }
+        self.sleeps.lock().unwrap().push(checkpoint_id);
+        Ok(())
+    }
+}
+
+fn run_invoke_once(
+    wasm_path: &Path,
+    host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
+    input: Vec<u8>,
+) -> runtara_component_host::InvokeExit {
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime
+        .block_on(async {
+            let pre = executor
+                .load_instance_pre(wasm_path)
+                .await
+                .expect("load invoke-shaped artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    input,
+                )
+                .await
+        })
+        .exit
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis() as u64
+}
+
+/// Store-freeing Slice 2: with the gate ON, a durable Delay under the invoke
+/// export EXITS with `suspended(at(deadline))` on first reach (freeing the
+/// Store) and, on relaunch, HITS the deadline checkpoint and skips the sleep —
+/// completing with output byte-identical to the blocking lowering. This is the
+/// in-process stand-in for the wake scheduler: the two invokes share one
+/// checkpoint-persisting host, exactly as a relaunched instance shares the
+/// durable checkpoint store.
+#[test]
+fn direct_wasm_execute_invoke_store_freeing_delay_suspends_then_resumes() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{"value":"resume-me"}"#.to_vec();
+    let duration_ms = 3_600_000u64;
+
+    // --- Store-freeing lowering (gate ON): suspend, then resume. ---
+    let store_freeing = compile_invoke_abi_artifact_configured(
+        &components_dir,
+        "store-freeing-delay-on",
+        STORE_FREEING_DELAY,
+        true,
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let before = now_ms();
+    let first = run_invoke_once(&store_freeing.wasm_path, host.clone(), input.clone());
+    let after = now_ms();
+
+    let wakes = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => wakes,
+        other => panic!("first invoke must suspend, got {other:?}"),
+    };
+    assert_eq!(wakes.len(), 1, "sequential lowering emits one wake");
+    let deadline = match &wakes[0] {
+        runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
+        other => panic!("durable Delay must suspend on a timed wake, got {other:?}"),
+    };
+    // deadline == now_ms(at suspend) + duration, and the suspend happened
+    // between `before` and `after`.
+    assert!(
+        deadline >= before + duration_ms && deadline <= after + duration_ms,
+        "deadline {deadline} must be ~now+{duration_ms} (window {}..={})",
+        before + duration_ms,
+        after + duration_ms
+    );
+    // The deadline was persisted under the top-level delay key, and NO blocking
+    // sleep fired.
+    assert!(
+        host.checkpoints.lock().unwrap().contains_key("delay"),
+        "store-freeing suspend must checkpoint its deadline under the delay key"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "store-freeing lowering must not call the blocking durable-sleep host fn"
+    );
+    assert!(
+        host.completed.lock().unwrap().is_none(),
+        "a suspended run has not completed yet"
+    );
+
+    // Relaunch: same host (checkpoint survives), replay from the start. The
+    // deadline checkpoint HITS, the sleep is skipped, and the run completes.
+    let second = run_invoke_once(&store_freeing.wasm_path, host.clone(), input.clone());
+    let resumed_output = match second {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("relaunch must complete, got {other:?}"),
+    };
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "resume must not block either — the checkpoint HIT skips the sleep"
+    );
+
+    // --- Blocking lowering (gate OFF): completes in ONE invoke. ---
+    let blocking = compile_invoke_abi_artifact_configured(
+        &components_dir,
+        "store-freeing-delay-off",
+        STORE_FREEING_DELAY,
+        false,
+    );
+    let blocking_host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let blocking_exit = run_invoke_once(&blocking.wasm_path, blocking_host.clone(), input.clone());
+    let blocking_output = match blocking_exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("blocking Delay must complete in one invoke, got {other:?}"),
+    };
+    // The blocking path DID call the durable-sleep host fn (its whole point),
+    // proving the two lowerings diverge internally...
+    assert_eq!(
+        blocking_host.sleeps.lock().unwrap().as_slice(),
+        &["delay".to_string()],
+        "blocking lowering must go through durable-sleep-checkpoint"
+    );
+
+    // ...yet converge on byte-identical observable output. This is the
+    // "semantics == legacy blocking, byte-preserved" guarantee.
+    assert_eq!(
+        resumed_output, blocking_output,
+        "store-freeing resume output must byte-match the blocking output"
+    );
+    let expected: Value = serde_json::json!({ "echo": "resume-me" });
+    assert_eq!(
+        serde_json::from_slice::<Value>(&resumed_output).expect("output is JSON"),
+        expected
     );
 }

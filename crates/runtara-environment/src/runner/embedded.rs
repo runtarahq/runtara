@@ -198,6 +198,64 @@ fn invoke_exit_to_result(
     }
 }
 
+/// The earliest timed wake deadline (ms since epoch) across a suspend's wake
+/// set, or `None` when every wake is deadline-less (`on-resume`, or a signal
+/// wait with no timeout). `suspended` is re-invoke-on-ANY, so the earliest
+/// deadline is when the scheduler must relaunch.
+fn earliest_wake_deadline_ms(
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> Option<u64> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes
+        .iter()
+        .filter_map(|wake| match wake {
+            WorkflowWake::At(ms) => Some(*ms),
+            WorkflowWake::OnSignal(wait) => wait.deadline_ms,
+            WorkflowWake::OnResume => None,
+        })
+        .min()
+}
+
+/// Park an invoke-shaped instance that returned `outcome::suspended` with a
+/// TIMED wake (the store-freeing durable-sleep path): stamp `status=suspended`
+/// and `sleep_until=deadline` so the wake scheduler relaunches it. The guest
+/// already persisted its resume checkpoint before exiting, so there is no
+/// output/checkpoint work here.
+///
+/// Deadline-less suspends (`on-resume` from a breakpoint/drain-signal pause)
+/// are NOT handled here: those already recorded `status=suspended` inline via
+/// their host-import ack, and the drain path stamps its own restart wake —
+/// touching `sleep_until` for them would wrongly schedule an immediate wake.
+async fn park_invoke_suspend(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) {
+    let Some(deadline_ms) = earliest_wake_deadline_ms(wakes) else {
+        return;
+    };
+    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
+    else {
+        warn!(
+            instance_id,
+            deadline_ms, "Suspend deadline out of range; not parking"
+        );
+        return;
+    };
+    // status first, then sleep_until: the wake scan requires BOTH
+    // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
+    // exposes a half-parked instance to a premature claim.
+    if let Err(e) = persistence
+        .update_instance_status(instance_id, "suspended", None)
+        .await
+    {
+        warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+    }
+    if let Err(e) = persistence.set_instance_sleep(instance_id, deadline).await {
+        warn!(instance_id, error = %e, "Failed to set sleep_until after invoke suspend");
+    }
+}
+
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
     ContainerMetrics {
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -248,6 +306,15 @@ impl Runner for EmbeddedWasmRunner {
             self.executor.engine(),
         ) {
             let input = self.persisted_input(&options.instance_id).await?;
+            // Run as `running` (see the detached path for why relaunches need
+            // this) — no-op on the first-run path, which is already running.
+            if let Err(e) = self
+                .persistence
+                .update_instance_status(&options.instance_id, "running", None)
+                .await
+            {
+                warn!(instance_id = %options.instance_id, error = %e, "Failed to mark invoke instance running");
+            }
             let run = self
                 .executor
                 .execute_invoke(
@@ -256,6 +323,20 @@ impl Runner for EmbeddedWasmRunner {
                     input,
                 )
                 .await;
+            // A store-freeing suspend has no output yet — park it and report a
+            // clean, non-terminal result rather than letting `load_output` fail.
+            if let runtara_component_host::InvokeExit::Suspended(wakes) = &run.exit {
+                park_invoke_suspend(self.persistence.as_ref(), &options.instance_id, wakes).await;
+                return Ok(LaunchResult {
+                    instance_id: options.instance_id.clone(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    stderr: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    metrics: invoke_metrics_of(&run),
+                });
+            }
             (invoke_metrics_of(&run), invoke_exit_to_result(&run.exit))
         } else {
             let pre = self
@@ -397,6 +478,19 @@ impl Runner for EmbeddedWasmRunner {
                                 b"{}".to_vec()
                             }
                         };
+                        // Ensure the run executes as `running`. The first-run
+                        // launch also sets this after `launch_detached` returns,
+                        // but a wake-scheduler relaunch (`wake_instance`) does
+                        // NOT — and a guest that completes while still marked
+                        // `suspended` would have its `if_running`-guarded
+                        // terminal event silently dropped. Set it here so BOTH
+                        // paths run as `running` before the guest starts.
+                        if let Err(e) = persistence
+                            .update_instance_status(&instance_id, "running", None)
+                            .await
+                        {
+                            warn!(instance_id = %instance_id, error = %e, "Failed to mark invoke instance running");
+                        }
                         let run = executor.execute_invoke(&instance_pre, spec, input).await;
                         {
                             let mut guard = metrics_for_task.lock().await;
@@ -409,6 +503,13 @@ impl Runner for EmbeddedWasmRunner {
                             }
                             InvokeExit::Suspended(wakes) => {
                                 info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+                                // Store-freeing durable sleep: the guest exited
+                                // with a timed wake instead of blocking; park it
+                                // so the wake scheduler relaunches at the
+                                // deadline. (A deadline-less on-resume was
+                                // already recorded suspended by its ack.)
+                                park_invoke_suspend(persistence.as_ref(), &instance_id, wakes)
+                                    .await;
                             }
                             InvokeExit::Failed(_) => {
                                 warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -554,5 +655,105 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn get_pid(&self, _handle: &RunnerHandle) -> Option<u32> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_component_host::lifecycle::{SignalWait, WorkflowWake};
+    use runtara_core::persistence::SqlitePersistence;
+
+    #[test]
+    fn earliest_wake_deadline_is_the_min_timed_wake() {
+        // Re-invoke-on-ANY: the scheduler must relaunch at the EARLIEST wake.
+        let wakes = vec![
+            WorkflowWake::At(300),
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "sig".into(),
+                deadline_ms: Some(120),
+            }),
+            WorkflowWake::OnResume,
+        ];
+        assert_eq!(earliest_wake_deadline_ms(&wakes), Some(120));
+    }
+
+    #[test]
+    fn earliest_wake_deadline_is_none_when_all_deadline_less() {
+        let wakes = vec![
+            WorkflowWake::OnResume,
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "sig".into(),
+                deadline_ms: None,
+            }),
+        ];
+        assert_eq!(earliest_wake_deadline_ms(&wakes), None);
+    }
+
+    async fn running_instance() -> (Arc<dyn Persistence>, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let persistence: Arc<dyn Persistence> = Arc::new(
+            SqlitePersistence::from_path(dir.path().join("park.db"))
+                .await
+                .expect("sqlite persistence"),
+        );
+        let instance_id = "park-inst".to_string();
+        persistence
+            .register_instance(&instance_id, "park-tenant")
+            .await
+            .expect("register");
+        persistence
+            .update_instance_status(&instance_id, "running", None)
+            .await
+            .expect("mark running");
+        (persistence, instance_id, dir)
+    }
+
+    #[tokio::test]
+    async fn park_stamps_suspended_and_sleep_until_for_a_timed_wake() {
+        let (persistence, instance_id, _dir) = running_instance().await;
+        let deadline_ms = 1_900_000_000_000u64; // a fixed absolute epoch-ms
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::At(deadline_ms)],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(
+            inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "sleep_until must be the wake deadline so the wake scan selects it"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_leaves_a_deadline_less_suspend_untouched() {
+        // on-resume (breakpoint/drain pause) already recorded suspended via its
+        // ack; park must NOT stamp a premature sleep_until that would wake it.
+        let (persistence, instance_id, _dir) = running_instance().await;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnResume],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "running", "no timed wake => no status change");
+        assert!(
+            inst.sleep_until.is_none(),
+            "no timed wake => no sleep_until stamp"
+        );
     }
 }
