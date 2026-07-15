@@ -221,7 +221,11 @@ struct CachedComponent {
     mtime: Option<SystemTime>,
     len: u64,
     last_used: Instant,
-    pre: Arc<CommandPre<WorkflowState>>,
+    /// The linked component, export-shape-agnostic.
+    instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
+    /// Lazily-derived `wasi:cli/run` wrapper — present only once a legacy
+    /// (run-shaped) artifact has been loaded through [`WorkflowExecutor::load`].
+    command: Option<Arc<CommandPre<WorkflowState>>>,
 }
 
 /// Loads composed workflow components and executes them in-process.
@@ -258,6 +262,37 @@ impl WorkflowExecutor {
     /// cache key is the path; entries are revalidated against file mtime+len
     /// so a re-deployed image at the same path recompiles.
     pub async fn load(&self, wasm_path: &Path) -> Result<Arc<CommandPre<WorkflowState>>> {
+        let instance_pre = self.load_instance_pre(wasm_path).await?;
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(entry) = cache.get_mut(wasm_path) {
+                if let Some(command) = &entry.command {
+                    return Ok(Arc::clone(command));
+                }
+                let command = Arc::new(
+                    CommandPre::new(entry.instance_pre.as_ref().clone()).map_err(|e| {
+                        anyhow::anyhow!("workflow component does not export wasi:cli/run: {e:#}")
+                    })?,
+                );
+                entry.command = Some(Arc::clone(&command));
+                return Ok(command);
+            }
+        }
+        // The entry was evicted between the two locks — derive without caching.
+        Ok(Arc::new(
+            CommandPre::new(instance_pre.as_ref().clone()).map_err(|e| {
+                anyhow::anyhow!("workflow component does not export wasi:cli/run: {e:#}")
+            })?,
+        ))
+    }
+
+    /// Load (or fetch from cache) the linked component, export-shape-agnostic
+    /// — the entry point for invoke-shaped artifacts (which do not export
+    /// `wasi:cli/run` and therefore cannot go through [`Self::load`]).
+    pub async fn load_instance_pre(
+        &self,
+        wasm_path: &Path,
+    ) -> Result<Arc<wasmtime::component::InstancePre<WorkflowState>>> {
         let meta = std::fs::metadata(wasm_path)
             .with_context(|| format!("stat workflow component {}", wasm_path.display()))?;
         let mtime = meta.modified().ok();
@@ -270,7 +305,7 @@ impl WorkflowExecutor {
                 && entry.len == len
             {
                 entry.last_used = Instant::now();
-                return Ok(Arc::clone(&entry.pre));
+                return Ok(Arc::clone(&entry.instance_pre));
             }
         }
 
@@ -287,13 +322,11 @@ impl WorkflowExecutor {
         .await
         .context("workflow component compile task panicked")??;
 
-        let instance_pre = self
-            .linker
-            .instantiate_pre(&component)
-            .map_err(|e| anyhow::anyhow!("link workflow component: {e:#}"))?;
-        let pre = Arc::new(CommandPre::new(instance_pre).map_err(|e| {
-            anyhow::anyhow!("workflow component does not export wasi:cli/run: {e:#}")
-        })?);
+        let instance_pre = Arc::new(
+            self.linker
+                .instantiate_pre(&component)
+                .map_err(|e| anyhow::anyhow!("link workflow component: {e:#}"))?,
+        );
 
         let mut cache = self.cache.lock().await;
         cache.insert(
@@ -302,13 +335,14 @@ impl WorkflowExecutor {
                 mtime,
                 len,
                 last_used: Instant::now(),
-                pre: Arc::clone(&pre),
+                instance_pre: Arc::clone(&instance_pre),
+                command: None,
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
             evict_lru(&mut cache);
         }
-        Ok(pre)
+        Ok(instance_pre)
     }
 
     /// Execute one workflow instance to completion (or interruption).
@@ -438,6 +472,188 @@ impl WorkflowExecutor {
             duration: started.elapsed(),
         }
     }
+
+    /// Execute one invoke-shaped workflow instance (the unified agent-shaped
+    /// export): `input` is passed as the call argument; the terminal result
+    /// is the lifted return value. Same sandbox, limits, and interruption
+    /// rings as [`Self::execute`].
+    pub async fn execute_invoke(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+    ) -> InvokeRunResult {
+        let started = Instant::now();
+
+        let mut builder = WasiCtxBuilder::new();
+        let mut env: Vec<(&String, &String)> = spec.env.iter().collect();
+        env.sort();
+        for (k, v) in env {
+            builder.env(k, v);
+        }
+        let host_stderr = match &spec.stderr {
+            Some(file) => match file.try_clone() {
+                Ok(clone) => {
+                    builder.stderr(OutputFile::new(clone));
+                    spec.stderr
+                }
+                Err(_) => spec.stderr,
+            },
+            None => None,
+        };
+
+        let state = WorkflowState {
+            wasi: builder.build(),
+            http: WasiHttpCtx::new(),
+            table: ResourceTable::new(),
+            hooks: WorkflowHooks,
+            limiter: WorkflowLimiter {
+                max_memory_bytes: spec.limits.max_memory_bytes,
+                max_table_elements: spec.limits.max_table_elements,
+                memory_peak_bytes: 0,
+                denied_memory_grow: false,
+            },
+            termination: None,
+            runtime: spec.runtime.clone(),
+        };
+
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limiter);
+
+        let timeout = spec.timeout;
+        let cancel = spec.cancel.clone();
+        let deadline_started = started;
+        store.epoch_deadline_callback(move |mut ctx| {
+            if let Some(flag) = &cancel
+                && flag.load(Ordering::Relaxed)
+            {
+                ctx.data_mut().termination = Some(Termination::Cancelled);
+                return Ok(UpdateDeadline::Interrupt);
+            }
+            if deadline_started.elapsed() >= timeout {
+                ctx.data_mut().termination = Some(Termination::Timeout);
+                return Ok(UpdateDeadline::Interrupt);
+            }
+            Ok(UpdateDeadline::Yield(1))
+        });
+        store.set_epoch_deadline(1);
+
+        let watchdog_cancel = spec.cancel.clone();
+        let run_ended = {
+            let run = async {
+                let instance = pre.instantiate_async(&mut store).await?;
+                let iface_idx = instance
+                    .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "workflow component does not export {} — not an invoke-shaped \
+                             artifact (use execute() for wasi:cli/run artifacts)",
+                            crate::lifecycle::LIFECYCLE_INTERFACE_NAME
+                        )
+                    })?;
+                let invoke_idx = instance
+                    .get_export_index(&mut store, Some(&iface_idx), "invoke")
+                    .ok_or_else(|| anyhow::anyhow!("lifecycle interface has no `invoke` export"))?;
+                type InvokeFunc = wasmtime::component::TypedFunc<
+                    (Vec<u8>,),
+                    (
+                        Result<
+                            crate::lifecycle::WorkflowOutcome,
+                            crate::lifecycle::WorkflowErrorInfo,
+                        >,
+                    ),
+                >;
+                let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
+                let (result,) = invoke.call_async(&mut store, (input,)).await?;
+                // post-return is driven automatically by wasmtime 44's typed
+                // call path; the store is single-use anyway (fresh per run).
+                Ok::<_, anyhow::Error>(result)
+            };
+            tokio::pin!(run);
+            let watchdog = async {
+                loop {
+                    tokio::time::sleep(EPOCH_TICK).await;
+                    if let Some(flag) = &watchdog_cancel
+                        && flag.load(Ordering::Relaxed)
+                    {
+                        return Termination::Cancelled;
+                    }
+                    if started.elapsed() >= timeout {
+                        return Termination::Timeout;
+                    }
+                }
+            };
+            tokio::select! {
+                result = &mut run => Ok(result),
+                termination = watchdog => Err(termination),
+            }
+        };
+
+        let data = store.data();
+        let exit = match run_ended {
+            Err(Termination::Timeout) => InvokeExit::Timeout,
+            Err(Termination::Cancelled) => InvokeExit::Cancelled,
+            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Completed(output)))) => {
+                InvokeExit::Completed(output)
+            }
+            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Suspended(wakes)))) => {
+                InvokeExit::Suspended(wakes)
+            }
+            Ok(Ok(Err(error))) => InvokeExit::Failed(error),
+            Ok(Err(trap)) => match data.termination {
+                Some(Termination::Timeout) => InvokeExit::Timeout,
+                Some(Termination::Cancelled) => InvokeExit::Cancelled,
+                None if data.limiter.denied_memory_grow => InvokeExit::Trapped {
+                    reason: format!(
+                        "guest memory limit exceeded ({} bytes)",
+                        data.limiter.max_memory_bytes
+                    ),
+                },
+                None => InvokeExit::Trapped {
+                    reason: format!("{trap:#}"),
+                },
+            },
+        };
+
+        if let Some(mut file) = host_stderr
+            && let InvokeExit::Trapped { reason } = &exit
+        {
+            let _ = writeln!(file, "workflow trapped: {reason}");
+        }
+
+        InvokeRunResult {
+            exit,
+            memory_peak_bytes: store.data().limiter.memory_peak_bytes,
+            duration: started.elapsed(),
+        }
+    }
+}
+
+/// Why an invoke-shaped workflow run ended. Unlike [`WorkflowExit`], terminal
+/// output/error/suspension arrive in-band as the lifted return value — no
+/// out-of-band status read is needed.
+#[derive(Debug)]
+pub enum InvokeExit {
+    /// `Ok(outcome::completed(bytes))` — the terminal output.
+    Completed(Vec<u8>),
+    /// `Ok(outcome::suspended(wakes))` — re-invoke when ANY wake fires.
+    Suspended(Vec<crate::lifecycle::WorkflowWake>),
+    /// `Err(error-info)` — the terminal failure.
+    Failed(crate::lifecycle::WorkflowErrorInfo),
+    /// Instantiation failed or the guest trapped.
+    Trapped { reason: String },
+    /// The wall-clock budget elapsed.
+    Timeout,
+    /// The cancel flag was raised.
+    Cancelled,
+}
+
+/// Result of one invoke-shaped workflow run.
+#[derive(Debug)]
+pub struct InvokeRunResult {
+    pub exit: InvokeExit,
+    pub memory_peak_bytes: u64,
+    pub duration: Duration,
 }
 
 fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {

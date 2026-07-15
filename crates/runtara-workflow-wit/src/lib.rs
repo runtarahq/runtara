@@ -11,11 +11,21 @@ pub const STDLIB_PACKAGE: &str = "runtara:workflow-stdlib@0.1.0";
 /// WIT package name for the runtime/SDK lifecycle component.
 pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.1.0";
 
+/// WIT package name for the workflow invoke-export contract.
+pub const LIFECYCLE_PACKAGE: &str = "runtara:workflow-lifecycle@0.1.0";
+
+/// Fully-qualified component export name of the lifecycle interface — what a
+/// workflow compiled with the invoke ABI exports instead of `wasi:cli/run`.
+pub const LIFECYCLE_INTERFACE_NAME: &str = "runtara:workflow-lifecycle/lifecycle@0.1.0";
+
 /// WIT text for `runtara:workflow-stdlib@0.1.0`.
 pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib.wit");
 
 /// WIT text for `runtara:workflow-runtime@0.1.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
+
+/// WIT text for `runtara:workflow-lifecycle@0.1.0`.
+pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-lifecycle.wit");
 
 #[cfg(test)]
 mod tests {
@@ -114,6 +124,37 @@ mod tests {
         }
 
         let world_id = package.worlds["workflow-stdlib"];
+        let world = &resolve.worlds[world_id];
+        assert!(world.imports.is_empty());
+        assert_eq!(world.exports.len(), 1);
+        assert!(
+            world
+                .exports
+                .values()
+                .any(|item| matches!(item, WorldItem::Interface { id, .. } if *id == interface_id))
+        );
+    }
+
+    #[test]
+    fn lifecycle_wit_parses_and_exports_invoke() {
+        let mut resolve = Resolve::default();
+        let package_id = resolve
+            .push_file(crate_dir().join("wit/lifecycle/runtara-workflow-lifecycle.wit"))
+            .expect("lifecycle WIT parses");
+        let package = &resolve.packages[package_id];
+
+        assert_eq!(package.name.to_string(), super::LIFECYCLE_PACKAGE);
+        let interface_id = package.interfaces["lifecycle"];
+        let interface = &resolve.interfaces[interface_id];
+        assert!(interface.functions.contains_key("invoke"));
+        for type_name in ["error-info", "signal-wait", "wake", "outcome"] {
+            assert!(
+                interface.types.contains_key(type_name),
+                "missing lifecycle type {type_name}"
+            );
+        }
+
+        let world_id = package.worlds["workflow-lifecycle"];
         let world = &resolve.worlds[world_id];
         assert!(world.imports.is_empty());
         assert_eq!(world.exports.len(), 1);

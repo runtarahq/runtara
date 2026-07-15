@@ -43,6 +43,9 @@ pub(super) struct DirectCoreConfig {
     pub(super) run_plan: DirectRunPlan,
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
+    /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
+    /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
+    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
 }
 
 impl DirectCoreConfig {
@@ -64,6 +67,12 @@ impl DirectCoreConfig {
         Self::new_inner(manifest, manifest_json, track_events, Some(workflow_id))
     }
 
+    /// Override the export shape.
+    pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowAbi) -> Self {
+        self.abi = abi;
+        self
+    }
+
     fn new_inner(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
@@ -72,6 +81,7 @@ impl DirectCoreConfig {
     ) -> Result<Self, DirectCompileError> {
         let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
+            abi: crate::direct_wasm::component::WorkflowAbi::default(),
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -145,7 +155,7 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    let import_indices = import_indices.require_all()?;
+    let import_indices = import_indices.require_all(config.abi)?;
 
     for (name, export) in &world.exports {
         match export {
@@ -288,7 +298,13 @@ fn export_core_function(
     );
     exports.export(&export_name, ExportKind::Func, function_index);
 
-    let body = if is_wasi_cli_run_export(resolve, interface, function) {
+    let body = if is_wasi_cli_run_export(resolve, interface, function)
+        || super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
+    {
+        // The entry export of the current ABI (the world declares exactly
+        // one): `wasi:cli/run` under CliRunHttp, `lifecycle.invoke` under
+        // InvokeHostImports. `direct_run_function` shapes its prologue and
+        // return convention from `config.abi`.
         direct_run_function(import_indices, config)
     } else {
         zero_return_function(&signature.results)
@@ -401,6 +417,8 @@ fn direct_run_function(
     indices: &DirectCoreFunctionIndices,
     config: &DirectCoreConfig,
 ) -> WasmFunction {
+    use crate::direct_wasm::component::WorkflowAbi;
+
     const DATA_PTR_LOCAL: u32 = 0;
     const DATA_LEN_LOCAL: u32 = 1;
     const SOURCE_PTR_LOCAL: u32 = 2;
@@ -412,8 +430,17 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
+    // Under the invoke ABI the export takes `input: list<u8>`, whose two
+    // flattened i32 params occupy indices 0/1 — exactly where DATA_PTR/
+    // DATA_LEN live as declared locals under `wasi:cli/run` (which takes no
+    // params). Shrinking the first declared group by two keeps every one of
+    // the ~100 hand-assigned DIRECT_*_LOCAL indices identical across ABIs.
+    let first_i32_group = match config.abi {
+        WorkflowAbi::CliRunHttp => 16,
+        WorkflowAbi::InvokeHostImports => 14,
+    };
     let mut body = WasmFunction::new([
-        (16, ValType::I32),
+        (first_i32_group, ValType::I32),
         (2, ValType::I64),
         (10, ValType::I32),
         (1, ValType::I64),
@@ -443,10 +470,14 @@ fn direct_run_function(
     body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
-    push_retptr_arg(&mut body);
-    body.instruction(&Instruction::Call(indices.runtime_load_input));
-    emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-    load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
+    if config.abi == WorkflowAbi::CliRunHttp {
+        push_retptr_arg(&mut body);
+        body.instruction(&Instruction::Call(indices.runtime_load_input));
+        emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
+        load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
+    }
+    // InvokeHostImports: the input envelope arrived as the call argument —
+    // params 0/1 ARE (DATA_PTR, DATA_LEN); no load-input round-trip.
 
     body.instruction(&Instruction::I32Const(config.static_data.steps.offset));
     body.instruction(&Instruction::LocalSet(STEPS_PTR_LOCAL));
@@ -493,7 +524,55 @@ fn direct_run_function(
     body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.runtime_complete));
-    load_retptr_tag(&mut body);
+    match config.abi {
+        WorkflowAbi::CliRunHttp => {
+            load_retptr_tag(&mut body);
+        }
+        WorkflowAbi::InvokeHostImports => {
+            // runtime.complete still fires above (additive host-side status
+            // recording during the migration; its retptr result is ignored —
+            // the return value below is authoritative). The terminal result
+            // travels as the return value: Ok(outcome::completed(output)).
+            emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
+        }
+    }
     body.instruction(&Instruction::End);
     body
+}
+
+/// Write `Ok(outcome::completed(output))` for the invoke export into the
+/// fixed result area and leave its pointer on the stack.
+///
+/// Canonical-ABI layout of `result<outcome, error-info>` (payload align 8):
+/// result disc u8 @0; ok arm = outcome @8: disc u8 @8 (0 = completed),
+/// payload list<u8> @12: ptr @12, len @16. The area is the low retptr
+/// scratch at offset 0 — dead by construction here (no host call ever runs
+/// between this write and the canonical lift; post-return is a no-op) and
+/// 8-aligned as the ABI requires.
+pub(super) fn emit_invoke_ok_completed_return(
+    body: &mut WasmFunction,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    // Zero the header region so both discriminants read 0 (ok/completed).
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(24));
+    body.instruction(&Instruction::MemoryFill(0));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    // The return value: the result area's address.
+    body.instruction(&Instruction::I32Const(0));
 }

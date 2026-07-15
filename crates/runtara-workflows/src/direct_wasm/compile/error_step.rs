@@ -103,11 +103,8 @@ pub(super) fn emit_error_plan(
             output_len_local,
         );
     } else {
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_fail));
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::Return);
+        // Same terminal-failure convention as every other fail site — the
+        // helper owns the per-ABI return shape (tag vs Err result area).
+        super::emit_runtime_fail_return(body, indices, output_ptr_local, output_len_local);
     }
 }

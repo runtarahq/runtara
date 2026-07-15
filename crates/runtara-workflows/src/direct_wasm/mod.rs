@@ -40,13 +40,15 @@ pub use compile::{
     DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
     DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
     compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
+    compile_direct_workflow_composed_with_binding, compile_direct_workflow_with_abi,
+    compose_direct_workflow,
 };
 #[cfg(feature = "compiler")]
 pub use component::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
-    RuntimeBinding, emit_direct_component_artifacts, emit_direct_component_artifacts_with_binding,
+    RuntimeBinding, WorkflowAbi, emit_direct_component_artifacts,
+    emit_direct_component_artifacts_configured, emit_direct_component_artifacts_with_binding,
 };
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;

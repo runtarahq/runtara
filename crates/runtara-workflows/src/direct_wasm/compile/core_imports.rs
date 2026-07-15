@@ -143,10 +143,14 @@ pub(super) struct DirectCoreImportIndices {
 }
 
 impl DirectCoreImportIndices {
-    pub(super) fn require_all(self) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
+    pub(super) fn require_all(
+        self,
+        abi: crate::direct_wasm::component::WorkflowAbi,
+    ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
+            abi,
             runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
             runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
             runtime_fail: require_import(self.runtime_fail, "runtime.fail")?,
@@ -543,6 +547,11 @@ impl DirectCoreImportIndices {
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectCoreFunctionIndices {
+    /// The top-level export shape the module is emitted against. Threaded
+    /// through the indices because every lowerer already receives them, and
+    /// the return convention at fail sites depends on it (tag under
+    /// `wasi:cli/run`; result-area pointer under the invoke export).
+    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
     pub(super) runtime_load_input: u32,
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,
@@ -714,6 +723,19 @@ pub(super) fn is_wasi_cli_run_export(
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name.starts_with("wasi:cli/run"))
+}
+
+/// True for `runtara:workflow-lifecycle/lifecycle.invoke` — the entry export
+/// under [`WorkflowAbi::InvokeHostImports`].
+pub(super) fn is_lifecycle_invoke_export(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "invoke"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("runtara:workflow-lifecycle/lifecycle"))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -57,7 +57,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_workflow_wit::{RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION};
+use runtara_workflow_wit::{
+    LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
+};
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -100,8 +102,11 @@ use super::support::{
     DirectWorkflowSupportReport, analyze_direct_wasm_support_with_child_workflows,
 };
 
-/// Direct workflow artifact ABI version.
+/// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
 pub const DIRECT_WORKFLOW_ABI_VERSION: u32 = 1;
+/// Direct workflow artifact ABI version for the unified invoke export
+/// (`runtara:workflow-lifecycle/lifecycle.invoke`).
+pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 2;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
 pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
 /// Custom section containing [`DirectWorkflowSupportReport`] JSON.
@@ -699,13 +704,24 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
+    compile_direct_workflow_with_abi(input, super::component::WorkflowAbi::default())
+}
+
+/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`]
+/// — the flag-gated invoke-export path (Phase 3 of
+/// docs/unify-agents-workflows-plan.md). The default entry keeps the legacy
+/// `wasi:cli/run` shape untouched.
+pub fn compile_direct_workflow_with_abi(
+    input: DirectCompilationInput,
+    abi: super::component::WorkflowAbi,
+) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
     let handle = std::thread::Builder::new()
         .name("direct-compile".to_string())
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input)
+            compile_direct_workflow_inner(input, abi)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -716,6 +732,7 @@ pub fn compile_direct_workflow(
 
 fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
+    abi: super::component::WorkflowAbi,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
     // runtime catalog loaded from component `meta.json`). When absent, the
@@ -758,12 +775,14 @@ fn compile_direct_workflow_inner(
         &support_json,
         input.track_events,
         &input.workflow_id,
+        abi,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
-    let component_artifacts = super::component::emit_direct_component_artifacts_with_binding(
+    let component_artifacts = super::component::emit_direct_component_artifacts_configured(
         &manifest.feature_summary.agent_ids,
         runtime_binding_from_env(),
+        abi,
     );
 
     let build_dir = input.output_dir.join(format!(
@@ -828,20 +847,37 @@ fn emit_direct_artifact(
     support_json: &[u8],
     track_events: bool,
     workflow_id: &str,
+    abi: super::component::WorkflowAbi,
 ) -> Result<Vec<u8>, DirectCompileError> {
-    let abi_json = serde_json::to_vec(&serde_json::json!({
-        "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
-        "artifactKind": "direct-run-component",
-        "componentRunExport": "wasi:cli/run@0.2.3",
-        "entryPointExecutable": true,
-        "runtimeExecutable": true,
-        "outputMode": "stdlib-apply-mapping",
-        "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-        "stepCount": manifest.feature_summary.total_steps,
-        "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
-    }))?;
+    let abi_json = match abi {
+        super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
+            "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
+            "artifactKind": "direct-run-component",
+            "componentRunExport": "wasi:cli/run@0.2.3",
+            "entryPointExecutable": true,
+            "runtimeExecutable": true,
+            "outputMode": "stdlib-apply-mapping",
+            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+            "stepCount": manifest.feature_summary.total_steps,
+            "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
+        }))?,
+        super::component::WorkflowAbi::InvokeHostImports => {
+            serde_json::to_vec(&serde_json::json!({
+                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+                "artifactKind": "direct-invoke-component",
+                "componentRunExport": LIFECYCLE_INTERFACE_NAME,
+                "entryPointExecutable": true,
+                "runtimeExecutable": true,
+                "outputMode": "invoke-result-outcome",
+                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+                "stepCount": manifest.feature_summary.total_steps,
+                "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
+            }))?
+        }
+    };
 
-    let mut component = emit_direct_component(manifest, manifest_json, track_events, workflow_id)?;
+    let mut component =
+        emit_direct_component(manifest, manifest_json, track_events, workflow_id, abi)?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
         &mut component,
@@ -862,11 +898,13 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
     workflow_id: &str,
+    abi: super::component::WorkflowAbi,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) =
-        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)?;
+        build_direct_component_resolve_configured(&manifest.feature_summary.agent_ids, abi)?;
     let core_config =
-        DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?;
+        DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
+            .with_abi(abi);
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
@@ -881,11 +919,19 @@ fn emit_direct_component(
 
 #[cfg(test)]
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
-    build_direct_component_resolve_with_agents(&[])
+    build_direct_component_resolve_configured(&[], super::component::WorkflowAbi::default())
 }
 
+#[cfg(test)]
 fn build_direct_component_resolve_with_agents(
     agents: &[String],
+) -> Result<(Resolve, WorldId), DirectCompileError> {
+    build_direct_component_resolve_configured(agents, super::component::WorkflowAbi::default())
+}
+
+fn build_direct_component_resolve_configured(
+    agents: &[String],
+    abi: super::component::WorkflowAbi,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -894,9 +940,18 @@ fn build_direct_component_resolve_with_agents(
     resolve
         .push_str("runtara-workflow-runtime.wit", RUNTIME_WIT)
         .map_err(component_error)?;
-    resolve
-        .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
-        .map_err(component_error)?;
+    match abi {
+        super::component::WorkflowAbi::CliRunHttp => {
+            resolve
+                .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
+                .map_err(component_error)?;
+        }
+        super::component::WorkflowAbi::InvokeHostImports => {
+            resolve
+                .push_str("runtara-workflow-lifecycle.wit", LIFECYCLE_WIT)
+                .map_err(component_error)?;
+        }
+    }
     if !agents.is_empty() {
         resolve
             .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
@@ -923,7 +978,14 @@ fn build_direct_component_resolve_with_agents(
             "    import runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION};\n",
         ));
     }
-    workflow_wit.push_str("    export wasi:cli/run@0.2.3;\n");
+    match abi {
+        super::component::WorkflowAbi::CliRunHttp => {
+            workflow_wit.push_str("    export wasi:cli/run@0.2.3;\n")
+        }
+        super::component::WorkflowAbi::InvokeHostImports => {
+            workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
+        }
+    }
     workflow_wit.push_str("}\n");
     let package = resolve
         .push_str("runtara-workflow.wit", &workflow_wit)
@@ -954,6 +1016,22 @@ fn agent_wit_package(agent: &str) -> String {
     )
 }
 
+/// Terminal-failure return — the ONE place that owns the per-ABI exit shape.
+/// Every fail site in every lowerer funnels here (directly or via the
+/// `abi.rs` retptr-error wrappers).
+///
+/// Both ABIs still record the failure host-side via `runtime.fail` (additive
+/// during the migration). The return differs:
+/// - `wasi:cli/run`: the classic non-zero result tag.
+/// - invoke export: `Err(error-info)` written into the fixed result area at
+///   offset 0 (the low retptr scratch — dead here by construction: no host
+///   call runs between this write and the canonical lift, and it is
+///   8-aligned as the payload requires). Layout (payload @8, align 8):
+///   code@8/12, message@16/20, category@24/28, severity@32/36, retryable@40,
+///   retry-after-ms tag@48 val@56, attributes tag@64 str@68/72 — total 80.
+///   v1 wraps the raw error bytes as `message` and leaves code/category/
+///   severity as empty strings (zeroed ptr/len is a valid empty string);
+///   structured mapping arrives with the suspend wiring phase.
 fn emit_runtime_fail_return(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -964,8 +1042,43 @@ fn emit_runtime_fail_return(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_fail));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::Return);
+    match indices.abi {
+        super::component::WorkflowAbi::CliRunHttp => {
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::Return);
+        }
+        super::component::WorkflowAbi::InvokeHostImports => {
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::I32Const(80));
+            body.instruction(&Instruction::MemoryFill(0));
+            // result disc = 1 (err)
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            // error-info.message = the raw error bytes
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::LocalGet(error_ptr_local));
+            body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                offset: 16,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::LocalGet(error_len_local));
+            body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                offset: 20,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::Return);
+        }
+    }
 }
 
 fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {

@@ -5878,3 +5878,207 @@ fn direct_wasm_sql_transport_failure_classification() {
         );
     }
 }
+
+// ===========================================================================
+// Invoke ABI (Phase 3 of docs/unify-agents-workflows-plan.md): the workflow
+// exports lifecycle.invoke instead of wasi:cli/run — input as the call
+// argument, terminal result as the lifted return value. These are the Spike-E
+// acceptance tests: the emitter's param-fold + result-area writer, the WIT
+// world, ComponentEncoder validation, wac composition, and wasmtime's typed
+// lift all have to agree for a single byte to come back.
+// ===========================================================================
+
+fn compile_invoke_abi_artifact(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+) -> runtara_workflows::direct_wasm::DirectCompilationResult {
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+    )
+    .expect("invoke-abi emit succeeds");
+    compose_direct_workflow(&mut result, components_dir).expect("invoke-abi compose succeeds");
+    // Keep the tempdir alive by leaking it — the executor reads the artifact
+    // lazily and the test owns the whole lifetime anyway.
+    std::mem::forget(temp);
+    result
+}
+
+#[test]
+fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_invoke_abi_artifact(&components_dir, "invoke-abi-completed", SIMPLE_PASSTHROUGH);
+
+    // Input travels as the call argument — the RecordingRuntimeHost's
+    // load_input must never be consulted (poisoned input proves it).
+    let host = Arc::new(RecordingRuntimeHost::new(b"{\"input\":\"WRONG-PATH\"}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load invoke-shaped artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"input":"invoke-abi"}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("expected Completed, got {other:?}"),
+    };
+    let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
+    assert_eq!(output_json, serde_json::json!({ "result": "invoke-abi" }));
+
+    // runtime.complete still fires additively during the migration and must
+    // carry the SAME bytes the return value carried.
+    let recorded = host
+        .completed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("complete fired additively");
+    assert_eq!(recorded, output, "in-band and recorded outputs must agree");
+}
+
+#[test]
+fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_invoke_abi_artifact(&components_dir, "invoke-abi-failed", ERROR_DIRECT_SIMPLE);
+
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load invoke-shaped artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"reason":"invoke-abi-error"}"#.to_vec(),
+            )
+            .await
+    });
+
+    let error = match run.exit {
+        runtara_component_host::InvokeExit::Failed(error) => error,
+        other => panic!("expected Failed, got {other:?}"),
+    };
+    // v1 wrapping: the raw error bytes ride `message`; code/category/severity
+    // are empty until the structured mapping lands with the suspend wiring.
+    assert!(
+        !error.message.is_empty(),
+        "error message must carry the failure payload"
+    );
+    assert_eq!(error.code, "");
+    assert!(!error.retryable);
+
+    // runtime.fail fired additively with the same payload.
+    let recorded = host
+        .failed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("fail fired additively");
+    assert_eq!(
+        String::from_utf8_lossy(&recorded),
+        error.message,
+        "in-band and recorded errors must agree"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_invoke_abi_artifact_rejects_run_loader() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_invoke_abi_artifact(&components_dir, "invoke-abi-shape", SIMPLE_PASSTHROUGH);
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    // The legacy loader requires wasi:cli/run — an invoke-shaped artifact
+    // must be rejected loudly, not executed as a no-op.
+    match runtime.block_on(executor.load(&compiled.wasm_path)) {
+        Ok(_) => panic!("wasi:cli/run loader must reject an invoke-shaped artifact"),
+        Err(error) => assert!(
+            format!("{error:#}").contains("wasi:cli/run"),
+            "unexpected error: {error:#}"
+        ),
+    }
+}
+
+#[test]
+fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_invoke_abi_artifact(&components_dir, "invoke-abi-agent", AGENT_CACHED_REPLAY);
+
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load invoke-shaped agent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"value":"invoke-agent"}"#.to_vec(),
+            )
+            .await
+    });
+
+    // A durable agent step (utils return-input) composed under the invoke
+    // world: agent imports + checkpoint host calls + the in-band result all
+    // have to line up.
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("expected Completed, got {other:?}"),
+    };
+    let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
+    assert_eq!(output_json, serde_json::json!({ "result": "invoke-agent" }));
+}
