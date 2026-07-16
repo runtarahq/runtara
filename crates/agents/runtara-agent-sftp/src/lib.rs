@@ -524,7 +524,7 @@ struct Component;
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
     fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
+        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
             "sftp-list-files" => __executor_sftp_list_files(value),
