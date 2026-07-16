@@ -621,8 +621,8 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
-    // 116-117 spare; 118-123 are the parallel-Split scratch (DIRECT_PSPLIT_*,
-    // see docs/wasip3-parallelism.md Phase 3).
+    // 116 = parallel-Split suspend flag, 117 spare; 118-123 are the
+    // parallel-Split scratch (DIRECT_PSPLIT_*, docs/wasip3-parallelism.md).
     (20, ValType::I32),
 ];
 

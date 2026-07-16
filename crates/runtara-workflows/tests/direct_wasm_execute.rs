@@ -9699,3 +9699,145 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
         timings[1]
     );
 }
+
+/// A pause signalled DURING a parallel window is observed at the drain
+/// wakeups, but the suspend fires only at the CHUNK BOUNDARY — after every
+/// subtask resolved and assemble checkpointed the durable items — so the
+/// resumed run replays from checkpoints and never re-fires the agents.
+#[test]
+fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Slow proxy stub: the host-io hyper client POSTs the proxy envelope
+    // here; each response takes 300ms so the drain loop genuinely waits
+    // (and polls) while subtasks are in flight. Thread-per-connection.
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind slow proxy stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(300));
+                        let body = br#"{"status":200,"headers":{},"body":{"ok":true}}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // Durable workflow (graph default) so assemble checkpoints each item.
+    let graph = parallel_http_split_graph(&stub_url, 4);
+    let graph: ExecutionGraph = serde_json::from_str(&graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-pause-resume".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("parallel split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(br#"{"items":[1,2,3,4]}"#));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let run_once = |host: Arc<PersistingRuntimeHost>| {
+        let env = env.clone();
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&compiled.wasm_path)
+                .await
+                .expect("load parallel artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env,
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+                )
+                .await
+        })
+    };
+
+    // PAUSE requested before the run: the drain-wakeup polls see it while the
+    // four subtasks are in flight; the suspend fires at the chunk boundary.
+    host.suspend_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = run_once(host.clone());
+    match first.exit {
+        runtara_component_host::InvokeExit::Suspended(_) => {}
+        other => panic!("pause during the window must SUSPEND, got {other:?}"),
+    }
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "a lifecycle pause must not surface as a failure"
+    );
+    let first_run_hits = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        first_run_hits, 4,
+        "all four launched calls must resolve before the suspend"
+    );
+
+    // RESUME: replay-from-start. Every item checkpointed during assemble HITs
+    // (launch gate + durable block), so the agents never re-fire.
+    host.suspend_requested
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let second = run_once(host.clone());
+    let output = match second.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed run must complete, got {other:?}"),
+    };
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), 4);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        first_run_hits,
+        "the resumed run must replay from checkpoints — zero new agent calls"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}

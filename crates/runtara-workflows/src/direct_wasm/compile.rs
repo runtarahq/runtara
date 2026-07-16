@@ -368,6 +368,10 @@ const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 // parallel split is ever ACTIVE at a time (eligible bodies are single Agent
 // steps, so parallel splits cannot nest), so these are plain fixed locals with
 // no save/restore frame.
+/// Sticky suspend/cancel flag observed by the drain loop's per-wakeup polls;
+/// acted on only at the chunk boundary (after assemble), never with live
+/// subtasks. Lives in the spare slot below the PSPLIT block.
+const DIRECT_PSPLIT_SIGNAL_LOCAL: u32 = 116;
 const DIRECT_PSPLIT_WS_LOCAL: u32 = 118;
 const DIRECT_PSPLIT_PENDING_LOCAL: u32 = 119;
 const DIRECT_PSPLIT_SLOTS_LOCAL: u32 = 120;

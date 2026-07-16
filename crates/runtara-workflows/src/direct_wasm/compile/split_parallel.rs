@@ -37,16 +37,18 @@ use std::collections::BTreeMap;
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    load_retptr_list, load_retptr_tag, push_retptr_arg, push_segment_args, push_variables_args,
+    emit_entry_suspend_return, emit_retptr_error_or_return, load_retptr_list, load_retptr_tag,
+    push_retptr_arg, push_retptr_u8_load, push_segment_args, push_variables_args,
 };
 use super::agent::emit_agent_plan;
 use super::split::{emit_loop_iteration_heap_reset, emit_value_store_retain};
 use super::{
     DIRECT_PSPLIT_CHUNK_END_LOCAL, DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET,
-    DIRECT_PSPLIT_LAUNCH_LOCAL, DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
-    DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_WS_LOCAL,
-    DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_HEAP_BASE_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
-    DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_PSPLIT_LAUNCH_LOCAL, DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
+    DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOTS_LOCAL,
+    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_SPLIT_COUNT_LOCAL,
+    DIRECT_SPLIT_HEAP_BASE_LOCAL, DIRECT_SPLIT_INDEX_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL,
+    DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
     DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
@@ -401,6 +403,8 @@ pub(super) fn emit_parallel_split_items(
         .expect("parallel split compiles import the waitable builtins");
 
     // item cursor starts at 0 (set by the caller, mirroring sequential).
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty)); // $chunks_done
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $chunks
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
@@ -701,6 +705,29 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
+    if !indices.omit_runtime {
+        // Per-wakeup lifecycle polls (§4.3): heartbeat, then OR is-cancelled
+        // and check-signals into the sticky suspend flag. Only FLAGGED here —
+        // the suspend itself happens at the chunk boundary, after every
+        // launched subtask has resolved and assemble has persisted results;
+        // exiting mid-drain would tear down live subtasks. A poll ERROR also
+        // sets the flag: the boundary re-poll reports it with full error
+        // handling at a safe point. NOTE these are sync-typed host calls —
+        // in-flight host-io futures pause for the call's duration (ms-scale,
+        // rate-limited server-side).
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(poll));
+            load_retptr_tag(body);
+            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+            body.instruction(&Instruction::I32Or);
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+            body.instruction(&Instruction::I32Or);
+            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        }
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::Call(ws_wait));
@@ -767,6 +794,30 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::Br(0)); // -> $assemble
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End); // $assemble_done
+
+    // Chunk boundary: act on a suspend/cancel flagged during the drain. All
+    // subtasks are resolved and dropped, and assemble has run (durable items
+    // are checkpointed), so this is a replay-safe point — mirror the While
+    // loop-head sequence, with full error handling this time.
+    if !indices.omit_runtime {
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(poll));
+            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+            emit_entry_suspend_return(body, indices);
+            body.instruction(&Instruction::End);
+        }
+        // Spurious flag (transient poll error, or the signal was withdrawn):
+        // clear it and keep going.
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::Br(0)); // -> $chunks
     body.instruction(&Instruction::End); // loop $chunks
