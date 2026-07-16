@@ -13,10 +13,8 @@ fn nested_only_is_rejected_but_header_plus_nested_parses() {
     }
 }
 "#;
-    let group = UnresolvedPackageGroup::parse("probe.wit", nested_only).expect("parse");
-    let mut resolve = Resolve::default();
     assert!(
-        resolve.push_group(group).is_err(),
+        UnresolvedPackageGroup::parse("probe.wit", nested_only).is_err(),
         "0.247 requires a top-level package header; if this starts passing, \
          the wit.rs texts can be simplified"
     );
