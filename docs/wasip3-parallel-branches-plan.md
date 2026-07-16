@@ -1,10 +1,18 @@
 # Parallel graph branches (heterogeneous fan-out) — detailed plan
 
-Status: **PLAN ONLY**. Sibling to `docs/wasip3-parallelism.md`, which delivered
-in-guest parallelism for the **Split** step (homogeneous data-parallelism, Phases
-0–3 + concurrent backoff). This document plans the remaining Phase-4 item:
-running **heterogeneous graph branches** — a fan-out `A → {B, C, …} → M` where the
-branches are *different* subgraphs — concurrently instead of linearising them.
+Status: **4a LANDED** (4a.1 non-durable + 4a.2 durable single-Agent branches run
+concurrently); **4b/4c pending**. Sibling to `docs/wasip3-parallelism.md`, which
+delivered in-guest parallelism for the **Split** step (homogeneous data-parallelism,
+Phases 0–3 + concurrent backoff). This document plans **heterogeneous graph
+branches** — a fan-out `A → {B, C, …} → M` where the branches are *different*
+subgraphs — run concurrently instead of linearised.
+
+**Landed (worktree-wasip3-parallelism):** `DirectRunPlan::ParallelBranches`;
+`compile/branch_parallel.rs` launch→drain→assemble window with memoized invoke +
+per-branch instance pooling; durable launch checkpoint-gate (replay-safe — the
+durable key ignores `source.steps`). Verified: emitter unit tests, e2e battery
+(overlap + durable-resume-no-double-fire), and an isolated live server (merge
+`{"b":"B","c":"C"}`). See [[project_parallel_branches]] / [[reference_isolated_live_server]].
 
 The constraint from `docs/wasip3-parallelism.md` still binds: **no host-orchestrated
 fan-out.** All concurrency lives inside the emitted `workflow.wasm`; the host only
