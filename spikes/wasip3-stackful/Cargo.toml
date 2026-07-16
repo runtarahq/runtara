@@ -1,0 +1,36 @@
+# Spike S1 (docs/wasip3-parallelism.md Phase 1): prove a HAND-EMITTED component
+# using the stackful async ABI runs with real overlap on wasmtime 46.
+#
+# Deliberately pinned to the PRODUCTION emitter's wasm-tools line (0.247, see
+# crates/runtara-workflows/Cargo.toml) — the exit criterion is that bytes
+# emitted with the production pins validate and run on wasmtime 46's
+# post-1.249 validator. Standalone crate: not a workspace member, own lockfile.
+[package]
+name = "wasip3-stackful-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+# Production emitter pins (runtara-workflows uses 0.247 for emit + compose).
+wasm-encoder = "0.247"
+wit-parser = "0.247"
+wit-component = "0.247"
+wac-graph = "0.10"
+wac-parser = "0.10"
+wac-resolver = "0.10"
+# The runtime under test.
+wasmtime = { version = "46", default-features = false, features = [
+    "std",
+    "anyhow",
+    "runtime",
+    "component-model",
+    "component-model-async",
+    "async",
+    "cranelift",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
