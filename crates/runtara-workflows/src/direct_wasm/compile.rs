@@ -415,7 +415,15 @@ const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
 const DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET: i32 = 4;
 const DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET: i32 = 8;
 const DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET: i32 = 12;
+/// Durable replay only: set when this attempt's `::attempt::N` checkpoint was
+/// a HIT (the attempt already ran on a prior life), so classify decodes it
+/// instead of the fresh slot result, and skips the already-elapsed backoff.
+const DIRECT_PSPLIT_SLOT_HIT_OFFSET: i32 = 16;
 const DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET: i32 = 24;
+/// Durable per-item step cache key (offsets 32/36) — the base for each
+/// attempt's `{cache_key}::attempt::N` checkpoint. Computed once at launch.
+const DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET: i32 = 32;
+const DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET: i32 = 36;
 /// Event scratch for `waitable-set.wait` `{handle: u32, state: u32}` — lives
 /// in the reserved low-memory region above the wait-deadline scratch (208..216)
 /// and below the static data base (256).

@@ -9890,7 +9890,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
 /// error-info (retry_after_ms included), the per-item retry machinery engages
 /// per item, and nothing fails or double-fires.
 #[test]
-fn direct_wasm_execute_parallel_split_rate_limited_items_retry_and_succeed() {
+fn direct_wasm_execute_parallel_split_durable_rate_limited_items_retry_and_succeed() {
     let _timing_guard = PARALLEL_TIMING_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -10019,13 +10019,26 @@ fn direct_wasm_execute_parallel_split_rate_limited_items_retry_and_succeed() {
         2 * ITEMS,
         "each item must call exactly twice: the launched 429 + one retry"
     );
-    // The rate-limited backoff engaged per item: each retry sleeps under its
-    // keyed retry-sleep checkpoint before re-invoking.
-    let sleep_ids = host.sleep_ids.lock().unwrap().clone();
+    // DURABLE concurrent backoff (§3.4): each item's failed attempt-1 is
+    // persisted under its `::attempt::1` checkpoint (so a resume never
+    // re-fires it), and the backoff is a concurrent TIMER subtask — NOT the
+    // blocking `durable-sleep-checkpoint` the sequential path used. So: one
+    // attempt-1 checkpoint per item, and zero durable sleeps.
+    let attempt_writes = host
+        .checkpoint_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| id.contains("::attempt::1"))
+        .count();
     assert_eq!(
-        sleep_ids.len(),
-        ITEMS as usize,
-        "one keyed backoff sleep per rate-limited item, got {sleep_ids:?}"
+        attempt_writes, ITEMS as usize,
+        "one per-attempt checkpoint per rate-limited item (durable replay guard)"
+    );
+    assert!(
+        host.sleep_ids.lock().unwrap().is_empty(),
+        "durable in-window backoff is a timer subtask, not a durable sleep: {:?}",
+        host.sleep_ids.lock().unwrap()
     );
 
     let _ = stub_stop_tx.send(());
@@ -10196,6 +10209,148 @@ fn direct_wasm_execute_parallel_split_concurrent_backoff_overlaps() {
     assert!(
         span < THINK,
         "retry backoffs failed to overlap: span {span:?} (>= one think-time)"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// DURABLE concurrent backoff — replay never double-fires. A first run of a
+/// durable rate-limited split (429→retry→200) settles every item and
+/// checkpoints the step results. A second run with the SAME checkpoint store
+/// (a resume) HITs every item's step checkpoint at launch and completes with
+/// the same outputs and ZERO new upstream calls — the per-attempt + step
+/// checkpoints prevent re-firing any agent call.
+#[test]
+fn direct_wasm_execute_parallel_split_durable_backoff_replay_no_double_fire() {
+    let components_dir = direct_e2e_components_dir();
+    const ITEMS: u32 = 4;
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(60));
+                        let body = if n < ITEMS {
+                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rl"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // DURABLE (graph default) rate-limited parallel split.
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "durable-backoff-replay".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("durable concurrent-backoff split compiles");
+
+    // The SAME host across both runs — its checkpoint store persists, exactly
+    // as the real persistence layer does across a resume.
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let run = |host: Arc<PersistingRuntimeHost>| {
+        let env = env.clone();
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&compiled.wasm_path)
+                .await
+                .expect("load parallel artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env,
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+                )
+                .await
+        })
+    };
+
+    // Run 1: 429→retry→200 for every item; 2 calls/item.
+    let first = run(host.clone());
+    let out1 = match first.exit {
+        runtara_component_host::InvokeExit::Completed(o) => {
+            serde_json::from_slice::<Value>(&o).expect("json")
+        }
+        other => panic!("first run must complete, got {other:?}"),
+    };
+    for r in out1["results"].as_array().expect("results") {
+        assert_eq!(r["status"], 200);
+    }
+    let hits_after_first = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(hits_after_first, 2 * ITEMS, "run 1: 2 calls per item");
+
+    // Run 2 (resume): every item's step checkpoint HITs at launch — the agent
+    // is never re-invoked, and the output is identical.
+    let second = run(host.clone());
+    let out2 = match second.exit {
+        runtara_component_host::InvokeExit::Completed(o) => {
+            serde_json::from_slice::<Value>(&o).expect("json")
+        }
+        other => panic!("resumed run must complete, got {other:?}"),
+    };
+    assert_eq!(out2, out1, "resume must reproduce the exact output");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        hits_after_first,
+        "resume must re-fire ZERO agent calls (step checkpoints replay)"
     );
 
     let _ = stub_stop_tx.send(());
