@@ -67,9 +67,10 @@ macro_rules! impl_instance_ops {
                 use $crate::persistence::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
-                            {status_col}, checkpoint_id, attempt, max_attempts, \
+                            {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                             created_at, started_at, finished_at, input, output, error, sleep_until, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
@@ -333,10 +334,11 @@ macro_rules! impl_instance_ops {
                 let p3 = <$Dialect>::placeholder(3);
                 let p4 = <$Dialect>::placeholder(4);
                 let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
-                            {status_col}, checkpoint_id, attempt, max_attempts, \
+                            {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                             created_at, started_at, finished_at, output, error, sleep_until \
                      FROM instances \
                      WHERE ({p1} IS NULL OR tenant_id = {p1}) \

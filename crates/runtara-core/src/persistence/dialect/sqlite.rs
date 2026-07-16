@@ -85,6 +85,10 @@ impl Dialect for SqliteDialect {
         "status"
     }
 
+    fn select_termination_col() -> &'static str {
+        "termination_reason"
+    }
+
     fn normalize_timestamp(expr: &str) -> String {
         // SQLite stores timestamps as TEXT; wrap in datetime() so both
         // sides of a comparison normalize to the canonical

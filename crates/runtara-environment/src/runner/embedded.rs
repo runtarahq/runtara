@@ -198,6 +198,11 @@ fn invoke_exit_to_result(
     }
 }
 
+/// `termination_reason` stamped on an on-signal park — the discriminator the
+/// custom-signal waker requires before relaunching a suspended row. A suspend
+/// from a pause/breakpoint ack carries no marker and is never signal-woken.
+pub(crate) const WAITING_SIGNAL_TERMINATION: &str = "waiting_signal";
+
 /// The earliest timed wake deadline (ms since epoch) across a suspend's wake
 /// set, or `None` when every wake is deadline-less (`on-resume`, or a signal
 /// wait with no timeout). `suspended` is re-invoke-on-ANY, so the earliest
@@ -236,6 +241,15 @@ fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake])
 /// - only `on-resume` (breakpoint/drain pause) → left untouched: those recorded
 ///   `status=suspended` inline via their ack, and stamping `sleep_until` would
 ///   wrongly schedule an immediate wake.
+///
+/// The park is `if_running`-guarded (a guest that already reported a terminal
+/// complete/fail must not be resurrected as suspended — the same race guard
+/// `handle_instance_event`'s suspend path uses), and stamps a
+/// `termination_reason` marker naming the wake shape: `waiting_signal` for
+/// on-signal parks (the ONLY rows the custom-signal waker may relaunch — a
+/// pause/breakpoint suspend has no marker and must never be signal-woken) or
+/// `sleeping` for pure timed parks. Relaunch clears the marker with the
+/// running transition.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -246,14 +260,36 @@ async fn park_invoke_suspend(
         // Pure on-resume: already handled by the ack path.
         return;
     }
+    let wake_marker = if has_on_signal_wake(wakes) {
+        WAITING_SIGNAL_TERMINATION
+    } else {
+        "sleeping"
+    };
     // status first, then sleep_until: the wake scan requires BOTH
     // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
     // exposes a half-parked instance to a premature claim.
-    if let Err(e) = persistence
-        .update_instance_status(instance_id, "suspended", None)
+    match persistence
+        .complete_instance(
+            runtara_core::persistence::CompleteInstanceParams::new(instance_id, "suspended")
+                .if_running()
+                .with_termination(wake_marker, None),
+        )
         .await
     {
-        warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+        Ok(true) => {}
+        Ok(false) => {
+            // Already terminal (or otherwise not running) — a malformed guest
+            // that completed/failed and THEN returned suspended, or the
+            // monitor's timeout landed first. Never overwrite, never schedule.
+            warn!(
+                instance_id,
+                "Invoke suspend ignored: instance is not running (terminal status preserved)"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+        }
     }
     let Some(deadline_ms) = deadline_ms else {
         // Deadline-less on-signal: parked as suspended; the waker relaunches it.
@@ -747,6 +783,11 @@ mod tests {
             Some(deadline_ms),
             "sleep_until must be the wake deadline so the wake scan selects it"
         );
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some("sleeping"),
+            "a pure timed park is scheduler-woken, never signal-woken"
+        );
     }
 
     #[tokio::test]
@@ -797,6 +838,48 @@ mod tests {
         assert!(
             inst.sleep_until.is_none(),
             "a deadline-less on-signal wait relies on the waker, not sleep_until"
+        );
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some(WAITING_SIGNAL_TERMINATION),
+            "the waker must be able to distinguish this park from a pause suspend"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_never_overwrites_a_terminal_status() {
+        // A malformed guest that reported terminal complete and THEN returned
+        // outcome::suspended must not be resurrected (and must not be
+        // scheduled for a wake) — the same if_running guard the event path's
+        // suspend uses.
+        let (persistence, instance_id, _dir) = running_instance().await;
+        persistence
+            .complete_instance(
+                runtara_core::persistence::CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running(),
+            )
+            .await
+            .expect("complete");
+
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::At(1_900_000_000_000u64)],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(
+            inst.status, "completed",
+            "a terminal status must survive a late suspend return"
+        );
+        assert!(
+            inst.sleep_until.is_none(),
+            "a rejected park must not schedule a wake for a completed instance"
         );
     }
 

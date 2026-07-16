@@ -118,12 +118,13 @@ macro_rules! impl_sleep_ops {
                 use $crate::persistence::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
                 let now = <$Dialect>::NOW;
                 let lhs = <$Dialect>::normalize_timestamp("sleep_until");
                 let rhs = <$Dialect>::normalize_timestamp(now);
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
-                            {status_col}, checkpoint_id, attempt, max_attempts, \
+                            {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                             created_at, started_at, finished_at, output, error, sleep_until \
                      FROM instances \
                      WHERE sleep_until IS NOT NULL \

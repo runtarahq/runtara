@@ -70,6 +70,10 @@ impl Dialect for PostgresDialect {
         "status::text as status"
     }
 
+    fn select_termination_col() -> &'static str {
+        "termination_reason::text as termination_reason"
+    }
+
     fn normalize_timestamp(expr: &str) -> String {
         // PG's `timestamp` / `timestamptz` comparisons handle both sides
         // natively — no wrapping needed.
