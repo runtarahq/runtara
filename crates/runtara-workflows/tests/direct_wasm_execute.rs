@@ -8014,3 +8014,270 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
     assert!(host.failed.lock().unwrap().is_none());
     std::mem::forget(temp);
 }
+
+/// Stale-artifact gate (plan §5): a DURABLE workflow-agent staged with a
+/// sidecar that predates checkpoint namespacing (no `checkpoint-scope:1`
+/// capability tag) must FAIL the parent's compose with a republish error —
+/// its `build_source` would silently drop the injected `_cache_key_prefix`
+/// and the checkpoint collision would return invisibly.
+#[test]
+fn stale_durable_workflow_agent_artifact_fails_compose() {
+    let components_dir = direct_e2e_components_dir();
+
+    const DURABLE_CHILD: &str = r#"{
+      "name": "Stale Durable Child",
+      "steps": {
+        "delay": {
+          "stepType": "Delay",
+          "id": "delay",
+          "durationMs": { "valueType": "immediate", "value": 5 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "delay",
+      "executionPlan": [ { "fromStep": "delay", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(DURABLE_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "stale-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("stale-durable".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("durable child compiles as an agent");
+    assert!(
+        !child.omit_runtime,
+        "durable child keeps the runtime import"
+    );
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_stale_durable.wasm"),
+    )
+    .expect("stage child wasm");
+    // Simulate a pre-namespacing publish: the synthesized meta WITHOUT the
+    // `checkpoint-scope:1` marker tag.
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "stale-durable",
+        "Stale Durable",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    let mut stripped = serde_json::to_value(&info).expect("info to json");
+    let tags = stripped["capabilities"][0]["tags"]
+        .as_array_mut()
+        .expect("capability tags");
+    tags.retain(|tag| tag != "checkpoint-scope:1");
+    fs::write(
+        staging.join("runtara_agent_stale_durable.meta.json"),
+        serde_json::to_vec_pretty(&stripped).expect("meta serializes"),
+    )
+    .expect("stage stripped meta");
+
+    const PARENT: &str = r#"{
+      "name": "Parent Of Stale Agent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "stale-durable",
+          "capabilityId": "run",
+          "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": { "msg": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    // The catalog is what a server loading this stale sidecar would serve.
+    let stale_info: runtara_dsl::agent_meta::AgentInfo =
+        serde_json::from_value(stripped).expect("stripped info parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        stale_info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "stale-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile itself succeeds");
+    let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect_err("composing a stale DURABLE workflow-agent must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("predates checkpoint namespacing") && message.contains("stale-durable"),
+        "the error must name the stale slug and ask for a republish: {message}"
+    );
+    std::mem::forget(temp);
+}
+
+/// The pure counterpart of the stale-artifact gate: a runtime-LESS
+/// workflow-agent has no checkpoints to protect, so even a pre-namespacing
+/// sidecar (no `checkpoint-scope:1` tag) composes freely.
+#[test]
+fn stale_pure_workflow_agent_artifact_composes_freely() {
+    let components_dir = direct_e2e_components_dir();
+
+    const PURE_CHILD: &str = r#"{
+      "name": "Stale Pure Child",
+      "durable": false,
+      "steps": {
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "finish",
+      "executionPlan": [],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(PURE_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "stale-pure-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("stale-pure".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("pure child compiles as an agent");
+    assert!(child.omit_runtime, "pure child must not import the runtime");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_stale_pure.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "stale-pure",
+        "Stale Pure",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    let mut stripped = serde_json::to_value(&info).expect("info to json");
+    stripped["capabilities"][0]["tags"]
+        .as_array_mut()
+        .expect("capability tags")
+        .retain(|tag| tag != "checkpoint-scope:1");
+    fs::write(
+        staging.join("runtara_agent_stale_pure.meta.json"),
+        serde_json::to_vec_pretty(&stripped).expect("meta serializes"),
+    )
+    .expect("stage stripped meta");
+
+    const PARENT: &str = r#"{
+      "name": "Parent Of Stale Pure Agent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "stale-pure",
+          "capabilityId": "run",
+          "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": { "msg": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let stale_info: runtara_dsl::agent_meta::AgentInfo =
+        serde_json::from_value(stripped).expect("stripped info parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        stale_info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "stale-pure-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("a stale PURE child has no checkpoints to protect — composes freely");
+    std::mem::forget(temp);
+}

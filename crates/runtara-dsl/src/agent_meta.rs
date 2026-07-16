@@ -103,6 +103,14 @@ pub mod capability_tags {
     /// child's input in the checkpoint-namespace envelope at the invoke
     /// boundary — native agents must never receive an envelope-shaped input.
     pub const WORKFLOW_AGENT: &str = "workflow-agent";
+    /// Artifact-compatibility marker for checkpoint namespacing: the staged
+    /// workflow-agent was compiled with the `_cache_key_prefix` whitelist, so
+    /// it honors the namespace envelope its parent injects. A DURABLE
+    /// workflow-agent sidecar WITHOUT this tag predates namespacing (it would
+    /// silently drop the prefix and its checkpoint ids would collide across
+    /// invocation sites) — the parent compile refuses to compose it until it
+    /// is republished. Pure (runtime-less) children compose freely either way.
+    pub const WORKFLOW_AGENT_CHECKPOINT_SCOPE: &str = "checkpoint-scope:1";
 }
 
 /// Error category for capability errors
@@ -2059,7 +2067,10 @@ pub fn workflow_agent_info(
             rate_limited: false,
             compensation_hint: None,
             known_errors: Vec::new(),
-            tags: vec![capability_tags::WORKFLOW_AGENT.to_string()],
+            tags: vec![
+                capability_tags::WORKFLOW_AGENT.to_string(),
+                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE.to_string(),
+            ],
         }],
     }
 }
@@ -2795,7 +2806,11 @@ mod workflow_agent_info_tests {
         // Conservative execution semantics for published workflows.
         assert!(cap.has_side_effects);
         assert!(!cap.is_idempotent);
-        assert_eq!(cap.tags, vec!["workflow-agent"]);
+        assert_eq!(
+            cap.tags,
+            vec!["workflow-agent", "checkpoint-scope:1"],
+            "the checkpoint-scope marker must ride the synthesized meta"
+        );
     }
 
     #[test]

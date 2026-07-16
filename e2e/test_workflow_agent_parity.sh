@@ -367,4 +367,165 @@ DURABLE_PARENT_ID=$(create_and_compile "Parent Of Durable Echo" "${DURABLE_PAREN
 execute_and_assert "${DURABLE_PARENT_ID}" '{"data":{"msg":"durable-live"}}' \
     '{"childEcho":"durable-live"}' "parent→durable-child"
 
-print_success "workflow<>agent parity: slug + publish + parent invoke + durable child, all green"
+#-------------------------------------------------------------------------
+print_step "5. Checkpoint namespacing: Split over a durable child with a same-named step..."
+# The child's internal Delay step is deliberately named `call` — the SAME id
+# as the parent's Agent step. Without per-site namespacing all three Split
+# iterations would collide on one bare `call` sleep checkpoint.
+RESP=$(api_post /workflows/create '{"name":"NS Delay Echo","description":"parity e2e","slug":"ns-delay-echo"}')
+NS_CHILD_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${NS_CHILD_ID}" ] || { print_error "ns child create failed: ${RESP}"; exit 1; }
+NS_CHILD_GRAPH='{
+  "name": "NS Delay Echo",
+  "steps": {
+    "call": {
+      "stepType": "Delay",
+      "id": "call",
+      "durationMs": { "valueType": "immediate", "value": 30 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+    }
+  },
+  "entryPoint": "call",
+  "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": { "value": { "type": "string", "required": true } },
+  "outputSchema": {}
+}'
+RESP=$(api_post "/workflows/${NS_CHILD_ID}/update" "{\"executionGraph\": ${NS_CHILD_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "ns child update failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${NS_CHILD_ID}/publish-agent" "" 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "ns child publish failed: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+NS_META="${TEST_DATA_DIR}/workflow-agents/${TENANT}/runtara_agent_ns_delay_echo.meta.json"
+jq -e '.capabilities[0].tags | index("checkpoint-scope:1")' "${NS_META}" >/dev/null \
+    || { print_error "published meta lacks the checkpoint-scope marker: $(cat "${NS_META}")"; exit 1; }
+echo "  ns child published with checkpoint-scope marker ✓"
+
+NS_PARENT_GRAPH='{
+  "name": "NS Split Parent",
+  "durable": true,
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": { "value": { "valueType": "reference", "value": "data.items" } },
+      "subgraph": {
+        "name": "Body",
+        "entryPoint": "call",
+        "steps": {
+          "call": {
+            "stepType": "Agent",
+            "id": "call",
+            "agentId": "ns-delay-echo",
+            "capabilityId": "run",
+            "inputMapping": { "value": { "valueType": "reference", "value": "item.v" } }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+          }
+        },
+        "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "results": { "valueType": "reference", "value": "steps.split.outputs" } }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [ { "fromStep": "split", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": { "items": { "type": "array", "required": true } },
+  "outputSchema": {}
+}'
+NS_PARENT_ID=$(create_and_compile "NS Split Parent" "${NS_PARENT_GRAPH}")
+RESP=$(api_post "/workflows/${NS_PARENT_ID}/execute" '{"inputs":{"data":{"items":[{"v":"a"},{"v":"b"},{"v":"c"}]}}}')
+NS_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${NS_INSTANCE}" ] || { print_error "ns parent execute failed: ${RESP}"; exit 1; }
+NS_STATUS=""
+for _ in {1..90}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${NS_INSTANCE}")
+    NS_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${NS_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+[ "${NS_STATUS}" = "completed" ] \
+    || { print_error "ns split parent ended '${NS_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  split over durable child completed ✓"
+
+# The stored checkpoint ids must be per-invocation-site scoped: one child
+# sleep key per Split iteration, and NEVER the bare legacy `call`.
+ENV_API="http://127.0.0.1:${TEST_ENV_HTTP_PORT}/api/v1"
+CKPT_IDS=$(curl -sS "${ENV_API}/instances/${NS_INSTANCE}/checkpoints?limit=500" | jq -r '.checkpoints[].checkpoint_id')
+[ -n "${CKPT_IDS}" ] || { print_error "no checkpoints recorded for ${NS_INSTANCE}"; exit 1; }
+for i in 0 1 2; do
+    echo "${CKPT_IDS}" | grep -q "::call\[${i}\]::call$" \
+        || { print_error "missing scoped child sleep key for iteration ${i}; got:"$'\n'"${CKPT_IDS}"; exit 1; }
+done
+if echo "${CKPT_IDS}" | grep -qx "call"; then
+    print_error "bare legacy 'call' checkpoint id present — namespacing not applied:"$'\n'"${CKPT_IDS}"
+    exit 1
+fi
+echo "  three per-site scoped child sleep keys, no bare legacy key ✓"
+
+#-------------------------------------------------------------------------
+print_step "6. Stale-artifact gate: durable child without the marker fails parent compile..."
+# Simulate an artifact published before checkpoint namespacing by stripping
+# the marker tag from the staged sidecar, then compiling a fresh parent.
+jq '(.capabilities[0].tags) |= map(select(. != "checkpoint-scope:1"))' "${NS_META}" > "${NS_META}.tmp" \
+    && mv "${NS_META}.tmp" "${NS_META}"
+GATE_PARENT_GRAPH='{
+  "name": "Gate Parent",
+  "steps": {
+    "call": {
+      "stepType": "Agent",
+      "id": "call",
+      "agentId": "ns-delay-echo",
+      "capabilityId": "run",
+      "inputMapping": { "value": { "valueType": "immediate", "value": "x" } }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+    }
+  },
+  "entryPoint": "call",
+  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+RESP=$(api_post /workflows/create '{"name":"Gate Parent","description":"parity e2e"}')
+GATE_PARENT_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${GATE_PARENT_ID}" ] || { print_error "gate parent create failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${GATE_PARENT_ID}/update" "{\"executionGraph\": ${GATE_PARENT_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "gate parent update failed: ${RESP}"; exit 1; }
+GATE_VERSION=$(curl -sS "${API}/workflows/${GATE_PARENT_ID}/versions" \
+    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${GATE_PARENT_ID}/versions/${GATE_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
+    || { print_error "compile against a STALE durable artifact must fail, got: ${RESP}"; exit 1; }
+echo "${RESP}" | jq -r '[.. | strings] | join(" ")' | grep -q "predates checkpoint namespacing" \
+    || { print_error "gate error must mention the stale artifact: ${RESP}"; exit 1; }
+echo "  stale durable artifact rejected with republish error ✓"
+
+# Republish heals it: the fresh meta carries the marker and the same parent compiles.
+RESP=$(api_post "/workflows/${NS_CHILD_ID}/publish-agent" "" 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "ns child republish failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${GATE_PARENT_ID}/versions/${GATE_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "republish must heal the gate: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  republish heals the gate ✓"
+
+print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate, all green"

@@ -1,6 +1,14 @@
 # Checkpoint namespacing for composed workflow-agent children — plan
 
-_Verified against `feature/workflow-agent-unification` (2026-07-16). Status: PLAN ONLY._
+_Verified against `feature/workflow-agent-unification` (2026-07-16).
+Status: IMPLEMENTED — N1 (stdlib whitelist + shared `child_cache_prefix` +
+key-builder audit), N2 (`is_workflow_agent` manifest flag + `agent-scope-input`
+envelope wrap), N3 (`checkpoint-scope:1` capability-tag marker + stale-artifact
+compose gate + live e2e in `e2e/test_workflow_agent_parity.sh` steps 5–6).
+§4 signal-id scoping remains deferred to a separate PR. Note: the artifact
+marker landed as a capability TAG (`checkpoint-scope:1`) rather than a
+top-level `checkpointScope` meta field — same semantics, zero `AgentInfo`
+schema change._
 
 ## 1. The problem, precisely
 
