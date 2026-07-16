@@ -1947,6 +1947,157 @@ pub fn validate_workflow_slug(slug: &str) -> Result<(), SlugError> {
     Ok(())
 }
 
+/// Capability id of a workflow-as-agent's single capability. The agent id is
+/// the workflow's slug; the one capability that runs the workflow is `run`
+/// (an Agent step targets it as `agentId: <slug>, capabilityId: "run"`).
+pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
+
+/// Synthesize the catalog metadata for a workflow published as an agent — the
+/// exact `AgentInfo` shape a native agent's `meta.json` sidecar carries, so a
+/// staged workflow-agent drops into the same catalog/validation/step-picker
+/// machinery with zero special-casing.
+///
+/// The capability's `inputs` ARE the workflow's `inputSchema` fields —
+/// including `connection`-typed ones (surfaced with `type: "connection"`),
+/// which is how a workflow-agent advertises the connections a CALLER must
+/// supply: there is no separate connection-slots descriptor
+/// (docs/workflow-agent-connections.md). `supportsConnections` and
+/// `integrationIds` are derived from those fields.
+///
+/// `hasSideEffects` is conservatively `true` (a workflow may do anything) and
+/// `isIdempotent` `false` — callers must not silently retry a published
+/// workflow.
+pub fn workflow_agent_info(
+    slug: &str,
+    name: &str,
+    description: &str,
+    input_schema: &std::collections::HashMap<String, crate::SchemaField>,
+    output_schema: &std::collections::HashMap<String, crate::SchemaField>,
+) -> AgentInfo {
+    let mut inputs: Vec<CapabilityField> = input_schema
+        .iter()
+        .map(|(field_name, field)| capability_field_from_schema(field_name, field))
+        .collect();
+    // HashMap iteration is nondeterministic; the meta.json must be stable
+    // across recompiles (checksummed sidecars, diffs).
+    inputs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut output_fields: Vec<OutputField> = output_schema
+        .iter()
+        .map(|(field_name, field)| OutputField {
+            name: field_name.clone(),
+            display_name: field.label.clone(),
+            description: field.description.clone(),
+            type_name: field.field_type.as_str().to_string(),
+            format: field.format.clone(),
+            example: field.example.clone(),
+            nullable: field.nullable.unwrap_or(false),
+            items: field
+                .items
+                .as_ref()
+                .map(|item| Box::new(field_type_info_from_schema(item))),
+            fields: None,
+        })
+        .collect();
+    output_fields.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let integration_ids: Vec<String> = {
+        let mut ids: Vec<String> = input_schema
+            .values()
+            .filter(|field| matches!(field.field_type, crate::SchemaFieldType::Connection))
+            .filter_map(|field| field.integration.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let supports_connections = input_schema
+        .values()
+        .any(|field| matches!(field.field_type, crate::SchemaFieldType::Connection));
+
+    AgentInfo {
+        id: slug.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        has_side_effects: true,
+        supports_connections,
+        integration_ids,
+        capabilities: vec![CapabilityInfo {
+            id: WORKFLOW_AGENT_CAPABILITY_ID.to_string(),
+            name: WORKFLOW_AGENT_CAPABILITY_ID.to_string(),
+            display_name: Some(format!("Run {name}")),
+            description: Some(if description.is_empty() {
+                format!("Run the '{name}' workflow as an agent capability")
+            } else {
+                description.to_string()
+            }),
+            input_type: "WorkflowInput".to_string(),
+            inputs,
+            output: FieldTypeInfo {
+                type_name: "object".to_string(),
+                format: None,
+                display_name: None,
+                description: None,
+                fields: if output_fields.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(output_fields))
+                },
+                items: None,
+                nullable: false,
+            },
+            has_side_effects: true,
+            is_idempotent: false,
+            rate_limited: false,
+            compensation_hint: None,
+            known_errors: Vec::new(),
+            tags: vec!["workflow-agent".to_string()],
+        }],
+    }
+}
+
+fn capability_field_from_schema(field_name: &str, field: &crate::SchemaField) -> CapabilityField {
+    CapabilityField {
+        name: field_name.to_string(),
+        display_name: field.label.clone(),
+        description: field.description.clone(),
+        type_name: field.field_type.as_str().to_string(),
+        format: field.format.clone(),
+        items: field
+            .items
+            .as_ref()
+            .map(|item| field_type_info_from_schema(item)),
+        required: field.required,
+        default_value: field.default.clone(),
+        example: field.example.clone(),
+        enum_values: field.enum_values.as_ref().map(|values| {
+            values
+                .iter()
+                .map(|value| match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect()
+        }),
+        schema: None,
+    }
+}
+
+fn field_type_info_from_schema(field: &crate::SchemaField) -> FieldTypeInfo {
+    FieldTypeInfo {
+        type_name: field.field_type.as_str().to_string(),
+        format: field.format.clone(),
+        display_name: field.label.clone(),
+        description: field.description.clone(),
+        fields: None,
+        items: field
+            .items
+            .as_ref()
+            .map(|item| Box::new(field_type_info_from_schema(item))),
+        nullable: field.nullable.unwrap_or(false),
+    }
+}
+
 /// A snapshot of every agent the runtime knows about, indexed by id.
 ///
 /// The catalog is the runtime replacement for `runtara-agents::static_registry`
@@ -2550,6 +2701,110 @@ mod catalog_tests {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod workflow_agent_info_tests {
+    use super::*;
+    use crate::{SchemaField, SchemaFieldType};
+    use std::collections::HashMap;
+
+    fn field(field_type: SchemaFieldType, required: bool) -> SchemaField {
+        SchemaField {
+            field_type,
+            description: None,
+            required,
+            default: None,
+            example: None,
+            items: None,
+            enum_values: None,
+            integration: None,
+            label: None,
+            placeholder: None,
+            order: None,
+            format: None,
+            min: None,
+            max: None,
+            pattern: None,
+            properties: None,
+            visible_when: None,
+            nullable: None,
+        }
+    }
+
+    #[test]
+    fn synthesizes_agent_info_from_workflow_schemas() {
+        let mut input_schema = HashMap::new();
+        input_schema.insert("message".to_string(), field(SchemaFieldType::String, true));
+        input_schema.insert("count".to_string(), field(SchemaFieldType::Integer, false));
+        let mut crm = field(SchemaFieldType::Connection, true);
+        crm.integration = Some("hubspot".to_string());
+        input_schema.insert("crm".to_string(), crm);
+        let mut output_schema = HashMap::new();
+        output_schema.insert("result".to_string(), field(SchemaFieldType::Object, true));
+
+        let info = workflow_agent_info(
+            "order-sync",
+            "Order Sync",
+            "Syncs orders",
+            &input_schema,
+            &output_schema,
+        );
+
+        assert_eq!(info.id, "order-sync");
+        // Connection-typed inputs drive the agent-level connection metadata.
+        assert!(info.supports_connections);
+        assert_eq!(info.integration_ids, vec!["hubspot"]);
+
+        assert_eq!(info.capabilities.len(), 1);
+        let cap = &info.capabilities[0];
+        assert_eq!(cap.id, WORKFLOW_AGENT_CAPABILITY_ID);
+        // Inputs are sorted for a deterministic (checksummable) meta.json.
+        let names: Vec<&str> = cap.inputs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["count", "crm", "message"]);
+        // The connection input surfaces AS a typed input — no separate
+        // connection-slots descriptor exists.
+        let crm = cap.inputs.iter().find(|f| f.name == "crm").unwrap();
+        assert_eq!(crm.type_name, "connection");
+        assert!(crm.required);
+        let message = cap.inputs.iter().find(|f| f.name == "message").unwrap();
+        assert_eq!(message.type_name, "string");
+        assert!(
+            !cap.inputs
+                .iter()
+                .find(|f| f.name == "count")
+                .unwrap()
+                .required
+        );
+
+        let output_fields = cap.output.fields.as_ref().expect("output fields");
+        assert_eq!(output_fields.len(), 1);
+        assert_eq!(output_fields[0].name, "result");
+        assert_eq!(output_fields[0].type_name, "object");
+
+        // Conservative execution semantics for published workflows.
+        assert!(cap.has_side_effects);
+        assert!(!cap.is_idempotent);
+        assert_eq!(cap.tags, vec!["workflow-agent"]);
+    }
+
+    #[test]
+    fn synthesized_info_round_trips_like_a_meta_sidecar() {
+        // The staged runtara_agent_<slug>.meta.json must parse back through the
+        // exact loader path the dispatcher/catalog uses (serde on AgentInfo).
+        let info = workflow_agent_info("echo", "Echo", "", &HashMap::new(), &HashMap::new());
+        let json = serde_json::to_string_pretty(&info).expect("serializes");
+        let parsed: AgentInfo = serde_json::from_str(&json).expect("parses back");
+        assert_eq!(parsed.id, "echo");
+        assert!(!parsed.supports_connections);
+        assert!(parsed.integration_ids.is_empty());
+        assert_eq!(parsed.capabilities[0].id, "run");
+        // An empty output schema serializes without a fields key.
+        assert!(parsed.capabilities[0].output.fields.is_none());
+        // And the catalog folds it like any agent id.
+        let catalog = AgentCatalog::from_agents(vec![parsed]);
+        assert!(catalog.has_agent("echo"));
+    }
+}
 
 #[cfg(test)]
 mod slug_tests {
