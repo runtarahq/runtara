@@ -131,6 +131,19 @@ world command {
 }
 "#;
 const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
+/// Host-satisfied concurrent timer for in-window retry backoff
+/// (docs/wasip3-parallelism.md §3.4). Imported by the workflow world only
+/// when a parallel Split window exists; the wac trailing `...` bubbles it to
+/// the composed component where the executor binds it func_wrap_concurrent.
+const HOST_IO_TIMERS_WIT: &str = "\
+package runtara:host-io@0.1.0;
+
+interface timers {
+    /// Async-TYPED so the emitter may async-lower it into a waitable; the
+    /// world-level sync lowering is never called.
+    sleep: async func(ms: u64);
+}
+";
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
@@ -380,15 +393,29 @@ const DIRECT_PSPLIT_CHUNK_END_LOCAL: u32 = 122;
 /// Launch-pass item cursor; reused during assemble as the CURRENT item's slot
 /// pointer (the memoized-invoke operand).
 const DIRECT_PSPLIT_LAUNCH_LOCAL: u32 = 123;
+/// Retry-round item cursor (§3.4 concurrent backoff).
+const DIRECT_PSPLIT_ROUND_CURSOR_LOCAL: u32 = 124;
+/// Set when a retry round fired at least one backoff timer — drives the
+/// round-loop exit (0 => every item settled, stop).
+const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
 
-/// Per-item slot: `{ state: u32, pad: u32, result: [u8; 104] }`. `state` is 0
-/// until a launch stores 1; the async-lowered invoke writes the canonical
-/// `result<list<u8>, error-info>` through the slot retptr (offset 8). 104
-/// bytes comfortably covers the inline store footprint (~68 bytes worst-case
-/// error-info) — payload pointers land in the bump heap, which is not rewound
-/// during a chunk.
-const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 112;
-const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 8;
+/// Per-item slot for the parallel window's concurrent-retry state machine
+/// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,
+///    wait_total:u64, _pad2:[u8;8], result:[u8;112] }`.
+/// States (see `split_parallel::SLOT_*`): 0 EMPTY (launch skipped — assemble
+/// runs the item fully sequentially), 1 AGENT-READY (a result is present,
+/// awaiting classification), 3 TIMER-PENDING (a backoff timer was fired),
+/// 5 SETTLED (final result memoized for assemble). `attempts` counts invokes
+/// fired; `wait_total` is the per-item rate-limit budget accumulator. The
+/// canonical `result<list<u8>, error-info>` lands at the result offset (~68
+/// bytes worst case; payload pointers live in the bump heap, which is not
+/// rewound during a chunk).
+const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 160;
+const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
+const DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET: i32 = 4;
+const DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET: i32 = 8;
+const DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET: i32 = 12;
+const DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET: i32 = 24;
 /// Event scratch for `waitable-set.wait` `{handle: u32, state: u32}` — lives
 /// in the reserved low-memory region above the wait-deadline scratch (208..216)
 /// and below the static data base (256).
@@ -1261,6 +1288,11 @@ fn build_direct_component_resolve_configured(
                 .map_err(component_error)?;
         }
     }
+    if !parallel_pools.is_empty() {
+        resolve
+            .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
+            .map_err(component_error)?;
+    }
     if !agents.is_empty() {
         // Under AgentCapabilities the types package was already pushed above;
         // pushing the same content twice is a wit-parser error.
@@ -1302,6 +1334,9 @@ fn build_direct_component_resolve_configured(
         workflow_wit.push_str(&format!(
             "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
         ));
+    }
+    if !parallel_pools.is_empty() {
+        workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {
         workflow_wit.push_str(&format!(

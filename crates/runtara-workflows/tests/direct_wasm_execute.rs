@@ -626,6 +626,11 @@ fn route(
             .as_str()
             .is_some_and(|url| url.ends_with("/slow-item"))
         {
+            server_state
+                .slow_item_arrivals
+                .lock()
+                .expect("slow_item_arrivals lock")
+                .push(Instant::now());
             thread::sleep(Duration::from_millis(400));
             return (
                 200,
@@ -9672,13 +9677,11 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
     const DELAY: Duration = Duration::from_millis(400);
     const ITEMS: usize = 4;
 
-    let mut timings = Vec::new();
     for parallelism in [1u32, ITEMS as u32] {
         // The http agent forwards through RUNTARA_HTTP_PROXY_URL (the harness
         // mock); the target URL is carried in the proxy envelope and answered
         // by the mock's /slow-item branch — no real dial happens.
         let graph = parallel_http_split_graph("http://slow.invalid", parallelism);
-        let start = Instant::now();
         let captured = run_direct_workflow_capture(
             &components_dir,
             &format!("parallel-http-{parallelism}"),
@@ -9686,7 +9689,6 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
             br#"{"items":[1,2,3,4]}"#,
             false,
         );
-        let elapsed = start.elapsed();
         assert!(
             captured.status_success,
             "parallel http split run failed: stderr={} error={:?}",
@@ -9701,31 +9703,39 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
         for result in results {
             assert_eq!(result["status"], 200, "item result: {result}");
         }
-        eprintln!(
-            "[parallel-split-timing] parallelism={parallelism} wall={}ms",
-            elapsed.as_millis()
-        );
-        timings.push(elapsed);
-    }
 
-    // Compile-time floor: the sequential run must take at least ITEMS*DELAY.
-    assert!(
-        timings[0] >= DELAY * (ITEMS as u32),
-        "sequential run implausibly fast: {:?}",
-        timings[0]
-    );
-    // True overlap: the four 400ms requests fly together (the mock logs them
-    // arriving in the same millisecond), so the request phase collapses from
-    // ~1600ms to ~400ms. Wall time includes compile+startup on both sides;
-    // 1.5x is a CI-safe floor for what measures ~2.4x locally.
-    let speedup = timings[0].as_secs_f64() / timings[1].as_secs_f64();
-    eprintln!("[parallel-split-timing] speedup: {speedup:.2}x");
-    assert!(
-        speedup >= 1.5,
-        "parallel window failed to overlap agent I/O: sequential {:?} vs parallel {:?}",
-        timings[0],
-        timings[1]
-    );
+        // Load-robust concurrency signal: the SPAN over which the mock
+        // observed the ITEMS requests arrive. Wall-clock ratios melt when the
+        // battery runs multi-threaded; request INTERLEAVING (timestamped at
+        // the mock) does not.
+        let arrivals = &captured.slow_item_arrivals;
+        assert_eq!(arrivals.len(), ITEMS, "every item must reach the upstream");
+        let span = arrivals
+            .iter()
+            .max()
+            .zip(arrivals.iter().min())
+            .map(|(max, min)| max.duration_since(*min))
+            .expect("arrival span");
+        eprintln!(
+            "[parallel-split-timing] parallelism={parallelism} arrival-span={}ms",
+            span.as_millis()
+        );
+        if parallelism == 1 {
+            // Request i+1 leaves only after response i, so arrivals span at
+            // least (ITEMS-1) think-times.
+            assert!(
+                span >= DELAY * (ITEMS as u32 - 1),
+                "sequential arrivals implausibly close: {span:?}"
+            );
+        } else {
+            // All launches fire before any response lands: every request
+            // arrives within one think-time.
+            assert!(
+                span < DELAY,
+                "parallel window failed to overlap agent I/O: arrivals span {span:?}"
+            );
+        }
+    }
 }
 
 /// A pause signalled DURING a parallel window is observed at the drain
@@ -10016,6 +10026,176 @@ fn direct_wasm_execute_parallel_split_rate_limited_items_retry_and_succeed() {
         sleep_ids.len(),
         ITEMS as usize,
         "one keyed backoff sleep per rate-limited item, got {sleep_ids:?}"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// NON-DURABLE rate-limited items: the retry BACKOFFS overlap. Every item's
+/// first call answers 429 + retry-after; the window classifies each failure,
+/// fires the backoff as a CONCURRENT timer subtask, drains the timers
+/// together, and re-invokes concurrently — so all four backoffs run in one
+/// window instead of serializing. Asserts correctness (2 calls/item, correct
+/// output) AND overlap (the four retry requests arrive within one backoff
+/// span, not four sequential think+backoff cycles).
+#[test]
+fn direct_wasm_execute_parallel_split_concurrent_backoff_overlaps() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+
+    const ITEMS: u32 = 4;
+    const THINK: Duration = Duration::from_millis(120);
+    // Records (hit_index, arrival_instant) so the test can isolate the retry
+    // (attempt-2) requests and measure how tightly they cluster.
+    let arrivals: Arc<Mutex<Vec<(u32, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub_arrivals = arrivals.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    let arrivals = stub_arrivals.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        arrivals.lock().unwrap().push((n, Instant::now()));
+                        thread::sleep(THINK);
+                        let body = if n < ITEMS {
+                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rate limited"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // NON-durable graph => the agent is non-durable => the window owns the
+    // retry backoff (concurrent timer subtasks).
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["durable"] = Value::Bool(false);
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-concurrent-backoff".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("non-durable concurrent-backoff split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load parallel artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match result.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("concurrent-backoff items must retry and complete, got {other:?}"),
+    };
+    assert!(host.failed.lock().unwrap().is_none());
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), ITEMS as usize);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2 * ITEMS,
+        "each item calls exactly twice: the 429 + one retry"
+    );
+
+    // Overlap proof: the ITEMS retry requests (hit indices >= ITEMS) must all
+    // arrive within a SINGLE backoff+think span, not four sequential cycles.
+    let arrivals = arrivals.lock().unwrap();
+    let retry_arrivals: Vec<Instant> = arrivals
+        .iter()
+        .filter(|(n, _)| *n >= ITEMS)
+        .map(|(_, t)| *t)
+        .collect();
+    assert_eq!(
+        retry_arrivals.len(),
+        ITEMS as usize,
+        "every item must retry"
+    );
+    let span = retry_arrivals
+        .iter()
+        .max()
+        .zip(retry_arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("retry arrival span");
+    eprintln!(
+        "[concurrent-backoff] retry-arrival-span={}ms (sequential would be ~{}ms)",
+        span.as_millis(),
+        (THINK.as_millis() + 40) * (ITEMS as u128 - 1)
+    );
+    // Concurrent: all retries fire within one backoff round. Sequential would
+    // span (ITEMS-1) * (think + backoff) ≈ 480ms. One think-time is a
+    // load-robust ceiling for the concurrent case.
+    assert!(
+        span < THINK,
+        "retry backoffs failed to overlap: span {span:?} (>= one think-time)"
     );
 
     let _ = stub_stop_tx.send(());

@@ -34,6 +34,16 @@ pub(crate) fn add_host_io_to_linker<T: Send + 'static>(linker: &mut Linker<T>) -
             Ok((response,))
         })
     })?;
+    // Concurrent timer for in-window retry backoff (docs/wasip3-parallelism.md
+    // §3.4): a sleep is just another waitable in the window's set, so item
+    // backoffs overlap instead of serializing through assembly.
+    let mut timers = linker.instance("runtara:host-io/timers@0.1.0")?;
+    timers.func_wrap_concurrent("sleep", |_accessor, (ms,): (u64,)| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(())
+        })
+    })?;
     Ok(())
 }
 

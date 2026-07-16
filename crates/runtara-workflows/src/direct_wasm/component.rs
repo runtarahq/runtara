@@ -297,6 +297,9 @@ fn emit_world_wit(
             "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
         ));
     }
+    if !parallel_pools.is_empty() {
+        out.push_str("    import runtara:host-io/timers@0.1.0;\n");
+    }
     for agent in agents {
         out.push_str(&format!(
             "    import runtara:agent-{agent}/capabilities@{DIRECT_AGENT_WIT_VERSION};\n"

@@ -152,6 +152,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
+    pub(super) timer_sleep_async: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -611,6 +612,7 @@ impl DirectCoreImportIndices {
             waitable_set_drop: self.waitable_set_drop,
             waitable_join: self.waitable_join,
             subtask_drop: self.subtask_drop,
+            timer_sleep_async: self.timer_sleep_async,
             agent_invokes_async: self.agent_invokes_async,
         })
     }
@@ -766,6 +768,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
+    pub(super) timer_sleep_async: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 

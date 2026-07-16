@@ -271,6 +271,25 @@ pub(super) fn emit_direct_core_module(
             &mut imported_function_count,
         ));
 
+        // Concurrent backoff timer (§3.4): async-lowered `sleep` from the
+        // host-io timers interface. Params ≤4 flats, empty result → no retptr;
+        // returns the packed subtask status.
+        {
+            let type_index = {
+                let index = type_count;
+                types.ty().function([ValType::I64], [ValType::I32]);
+                type_count += 1;
+                index
+            };
+            imports.import(
+                "runtara:host-io/timers@0.1.0",
+                "[async-lower]sleep",
+                wasm_encoder::EntityType::Function(type_index),
+            );
+            import_indices.timer_sleep_async = Some(imported_function_count);
+            imported_function_count += 1;
+        }
+
         let is_pool_member = |agent_id: &str| -> bool {
             if parallel_pools.contains_key(agent_id) {
                 return true;
@@ -622,8 +641,9 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
     // 116 = parallel-Split suspend flag, 117 spare; 118-123 are the
-    // parallel-Split scratch (DIRECT_PSPLIT_*, docs/wasip3-parallelism.md).
-    (20, ValType::I32),
+    // parallel-Split scratch (DIRECT_PSPLIT_*, docs/wasip3-parallelism.md);
+    // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
+    (22, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
