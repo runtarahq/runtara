@@ -981,6 +981,19 @@ impl DirectJsonManifest {
     }
 
     /// Build the generated-code-compatible checkpoint key for a step breakpoint.
+    /// The inherited checkpoint-namespace prefix, when running as a child
+    /// (embedded or composed). Empty at the top level — every builder that
+    /// folds this stays byte-identical for plain workflows.
+    fn source_cache_key_prefix(source: &Value) -> Option<String> {
+        source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_cache_key_prefix"))
+            .and_then(Value::as_str)
+            .filter(|prefix| !prefix.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn breakpoint_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse breakpoint-key source: {err}"))?;
@@ -1002,11 +1015,15 @@ impl DirectJsonManifest {
                     .join("_")
             })
             .unwrap_or_default();
-        if loop_indices.is_empty() {
-            Ok(format!("breakpoint::{step_id}"))
+        let base = if loop_indices.is_empty() {
+            format!("breakpoint::{step_id}")
         } else {
-            Ok(format!("breakpoint::{step_id}::{loop_indices}"))
-        }
+            format!("breakpoint::{step_id}::{loop_indices}")
+        };
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
     }
 
     /// Per-scope durability key for a durable Delay's sleep checkpoint.
@@ -1015,7 +1032,10 @@ impl DirectJsonManifest {
     /// key, so existing checkpoint rows and assertions are unaffected — and
     /// `{step_id}::{indices}` inside Split/While iterations (folding
     /// `variables._loop_indices` exactly like [`Self::breakpoint_key`]).
-    /// Without the fold, per-item durable delays collide on one key.
+    /// Without the fold, per-item durable delays collide on one key. A child
+    /// scope's `_cache_key_prefix` (embedded or composed) prepends as
+    /// `{prefix}::` so a durable child's delays never collide with the
+    /// parent's — or with another invocation of the same child.
     pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse delay-sleep-key source: {err}"))?;
@@ -1037,11 +1057,15 @@ impl DirectJsonManifest {
                     .join("_")
             })
             .unwrap_or_default();
-        if loop_indices.is_empty() {
-            Ok(step_id.to_string())
+        let base = if loop_indices.is_empty() {
+            step_id.to_string()
         } else {
-            Ok(format!("{step_id}::{loop_indices}"))
-        }
+            format!("{step_id}::{loop_indices}")
+        };
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
     }
 
     /// Build the generated-code-compatible custom event payload for a step breakpoint.
@@ -1622,7 +1646,11 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
         let indices_suffix = wait_loop_indices_suffix(&source);
-        Ok(format!("{step_id}.turn.{iteration}{indices_suffix}"))
+        let base = format!("{step_id}.turn.{iteration}{indices_suffix}");
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
     }
 
     /// Per-turn durability: wrap the post-turn loop state for the turn
@@ -3208,7 +3236,12 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
     // stored verbatim as the instance input. Unwrap it so `data.*` resolves
     // against the inner payload, and merge the runtime `variables` over the
     // compile-time declared defaults (runtime wins). The `_`-prefixed identity
-    // variables are never overridable from input. Inputs with no `data` key
+    // variables are never overridable from input — with ONE whitelisted
+    // exception: `_cache_key_prefix`, the checkpoint-namespace a PARENT
+    // injects when invoking this workflow as a composed agent (see
+    // `child_cache_prefix`). It is a namespace hint, not identity — the worst
+    // a caller can do by setting it is namespace its own child's durable
+    // state, which is exactly the feature. Inputs with no `data` key
     // (low-level / direct runtime invocations) are used as-is.
     let inner_data = if let Value::Object(envelope) = &mut data {
         if envelope.contains_key("data") {
@@ -3216,7 +3249,7 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
                 && let Value::Object(defaults) = &mut variables
             {
                 for (key, value) in runtime_vars {
-                    if !key.starts_with('_') {
+                    if !key.starts_with('_') || key == "_cache_key_prefix" {
                         defaults.insert(key, value);
                     }
                 }
@@ -4928,6 +4961,44 @@ fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
     }
 }
 
+/// The checkpoint-namespace prefix for a CHILD invoked at `step_id` of the
+/// current scope — the compositional site scope every durable key builder
+/// honors via `variables._cache_key_prefix`:
+/// `{inherited_prefix}__{step_id}[loop,indices]`, falling back to
+/// `{workflow_id}::{step_id}[...]` at the root. Replay-stable by construction
+/// (compile-time step id + deterministic loop indices + recursion). One
+/// definition shared by EmbedWorkflow children (inlined; prefix rides the
+/// in-process variables) and composed workflow-agent children (prefix rides
+/// the child's input envelope) — so both child kinds are indistinguishable in
+/// checkpoint key-space. See docs/workflow-agent-checkpoint-namespace-plan.md.
+pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
+    let parent_variables = source.get("variables").and_then(Value::as_object);
+    let loop_indices_suffix = parent_variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    match parent_variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+    {
+        Some(prefix) if !prefix.is_empty() => {
+            format!("{prefix}__{step_id}{loop_indices_suffix}")
+        }
+        _ => {
+            let workflow_id = parent_variables
+                .and_then(|vars| vars.get("_workflow_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("root");
+            format!("{workflow_id}::{step_id}{loop_indices_suffix}")
+        }
+    }
+}
+
 fn embed_child_variables(
     step_id: &str,
     child: &DirectJsonChildWorkflow,
@@ -4960,33 +5031,9 @@ fn embed_child_variables(
         variables.insert("_tenant_id".to_string(), tenant_id.clone());
     }
 
-    let loop_indices_suffix = parent_variables
-        .and_then(|vars| vars.get("_loop_indices"))
-        .and_then(Value::as_array)
-        .filter(|indices| !indices.is_empty())
-        .map(|indices| {
-            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
-            format!("[{}]", indices.join(","))
-        })
-        .unwrap_or_default();
-    let child_cache_prefix = match parent_variables
-        .and_then(|vars| vars.get("_cache_key_prefix"))
-        .and_then(Value::as_str)
-    {
-        Some(prefix) if !prefix.is_empty() => {
-            format!("{prefix}__{step_id}{loop_indices_suffix}")
-        }
-        _ => {
-            let workflow_id = parent_variables
-                .and_then(|vars| vars.get("_workflow_id"))
-                .and_then(Value::as_str)
-                .unwrap_or("root");
-            format!("{workflow_id}::{step_id}{loop_indices_suffix}")
-        }
-    };
     variables.insert(
         "_cache_key_prefix".to_string(),
-        Value::String(child_cache_prefix),
+        Value::String(child_cache_prefix(step_id, source)),
     );
 
     if let Some(defaults) = child.variables.as_object() {
@@ -10614,6 +10661,96 @@ mod tests {
         let bare = build_source(br#"{"tpl":"bare"}"#, b"{}", b"{}").expect("bare source");
         let bare: Value = serde_json::from_slice(&bare).expect("bare json");
         assert_eq!(bare["data"], json!({ "tpl": "bare" }));
+    }
+
+    #[test]
+    fn build_source_whitelists_cache_key_prefix_but_not_identity_vars() {
+        // A parent invoking this workflow as a composed agent injects the
+        // checkpoint-namespace through the input envelope. `_cache_key_prefix`
+        // must survive the `_`-filter; the identity variables must NOT — a
+        // caller can namespace its child's state but never spoof identity.
+        let source = build_source(
+            br#"{"data":{"x":1},"variables":{"_cache_key_prefix":"wfP::call[2]","_workflow_id":"spoofed","_tenant_id":"spoofed","plain":"ok"}}"#,
+            br#"{"_workflow_id":"wf-real::inst-1"}"#,
+            b"{}",
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        let vars = source["variables"].as_object().expect("variables");
+        assert_eq!(vars["_cache_key_prefix"], json!("wfP::call[2]"));
+        assert_eq!(
+            vars["_workflow_id"],
+            json!("wf-real::inst-1"),
+            "identity variables must stay non-overridable from input"
+        );
+        assert_ne!(vars.get("_tenant_id"), Some(&json!("spoofed")));
+        assert_eq!(vars["plain"], json!("ok"));
+    }
+
+    #[test]
+    fn child_scoped_durable_keys_fold_the_cache_key_prefix() {
+        // With `_cache_key_prefix` set (a child scope — embedded or composed),
+        // every durable key builder prepends it; without it, keys stay
+        // byte-identical to the legacy shapes (top-level workflows unaffected).
+        let manifest =
+            DirectJsonManifest::parse(&debug_manifest("Delay", "wait-step", None, json!({})))
+                .expect("manifest");
+
+        let plain = br#"{"data":{},"variables":{},"steps":{}}"#;
+        let scoped = br#"{"data":{},"variables":{"_cache_key_prefix":"wfP::call[1]"},"steps":{}}"#;
+
+        assert_eq!(
+            manifest
+                .delay_sleep_key("wait-step", plain)
+                .expect("plain delay key"),
+            "wait-step"
+        );
+        assert_eq!(
+            manifest
+                .delay_sleep_key("wait-step", scoped)
+                .expect("scoped delay key"),
+            "wfP::call[1]::wait-step"
+        );
+        assert_eq!(
+            manifest
+                .breakpoint_key("wait-step", scoped)
+                .expect("scoped breakpoint key"),
+            "wfP::call[1]::breakpoint::wait-step"
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_cache_key("ai", 3, scoped).expect("scoped turn key"),
+            "wfP::call[1]::ai.turn.3"
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_cache_key("ai", 3, plain).expect("plain turn key"),
+            "ai.turn.3"
+        );
+        // Retry/attempt keys derive from the (already-prefixed) base key.
+        assert_eq!(
+            DirectJsonManifest::agent_retry_sleep_key("wfP::call[1]::wait-step", 2),
+            b"wfP::call[1]::wait-step::retry_sleep::2".to_vec()
+        );
+    }
+
+    #[test]
+    fn child_cache_prefix_matches_the_embed_formula() {
+        // One shared definition for both child kinds: root level derives from
+        // `_workflow_id`, nested levels chain with `__`, loop indices append.
+        let root: Value = serde_json::from_str(r#"{"variables":{"_workflow_id":"wf-1::inst-9"}}"#)
+            .expect("root source");
+        assert_eq!(child_cache_prefix("call", &root), "wf-1::inst-9::call");
+
+        let nested: Value = serde_json::from_str(
+            r#"{"variables":{"_cache_key_prefix":"wf-1::inst-9::call","_loop_indices":[2,5]}}"#,
+        )
+        .expect("nested source");
+        assert_eq!(
+            child_cache_prefix("inner", &nested),
+            "wf-1::inst-9::call__inner[2,5]"
+        );
+
+        let bare: Value = serde_json::from_str(r#"{"variables":{}}"#).expect("bare source");
+        assert_eq!(child_cache_prefix("call", &bare), "root::call");
     }
 
     #[test]
