@@ -41,6 +41,9 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // `add_only_http_to_linker_async` is the slim version that skips
     // re-adding wasi:io (which wasi::p2::add_to_linker_async already added).
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+    // Concurrent host-io HTTP hop for agents' proxied requests (wasip3 route
+    // (b)) — agents built against runtara:host-io import it unconditionally.
+    crate::host_io::add_host_io_to_linker(&mut linker)?;
     Ok(linker)
 }
 

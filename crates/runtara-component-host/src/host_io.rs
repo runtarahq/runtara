@@ -21,14 +21,12 @@ use std::time::Duration;
 use anyhow::Result;
 use wasmtime::component::Linker;
 
-use crate::workflow::WorkflowState;
-
 /// Ceiling for a single host-io request when the guest names no timeout —
 /// matches the outer watchdog's order of magnitude so a hung upstream can't
 /// pin a task forever.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub(crate) fn add_host_io_to_linker(linker: &mut Linker<WorkflowState>) -> Result<()> {
+pub(crate) fn add_host_io_to_linker<T: Send + 'static>(linker: &mut Linker<T>) -> Result<()> {
     let mut instance = linker.instance("runtara:host-io/http@0.1.0")?;
     instance.func_wrap_concurrent("request", |_accessor, (input,): (Vec<u8>,)| {
         Box::pin(async move {
