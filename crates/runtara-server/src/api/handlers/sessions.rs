@@ -407,6 +407,24 @@ pub async fn session_pending_input(
         })
         .collect();
 
+    // A resolved WaitForSignal's step_debug_end carries its signal id inside
+    // the outputs envelope. Standalone waits are matched by SIGNAL id below —
+    // signal ids are per-invocation-site (one child step can wait at several
+    // sites in one instance, embedded or composed), so a completed wait at
+    // one site must not hide another site's open wait on the same step id.
+    let completed_signal_ids: std::collections::HashSet<String> = end_events
+        .iter()
+        .filter_map(|event| {
+            event
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("outputs"))
+                .and_then(|outputs| outputs.get("signal_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
     let pending: Vec<Value> = input_events
         .iter()
         .filter_map(|event| {
@@ -414,21 +432,26 @@ pub async fn session_pending_input(
             let signal_id = data.get("signal_id")?.as_str()?.to_string();
             let ai_step_id = data.get("ai_agent_step_id").and_then(|v| v.as_str());
             let tool_name = data.get("tool_name").and_then(|v| v.as_str());
-            let step_id = data.get("step_id").and_then(|v| v.as_str());
             let call_number = data
                 .get("call_number")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
 
-            let check_step_id = match (ai_step_id, tool_name, call_number) {
+            // AI Agent tool calls complete under the synthetic
+            // "{ai_step_id}.tool.{tool_name}.{call_number}" step id;
+            // standalone waits are matched by their per-site signal id.
+            match (ai_step_id, tool_name, call_number) {
                 (Some(step), Some(tool), Some(num)) => {
-                    format!("{}.tool.{}.{}", step, tool, num)
+                    let check_step_id = format!("{}.tool.{}.{}", step, tool, num);
+                    if completed_tool_ids.contains(&check_step_id) {
+                        return None;
+                    }
                 }
-                _ => step_id.unwrap_or("").to_string(),
-            };
-
-            if !check_step_id.is_empty() && completed_tool_ids.contains(&check_step_id) {
-                return None;
+                _ => {
+                    if completed_signal_ids.contains(&signal_id) {
+                        return None;
+                    }
+                }
             }
 
             Some(json!({

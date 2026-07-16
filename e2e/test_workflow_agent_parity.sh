@@ -624,4 +624,121 @@ OUT=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
     || { print_error "signal payload did not flow through, got: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
 echo "  scoped signal delivered, payload flowed to output ✓"
 
-print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals, all green"
+#-------------------------------------------------------------------------
+print_step "8. Multi-site discovery: second wait on the same step id stays discoverable..."
+# Two EMBEDS of one wait-child (events ON). After site 1's wait completes, a
+# step_debug_end with the bare child step id exists — the pending-input
+# listing must still surface site 2's open wait (it matches resolved waits
+# by per-site SIGNAL id, not bare step id).
+RESP=$(api_post /workflows/create '{"name":"Embed Wait Child","description":"parity e2e"}')
+EMB_CHILD_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${EMB_CHILD_ID}" ] || { print_error "embed child create failed: ${RESP}"; exit 1; }
+EMB_CHILD_GRAPH='{
+  "name": "Embed Wait Child",
+  "steps": {
+    "approve": {
+      "stepType": "WaitForSignal",
+      "id": "approve",
+      "pollIntervalMs": 500,
+      "timeoutMs": { "valueType": "immediate", "value": 120000 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" } }
+    }
+  },
+  "entryPoint": "approve",
+  "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+RESP=$(api_post "/workflows/${EMB_CHILD_ID}/update" "{\"executionGraph\": ${EMB_CHILD_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "embed child update failed: ${RESP}"; exit 1; }
+
+EMB_PARENT_GRAPH='{
+  "name": "Embed Wait Parent",
+  "steps": {
+    "embed1": {
+      "stepType": "EmbedWorkflow",
+      "id": "embed1",
+      "childWorkflowId": "'"${EMB_CHILD_ID}"'",
+      "childVersion": "latest",
+      "inputMapping": {}
+    },
+    "embed2": {
+      "stepType": "EmbedWorkflow",
+      "id": "embed2",
+      "childWorkflowId": "'"${EMB_CHILD_ID}"'",
+      "childVersion": "latest",
+      "inputMapping": {}
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "first": { "valueType": "reference", "value": "steps.embed1.outputs.decision" },
+        "second": { "valueType": "reference", "value": "steps.embed2.outputs.decision" }
+      }
+    }
+  },
+  "entryPoint": "embed1",
+  "executionPlan": [
+    { "fromStep": "embed1", "toStep": "embed2" },
+    { "fromStep": "embed2", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+EMB_PARENT_ID=$(create_and_compile "Embed Wait Parent" "${EMB_PARENT_GRAPH}")
+RESP=$(api_post "/workflows/${EMB_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
+EMB_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${EMB_INSTANCE}" ] || { print_error "embed parent execute failed: ${RESP}"; exit 1; }
+
+# Discover a site's open signal id (by site marker) via pending-input.
+discover_signal() {
+    local marker="$1" found=""
+    for _ in {1..45}; do
+        local resp
+        resp=$(curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${EMB_INSTANCE}/pending-input")
+        found=$(echo "${resp}" | jq -r --arg m "${marker}" \
+            '.data.pendingInputs[]?.signalId // empty | select(contains($m))' | head -1)
+        [ -n "${found}" ] && { echo "${found}"; return 0; }
+        sleep 2
+    done
+    print_error "pending-input never surfaced a signal id containing '${marker}'"
+    return 1
+}
+
+SIG1=$(discover_signal "::embed1::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
+RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG1}\", \"payload\": {\"decision\": \"first-ok\"}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "site-1 signal submit failed: ${RESP}"; exit 1; }
+echo "  site 1 discovered + signaled (${SIG1}) ✓"
+
+# THE regression: after site 1 completed (its step_debug_end recorded under
+# the bare step id "approve"), site 2's open wait must STILL be listed.
+SIG2=$(discover_signal "::embed2::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
+RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG2}\", \"payload\": {\"decision\": \"second-ok\"}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "site-2 signal submit failed: ${RESP}"; exit 1; }
+echo "  site 2 still discoverable after site 1 completed (${SIG2}) ✓"
+
+EMB_STATUS=""
+for _ in {1..45}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${EMB_INSTANCE}")
+    EMB_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${EMB_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+[ "${EMB_STATUS}" = "completed" ] \
+    || { print_error "embed parent ended '${EMB_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
+OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
+[ "${OUT}" = '{"first":"first-ok","second":"second-ok"}' ] \
+    || { print_error "per-site payload routing broken, got: ${OUT}"; exit 1; }
+echo "  both sites resolved with their own payloads ✓"
+
+print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals + multi-site discovery, all green"
