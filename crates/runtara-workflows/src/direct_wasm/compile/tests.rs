@@ -834,6 +834,7 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -933,6 +934,7 @@ fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("emit should succeed for a handler step that carries an onError edge");
 
@@ -986,6 +988,7 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("emit should succeed for fan-out inside a Conditional branch");
 
@@ -1066,6 +1069,7 @@ fn direct_compile_long_chain_compiles_from_small_stack_caller() {
                 output_dir,
                 track_events: true,
                 agent_catalog: None,
+                agent_slug: None,
             })
         })
         .expect("spawn 2 MiB caller thread");
@@ -1092,6 +1096,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -1171,6 +1176,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -1225,6 +1231,7 @@ fn direct_compile_supports_conditional_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct conditional compile should succeed");
 
@@ -1254,6 +1261,7 @@ fn direct_compile_supports_nested_conditional_tree() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested conditional compile should succeed");
 
@@ -1289,6 +1297,7 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow compile should succeed");
 
@@ -1357,6 +1366,7 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow breakpoint compile should succeed");
 
@@ -1542,6 +1552,7 @@ fn direct_compile_supports_static_embed_workflow_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow retry override compile should succeed");
 
@@ -1600,6 +1611,7 @@ fn direct_compile_supports_nested_static_embed_workflow_retry_frame_isolation() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow retry compile should succeed");
 
@@ -1665,6 +1677,7 @@ fn direct_compile_supports_static_embed_workflow_with_terminal_error_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow terminal Error child compile should succeed");
 
@@ -1712,6 +1725,7 @@ fn direct_compile_supports_static_embed_workflow_with_conditional_error_child() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow conditional Error child compile should succeed");
 
@@ -1763,6 +1777,7 @@ fn direct_compile_supports_static_embed_workflow_parent_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow parent onError compile should succeed");
 
@@ -1817,6 +1832,7 @@ fn direct_compile_supports_static_embed_workflow_child_local_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow child-local onError compile should succeed");
 
@@ -1881,6 +1897,7 @@ fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow compile should succeed");
 
@@ -1970,6 +1987,7 @@ fn direct_compile_supports_nested_static_embed_workflow_failure_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow failure compile should succeed");
 
@@ -2001,6 +2019,7 @@ fn direct_compile_supports_group_by_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct GroupBy compile should succeed");
 
@@ -2032,6 +2051,7 @@ fn direct_compile_supports_sequential_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split compile should succeed");
 
@@ -2193,6 +2213,7 @@ fn direct_compile_supports_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested Split compile should succeed");
 
@@ -2232,6 +2253,7 @@ fn direct_compile_supports_dont_stop_split_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dontStop nested Split compile should succeed");
 
@@ -2277,6 +2299,7 @@ fn direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dontStop deep nested Split/While compile should succeed");
 
@@ -2332,6 +2355,7 @@ fn direct_compile_supports_simple_while_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While compile should succeed");
 
@@ -2361,6 +2385,7 @@ fn direct_compile_supports_split_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split onError compile should succeed");
 
@@ -2406,6 +2431,7 @@ fn direct_compile_supports_ai_agent_single_shot_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct single-shot AiAgent compile should succeed");
 
@@ -2472,6 +2498,7 @@ fn direct_compile_supports_ai_agent_structured_output_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct structured-output AiAgent compile should succeed");
 
@@ -2521,6 +2548,7 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct tool-loop AiAgent compile should succeed");
 
@@ -2592,6 +2620,7 @@ fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-tool AiAgent compile should succeed");
 
@@ -2653,6 +2682,7 @@ fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct wait-tool AiAgent compile should succeed");
 
@@ -2707,6 +2737,7 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct wait-tool-with-onWait AiAgent compile should succeed");
 
@@ -2738,6 +2769,7 @@ fn direct_compile_supports_wait_for_signal_with_nested_on_wait() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested-onWait wait compile should succeed");
 
@@ -2772,6 +2804,7 @@ fn direct_compile_supports_embed_workflow_child_with_agent_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-with-agent-child compile should succeed");
 
@@ -2819,6 +2852,7 @@ fn direct_compile_supports_embed_workflow_child_with_split_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-with-split-child compile should succeed");
 
@@ -2847,6 +2881,7 @@ fn direct_compile_supports_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct conditional-diamond compile should succeed");
 
@@ -2895,6 +2930,7 @@ fn direct_compile_supports_nested_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested conditional-diamond compile should succeed");
 
@@ -2923,6 +2959,7 @@ fn direct_compile_supports_edge_condition_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct edge-condition-diamond compile should succeed");
 
@@ -2952,6 +2989,7 @@ fn direct_compile_supports_ai_agent_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct AiAgent-with-onError compile should succeed");
 
@@ -2978,6 +3016,7 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct multi-tool AiAgent compile should succeed");
 
@@ -3030,6 +3069,7 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct multi-tool AiAgent compile should succeed");
 
@@ -3086,6 +3126,7 @@ fn direct_compile_injects_ai_agent_turn_timeout() {
         output_dir: temp0.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-shot AiAgent compile should succeed");
     let baseline_manifest: DirectWorkflowManifest =
@@ -3122,6 +3163,7 @@ fn direct_compile_injects_ai_agent_turn_timeout() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-shot AiAgent compile should succeed");
     let manifest: DirectWorkflowManifest =
@@ -3149,6 +3191,7 @@ fn direct_compile_supports_ai_agent_memory_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory AiAgent compile should succeed");
 
@@ -3223,6 +3266,7 @@ fn direct_compile_supports_ai_agent_memory_compaction_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory-compaction AiAgent compile should succeed");
 
@@ -3272,6 +3316,7 @@ fn direct_compile_supports_ai_agent_memory_summarize_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory-summarize AiAgent compile should succeed");
 
@@ -3328,6 +3373,7 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct MCP AiAgent compile should succeed");
 
@@ -3438,6 +3484,7 @@ fn direct_compile_supports_ai_agent_tool_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct tool-error AiAgent compile should succeed");
 
@@ -3464,6 +3511,7 @@ fn direct_compile_supports_fanout_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct fan-out diamond compile should succeed");
 
@@ -3526,6 +3574,7 @@ fn direct_compile_supports_split_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split timeout compile should succeed");
 
@@ -3559,6 +3608,7 @@ fn direct_compile_supports_while_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While timeout compile should succeed");
 
@@ -3592,6 +3642,7 @@ fn direct_compile_supports_while_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While onError compile should succeed");
 
@@ -3637,6 +3688,7 @@ fn direct_compile_supports_while_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While with nested Split compile should succeed");
 
@@ -3678,6 +3730,7 @@ fn direct_compile_supports_split_schema_validation_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split schema compile should succeed");
 
@@ -3715,6 +3768,7 @@ fn direct_compile_supports_split_dont_stop_on_failed_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split dontStopOnFailed compile should succeed");
 
@@ -3743,6 +3797,7 @@ fn direct_compile_supports_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Delay compile should succeed");
 
@@ -3775,6 +3830,7 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dynamic Delay compile should succeed");
 
@@ -3810,6 +3866,7 @@ fn direct_compile_supports_non_durable_delay() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("non-durable Delay should compile");
 
@@ -3839,6 +3896,7 @@ fn direct_compile_supports_filter_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Filter compile should succeed");
 
@@ -3868,6 +3926,7 @@ fn direct_compile_supports_value_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct value Switch compile should succeed");
 
@@ -3897,6 +3956,7 @@ fn direct_compile_supports_routing_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct routing Switch compile should succeed");
 
@@ -3926,6 +3986,7 @@ fn direct_compile_supports_log_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Log compile should succeed");
 
@@ -3955,6 +4016,7 @@ fn direct_compile_supports_error_entry_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Error compile should succeed");
 
@@ -3984,6 +4046,7 @@ fn direct_compile_supports_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct edge-condition compile should succeed");
 
@@ -4014,6 +4077,7 @@ fn direct_compile_supports_non_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent compile should succeed");
 
@@ -4047,6 +4111,7 @@ fn direct_compile_supports_non_durable_agent_default_retry() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("non-durable Agent default retry compile should succeed");
 
@@ -4078,6 +4143,7 @@ fn direct_compile_supports_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent compile should succeed");
 
@@ -4111,6 +4177,7 @@ fn direct_compile_supports_durable_agent_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent retry compile should succeed");
 
@@ -4143,6 +4210,7 @@ fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent connection compile should succeed");
 
@@ -4174,6 +4242,7 @@ fn direct_compile_supports_non_durable_agent_default_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent onError compile should succeed");
 
@@ -4209,6 +4278,7 @@ fn direct_compile_supports_non_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent conditional onError compile should succeed");
 
@@ -4243,6 +4313,7 @@ fn direct_compile_supports_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent conditional onError compile should succeed");
 
@@ -4280,6 +4351,7 @@ fn direct_compile_supports_next_label_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct next edge-condition compile should succeed");
 
@@ -10089,6 +10161,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -10125,6 +10198,7 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -10192,6 +10266,7 @@ fn direct_compile_composition_rejects_stale_component_metadata() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
     let component = &result.component_artifacts.shared_components[0];
@@ -10238,6 +10313,7 @@ fn direct_compile_composition_reports_missing_agent_component() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct agent compile should succeed");
     for component in &result.component_artifacts.shared_components {
@@ -10276,6 +10352,7 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         &components_dir,
     )
@@ -10342,6 +10419,7 @@ fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect_err("parallel fan-out is not supported in direct mode");
 
@@ -10400,6 +10478,7 @@ fn direct_compile_supports_single_agent_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-agent-no-finish should compile direct (implicit finish)");
 
@@ -10463,6 +10542,7 @@ fn direct_compile_supports_agent_chain_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("agent-chain-no-finish should compile direct (implicit finish)");
 

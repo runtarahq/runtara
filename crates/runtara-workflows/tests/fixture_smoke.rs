@@ -74,6 +74,7 @@ fn emit(graph: ExecutionGraph) -> Result<PathBuf, String> {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .map_err(|e| e.to_string())?;
     if !result.support_report.supported {

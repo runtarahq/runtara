@@ -391,6 +391,11 @@ pub struct DirectCompilationInput {
     /// `None` falls back to the statically linked registry, matching the Rust
     /// codegen compiler's transition behavior.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// The workflow's slug — the capability id an `AgentCapabilities` compile
+    /// exports as `runtara:agent-<slug>/capabilities`. Ignored for the other
+    /// ABIs. `None` derives one from the graph name + workflow id (tests /
+    /// legacy paths); production passes `workflows.slug`.
+    pub agent_slug: Option<String>,
 }
 
 /// Result of opt-in direct workflow compilation.
@@ -679,6 +684,19 @@ pub fn compile_direct_workflow_composed_configured(
     store_freeing_sleep: bool,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
+    // Mirror the inner path's export-id derivation so the re-emitted world
+    // names the same `runtara:agent-<slug>` package the module actually exports.
+    let export_agent_id = match abi {
+        super::component::WorkflowAbi::AgentCapabilities => {
+            Some(input.agent_slug.clone().unwrap_or_else(|| {
+                runtara_dsl::agent_meta::generate_workflow_slug(
+                    input.execution_graph.name.as_deref().unwrap_or(""),
+                    &input.workflow_id,
+                )
+            }))
+        }
+        _ => None,
+    };
     let mut result =
         compile_direct_workflow_with_abi(input, abi, store_freeing_sleep, omit_runtime)?;
     let agent_ids: Vec<String> = result
@@ -695,6 +713,7 @@ pub fn compile_direct_workflow_composed_configured(
         binding,
         abi,
         result.omit_runtime,
+        export_agent_id.as_deref(),
     );
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
@@ -881,6 +900,31 @@ fn compile_direct_workflow_inner(
         super::component::WorkflowAbi::CliRunHttp => false,
     };
 
+    // The export id an AgentCapabilities compile publishes under. A supplied
+    // slug is re-validated defensively (a corrupt/legacy row would otherwise
+    // surface as an opaque wit-parser lexer error that bricks the compile);
+    // absent one, derive from the graph name — same transform the server uses.
+    let export_agent_id = match abi {
+        super::component::WorkflowAbi::AgentCapabilities => {
+            let slug = match input.agent_slug.as_deref() {
+                Some(slug) => {
+                    runtara_dsl::agent_meta::validate_workflow_slug(slug).map_err(|e| {
+                        DirectCompileError::Component(format!(
+                            "workflow slug {slug:?} is not a valid capability id: {e}"
+                        ))
+                    })?;
+                    slug.to_string()
+                }
+                None => runtara_dsl::agent_meta::generate_workflow_slug(
+                    input.execution_graph.name.as_deref().unwrap_or(""),
+                    &input.workflow_id,
+                ),
+            };
+            Some(slug)
+        }
+        _ => None,
+    };
+
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let wasm = emit_direct_artifact(
@@ -892,6 +936,7 @@ fn compile_direct_workflow_inner(
         abi,
         store_freeing_sleep,
         omit_runtime,
+        export_agent_id.as_deref(),
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -900,6 +945,7 @@ fn compile_direct_workflow_inner(
         runtime_binding_from_env(),
         abi,
         omit_runtime,
+        export_agent_id.as_deref(),
     );
 
     let build_dir = input.output_dir.join(format!(
@@ -969,6 +1015,7 @@ fn emit_direct_artifact(
     abi: super::component::WorkflowAbi,
     store_freeing_sleep: bool,
     omit_runtime: bool,
+    export_agent_id: Option<&str>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let abi_json = match abi {
         super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
@@ -1001,14 +1048,14 @@ fn emit_direct_artifact(
                 "artifactKind": "direct-agent-capability-component",
                 "componentRunExport": format!(
                     "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
-                    super::component::CAPABILITIES_EXPORT_AGENT_ID
+                    export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID)
                 ),
                 "entryPointExecutable": true,
                 "runtimeExecutable": true,
                 "outputMode": "capabilities-invoke-list",
                 "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
                 "stepCount": manifest.feature_summary.total_steps,
-                "note": "workflow-as-agent: exports runtara:agent-<id>/capabilities.invoke(cap-id, input, connection) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
+                "note": "workflow-as-agent: exports runtara:agent-<slug>/capabilities.invoke(cap-id, input) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
             }))?
         }
     };
@@ -1021,6 +1068,7 @@ fn emit_direct_artifact(
         abi,
         store_freeing_sleep,
         omit_runtime,
+        export_agent_id,
     )?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
@@ -1037,6 +1085,7 @@ fn emit_direct_artifact(
     Ok(component)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_direct_component(
     manifest: &DirectWorkflowManifest,
     manifest_json: &[u8],
@@ -1045,11 +1094,13 @@ fn emit_direct_component(
     abi: super::component::WorkflowAbi,
     store_freeing_sleep: bool,
     omit_runtime: bool,
+    export_agent_id: Option<&str>,
 ) -> Result<Vec<u8>, DirectCompileError> {
     let (resolve, world) = build_direct_component_resolve_configured(
         &manifest.feature_summary.agent_ids,
         abi,
         omit_runtime,
+        export_agent_id,
     )?;
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
@@ -1072,7 +1123,12 @@ fn emit_direct_component(
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
     // Pinned to the legacy world to match DirectCoreConfig::new (the
     // structural tests describe the wasi:cli/run lowering).
-    build_direct_component_resolve_configured(&[], super::component::WorkflowAbi::CliRunHttp, false)
+    build_direct_component_resolve_configured(
+        &[],
+        super::component::WorkflowAbi::CliRunHttp,
+        false,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -1084,6 +1140,7 @@ fn build_direct_component_resolve_with_agents(
         agents,
         super::component::WorkflowAbi::CliRunHttp,
         false,
+        None,
     )
 }
 
@@ -1091,6 +1148,7 @@ fn build_direct_component_resolve_configured(
     agents: &[String],
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
+    export_agent_id: Option<&str>,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -1117,22 +1175,26 @@ fn build_direct_component_resolve_configured(
                 .map_err(component_error)?;
         }
         super::component::WorkflowAbi::AgentCapabilities => {
-            // Export the agent capability interface. A workflow-as-agent is
-            // pure (the gate forbids agent steps), so `agents` is empty and the
-            // types/package below cannot collide with an imported agent.
+            // Export the agent capability interface under the workflow's own
+            // slug. The reserved-slug check at save time guarantees the export
+            // package can never collide with an imported native agent's.
             resolve
                 .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
                 .map_err(component_error)?;
-            let id = super::component::CAPABILITIES_EXPORT_AGENT_ID;
+            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
             resolve
                 .push_str(format!("runtara-agent-{id}.wit"), &agent_wit_package(id))
                 .map_err(component_error)?;
         }
     }
     if !agents.is_empty() {
-        resolve
-            .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
-            .map_err(component_error)?;
+        // Under AgentCapabilities the types package was already pushed above;
+        // pushing the same content twice is a wit-parser error.
+        if !matches!(abi, super::component::WorkflowAbi::AgentCapabilities) {
+            resolve
+                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
+                .map_err(component_error)?;
+        }
         for agent in agents {
             resolve
                 .push_str(
@@ -1167,7 +1229,7 @@ fn build_direct_component_resolve_configured(
             workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
         }
         super::component::WorkflowAbi::AgentCapabilities => {
-            let id = super::component::CAPABILITIES_EXPORT_AGENT_ID;
+            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
             workflow_wit.push_str(&format!(
                 "    export runtara:agent-{id}/capabilities@{AGENT_WIT_VERSION};\n"
             ))

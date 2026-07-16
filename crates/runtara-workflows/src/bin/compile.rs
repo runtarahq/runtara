@@ -363,6 +363,7 @@ fn run() -> Result<(), String> {
             child_workflows,
             connection_service_url: None,
             agent_catalog: Some(Arc::new(catalog)),
+            agent_slug: None,
             progress_callback,
         },
         DirectWorkflowCompileOptions {

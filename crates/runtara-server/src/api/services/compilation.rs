@@ -443,6 +443,7 @@ impl CompilationService {
             // the component dispatcher so the compiled view of agents
             // matches what the runtime can actually invoke.
             agent_catalog: self.agent_catalog.clone(),
+            agent_slug: None,
             progress_callback,
         };
         let desired_compiler_mode = WorkflowCompilerMode::DirectWasm;

@@ -107,6 +107,9 @@ pub struct CompilationInput {
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     /// Optional progress callback. See [`ProgressCallback`].
     pub progress_callback: Option<ProgressCallback>,
+    /// The workflow's slug — the capability id an agent-shaped compile exports
+    /// (`runtara:agent-<slug>`). `None` derives one from the graph name.
+    pub agent_slug: Option<String>,
 }
 
 /// Explicit options for compiling through the direct WebAssembly emitter.
@@ -204,6 +207,7 @@ pub fn compile_workflow_direct(
         connection_service_url: _,
         agent_catalog,
         progress_callback,
+        agent_slug,
     } = input;
 
     let child_dependencies = child_dependencies_from_inputs(&child_workflows);
@@ -223,6 +227,7 @@ pub fn compile_workflow_direct(
         output_dir: options.output_dir,
         track_events,
         agent_catalog,
+        agent_slug,
     })
     .map_err(direct_compile_error_to_io)?;
 
@@ -356,6 +361,7 @@ mod tests {
                 child_workflows: vec![],
                 connection_service_url: None,
                 agent_catalog: None,
+                agent_slug: None,
                 progress_callback: None,
             },
             DirectWorkflowCompileOptions {

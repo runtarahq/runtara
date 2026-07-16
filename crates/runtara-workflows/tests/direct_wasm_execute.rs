@@ -1191,6 +1191,7 @@ fn run_direct_workflow_capture_attempt(
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,
+            agent_slug: None,
         },
         components_dir,
         binding,
@@ -1691,6 +1692,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             child_workflows: vec![],
             connection_service_url: None,
             agent_catalog: None,
+            agent_slug: None,
             progress_callback: None,
         },
         DirectWorkflowCompileOptions {
@@ -1759,6 +1761,7 @@ fn direct_compile_measures_json_to_ready_bundle_latency() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct emit succeeds");
     let emit_elapsed = emit_start.elapsed();
@@ -1829,6 +1832,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct emit succeeds");
 
@@ -2000,6 +2004,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         WorkflowAbi::CliRunHttp,
         false,
@@ -4067,6 +4072,7 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         &components_dir,
     )
@@ -4104,6 +4110,7 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         &components_dir,
     )
@@ -5123,6 +5130,7 @@ fn run_direct_workflow_embedded(
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         components_dir,
         RuntimeBinding::Composed,
@@ -6026,6 +6034,7 @@ fn compile_invoke_abi_artifact_full(
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         components_dir,
         RuntimeBinding::HostImport,
@@ -6180,6 +6189,7 @@ fn compile_agent_capabilities_artifact(
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         components_dir,
         RuntimeBinding::HostImport,
@@ -6266,6 +6276,7 @@ fn direct_wasm_execute_agent_capabilities_rejects_runtime_needing_workflow() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         &components_dir,
         RuntimeBinding::HostImport,
