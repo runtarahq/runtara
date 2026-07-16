@@ -817,7 +817,18 @@ fn workflow_abi_from_env() -> super::component::WorkflowAbi {
 fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
     match raw {
         Some("cli-run") => super::component::WorkflowAbi::CliRunHttp,
-        _ => super::component::WorkflowAbi::default(),
+        Some("invoke") | None => super::component::WorkflowAbi::default(),
+        // Unknown values are LOUD, not a silent default: a typo'd lever on an
+        // older binary silently compiling the wrong ABI shape is exactly the
+        // failure mode docs/wasip3-parallelism.md §3.1 warns about.
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown RUNTARA_DIRECT_WORKFLOW_ABI value; using the default invoke ABI \
+                 (known values: unset|invoke, cli-run)"
+            );
+            super::component::WorkflowAbi::default()
+        }
     }
 }
 
@@ -1266,7 +1277,7 @@ fn agent_wit_package(agent: &str) -> String {
          \n\
          interface capabilities {{\n\
              use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
-             invoke: func(\n\
+             invoke: async func(\n\
                  capability-id: string,\n\
                  input: list<u8>,\n\
              ) -> result<list<u8>, error-info>;\n\

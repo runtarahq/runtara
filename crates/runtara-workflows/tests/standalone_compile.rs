@@ -248,7 +248,7 @@ fn compiles_deeply_nested_child_workflows_to_composed_wasm() {
 
     // The composed artifact is a valid component.
     let wasm = std::fs::read(&output_wasm).expect("output wasm exists");
-    wasmparser::Validator::new()
+    wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("composed workflow.wasm should validate");
 

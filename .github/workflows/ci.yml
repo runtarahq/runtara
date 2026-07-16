@@ -23,7 +23,7 @@ env:
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
-  WASMTIME_VERSION: "43.0.0"
+  WASMTIME_VERSION: "46.0.1"
 
 jobs:
   notify-start:

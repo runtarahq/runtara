@@ -26,6 +26,9 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-xml/agent",
+        // Sync impls of the async-TYPED invoke (sync lift; see
+        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        async: false,
         generate_all,
     });
 }

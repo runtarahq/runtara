@@ -50,6 +50,10 @@ wasmtime = { version = "46", default-features = false, features = [
     "anyhow",
     "runtime",
     "component-model",
+    # CM-async (WASIp3): concurrent host imports (func_wrap_concurrent), the
+    # in-store event loop, and the async-typed agent/lifecycle ABI v2. See
+    # docs/wasip3-parallelism.md.
+    "component-model-async",
     "async",
     "cranelift",
     "parallel-compilation",

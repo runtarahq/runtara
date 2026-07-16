@@ -83,5 +83,8 @@ pub fn exports_lifecycle_invoke(
     pre.component()
         .component_type()
         .exports(engine)
-        .any(|(name, _)| name == LIFECYCLE_INTERFACE_NAME)
+        .any(|(name, _)| {
+            name == LIFECYCLE_INTERFACE_NAME
+                || name == runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1
+        })
 }

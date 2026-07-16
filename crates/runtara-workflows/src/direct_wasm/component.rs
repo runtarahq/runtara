@@ -20,7 +20,7 @@ use runtara_workflow_wit::{
 /// Package name used by direct-emitted workflow logic components.
 pub const DIRECT_WORKFLOW_LOGIC_PACKAGE: &str = "runtara:workflow-logic@0.1.0";
 /// Version used by generated per-agent component imports.
-pub const DIRECT_AGENT_WIT_VERSION: &str = "0.3.0";
+pub const DIRECT_AGENT_WIT_VERSION: &str = "0.4.0";
 
 /// How the `runtara:workflow-runtime/runtime` interface is satisfied in the
 /// composed `workflow.wasm`.
@@ -358,7 +358,7 @@ mod tests {
         assert!(
             artifacts
                 .world_wit
-                .contains("export runtara:workflow-lifecycle/lifecycle@0.1.0;")
+                .contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;")
         );
         let legacy = emit_direct_component_artifacts_configured(
             &[],
@@ -390,9 +390,9 @@ package runtara:workflow@0.1.0;
 world workflow {
     import runtara:workflow-stdlib/json@0.1.0;
     import runtara:workflow-runtime/runtime@0.1.0;
-    import runtara:agent-crypto/capabilities@0.3.0;
-    import runtara:agent-object-model/capabilities@0.3.0;
-    export runtara:workflow-lifecycle/lifecycle@0.1.0;
+    import runtara:agent-crypto/capabilities@0.4.0;
+    import runtara:agent-object-model/capabilities@0.4.0;
+    export runtara:workflow-lifecycle/lifecycle@0.2.0;
 }
 ";
         assert_eq!(
@@ -422,7 +422,7 @@ world workflow {
         assert!(
             artifacts
                 .world_wit
-                .contains("export runtara:agent-order-sync/capabilities@0.3.0;"),
+                .contains("export runtara:agent-order-sync/capabilities@0.4.0;"),
             "{}",
             artifacts.world_wit
         );
@@ -437,7 +437,7 @@ world workflow {
         assert!(
             fallback
                 .world_wit
-                .contains("export runtara:agent-workflow-agent/capabilities@0.3.0;"),
+                .contains("export runtara:agent-workflow-agent/capabilities@0.4.0;"),
             "{}",
             fallback.world_wit
         );
@@ -485,7 +485,7 @@ world workflow {
                 DirectAgentComponentRequirement {
                     agent_id: "crypto".to_string(),
                     package: "runtara:agent-crypto".to_string(),
-                    package_with_version: "runtara:agent-crypto@0.3.0".to_string(),
+                    package_with_version: "runtara:agent-crypto@0.4.0".to_string(),
                     bundle_wasm_filename: "runtara_agent_crypto.wasm".to_string(),
                     bundle_meta_filename: "runtara_agent_crypto.meta.json".to_string(),
                     cas_wasm_filename: "runtara-agent-crypto.wasm".to_string(),
@@ -493,7 +493,7 @@ world workflow {
                 DirectAgentComponentRequirement {
                     agent_id: "object-model".to_string(),
                     package: "runtara:agent-object-model".to_string(),
-                    package_with_version: "runtara:agent-object-model@0.3.0".to_string(),
+                    package_with_version: "runtara:agent-object-model@0.4.0".to_string(),
                     bundle_wasm_filename: "runtara_agent_object_model.wasm".to_string(),
                     bundle_meta_filename: "runtara_agent_object_model.meta.json".to_string(),
                     cas_wasm_filename: "runtara-agent-object-model.wasm".to_string(),

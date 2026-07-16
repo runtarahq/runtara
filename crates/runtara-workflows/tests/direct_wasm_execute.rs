@@ -6399,7 +6399,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
     );
     let world = &compiled.component_artifacts.world_wit;
     assert!(
-        world.contains("export runtara:agent-pure-passthrough/capabilities@0.3.0"),
+        world.contains("export runtara:agent-pure-passthrough/capabilities@0.4.0"),
         "world must export the capabilities interface under the derived slug:\n{world}"
     );
     assert!(
@@ -6418,7 +6418,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         executor
             .invoke_capability(
                 &pre,
-                "runtara:agent-pure-passthrough/capabilities@0.3.0",
+                "runtara:agent-pure-passthrough/capabilities@0.4.0",
                 "run",
                 br#"{"input":"as-agent"}"#.to_vec(),
             )
@@ -6476,7 +6476,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-delay-agent/capabilities@0.3.0;")
+            .contains("export runtara:agent-delay-agent/capabilities@0.4.0;")
     );
 
     // 4a off-switch: durability is the ONLY runtime need of a plain transform
@@ -7283,7 +7283,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         child
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-shout-echo/capabilities@0.3.0;"),
+            .contains("export runtara:agent-shout-echo/capabilities@0.4.0;"),
         "child must export under its slug:\n{}",
         child.component_artifacts.world_wit
     );

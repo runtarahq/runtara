@@ -85,7 +85,7 @@ fn emit(graph: ExecutionGraph) -> Result<PathBuf, String> {
     }
     // Keep the wasm bytes alive past `temp` by reading them out.
     let wasm = fs::read(&result.wasm_path).map_err(|e| format!("read wasm: {e}"))?;
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .map_err(|e| format!("wasm did not validate as a component: {e}"))?;
     Ok(result.wasm_path)
