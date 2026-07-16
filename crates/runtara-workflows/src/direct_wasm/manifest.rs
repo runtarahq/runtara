@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use runtara_dsl::agent_meta::AgentCatalog;
+use runtara_dsl::agent_meta::{AgentCatalog, capability_tags};
 use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, MappingValue, Step};
 use sha2::{Digest, Sha256};
 
@@ -411,6 +411,13 @@ pub struct DirectAgentManifest {
     pub durable: bool,
     /// Whether the referenced capability is marked rate-limited in the Agent catalog.
     pub rate_limited: bool,
+    /// Whether the target is a published workflow-agent (catalog capability
+    /// tagged `workflow-agent`). Gates the pre-invoke envelope wrap that
+    /// namespaces a composed child's checkpoint ids — native agents must
+    /// never receive an envelope-shaped input. Skipped when false so existing
+    /// manifests stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_workflow_agent: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -990,6 +997,11 @@ fn step_manifest(
                     &agent_id,
                     &step.capability_id,
                 ),
+                is_workflow_agent: agent_capability_workflow_agent(
+                    agent_catalog,
+                    &agent_id,
+                    &step.capability_id,
+                ),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
@@ -1147,6 +1159,7 @@ fn step_manifest(
                     "ai-tools",
                     capability_id,
                 ),
+                is_workflow_agent: false,
                 input_mapping_id,
                 required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
                 // Retries are opt-in for AiAgent (default 0 — LLM calls
@@ -1194,6 +1207,7 @@ fn step_manifest(
                         connection_ref: connection_ref_json(mem_conn_ref.as_ref())?,
                         durable: inherited_durable && step.durable.unwrap_or(true),
                         rate_limited: false,
+                        is_workflow_agent: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1232,6 +1246,7 @@ fn step_manifest(
                             "ai-tools",
                             "summarize-memory",
                         ),
+                        is_workflow_agent: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1265,6 +1280,7 @@ fn step_manifest(
                             "mcp",
                             capability,
                         ),
+                        is_workflow_agent: false,
                         input_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1510,6 +1526,25 @@ fn agent_capability_rate_limited(
     agent_catalog
         .and_then(|catalog| catalog.capability(agent_id, capability_id))
         .map(|capability| capability.rate_limited)
+        .unwrap_or(false)
+}
+
+/// True when the catalog capability is tagged `workflow-agent` — a workflow
+/// published as an agent component, whose input must be wrapped in the
+/// checkpoint-namespace envelope at the invoke boundary.
+fn agent_capability_workflow_agent(
+    agent_catalog: Option<&AgentCatalog>,
+    agent_id: &str,
+    capability_id: &str,
+) -> bool {
+    agent_catalog
+        .and_then(|catalog| catalog.capability(agent_id, capability_id))
+        .map(|capability| {
+            capability
+                .tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        })
         .unwrap_or(false)
 }
 
@@ -2120,6 +2155,54 @@ mod tests {
             .expect("input mapping");
         assert_eq!(mapping.value["url"]["value"], "https://example.test");
         assert!(mapping.value.get("_connection").is_none());
+    }
+
+    #[test]
+    fn workflow_agent_capability_tag_flags_manifest_agent() {
+        use runtara_dsl::agent_meta::workflow_agent_info;
+        // The synthesized workflow-agent catalog entry (the same overlay the
+        // server merges at compile time) carries the `workflow-agent` tag,
+        // which must land on the manifest so the emitter wraps the child's
+        // input in the checkpoint-namespace envelope.
+        let catalog = AgentCatalog::from_agents(vec![workflow_agent_info(
+            "shout-echo",
+            "Shout Echo",
+            "",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )]);
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "call",
+              "executionPlan": [{"fromStep":"call","toStep":"finish"}],
+              "steps": {
+                "call": {"id":"call","stepType":"Agent","agentId":"shout-echo","capabilityId":"run",
+                  "inputMapping":{"message":{"valueType":"immediate","value":"hi"}}},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest_with_agent_catalog(&graph, Some(&catalog))
+            .expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "call")
+            .expect("agent entry");
+        assert!(agent.is_workflow_agent);
+        let json = serde_json::to_value(agent).expect("agent json");
+        assert_eq!(json["isWorkflowAgent"], serde_json::json!(true));
+
+        // A native target stays unflagged — and the field is skipped entirely
+        // so existing manifests remain byte-identical.
+        let native = build_direct_workflow_manifest(&graph).expect("manifest without catalog");
+        let agent = &native.graph.agents[0];
+        assert!(!agent.is_workflow_agent);
+        let json = serde_json::to_value(agent).expect("agent json");
+        assert!(json.get("isWorkflowAgent").is_none());
     }
 
     #[test]

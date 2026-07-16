@@ -98,6 +98,11 @@ pub mod capability_tags {
     pub const MEMORY_READ: &str = "memory:read";
     /// Capability can save/write conversation memory
     pub const MEMORY_WRITE: &str = "memory:write";
+    /// Capability is a published workflow-agent's `run` (a workflow compiled
+    /// and staged as an agent component). The emitter uses this to wrap the
+    /// child's input in the checkpoint-namespace envelope at the invoke
+    /// boundary — native agents must never receive an envelope-shaped input.
+    pub const WORKFLOW_AGENT: &str = "workflow-agent";
 }
 
 /// Error category for capability errors
@@ -2054,7 +2059,7 @@ pub fn workflow_agent_info(
             rate_limited: false,
             compensation_hint: None,
             known_errors: Vec::new(),
-            tags: vec!["workflow-agent".to_string()],
+            tags: vec![capability_tags::WORKFLOW_AGENT.to_string()],
         }],
     }
 }

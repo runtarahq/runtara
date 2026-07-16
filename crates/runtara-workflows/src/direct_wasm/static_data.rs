@@ -141,6 +141,10 @@ pub(super) struct DirectCoreStaticData {
     /// runtime), not a baked literal. The invoke path resolves these via the
     /// stdlib `resolve-connection-id` instead of reading a static segment.
     agent_connection_refs: BTreeSet<u32>,
+    /// Agents targeting a published workflow-agent. Gates the pre-invoke
+    /// `agent-scope-input` envelope wrap that namespaces the composed child's
+    /// checkpoint ids under the invocation site.
+    agent_workflow_agents: BTreeSet<u32>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -265,12 +269,14 @@ impl DirectCoreStaticData {
         let mut agent_capability_ids = BTreeMap::new();
         let mut agent_connection_literals = BTreeSet::new();
         let mut agent_connection_refs = BTreeSet::new();
+        let mut agent_workflow_agents = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
             &mut agent_capability_ids,
             &mut agent_connection_literals,
             &mut agent_connection_refs,
+            &mut agent_workflow_agents,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
@@ -279,6 +285,7 @@ impl DirectCoreStaticData {
                 &mut agent_capability_ids,
                 &mut agent_connection_literals,
                 &mut agent_connection_refs,
+                &mut agent_workflow_agents,
             )?;
         }
 
@@ -305,6 +312,7 @@ impl DirectCoreStaticData {
             agent_capability_ids,
             agent_connection_literals,
             agent_connection_refs,
+            agent_workflow_agents,
             heap_base: offset,
             memory_min_pages,
         })
@@ -333,6 +341,13 @@ impl DirectCoreStaticData {
     pub(super) fn agent_has_connection(&self, agent_id: u32) -> bool {
         self.agent_connection_literals.contains(&agent_id)
             || self.agent_connection_refs.contains(&agent_id)
+    }
+
+    /// True when the Agent targets a published workflow-agent — its input is
+    /// wrapped in the checkpoint-namespace envelope before the invoke. Gates
+    /// the pre-invoke `agent-scope-input` call.
+    pub(super) fn agent_is_workflow_agent(&self, agent_id: u32) -> bool {
+        self.agent_workflow_agents.contains(&agent_id)
     }
 
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
@@ -397,6 +412,7 @@ fn collect_static_agent_data(
     agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
     agent_connection_literals: &mut BTreeSet<u32>,
     agent_connection_refs: &mut BTreeSet<u32>,
+    agent_workflow_agents: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
@@ -417,6 +433,9 @@ fn collect_static_agent_data(
         {
             agent_connection_literals.insert(agent.id);
         }
+        if agent.is_workflow_agent {
+            agent_workflow_agents.insert(agent.id);
+        }
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
@@ -426,6 +445,7 @@ fn collect_static_agent_data(
                 agent_capability_ids,
                 agent_connection_literals,
                 agent_connection_refs,
+                agent_workflow_agents,
             )?;
         }
     }
@@ -654,6 +674,7 @@ mod tests {
             connection_ref: None,
             durable: false,
             rate_limited: false,
+            is_workflow_agent: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries: None,

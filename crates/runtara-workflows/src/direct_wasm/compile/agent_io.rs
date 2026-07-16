@@ -44,6 +44,39 @@ pub(super) fn emit_agent_connection_input(
     load_retptr_list(body, input_ptr_local, input_len_local);
 }
 
+/// Wrap a workflow-agent child's input in the canonical `{data, variables}`
+/// envelope carrying the invocation-site checkpoint namespace
+/// (`variables._cache_key_prefix`). Only for workflow-agent targets — native
+/// agents receive the bare input. Emitted ONCE per step, before the durable
+/// checkpoint / retry loop: the wrapped buffer feeds every attempt (a second
+/// pass would double-wrap), and the parent's own cache key derives from
+/// `source`, not this buffer, so its dedup semantics are untouched.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_agent_scope_input(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+) {
+    if !static_data.agent_is_workflow_agent(agent_id) {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_scope_input));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, input_ptr_local, input_len_local);
+}
+
 pub(super) fn emit_agent_cache_key(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

@@ -2316,6 +2316,47 @@ impl DirectJsonManifest {
         serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
     }
 
+    /// Wrap a composed workflow-agent child's input in the canonical
+    /// `{data, variables}` envelope carrying the invocation-site checkpoint
+    /// namespace.
+    ///
+    /// A durable workflow-agent child shares the PARENT instance's checkpoint
+    /// store; its checkpoint ids were baked at its own compile time from its
+    /// own step ids, so without a per-site scope they collide across
+    /// invocations (Split over one child, the same child twice) and with the
+    /// parent's own steps. The scope is [`child_cache_prefix`] — the exact
+    /// compositional formula the EmbedWorkflow path injects — which the
+    /// child's `build_source` whitelists back into its variables, prefixing
+    /// every durable key it builds. Replay-stable by construction: step id is
+    /// compile-time, `_loop_indices` are deterministic, the inherited parent
+    /// prefix recurses (nested composition chains like nested embeds).
+    ///
+    /// The emitter calls this ONLY for workflow-agent targets, once per step
+    /// (before the retry loop — the wrapped buffer feeds every attempt).
+    /// Native agents never see an envelope-shaped input.
+    pub fn agent_scope_input(
+        &self,
+        agent_id: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse Agent input for scoping: {err}"))?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for Agent scoping: {err}"))?;
+
+        let envelope = serde_json::json!({
+            "data": input,
+            "variables": { "_cache_key_prefix": child_cache_prefix(&agent.step_id, &source) }
+        });
+        serde_json::to_vec(&envelope)
+            .map_err(|err| format!("failed to serialize scoped Agent input: {err}"))
+    }
+
     /// Resolve an Agent's connection to ONE concrete connection id, evaluated
     /// against the execution `source`.
     ///
@@ -10349,6 +10390,44 @@ mod tests {
         assert_eq!(
             validation["missingInputs"][1]["code"],
             json!("STEP_REQUIRED_INPUT_MISSING")
+        );
+    }
+
+    #[test]
+    fn agent_scope_input_wraps_workflow_agent_child_envelope() {
+        let manifest =
+            DirectJsonManifest::parse(&agent_manifest_with_required_inputs(json!({}), json!([])))
+                .expect("manifest");
+
+        // Root invocation site: the scope derives from `_workflow_id`.
+        let scoped = manifest
+            .agent_scope_input(
+                0,
+                br#"{"message":"hi"}"#,
+                br#"{"data":{},"variables":{"_workflow_id":"wf-1::inst-9"},"steps":{}}"#,
+            )
+            .expect("scoped input");
+        let scoped: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(scoped["data"], json!({ "message": "hi" }));
+        assert_eq!(
+            scoped["variables"],
+            json!({ "_cache_key_prefix": "wf-1::inst-9::agent" })
+        );
+
+        // Nested site (this workflow itself running as a child): the inherited
+        // prefix chains and loop indices append — the same compositional
+        // formula as nested embeds, so composition depth is unbounded.
+        let nested = manifest
+            .agent_scope_input(
+                0,
+                b"{}",
+                br#"{"variables":{"_cache_key_prefix":"wfP::call","_loop_indices":[2]}}"#,
+            )
+            .expect("nested scoped input");
+        let nested: Value = serde_json::from_slice(&nested).expect("nested json");
+        assert_eq!(
+            nested["variables"]["_cache_key_prefix"],
+            json!("wfP::call__agent[2]")
         );
     }
 

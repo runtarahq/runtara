@@ -551,6 +551,20 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Wrap a composed workflow-agent child's input in the canonical
+    // `{data, variables}` envelope carrying the invocation-site checkpoint
+    // namespace (`variables._cache_key_prefix`, the same compositional
+    // formula the EmbedWorkflow path uses). A durable child shares the
+    // parent instance's checkpoint store; without this scope, its baked
+    // checkpoint ids collide across invocations and with the parent's.
+    // Emitted ONLY for workflow-agent targets — native agents receive the
+    // bare input unchanged.
+    agent-scope-input: func(
+        agent-id: u32,
+        input: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-cache-key: func(
         agent-id: u32,
         source: list<u8>,

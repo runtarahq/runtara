@@ -2520,6 +2520,7 @@ mod tests {
             connection_ref: None,
             durable: true,
             rate_limited,
+            is_workflow_agent: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries,

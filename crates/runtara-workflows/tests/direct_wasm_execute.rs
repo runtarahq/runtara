@@ -1987,6 +1987,146 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
     }
 }
 
+/// A checkpoint-PERSISTING runtime host: records every id-carrying durable
+/// call and keeps checkpoints across `execute_invoke` calls, so a second run
+/// against the same host behaves exactly like a drain/resume replay (every
+/// durable key HITs). Used to prove composed workflow-agent checkpoint
+/// namespacing: the ids are inspectable AND replay-stable.
+struct PersistingRuntimeHost {
+    input: Vec<u8>,
+    checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Ids passed to `durable-sleep-checkpoint` (durable Delays), in order.
+    sleep_ids: Mutex<Vec<String>>,
+    /// Ids written via `checkpoint` (agent/split/embed outputs), in order.
+    checkpoint_writes: Mutex<Vec<String>>,
+    completed: Mutex<Option<Vec<u8>>>,
+    failed: Mutex<Option<Vec<u8>>>,
+    complete_calls: std::sync::atomic::AtomicU32,
+}
+
+impl PersistingRuntimeHost {
+    fn new(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            checkpoints: Mutex::new(HashMap::new()),
+            sleep_ids: Mutex::new(Vec::new()),
+            checkpoint_writes: Mutex::new(Vec::new()),
+            completed: Mutex::new(None),
+            failed: Mutex::new(None),
+            complete_calls: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost {
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(Some(self.input.clone()))
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok("checkpoint-ns-e2e".to_string())
+    }
+    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        self.complete_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.completed.lock().unwrap() = Some(output);
+        Ok(())
+    }
+    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        *self.failed.lock().unwrap() = Some(error);
+        Ok(())
+    }
+    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .checkpoints
+            .lock()
+            .unwrap()
+            .get(&checkpoint_id)
+            .cloned())
+    }
+    async fn checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        self.checkpoint_writes
+            .lock()
+            .unwrap()
+            .push(checkpoint_id.clone());
+        // Mirror the production semantics (see `checkpoint_response`): an
+        // existing id is a HIT returning the stored state; otherwise store.
+        let mut checkpoints = self.checkpoints.lock().unwrap();
+        if let Some(existing) = checkpoints.get(&checkpoint_id) {
+            return Ok(
+                runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                    found: true,
+                    state: existing.clone(),
+                    pending_signal: None,
+                    custom_signal: None,
+                },
+            );
+        }
+        if !state.is_empty() {
+            checkpoints.insert(checkpoint_id, state);
+        }
+        Ok(
+            runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                found: false,
+                state: Vec::new(),
+                pending_signal: None,
+                custom_signal: None,
+            },
+        )
+    }
+    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+        _ms: u64,
+    ) -> Result<(), String> {
+        self.sleep_ids.lock().unwrap().push(checkpoint_id.clone());
+        // Persist so a replay HITs and skips the sleep (the guest gates on
+        // `get-checkpoint` for this key before sleeping).
+        self.checkpoints
+            .lock()
+            .unwrap()
+            .insert(checkpoint_id, state);
+        Ok(())
+    }
+}
+
 /// Phase-1 acceptance (docs/unify-agents-workflows-plan.md): a HostImport
 /// composition executes end-to-end through the in-process executor with the
 /// runtime interface satisfied by native host functions — input from memory,
@@ -7404,6 +7544,472 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             .load(std::sync::atomic::Ordering::SeqCst),
         1,
         "the composed child must never fire runtime.complete"
+    );
+    assert!(host.failed.lock().unwrap().is_none());
+    std::mem::forget(temp);
+}
+
+/// Checkpoint NAMESPACING (docs/workflow-agent-checkpoint-namespace-plan.md):
+/// a Split fanning out over a DURABLE workflow-agent child gives every
+/// invocation site its own checkpoint namespace. The child's internal step is
+/// deliberately named `call` — the SAME id as the parent's Agent step — the
+/// classic collision. Without the `agent-scope-input` envelope wrap, all
+/// three iterations' durable Delays would share ONE bare `call` sleep key
+/// (iteration 2 would HIT iteration 1's checkpoint and skip its sleep).
+/// A second run against the SAME host proves the scoped ids are replay-stable:
+/// everything HITs, nothing re-sleeps, the output is identical.
+#[test]
+fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
+    let components_dir = direct_e2e_components_dir();
+
+    const DURABLE_CHILD: &str = r#"{
+      "name": "NS Durable Child",
+      "steps": {
+        "call": {
+          "stepType": "Delay",
+          "id": "call",
+          "durationMs": { "valueType": "immediate", "value": 5 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(DURABLE_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "ns-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("ns-delay-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("durable child publishes as an agent");
+    assert!(
+        !child.omit_runtime,
+        "durable child keeps the runtime import"
+    );
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_ns_delay_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "ns-delay-echo",
+        "NS Delay Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_ns_delay_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    const PARENT: &str = r#"{
+      "name": "NS Split Parent",
+      "durable": true,
+      "steps": {
+        "split": {
+          "stepType": "Split",
+          "id": "split",
+          "config": { "value": { "valueType": "reference", "value": "data.items" } },
+          "subgraph": {
+            "name": "Body",
+            "entryPoint": "call",
+            "steps": {
+              "call": {
+                "stepType": "Agent",
+                "id": "call",
+                "agentId": "ns-delay-echo",
+                "capabilityId": "run",
+                "inputMapping": { "value": { "valueType": "reference", "value": "item.v" } }
+              },
+              "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+              }
+            },
+            "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ]
+          }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "results": { "valueType": "reference", "value": "steps.split.outputs" } }
+        }
+      },
+      "entryPoint": "split",
+      "executionPlan": [ { "fromStep": "split", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "items": { "type": "array", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "ns-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the durable child");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let input = br#"{"items":[{"v":"a"},{"v":"b"},{"v":"c"}]}"#;
+    let run_once = |host: Arc<PersistingRuntimeHost>| {
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&parent.wasm_path)
+                .await
+                .expect("load parent artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    input.to_vec(),
+                )
+                .await
+        })
+    };
+
+    let first = run_once(host.clone());
+    let first_output = match first.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("first run must complete, got {other:?}"),
+    };
+
+    // The three child Delay sleeps land on three DISTINCT, site-scoped keys —
+    // the exact compositional formula ({workflow_id}::{step}[i]::{child step}),
+    // NOT the bare `call` the un-namespaced child would have used thrice.
+    let sleeps = host.sleep_ids.lock().unwrap().clone();
+    assert_eq!(
+        sleeps,
+        vec![
+            "ns-parent-wf::call[0]::call".to_string(),
+            "ns-parent-wf::call[1]::call".to_string(),
+            "ns-parent-wf::call[2]::call".to_string(),
+        ],
+        "each invocation site must own a distinct child sleep key"
+    );
+    // ...and stay disjoint from the parent's own durable writes for the
+    // same-named `call` step (its agent-output checkpoints).
+    let writes = host.checkpoint_writes.lock().unwrap().clone();
+    assert!(
+        writes.iter().all(|id| !sleeps.contains(id)),
+        "child keys must never collide with parent checkpoint ids: {writes:?}"
+    );
+
+    // Replay: same host = a resume with all checkpoints present. Everything
+    // HITs — no new sleep fires — and the output is byte-identical, proving
+    // the scoped ids are deterministic across replays.
+    let second = run_once(host.clone());
+    let second_output = match second.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("replay run must complete, got {other:?}"),
+    };
+    assert_eq!(
+        host.sleep_ids.lock().unwrap().len(),
+        3,
+        "a replay must HIT every scoped sleep checkpoint, not re-sleep"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&second_output).expect("replay output json"),
+        serde_json::from_slice::<Value>(&first_output).expect("first output json"),
+        "replay must reproduce the run from checkpoints"
+    );
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "exactly one terminal complete per run (the parent's)"
+    );
+    assert!(host.failed.lock().unwrap().is_none());
+    std::mem::forget(temp);
+}
+
+/// Three-level composition: a parent invokes a published workflow-agent that
+/// itself invokes ANOTHER published (durable) workflow-agent. The checkpoint
+/// namespace chains through both boundaries with the same `__`-composition
+/// nested embeds use — the grandchild's durable Delay key carries both
+/// invocation sites.
+#[test]
+fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
+    let components_dir = direct_e2e_components_dir();
+
+    const GRANDCHILD: &str = r#"{
+      "name": "NS Grandchild",
+      "steps": {
+        "delay": {
+          "stepType": "Delay",
+          "id": "delay",
+          "durationMs": { "valueType": "immediate", "value": 5 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "delay",
+      "executionPlan": [ { "fromStep": "delay", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let grandchild_graph: ExecutionGraph =
+        serde_json::from_str(GRANDCHILD).expect("grandchild parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let grandchild = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "ns-grandchild-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: grandchild_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("grandchild-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("ns-grandchild".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("grandchild publishes as an agent");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &grandchild.wasm_path,
+        staging.join("runtara_agent_ns_grandchild.wasm"),
+    )
+    .expect("stage grandchild wasm");
+    let grandchild_info = runtara_dsl::agent_meta::workflow_agent_info(
+        "ns-grandchild",
+        "NS Grandchild",
+        "",
+        &grandchild_graph.input_schema,
+        &grandchild_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_ns_grandchild.meta.json"),
+        serde_json::to_vec_pretty(&grandchild_info).expect("meta serializes"),
+    )
+    .expect("stage grandchild meta");
+
+    // The MID workflow-agent: invokes the grandchild, republishes as an agent.
+    const MID: &str = r#"{
+      "name": "NS Mid",
+      "steps": {
+        "gcall": {
+          "stepType": "Agent",
+          "id": "gcall",
+          "agentId": "ns-grandchild",
+          "capabilityId": "run",
+          "inputMapping": { "value": { "valueType": "reference", "value": "data.value" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.gcall.outputs.echo" } }
+        }
+      },
+      "entryPoint": "gcall",
+      "executionPlan": [ { "fromStep": "gcall", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let mid_graph: ExecutionGraph = serde_json::from_str(MID).expect("mid parses");
+    let grandchild_catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        grandchild_info,
+    ]));
+    let mut mid = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "ns-mid-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: mid_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("mid-build"),
+            track_events: false,
+            agent_catalog: Some(grandchild_catalog),
+            agent_slug: Some("ns-mid".to_string()),
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("mid compiles as an agent");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut mid,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("mid composes the grandchild");
+    fs::copy(&mid.wasm_path, staging.join("runtara_agent_ns_mid.wasm")).expect("stage mid wasm");
+    let mid_info = runtara_dsl::agent_meta::workflow_agent_info(
+        "ns-mid",
+        "NS Mid",
+        "",
+        &mid_graph.input_schema,
+        &mid_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_ns_mid.meta.json"),
+        serde_json::to_vec_pretty(&mid_info).expect("meta serializes"),
+    )
+    .expect("stage mid meta");
+
+    const TOP: &str = r#"{
+      "name": "NS Top",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "ns-mid",
+          "capabilityId": "run",
+          "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": { "msg": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let top_graph: ExecutionGraph = serde_json::from_str(TOP).expect("top parses");
+    let mid_catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        mid_info,
+    ]));
+    let mut top = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "ns-top-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: top_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("top-build"),
+            track_events: false,
+            agent_catalog: Some(mid_catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("top compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut top,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("top composes the mid agent");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&top.wasm_path)
+            .await
+            .expect("load top artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"msg":"nested-hello"}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("nested composition must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "echo": "nested-hello" }),
+        "the value must round-trip through both composed children"
+    );
+    // The grandchild's durable Delay key chains BOTH invocation sites — the
+    // top's `call` and the mid's `gcall` — via the same `__` composition
+    // nested embeds use. One site, one key, however deep the nesting.
+    assert_eq!(
+        host.sleep_ids.lock().unwrap().clone(),
+        vec!["ns-top-wf::call__gcall::delay".to_string()],
+        "the grandchild sleep key must chain the full invocation path"
+    );
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "neither composed child may fire runtime.complete"
     );
     assert!(host.failed.lock().unwrap().is_none());
     std::mem::forget(temp);
