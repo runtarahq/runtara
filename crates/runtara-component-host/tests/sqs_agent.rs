@@ -108,7 +108,7 @@ async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
     let (result,) = invoke
         .call_async(
             &mut store,
-            ("queue-does-not-exist".to_string(), b"{}".to_vec(), None),
+            ("queue-does-not-exist".to_string(), b"{}".to_vec()),
         )
         .await?;
     let err = result.expect_err("unknown capability must error");
