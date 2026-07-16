@@ -8182,6 +8182,22 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
         message.contains("predates checkpoint namespacing") && message.contains("stale-durable"),
         "the error must name the stale slug and ask for a republish: {message}"
     );
+
+    // Anomalous-branch variant: a runtime-importing staged wasm with NO
+    // sidecar at all (partial stage / manual copy) must also be refused —
+    // the wasm itself is the authority, not the sidecar's presence.
+    fs::remove_file(staging.join("runtara_agent_stale_durable.meta.json")).expect("remove sidecar");
+    let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect_err("a runtime-importing component without a sidecar must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("missing or unreadable"),
+        "the error must name the missing sidecar: {message}"
+    );
     std::mem::forget(temp);
 }
 

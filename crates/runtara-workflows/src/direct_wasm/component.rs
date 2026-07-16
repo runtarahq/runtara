@@ -73,14 +73,20 @@ pub enum WorkflowAbi {
     /// docs/unify-agents-workflows-plan.md.
     #[default]
     InvokeHostImports,
-    /// Workflow-as-agent: export `runtara:agent-<id>/capabilities.invoke(
-    /// capability-id, input, connection) -> result<list<u8>, error-info>` — the
-    /// exact agent capability shape, so a compiled workflow drops into the
-    /// existing agent-composition path and is invocable AS an agent. Implies
-    /// the omit-runtime (zero runtime imports) shape and requires a pure,
-    /// non-suspending workflow (see docs/workflow-as-agent-plan.md). `capability-id`
-    /// and `connection` are accepted but ignored in v1; the success arm is the
-    /// terminal output (an `outcome::suspended` cannot occur — gated at compile).
+    /// Workflow-as-agent: export `runtara:agent-<slug>/capabilities.invoke(
+    /// capability-id, input) -> result<list<u8>, error-info>` — the exact
+    /// agent capability shape, so a compiled workflow drops into the existing
+    /// agent-composition path and is invocable AS an agent. A connection is
+    /// never an out-of-band argument: it rides inside `input` (under
+    /// `_connection`, or as an ordinary connection-typed input field). A PURE
+    /// workflow omits the runtime import entirely; a DURABLE one keeps it and
+    /// the import bubbles up to the composing parent's instance host, with
+    /// terminal complete/fail suppressed
+    /// ([`DirectCoreFunctionIndices::report_terminal_status`]). The success
+    /// arm is the terminal output; an in-guest lifecycle suspend CAN occur in
+    /// a durable child and surfaces as the reserved
+    /// [`super::compile::abi::AGENT_SUSPEND_SENTINEL_CODE`] error, which the
+    /// composing parent recognizes and re-raises through its own ABI.
     AgentCapabilities,
 }
 

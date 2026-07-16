@@ -316,37 +316,49 @@ fn check_workflow_agent_checkpoint_scope(
     dir: &Path,
     component: &DirectAgentComponentRequirement,
 ) -> Result<(), DirectCompileError> {
-    let Ok(meta_bytes) = fs::read(dir.join(&component.bundle_meta_filename)) else {
-        // No sidecar: a native bundle layout — checksum drift is caught by
-        // `read_component_sidecar_metadata` later.
-        return Ok(());
-    };
-    let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&meta_bytes) else {
-        return Ok(());
-    };
-    let tags: Vec<&str> = meta
-        .get("capabilities")
+    let meta = fs::read(dir.join(&component.bundle_meta_filename))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let tags: Vec<String> = meta
+        .as_ref()
+        .and_then(|meta| meta.get("capabilities"))
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|capability| capability.get("tags").and_then(serde_json::Value::as_array))
         .flatten()
         .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
         .collect();
-    if !tags.contains(&capability_tags::WORKFLOW_AGENT)
-        || tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE)
-    {
+
+    if tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE.to_string()) {
+        // Current artifact — compose freely.
+        return Ok(());
+    }
+    if meta.is_some() && !tags.contains(&capability_tags::WORKFLOW_AGENT.to_string()) {
+        // A parseable sidecar without the workflow-agent tag is a native
+        // agent — the fast path taken for every bundled agent on every
+        // compile; no wasm scan.
         return Ok(());
     }
 
+    // Anomalous branch only: a workflow-agent sidecar without the marker
+    // (stale publish), or a MISSING/unparseable sidecar (partial stage,
+    // manual copy). The wasm itself is the authority: only a
+    // runtime-importing component writes checkpoints into the composing
+    // parent's store, so only that shape is refused.
     let wasm_bytes = fs::read(dir.join(&component.bundle_wasm_filename))?;
     if component_imports_workflow_runtime(&wasm_bytes)? {
+        let cause = if meta.is_some() {
+            "is a stale artifact that predates checkpoint namespacing"
+        } else {
+            "has a missing or unreadable .meta.json sidecar"
+        };
         return Err(DirectCompileError::Component(format!(
-            "published workflow-agent `{}` is a stale artifact that predates checkpoint \
-             namespacing — composed into this workflow, its durable checkpoint ids would \
-             collide across invocations; republish it (POST /workflows/<id>/publish-agent) \
-             and recompile",
-            component.agent_id
+            "published workflow-agent `{}` {} — composed into this workflow, its durable \
+             checkpoint ids would collide across invocations; republish it \
+             (POST /workflows/<id>/publish-agent) and recompile",
+            component.agent_id, cause
         )));
     }
     Ok(())

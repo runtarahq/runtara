@@ -4672,8 +4672,18 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
         // An object without a message string still surfaces everything.
         None => raw,
     };
+    // The `__rt_suspended__` code is RESERVED: it is how a composed
+    // workflow-agent's lifecycle suspend crosses the capability boundary, and
+    // the composing parent re-raises its own suspend on seeing it. Every
+    // user-authored terminal error (Error steps, bubbled agent errors) flows
+    // through here — remap a spoofed sentinel so a workflow error can never
+    // silently suspend its parent instead of failing it.
+    let mut code = field("code");
+    if code == "__rt_suspended__" {
+        code = "__rt_suspended__:user".to_string();
+    }
     DirectInvokeErrorFields {
-        code: field("code"),
+        code,
         message,
         category: field("category"),
         severity: field("severity"),
@@ -12285,6 +12295,18 @@ mod tests {
 mod invoke_error_and_delay_key_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn user_error_cannot_spoof_the_suspend_sentinel() {
+        // `__rt_suspended__` is the reserved code a composed workflow-agent's
+        // lifecycle suspend uses to cross the capability boundary; a
+        // user-authored error carrying it must be remapped, or an Error step
+        // could silently SUSPEND its composing parent instead of failing it.
+        let fields =
+            invoke_error_fields(br#"{"code":"__rt_suspended__","message":"spoof attempt"}"#);
+        assert_eq!(fields.code, "__rt_suspended__:user");
+        assert_eq!(fields.message, "spoof attempt");
+    }
 
     #[test]
     fn invoke_error_fields_decomposes_structured_envelopes() {

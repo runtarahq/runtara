@@ -100,6 +100,29 @@ pub fn published_agent_ids(tenant_id: &str) -> std::collections::HashSet<String>
         .collect()
 }
 
+/// Remove a published workflow-agent's staged artifacts (best-effort; absent
+/// files are fine). Called when the owning workflow is deleted: the DB row is
+/// soft-deleted (which deliberately RESERVES the slug), but the staged agent
+/// must stop being composable — otherwise parents keep compiling against a
+/// workflow that no longer exists. Parents that already composed it keep
+/// their baked copy (composition embeds bytes), exactly like a removed
+/// native agent.
+pub fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
+    let dir = staging_dir(tenant_id);
+    let snake = slug.replace('-', "_");
+    for name in [
+        format!("runtara_agent_{snake}.wasm"),
+        format!("runtara_agent_{snake}.meta.json"),
+    ] {
+        match std::fs::remove_file(dir.join(&name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Stage a published workflow-agent: copy the composed `.wasm` and write the
 /// synthesized `.meta.json` sidecar. Returns `(wasm_path, meta_path)`.
 pub fn stage(
@@ -113,9 +136,13 @@ pub fn stage(
     let snake = slug.replace('-', "_");
     let wasm_path = dir.join(format!("runtara_agent_{snake}.wasm"));
     let meta_path = dir.join(format!("runtara_agent_{snake}.meta.json"));
-    std::fs::copy(composed_wasm, &wasm_path)?;
+    // Sidecar FIRST: the compose-time stale-artifact gate reasons from the
+    // sidecar's tags, so a crash mid-stage must never leave a `.wasm` without
+    // its `.meta.json` (a wasm-only stage would hit the gate's anomalous
+    // missing-sidecar branch and fail parent compiles until re-published).
     let meta_json = serde_json::to_vec_pretty(info)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&meta_path, meta_json)?;
+    std::fs::copy(composed_wasm, &wasm_path)?;
     Ok((wasm_path, meta_path))
 }

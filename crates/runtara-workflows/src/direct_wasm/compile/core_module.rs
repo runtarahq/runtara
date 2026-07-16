@@ -451,7 +451,7 @@ fn export_initialize(
 /// locals by dropping its export params off the FRONT of this list
 /// ([`drop_leading_locals`]): `wasi:cli/run` takes 0 params (uses this list
 /// verbatim), `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals
-/// 0/1), and `capabilities.invoke(cap-id, input, connection)` takes 17. Because
+/// 0/1), and `capabilities.invoke(capability-id, input)` takes 4. Because
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
 /// index with its original type — the invariant the lowerers depend on.

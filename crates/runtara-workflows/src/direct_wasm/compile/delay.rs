@@ -21,7 +21,8 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
     DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DIRECT_WAIT_DEADLINE_MS_LOCAL,
-    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
     DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
 };
@@ -153,13 +154,18 @@ pub(super) fn emit_delay_plan(
             // resume the replay re-reaches this delay, the checkpoint HITS, and
             // we skip. The deadline is stored, not the remaining duration, so a
             // resume never re-sleeps time that already elapsed.
+            // The looked-up value (the stored deadline bytes) is DISCARDED on
+            // a HIT — route it into wait-only scratch locals instead of the
+            // step output locals so the blocking and store-freeing lowerings
+            // leave identical state (deadline bytes must never be observable
+            // as a step output, however the delay is followed).
             emit_checkpoint_lookup(
                 body,
                 indices,
                 DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
                 DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-                output_ptr_local,
-                output_len_local,
+                DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+                DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
             );
             // HIT: the host already waited — fall through, skip the sleep.
             body.instruction(&Instruction::Else);

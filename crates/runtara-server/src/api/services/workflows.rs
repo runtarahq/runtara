@@ -939,11 +939,43 @@ impl WorkflowService {
             )));
         }
 
-        // Delegate to repository
-        self.repository
+        // Look the slug up BEFORE the soft delete (the lookup filters
+        // deleted rows) so any published workflow-agent artifact can be
+        // unstaged below.
+        let slug = self
+            .repository
+            .get_slug(tenant_id, workflow_id)
+            .await
+            .ok()
+            .flatten();
+
+        let deleted = self
+            .repository
             .delete_workflow(tenant_id, workflow_id)
             .await
-            .map_err(|e| ServiceError::DatabaseError(format!("Failed to delete workflow: {}", e)))
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to delete workflow: {}", e))
+            })?;
+
+        // The soft delete RESERVES the slug (by design), but a deleted
+        // workflow's PUBLISHED agent must stop being composable: remove the
+        // staged artifacts so new parent compiles fail with a clear
+        // missing-component error instead of composing dead logic. Parents
+        // that already composed it keep their baked copy. Best-effort — a
+        // cleanup failure must not resurrect the workflow.
+        if let Some(slug) = slug
+            && let Err(e) = crate::workflow_agents::unstage(tenant_id, &slug)
+        {
+            tracing::warn!(
+                tenant_id,
+                workflow_id,
+                slug,
+                error = %e,
+                "Failed to remove staged workflow-agent artifacts on delete"
+            );
+        }
+
+        Ok(deleted)
     }
 
     /// Clone a workflow with a new name
