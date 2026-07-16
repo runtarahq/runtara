@@ -1184,6 +1184,7 @@ pub async fn compile_workflow_handler(
                         crate::config::entitlements(),
                         &workflow.execution_graph,
                         child_graphs.iter(),
+                        &crate::workflow_agents::published_agent_ids(&tenant_id),
                     ) {
                         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
                     }

@@ -667,6 +667,7 @@ impl WorkflowService {
             crate::config::entitlements(),
             &workflow.execution_graph,
             closure_children.iter().map(|c| &c.execution_graph),
+            &crate::workflow_agents::published_agent_ids(tenant_id),
         )
         .map_err(ServiceError::EntitlementDenied)?;
 
@@ -847,6 +848,7 @@ impl WorkflowService {
         crate::middleware::entitlement::walk_graph_for_agents(
             crate::config::entitlements(),
             &workflow.execution_graph,
+            &crate::workflow_agents::published_agent_ids(tenant_id),
         )
         .map_err(ServiceError::EntitlementDenied)?;
 

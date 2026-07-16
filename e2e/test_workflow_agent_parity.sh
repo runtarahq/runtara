@@ -58,7 +58,8 @@ COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wa
 SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
 
 print_step()    { echo -e "${GREEN}[STEP]${NC} $1"; }
-print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+# stderr so failures inside $(command substitution) helpers stay visible.
+print_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 
 psql_quiet() {
@@ -107,7 +108,7 @@ create_and_compile() {
         | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
     resp=$(api_post "/workflows/${wf_id}/versions/${version}/compile" '{}' 900)
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] \
-        || { print_error "compile failed for ${name}: ${resp}"; tail -40 "${TEST_LOG}"; exit 1; }
+        || { print_error "compile failed for ${name}: ${resp}"; tail -40 "${TEST_LOG}" >&2; exit 1; }
     echo "${wf_id}"
 }
 

@@ -90,6 +90,16 @@ pub fn catalog_with_workflow_agents(
     Arc::new(AgentCatalog::from_agents(agents))
 }
 
+/// Canonical ids of the tenant's published workflow-agents — the exemption
+/// set for the `enabled_agents` entitlement gate (a tenant's own workflows
+/// are not licensed integrations).
+pub fn published_agent_ids(tenant_id: &str) -> std::collections::HashSet<String> {
+    load_tenant_agents(tenant_id)
+        .into_iter()
+        .map(|info| runtara_dsl::agent_meta::canonical_agent_id(&info.id))
+        .collect()
+}
+
 /// Stage a published workflow-agent: copy the composed `.wasm` and write the
 /// synthesized `.meta.json` sidecar. Returns `(wasm_path, meta_path)`.
 pub fn stage(

@@ -96,21 +96,32 @@ pub fn agent_decision(
 pub fn walk_graph_for_agents(
     snapshot: &EntitlementSnapshot,
     graph: &runtara_dsl::ExecutionGraph,
+    exempt_agents: &std::collections::HashSet<String>,
 ) -> Result<(), EntitlementDenial> {
     for step in graph.steps.values() {
         match step {
             runtara_dsl::Step::Agent(agent_step) => {
+                // The tenant's own PUBLISHED workflow-agents are exempt from
+                // the allowlist: they are user content, not licensed
+                // integrations — any native agents INSIDE the published child
+                // were already allowlist-checked when the child itself was
+                // saved.
+                if exempt_agents.contains(&runtara_dsl::agent_meta::canonical_agent_id(
+                    &agent_step.agent_id,
+                )) {
+                    continue;
+                }
                 agent_decision(snapshot, &agent_step.agent_id)?;
             }
             runtara_dsl::Step::Split(split) => {
-                walk_graph_for_agents(snapshot, &split.subgraph)?;
+                walk_graph_for_agents(snapshot, &split.subgraph, exempt_agents)?;
             }
             runtara_dsl::Step::While(w) => {
-                walk_graph_for_agents(snapshot, &w.subgraph)?;
+                walk_graph_for_agents(snapshot, &w.subgraph, exempt_agents)?;
             }
             runtara_dsl::Step::WaitForSignal(s) => {
                 if let Some(on_wait) = &s.on_wait {
-                    walk_graph_for_agents(snapshot, on_wait)?;
+                    walk_graph_for_agents(snapshot, on_wait, exempt_agents)?;
                 }
             }
             // Other step kinds carry no agent module reference of their
@@ -150,10 +161,11 @@ pub fn walk_closure_for_agents<'a>(
     snapshot: &EntitlementSnapshot,
     root: &runtara_dsl::ExecutionGraph,
     children: impl IntoIterator<Item = &'a runtara_dsl::ExecutionGraph>,
+    exempt_agents: &std::collections::HashSet<String>,
 ) -> Result<(), EntitlementDenial> {
-    walk_graph_for_agents(snapshot, root)?;
+    walk_graph_for_agents(snapshot, root, exempt_agents)?;
     for child in children {
-        walk_graph_for_agents(snapshot, child)?;
+        walk_graph_for_agents(snapshot, child, exempt_agents)?;
     }
     Ok(())
 }
@@ -563,7 +575,7 @@ mod tests {
                 "s2": {"stepType": "Agent", "id": "s2", "agentId": "csv", "capabilityId": "parse"}
             }
         }));
-        assert!(walk_graph_for_agents(&snap, &graph).is_ok());
+        assert!(walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new()).is_ok());
     }
 
     #[test]
@@ -576,7 +588,8 @@ mod tests {
                 "s2": {"stepType": "Agent", "id": "s2", "agentId": "csv", "capabilityId": "parse"}
             }
         }));
-        let denial = walk_graph_for_agents(&snap, &graph).expect_err("csv step must fail walk");
+        let denial = walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new())
+            .expect_err("csv step must fail walk");
         assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
         assert_eq!(denial.json_body()["agent"], "csv");
     }
@@ -606,7 +619,7 @@ mod tests {
                 }
             }
         }));
-        let denial = walk_graph_for_agents(&snap, &graph)
+        let denial = walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new())
             .expect_err("inner csv must be reached by recursion");
         assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
         assert_eq!(denial.json_body()["agent"], "csv");
@@ -643,7 +656,7 @@ mod tests {
                 }
             }
         }));
-        assert!(walk_graph_for_agents(&snap, &graph).is_err());
+        assert!(walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new()).is_err());
     }
 
     #[test]
@@ -659,7 +672,7 @@ mod tests {
                 }
             }
         }));
-        assert!(walk_graph_for_agents(&snap, &graph).is_ok());
+        assert!(walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new()).is_ok());
     }
 
     // ── walk_closure_for_agents ─────────────────────────────────────────
@@ -685,14 +698,35 @@ mod tests {
         }));
 
         assert!(
-            walk_graph_for_agents(&snap, &root).is_ok(),
+            walk_graph_for_agents(&snap, &root, &std::collections::HashSet::new()).is_ok(),
             "sanity check: root alone must look clean, or this test doesn't reproduce the bug"
         );
 
-        let denial = walk_closure_for_agents(&snap, &root, [&child])
-            .expect_err("csv step inside the embedded child must be reached");
+        let denial =
+            walk_closure_for_agents(&snap, &root, [&child], &std::collections::HashSet::new())
+                .expect_err("csv step inside the embedded child must be reached");
         assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
         assert_eq!(denial.json_body()["agent"], "csv");
+    }
+
+    #[test]
+    fn published_workflow_agents_are_exempt_from_the_allowlist() {
+        // A tenant's own published workflow-agent id is neither a registered
+        // dispatcher module nor in the allowlist — yet it must pass the walk:
+        // it is user content, not a licensed integration.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let graph = parse_graph(serde_json::json!({
+            "entryPoint": "s1",
+            "steps": {
+                "s1": {"stepType": "Agent", "id": "s1", "agentId": "shout-echo", "capabilityId": "run"}
+            }
+        }));
+        // Without the exemption the walk denies it…
+        assert!(walk_graph_for_agents(&snap, &graph, &std::collections::HashSet::new()).is_err());
+        // …with it (canonical-folded), it passes.
+        let exempt: std::collections::HashSet<String> =
+            ["shout-echo".to_string()].into_iter().collect();
+        assert!(walk_graph_for_agents(&snap, &graph, &exempt).is_ok());
     }
 
     #[test]
@@ -710,7 +744,10 @@ mod tests {
                 "inner": {"stepType": "Agent", "id": "inner", "agentId": "csv", "capabilityId": "parse"}
             }
         }));
-        assert!(walk_closure_for_agents(&snap, &root, [&child]).is_ok());
+        assert!(
+            walk_closure_for_agents(&snap, &root, [&child], &std::collections::HashSet::new())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -724,8 +761,13 @@ mod tests {
                 "s1": {"stepType": "Agent", "id": "s1", "agentId": "csv", "capabilityId": "parse"}
             }
         }));
-        let denial = walk_closure_for_agents(&snap, &root, std::iter::empty())
-            .expect_err("csv must still be denied with zero children");
+        let denial = walk_closure_for_agents(
+            &snap,
+            &root,
+            std::iter::empty(),
+            &std::collections::HashSet::new(),
+        )
+        .expect_err("csv must still be denied with zero children");
         assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
     }
 
