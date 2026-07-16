@@ -565,6 +565,21 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // The tool-call variant of `agent-scope-input`: a workflow-agent invoked
+    // as an AiAgent TOOL gets a PER-CALL checkpoint namespace —
+    // `{ai-step}.tool.{label}.{call-counter}` folded through the same
+    // compositional prefix formula — because one tool can be dispatched many
+    // times in one loop (the per-step scope would collide across calls). The
+    // counter is the loop's replay-stable tool-call counter (restored from
+    // the turn snapshot), so replays re-derive identical scopes.
+    agent-tool-scope-input: func(
+        ai-step-id: string,
+        label: string,
+        call-counter: u32,
+        input: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-cache-key: func(
         agent-id: u32,
         source: list<u8>,

@@ -2379,6 +2379,38 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize scoped Agent input: {err}"))
     }
 
+    /// The tool-call variant of [`Self::agent_scope_input`]: wrap a
+    /// workflow-agent TOOL's input in the `{data, variables}` envelope with a
+    /// PER-CALL checkpoint namespace.
+    ///
+    /// One tool can be dispatched many times in one AiAgent loop, so the
+    /// per-step site scope would collide across calls; the site here is
+    /// `{ai_step_id}.tool.{label}.{call_counter}` — the same shape the
+    /// wait-tool signal ids use, with the loop's replay-stable tool-call
+    /// counter (restored from the turn snapshot on replay, so a re-executed
+    /// turn re-derives identical scopes and the child's internal checkpoints
+    /// HIT).
+    pub fn agent_tool_scope_input(
+        ai_step_id: &str,
+        label: &str,
+        call_counter: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse tool input for scoping: {err}"))?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
+
+        let site = format!("{ai_step_id}.tool.{label}.{call_counter}");
+        let envelope = serde_json::json!({
+            "data": input,
+            "variables": { "_cache_key_prefix": child_cache_prefix(&site, &source) }
+        });
+        serde_json::to_vec(&envelope)
+            .map_err(|err| format!("failed to serialize scoped tool input: {err}"))
+    }
+
     /// Resolve an Agent's connection to ONE concrete connection id, evaluated
     /// against the execution `source`.
     ///
@@ -10526,6 +10558,60 @@ mod tests {
         assert_eq!(
             nested["variables"]["_cache_key_prefix"],
             json!("wfP::call__agent[2]")
+        );
+    }
+
+    #[test]
+    fn agent_tool_scope_input_wraps_per_call_envelope() {
+        // A workflow-agent invoked as an AiAgent TOOL is scoped PER CALL:
+        // the site is `{ai_step}.tool.{label}.{counter}`, so two dispatches
+        // of one tool (or a replayed turn) get deterministic, disjoint
+        // namespaces — folded through the same compositional formula as
+        // every other child scope.
+        let scoped = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            0,
+            br#"{"value":"first"}"#,
+            br#"{"data":{},"variables":{"_workflow_id":"parent-wf"},"steps":{}}"#,
+        )
+        .expect("scoped tool input");
+        let scoped: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(scoped["data"], json!({ "value": "first" }));
+        assert_eq!(
+            scoped["variables"],
+            json!({ "_cache_key_prefix": "parent-wf::ai.tool.wf_echo.0" })
+        );
+
+        // The next call gets its own namespace...
+        let second = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            1,
+            b"{}",
+            br#"{"variables":{"_workflow_id":"parent-wf"}}"#,
+        )
+        .expect("second scoped tool input");
+        let second: Value = serde_json::from_slice(&second).expect("second json");
+        assert_eq!(
+            second["variables"]["_cache_key_prefix"],
+            json!("parent-wf::ai.tool.wf_echo.1")
+        );
+
+        // ...and an inherited prefix chains (this AiAgent itself running as
+        // a composed/embedded child), like every other site scope.
+        let nested = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            2,
+            b"{}",
+            br#"{"variables":{"_cache_key_prefix":"top-wf::call","_loop_indices":[1]}}"#,
+        )
+        .expect("nested scoped tool input");
+        let nested: Value = serde_json::from_slice(&nested).expect("nested json");
+        assert_eq!(
+            nested["variables"]["_cache_key_prefix"],
+            json!("top-wf::call__ai.tool.wf_echo.2[1]")
         );
     }
 

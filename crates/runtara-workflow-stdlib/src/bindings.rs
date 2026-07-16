@@ -6479,6 +6479,93 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
+                pub unsafe fn _export_agent_tool_scope_input_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: i32,
+                    arg5: *mut u8,
+                    arg6: usize,
+                    arg7: *mut u8,
+                    arg8: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let bytes1 = _rt::Vec::from_raw_parts(arg2.cast(), len1, len1);
+                    let len2 = arg6;
+                    let len3 = arg8;
+                    let result4 = T::agent_tool_scope_input(
+                        _rt::string_lift(bytes0),
+                        _rt::string_lift(bytes1),
+                        arg4 as u32,
+                        _rt::Vec::from_raw_parts(arg5.cast(), len2, len2),
+                        _rt::Vec::from_raw_parts(arg7.cast(), len3, len3),
+                    );
+                    let ptr5 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result4 {
+                        Ok(e) => {
+                            *ptr5.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec6 = (e).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len6;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr6.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr5.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec7 = (e.into_bytes()).into_boxed_slice();
+                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                            let len7 = vec7.len();
+                            ::core::mem::forget(vec7);
+                            *ptr5
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len7;
+                            *ptr5
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr7.cast_mut();
+                        }
+                    };
+                    ptr5
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_agent_tool_scope_input<T: Guest>(
+                    arg0: *mut u8,
+                ) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            let base3 = l1;
+                            let len3 = l2;
+                            _rt::cabi_dealloc(base3, len3 * 1, 1);
+                        }
+                        _ => {
+                            let l4 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l5 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l4, l5, 1);
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
                 pub unsafe fn _export_agent_cache_key_cabi<T: Guest>(
                     arg0: i32,
                     arg1: *mut u8,
@@ -8073,6 +8160,20 @@ pub mod exports {
                         input: _rt::Vec<u8>,
                         source: _rt::Vec<u8>,
                     ) -> Result<_rt::Vec<u8>, _rt::String>;
+                    /// The tool-call variant of `agent-scope-input`: a workflow-agent invoked
+                    /// as an AiAgent TOOL gets a PER-CALL checkpoint namespace —
+                    /// `{ai-step}.tool.{label}.{call-counter}` folded through the same
+                    /// compositional prefix formula — because one tool can be dispatched many
+                    /// times in one loop (the per-step scope would collide across calls). The
+                    /// counter is the loop's replay-stable tool-call counter (restored from
+                    /// the turn snapshot), so replays re-derive identical scopes.
+                    fn agent_tool_scope_input(
+                        ai_step_id: _rt::String,
+                        label: _rt::String,
+                        call_counter: u32,
+                        input: _rt::Vec<u8>,
+                        source: _rt::Vec<u8>,
+                    ) -> Result<_rt::Vec<u8>, _rt::String>;
                     fn agent_cache_key(
                         agent_id: u32,
                         source: _rt::Vec<u8>,
@@ -9086,6 +9187,18 @@ pub mod exports {
                         u8,) { unsafe { $($path_to_types)*::
                         __post_return_agent_scope_input::<$ty > (arg0) } } #[unsafe
                         (export_name =
+                        "runtara:workflow-stdlib/json@0.1.0#agent-tool-scope-input")]
+                        unsafe extern "C" fn export_agent_tool_scope_input(arg0 : * mut
+                        u8, arg1 : usize, arg2 : * mut u8, arg3 : usize, arg4 : i32, arg5
+                        : * mut u8, arg6 : usize, arg7 : * mut u8, arg8 : usize,) -> *
+                        mut u8 { unsafe { $($path_to_types)*::
+                        _export_agent_tool_scope_input_cabi::<$ty > (arg0, arg1, arg2,
+                        arg3, arg4, arg5, arg6, arg7, arg8) } } #[unsafe (export_name =
+                        "cabi_post_runtara:workflow-stdlib/json@0.1.0#agent-tool-scope-input")]
+                        unsafe extern "C" fn _post_return_agent_tool_scope_input(arg0 : *
+                        mut u8,) { unsafe { $($path_to_types)*::
+                        __post_return_agent_tool_scope_input::<$ty > (arg0) } } #[unsafe
+                        (export_name =
                         "runtara:workflow-stdlib/json@0.1.0#agent-cache-key")] unsafe
                         extern "C" fn export_agent_cache_key(arg0 : i32, arg1 : * mut u8,
                         arg2 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
@@ -9407,9 +9520,9 @@ pub(crate) use __export_workflow_stdlib_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:workflow-stdlib@0.1.0:workflow-stdlib:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5546] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa4*\x01A\x02\x01A\x02\
-\x01B\xcc\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5626] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xf4*\x01A\x02\x01A\x02\
+\x01B\xce\x01\x01p}\x01r\x03\x07payload\0\x09retryable\x7f\x0crate-limited\x7f\x04\
 \0\x11agent-retry-error\x03\0\x01\x01kw\x01ks\x01r\x07\x04codes\x07messages\x08c\
 ategorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x03\x0aattributes\x04\x04\
 \0\x0cinvoke-error\x03\0\x05\x01j\0\x01s\x01@\x01\x08manifest\0\0\x07\x04\0\x0di\
@@ -9498,24 +9611,25 @@ U\x01@\x01\x0bload-output\0\0\x0a\x04\0\x17ai-memory-initial-state\x01V\x01@\x02
 Y\x01@\x01\x10summarize-result\0\0\x0a\x04\0\x13ai-summarize-output\x01Z\x01@\x02\
 \x08agent-idy\x05input\0\0\x0a\x04\0\x14agent-validate-input\x01[\x01@\x03\x08ag\
 ent-idy\x05input\0\x06source\0\0\x0a\x04\0\x16agent-connection-input\x01\\\x04\0\
-\x11agent-scope-input\x01\\\x01@\x02\x08agent-idy\x06source\0\0\x0a\x04\0\x0fage\
-nt-cache-key\x01]\x04\0\x15agent-retry-sleep-key\x01@\x04\0\x18agent-attempt-res\
-ult-key\x01@\x01@\x06\x03tag}\x09retryable\x7f\x0crate-limited\x7f\x0fretry-afte\
-r-tag\x7f\x0eretry-after-msw\x07payload\0\0\x0a\x04\0\x16agent-attempt-envelope\x01\
-^\x04\0\x14agent-retry-delay-ms\x01A\x01@\x07\x04codes\x07messages\x08categorys\x08\
-severitys\x09retryable\x7f\x0eretry-after-ms\x03\x0aattributes\x04\0\x0a\x04\0\x10\
-agent-error-info\x01_\x01j\x01\x02\x01s\x01@\x07\x04codes\x07messages\x08categor\
-ys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x03\x0aattributes\x04\0\xe0\0\
-\x04\0\x16agent-retry-error-info\x01a\x01@\x08\x08agent-idy\x04codes\x07messages\
-\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-ms\x03\x0aattributes\x04\
-\0\x0a\x04\0\x0bagent-error\x01b\x01@\x02\x08agent-idy\x0aerror-info\0\0\x0a\x04\
-\0\x15agent-error-from-info\x01c\x01@\x03\x08agent-idy\x06source\0\x05error\0\0\x0a\
-\x04\0\x11agent-debug-error\x01d\x04\0\x10step-debug-start\x01,\x04\0\x0estep-de\
-bug-end\x01,\x01@\x03\x07step-ids\x06source\0\x05error\0\0\x0a\x04\0\x10step-deb\
-ug-error\x01e\x04\0\"runtara:workflow-stdlib/json@0.1.0\x05\0\x04\0-runtara:work\
-flow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\x15\x01\0\x0fworkflow-stdlib\x03\0\0\
-\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\x10wit-bind\
-gen-rust\x060.41.0";
+\x11agent-scope-input\x01\\\x01@\x05\x0aai-step-ids\x05labels\x0ccall-countery\x05\
+input\0\x06source\0\0\x0a\x04\0\x16agent-tool-scope-input\x01]\x01@\x02\x08agent\
+-idy\x06source\0\0\x0a\x04\0\x0fagent-cache-key\x01^\x04\0\x15agent-retry-sleep-\
+key\x01@\x04\0\x18agent-attempt-result-key\x01@\x01@\x06\x03tag}\x09retryable\x7f\
+\x0crate-limited\x7f\x0fretry-after-tag\x7f\x0eretry-after-msw\x07payload\0\0\x0a\
+\x04\0\x16agent-attempt-envelope\x01_\x04\0\x14agent-retry-delay-ms\x01A\x01@\x07\
+\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-after-\
+ms\x03\x0aattributes\x04\0\x0a\x04\0\x10agent-error-info\x01`\x01j\x01\x02\x01s\x01\
+@\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0eretry-a\
+fter-ms\x03\x0aattributes\x04\0\xe1\0\x04\0\x16agent-retry-error-info\x01b\x01@\x08\
+\x08agent-idy\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
+retry-after-ms\x03\x0aattributes\x04\0\x0a\x04\0\x0bagent-error\x01c\x01@\x02\x08\
+agent-idy\x0aerror-info\0\0\x0a\x04\0\x15agent-error-from-info\x01d\x01@\x03\x08\
+agent-idy\x06source\0\x05error\0\0\x0a\x04\0\x11agent-debug-error\x01e\x04\0\x10\
+step-debug-start\x01,\x04\0\x0estep-debug-end\x01,\x01@\x03\x07step-ids\x06sourc\
+e\0\x05error\0\0\x0a\x04\0\x10step-debug-error\x01f\x04\0\"runtara:workflow-stdl\
+ib/json@0.1.0\x05\0\x04\0-runtara:workflow-stdlib/workflow-stdlib@0.1.0\x04\0\x0b\
+\x15\x01\0\x0fworkflow-stdlib\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
+wit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

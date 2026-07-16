@@ -1137,6 +1137,22 @@ mod component {
             })
         }
 
+        fn agent_tool_scope_input(
+            ai_step_id: String,
+            label: String,
+            call_counter: u32,
+            input: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::agent_tool_scope_input(
+                &ai_step_id,
+                &label,
+                call_counter,
+                &input,
+                &source,
+            )
+        }
+
         fn agent_cache_key(agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

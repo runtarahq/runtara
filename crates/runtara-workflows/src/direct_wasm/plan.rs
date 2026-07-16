@@ -222,6 +222,11 @@ pub(super) enum DirectAiToolPlan {
     Agent {
         agent_id: u32,
         agent_component_id: String,
+        /// The advertised tool name (the edge label; the synthetic
+        /// `<toolset>_search`/`_invoke` name for MCP meta-tools). Names the
+        /// per-CALL checkpoint scope `{ai_step}.tool.{label}.{call}` when the
+        /// target is a workflow-agent.
+        label: String,
         /// The tool Agent step's own `timeout` (ms), injected as `timeout_ms`
         /// into the LLM-provided arguments so the dispatched call is bounded
         /// independently of the AiAgent turnTimeout. `None` leaves the tool
@@ -967,6 +972,7 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        label: name.clone(),
                         timeout_ms: tool_agent.timeout,
                     });
                 } else {
@@ -986,6 +992,7 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        label: name.clone(),
                         // MCP tool providers carry their own transport timeout;
                         // this is typically None (no per-call override).
                         timeout_ms: tool_agent.timeout,

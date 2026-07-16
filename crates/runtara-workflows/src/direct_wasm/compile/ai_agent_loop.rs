@@ -625,6 +625,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             DirectAiToolPlan::Agent {
                 agent_id,
                 agent_component_id,
+                label,
                 timeout_ms,
             } => {
                 let tool_invoke = indices
@@ -645,6 +646,43 @@ pub(super) fn emit_ai_agent_loop_plan(
                     body.instruction(&Instruction::I64Const(*ms as i64));
                     push_retptr_arg(body);
                     body.instruction(&Instruction::Call(indices.stdlib_ai_tool_args_with_timeout));
+                    emit_retptr_error_or_return(
+                        body,
+                        indices,
+                        None,
+                        route_ptr_local,
+                        route_len_local,
+                    );
+                    load_retptr_list(
+                        body,
+                        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+                        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                    );
+                }
+                // A workflow-agent tool shares this instance's checkpoint
+                // store: wrap its arguments in the namespace envelope with a
+                // PER-CALL scope ({ai_step}.tool.{label}.{counter}) — one
+                // tool can be dispatched many times in one loop, so the
+                // per-step scope would collide across calls. The counter is
+                // the replay-stable tool-call counter (restored from the
+                // turn snapshot), so replays re-derive identical scopes.
+                // No-op for native tool targets.
+                if static_data.agent_is_workflow_agent(*agent_id) {
+                    let ai_step_segment = static_data
+                        .step_id(step_id)
+                        .expect("AiAgent step id is present in static data");
+                    let label_segment = static_data
+                        .step_id(label)
+                        .expect("AiAgent tool label is interned in static data");
+                    push_segment_args(body, ai_step_segment);
+                    push_segment_args(body, label_segment);
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
+                    body.instruction(&Instruction::LocalGet(source_ptr_local));
+                    body.instruction(&Instruction::LocalGet(source_len_local));
+                    push_retptr_arg(body);
+                    body.instruction(&Instruction::Call(indices.stdlib_agent_tool_scope_input));
                     emit_retptr_error_or_return(
                         body,
                         indices,

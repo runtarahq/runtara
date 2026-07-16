@@ -9326,3 +9326,221 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
     );
     std::mem::forget(temp);
 }
+
+/// N6 — PER-CALL checkpoint namespace for a workflow-agent invoked as an
+/// AiAgent TOOL. One durable workflow-agent tool is dispatched TWICE by the
+/// loop; each call gets its own `{ai_step}.tool.{label}.{counter}` scope, so
+/// the child's internal durable keys (its Delay sleep) never collide across
+/// calls. Before the wrap, both calls shared the child's bare unscoped keys:
+/// call 2's sleep lookup HIT call 1's checkpoint and silently skipped.
+#[test]
+fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
+    let components_dir = direct_e2e_components_dir();
+
+    const DURABLE_TOOL_CHILD: &str = r#"{
+      "name": "Tool Delay Echo",
+      "steps": {
+        "call": {
+          "stepType": "Delay",
+          "id": "call",
+          "durationMs": { "valueType": "immediate", "value": 5 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph =
+        serde_json::from_str(DURABLE_TOOL_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "tool-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("tool-delay-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("durable tool child publishes as an agent");
+    assert!(!child.omit_runtime, "durable tool child keeps the runtime");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_tool_delay_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "tool-delay-echo",
+        "Tool Delay Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_tool_delay_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    // The parent: an AiAgent whose only tool is the published workflow-agent
+    // (tool edge labeled `wf_echo`), plus a terminal Finish off the next edge.
+    const PARENT: &str = r#"{
+      "name": "AI Tool NS Parent",
+      "entryPoint": "ai",
+      "executionPlan": [
+        { "fromStep": "ai", "toStep": "wf_tool", "label": "wf_echo" },
+        { "fromStep": "ai", "toStep": "finish" }
+      ],
+      "steps": {
+        "ai": { "id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
+          "systemPrompt": { "valueType": "immediate", "value": "You call tools" },
+          "userPrompt": { "valueType": "immediate", "value": "Echo twice" },
+          "provider": "openai",
+          "model": "gpt-4o" } },
+        "wf_tool": { "id": "wf_tool", "stepType": "Agent", "name": "wf_echo",
+          "agentId": "tool-delay-echo", "capabilityId": "run", "inputMapping": {} },
+        "finish": { "id": "finish", "stepType": "Finish",
+          "inputMapping": { "answer": { "valueType": "reference", "value": "steps.ai.outputs.response" } } }
+      },
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "aitool-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the workflow-agent tool");
+
+    // Hermetic LLM stub: the model requests the tool twice, then completes.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+    let (capture_tx, _capture_rx) = mpsc::channel::<CapturedMessage>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let server_state = Arc::new(ServerState::default());
+    *server_state
+        .llm_responses
+        .lock()
+        .expect("llm_responses lock") = vec![
+        llm_tool_call("wf_echo", r#"{"value":"first"}"#),
+        llm_tool_call("wf_echo", r#"{"value":"second"}"#),
+        llm_ok("done"),
+    ];
+    let server_state_for_assertions = server_state.clone();
+    let input_arc = Arc::new(b"{}".to_vec());
+    let server_handle =
+        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
+
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
+    env.insert(
+        "RUNTARA_HTTP_PROXY_URL".to_string(),
+        format!("http://{addr}/llm-proxy"),
+    );
+    env.insert(
+        "RUNTARA_TENANT_ID".to_string(),
+        "direct-wasm-execute".to_string(),
+    );
+    env.insert("RUST_LOG".to_string(), "warn".to_string());
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await
+    });
+    let _ = stop_tx.send(());
+    let _ = server_handle.join();
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the tool loop must complete against the stub, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "answer": "done" }),
+        "the loop must finish on the third (completing) turn"
+    );
+    assert_eq!(
+        server_state_for_assertions
+            .llm_requests
+            .lock()
+            .expect("llm_requests lock")
+            .len(),
+        3,
+        "two tool-call turns + one completing turn"
+    );
+
+    // THE assertion: each tool CALL owns a distinct child checkpoint family —
+    // the durable child's Delay slept under two different per-call scopes.
+    // Unscoped (pre-wrap), call 2 would have HIT call 1's bare `call` key and
+    // skipped its sleep entirely.
+    let sleeps = host.sleep_ids.lock().unwrap().clone();
+    assert_eq!(
+        sleeps,
+        vec![
+            "aitool-parent-wf::ai.tool.wf_echo.0::call".to_string(),
+            "aitool-parent-wf::ai.tool.wf_echo.1::call".to_string(),
+        ],
+        "each tool call must own a per-call child checkpoint scope"
+    );
+    std::mem::forget(temp);
+}
