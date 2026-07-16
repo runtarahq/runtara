@@ -185,7 +185,7 @@ Default assumption: **(b)**, validated or overturned by S2. Either way the chang
 ### 3.7 DSL surface
 
 - `Split` gains `maxConcurrent: u32` (default **1** = today's sequential lowering, byte-preserved). `dontStopOnFailed`, `stats`/`hasFailures`, retry/timeout knobs keep identical semantics; result buckets keep **input order** (completion order is an implementation detail — required for replay determinism of downstream refs).
-- Fan-out branches: a later `parallel: true` on the fan-out step (Phase 4), same windowed machinery over heterogeneous subgraphs. E073 (fan-out must re-converge) stays.
+- Fan-out branches: a later `parallel: true` on the fan-out step (Phase 4), same windowed machinery over heterogeneous subgraphs. E073 (fan-out must re-converge) stays. **Detailed plan: [`docs/wasip3-parallel-branches-plan.md`](wasip3-parallel-branches-plan.md)** (new `ParallelBranches` plan node; phased 4a single-Agent branches → 4b linear-chain branches → 4c arbitrary subgraphs; opt-in, sequential fallback).
 - Validation: initially `maxConcurrent > 1` is rejected (new W/E code) when the Split body contains suspension points — `Wait`, `Delay`, durable `Embed`/child-workflow invokes — **or breakpoint-bearing steps** (`breakpoint-pause` is sync-typed and store-freezing; pausing mid-window with K calls in flight is undefined until Phase 4 defines and tests it). The quiesce policy (§4.4) starts with the tractable case; the gate is lifted in Phase 4 with a pause-mid-window battery case.
 
 ---

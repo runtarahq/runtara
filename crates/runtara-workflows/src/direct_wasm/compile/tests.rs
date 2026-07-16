@@ -551,6 +551,15 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
+        DirectRunPlan::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            for branch in branches {
+                collect_run_plan_ids(branch, condition_ids, mapping_ids);
+            }
+            collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+        }
         DirectRunPlan::Join => {}
         DirectRunPlan::ImplicitFinish => {}
     }
@@ -748,9 +757,10 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::AiAgentLoop { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::EdgeRoute { .. } | DirectRunPlan::Join | DirectRunPlan::ImplicitFinish => {
-            None
-        }
+        DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::ParallelBranches { .. }
+        | DirectRunPlan::Join
+        | DirectRunPlan::ImplicitFinish => None,
     }
 }
 

@@ -884,6 +884,34 @@ pub(super) fn emit_run_plan_mapping(
                 );
             }
         }
+        DirectRunPlan::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            super::branch_parallel::emit_parallel_branches(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                branches,
+                merge_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+            );
+        }
         DirectRunPlan::Join => {
             // A branch that reached its enclosing branching step's merge point;
             // the merge is emitted by the parent as the shared continuation, so

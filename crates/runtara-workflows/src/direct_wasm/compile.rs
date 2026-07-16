@@ -29,6 +29,7 @@ mod agent_io;
 mod agent_retry;
 mod ai_agent_loop;
 mod artifact_metadata;
+mod branch_parallel;
 mod checkpoint;
 mod core_imports;
 mod core_module;

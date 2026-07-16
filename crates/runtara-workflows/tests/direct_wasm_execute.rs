@@ -9657,6 +9657,67 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     )
 }
 
+/// A non-durable single-Agent diamond `start → {b, c} → finish` whose two
+/// branches each hit the mock `/slow-item` endpoint (docs/wasip3-parallel-
+/// branches-plan.md Phase 4a). The branches run concurrently in one waitable-set
+/// window; the merge `finish` reads BOTH branch outputs.
+fn parallel_http_branches_graph(url: &str) -> String {
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Branches",
+        "durable": false,
+        "steps": {{
+            "start": {{
+                "stepType": "Agent",
+                "id": "start",
+                "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime",
+                "maxRetries": 0,
+                "inputMapping": {{}}
+            }},
+            "b": {{
+                "stepType": "Agent",
+                "id": "b",
+                "agentId": "http",
+                "capabilityId": "http-request",
+                "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }},
+            "c": {{
+                "stepType": "Agent",
+                "id": "c",
+                "agentId": "http",
+                "capabilityId": "http-request",
+                "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }},
+            "finish": {{
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {{
+                    "b_status": {{"valueType": "reference", "value": "steps.b.outputs.status_code"}},
+                    "c_status": {{"valueType": "reference", "value": "steps.c.outputs.status_code"}}
+                }}
+            }}
+        }},
+        "entryPoint": "start",
+        "executionPlan": [
+            {{"fromStep": "start", "toStep": "b"}},
+            {{"fromStep": "start", "toStep": "c"}},
+            {{"fromStep": "b", "toStep": "finish"}},
+            {{"fromStep": "c", "toStep": "finish"}}
+        ],
+        "variables": {{}}
+    }}"#
+    )
+}
+
 /// Serializes the wall-clock-sensitive parallel-split tests against each
 /// other AND absorbs poisoning: they assert timing ratios and request
 /// interleavings that melt when they share cores with each other. The rest
@@ -9736,6 +9797,61 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
             );
         }
     }
+}
+
+/// Phase-4a payoff: a non-durable single-Agent diamond runs its two branches
+/// CONCURRENTLY. The merge sees both branch outputs, and the two `/slow-item`
+/// calls arrive at the mock within one think-time (they overlap) rather than
+/// serialized across two.
+#[test]
+fn direct_wasm_execute_parallel_branches_http_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_branches_graph("http://slow.invalid");
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-http",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "parallel branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["b_status"], 200, "branch b result: {output}");
+    assert_eq!(output["c_status"], 200, "branch c result: {output}");
+
+    // The mock timestamps each `/slow-item` arrival. Concurrent branches launch
+    // both requests before either response lands, so the two arrivals fall
+    // within one think-time; serialized branches would span at least one full
+    // think-time (request 2 leaves only after response 1).
+    let arrivals = &captured.slow_item_arrivals;
+    assert_eq!(
+        arrivals.len(),
+        2,
+        "both branch agents must reach the upstream"
+    );
+    let span = arrivals
+        .iter()
+        .max()
+        .zip(arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("arrival span");
+    eprintln!(
+        "[parallel-branches-timing] arrival-span={}ms",
+        span.as_millis()
+    );
+    assert!(
+        span < DELAY,
+        "parallel branches failed to overlap agent I/O: arrivals span {span:?}"
+    );
 }
 
 /// A pause signalled DURING a parallel window is observed at the drain

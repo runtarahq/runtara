@@ -208,6 +208,19 @@ pub(super) enum DirectRunPlan {
         /// `None` when the branches are terminal (no merge).
         merge_plan: Option<Box<DirectRunPlan>>,
     },
+    /// An unconditional fan-out whose branches run CONCURRENTLY, then re-converge
+    /// (docs/wasip3-parallel-branches-plan.md). Unlike the linearised default,
+    /// every branch's agent invoke is launched into the same waitable-set and the
+    /// window drains them together before assembling each branch's result into the
+    /// `steps` context in order — sequential-identical by construction (assemble IS
+    /// the per-branch lowering, with the invoke memoized), because independent DAG
+    /// branches never reference one another. Phase 4a: each branch is a single
+    /// Agent (`Agent { next_plan: Join, .. }`); the shared continuation runs once
+    /// as `merge_plan`, mirroring `Conditional`/`SwitchRoute`.
+    ParallelBranches {
+        branches: Vec<DirectRunPlan>,
+        merge_plan: Box<DirectRunPlan>,
+    },
     /// A branch that has reached its enclosing branching step's merge point. The
     /// merge (and everything after it) is emitted once by the parent as the shared
     /// continuation, so this terminal emits nothing — control falls through to it.
@@ -1386,6 +1399,23 @@ fn normal_flow_plan(
         // duplicating the shared continuation into earlier branches and
         // running steps before their inputs exist).
         if default_edges.len() > 1 {
+            // Concurrent fan-out (docs/wasip3-parallel-branches-plan.md): when the
+            // branches form a clean single-Agent diamond, emit them as a
+            // ParallelBranches window so the branch agents run concurrently.
+            // Anything else falls through to the sequential topological
+            // linearization below (widened in later phases).
+            if let Some(plan) = try_parallel_branches(
+                graph,
+                child_workflows,
+                from_step,
+                &default_edges,
+                stack,
+                include_on_error,
+                stop_at,
+                orders,
+            )? {
+                return Ok(plan);
+            }
             // E073 guard: an unconditional fan-out must re-converge inside its
             // region (or exit to the enclosing merge). A region with two
             // terminals is an ambiguous multi-exit graph; validation rejects
@@ -1604,6 +1634,134 @@ fn direct_find_merge_point(
         .iter()
         .find(|step_id| reachable_sets[1..].iter().all(|set| set.contains(step_id)))
         .cloned()
+}
+
+/// Try to lower an unconditional fan-out at `from_step` as concurrent
+/// `ParallelBranches` (docs/wasip3-parallel-branches-plan.md). Phase 4a: only a
+/// clean single-Agent diamond qualifies — every branch is exactly one Agent step
+/// that re-converges at a shared merge, non-durable, no retries, no breakpoint.
+/// Any other shape returns `None` so the caller linearizes it (transitional; the
+/// eligible set widens in 4b/4c). The plan is structural — whether the branches
+/// actually run concurrently (vs. a sequential fallback) is decided at emission
+/// time by `static_data.parallel_enabled` and the workflow-agent exclusion.
+#[allow(clippy::too_many_arguments)]
+fn try_parallel_branches(
+    graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
+    from_step: &str,
+    default_edges: &[&DirectEdgeManifest],
+    stack: &mut Vec<String>,
+    include_on_error: bool,
+    stop_at: Option<&str>,
+    orders: &mut DirectRegionOrderCache,
+) -> Result<Option<DirectRunPlan>, DirectCompileError> {
+    // Deterministic branch order (declaration order): (ordinal, to_step).
+    let mut ordered: Vec<&DirectEdgeManifest> = default_edges.to_vec();
+    ordered.sort_by(|left, right| {
+        (left.ordinal, left.to_step.as_str()).cmp(&(right.ordinal, right.to_step.as_str()))
+    });
+
+    // Clean diamond: all branches re-converge at a single merge inside the region.
+    let branch_starts: Vec<Option<String>> = ordered
+        .iter()
+        .map(|edge| Some(edge.to_step.clone()))
+        .collect();
+    let Some(merge) =
+        direct_find_merge_point(graph, &branch_starts).filter(|m| Some(m.as_str()) != stop_at)
+    else {
+        return Ok(None);
+    };
+
+    // Try to plan the branches + merge as an isolated diamond. Any planning
+    // FAILURE — a branch that itself fans out and cross-links (a shape the
+    // per-branch recursion cannot represent), or a nested non-re-converging
+    // region — means "not a clean diamond": restore the stack and decline, so the
+    // caller's sequential linearization (which is authoritative and handles
+    // cross-links) runs instead. A non-single-Agent branch declines the same way.
+    let stack_depth = stack.len();
+    stack.push(from_step.to_string());
+    let built = plan_branch_diamond(
+        graph,
+        child_workflows,
+        &ordered,
+        &merge,
+        stack,
+        include_on_error,
+        stop_at,
+        orders,
+    );
+    stack.truncate(stack_depth);
+    Ok(built.unwrap_or(None))
+}
+
+/// Plan each branch (single Agent → merge) plus the shared continuation, or
+/// `Ok(None)` when a branch isn't a single Agent. Returns `Err` when a branch
+/// cannot be planned at all (cross-linked / non-re-converging), which
+/// `try_parallel_branches` maps to a decline.
+#[allow(clippy::too_many_arguments)]
+fn plan_branch_diamond(
+    graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
+    ordered: &[&DirectEdgeManifest],
+    merge: &str,
+    stack: &mut Vec<String>,
+    include_on_error: bool,
+    stop_at: Option<&str>,
+    orders: &mut DirectRegionOrderCache,
+) -> Result<Option<DirectRunPlan>, DirectCompileError> {
+    let branch_stop = Some(merge);
+    let mut branches = Vec::with_capacity(ordered.len());
+    for edge in ordered {
+        let plan = step_run_plan_inner(
+            graph,
+            child_workflows,
+            &edge.to_step,
+            stack,
+            include_on_error,
+            branch_stop,
+            &edge.to_step,
+            orders,
+        )?;
+        if !is_single_agent_branch(&plan) {
+            return Ok(None);
+        }
+        branches.push(plan);
+    }
+    let merge_plan = step_run_plan_inner(
+        graph,
+        child_workflows,
+        merge,
+        stack,
+        include_on_error,
+        stop_at,
+        merge,
+        orders,
+    )?;
+    Ok(Some(DirectRunPlan::ParallelBranches {
+        branches,
+        merge_plan: Box::new(merge_plan),
+    }))
+}
+
+/// Phase-4a.1 branch eligibility: exactly one Agent step that ends the branch
+/// (`next_plan == Join`), non-durable and without a breakpoint. Retries ARE
+/// allowed — the launch fires attempt 1 concurrently and assemble owns the
+/// standard (sequential) retry loop via the memoized result, exactly like the
+/// Split window's non-concurrent-backoff path. Durable branches are excluded here
+/// (a later slice): the durable step key hashes the raw `source`, which assemble
+/// rebuilds to accumulate earlier siblings, so a launch-time gate key would drift
+/// from the assemble key and re-fire the agent on replay. A workflow-agent target
+/// is excluded at emission time, not here.
+fn is_single_agent_branch(plan: &DirectRunPlan) -> bool {
+    matches!(
+        plan,
+        DirectRunPlan::Agent {
+            durable_checkpoint: false,
+            breakpoint: false,
+            next_plan,
+            ..
+        } if matches!(**next_plan, DirectRunPlan::Join)
+    )
 }
 
 fn on_error_plan(
@@ -2390,6 +2548,18 @@ mod tests {
                     collect_plan_steps(merge, out);
                 }
             }
+            DirectRunPlan::ParallelBranches {
+                branches,
+                merge_plan,
+            } => {
+                out.push("ParallelBranches".to_string());
+                for branch in branches {
+                    out.push("  branch:".to_string());
+                    collect_plan_steps(branch, out);
+                }
+                out.push("  merge-of:ParallelBranches".to_string());
+                collect_plan_steps(merge_plan, out);
+            }
             DirectRunPlan::Join => out.push("Join".to_string()),
             DirectRunPlan::ImplicitFinish => out.push("ImplicitFinish".to_string()),
         }
@@ -2534,6 +2704,63 @@ mod tests {
             deduped.len(),
             step_ids.len(),
             "every step should be emitted exactly once: {emitted:?}"
+        );
+    }
+
+    /// A clean single-Agent diamond `a → {b, c} → m → finish` lowers to
+    /// concurrent `ParallelBranches` (docs/wasip3-parallel-branches-plan.md 4a):
+    /// the two branch agents form the window and the merge `m` runs once after.
+    #[test]
+    fn single_agent_diamond_lowers_to_parallel_branches() {
+        let mut steps = serde_json::Map::new();
+        for id in ["a", "b", "c", "m"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish",
+                "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            // 4a.1 parallelizes non-durable branches; durable is 4a.2.
+            "durable": false,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b"},
+                {"fromStep": "a", "toStep": "c"},
+                {"fromStep": "b", "toStep": "m"},
+                {"fromStep": "c", "toStep": "m"},
+                {"fromStep": "m", "toStep": "finish"}
+            ]
+        }))
+        .expect("graph parses");
+
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+
+        assert_eq!(
+            emitted,
+            vec![
+                "a",
+                "ParallelBranches",
+                "  branch:",
+                "b",
+                "Join",
+                "  branch:",
+                "c",
+                "Join",
+                "  merge-of:ParallelBranches",
+                "m",
+                "Finish:finish",
+            ],
+            "clean single-agent diamond should lower to ParallelBranches: {emitted:?}"
         );
     }
 

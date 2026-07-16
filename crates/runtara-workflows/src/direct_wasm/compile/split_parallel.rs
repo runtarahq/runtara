@@ -368,6 +368,42 @@ fn collect_parallel_agent_components(
                 collect_parallel_agent_components(static_data, merge_plan, out);
             }
         }
+        P::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            // The window runs concurrently only when EVERY branch is eligible
+            // (async ABI + no workflow-agent branch) — matching the emitter's
+            // gate. Then each branch's Agent needs an `[async-lower]invoke` import;
+            // a component shared by N branches gets an N-way instance pool (clamped
+            // to PARALLEL_POOL_MAX), since a sync-lifted instance serializes
+            // concurrent entries on its lock. A single workflow-agent branch tips
+            // the whole node to the sequential fallback — no async imports.
+            let concurrent = static_data.parallel_enabled
+                && branches.iter().all(|branch| {
+                    matches!(branch, P::Agent { agent_id, .. } if !static_data.agent_is_workflow_agent(*agent_id))
+                });
+            if concurrent {
+                let mut per_component: BTreeMap<String, u32> = BTreeMap::new();
+                for branch in branches {
+                    if let P::Agent {
+                        agent_component_id, ..
+                    } = branch
+                    {
+                        *per_component.entry(agent_component_id.clone()).or_insert(0) += 1;
+                    }
+                }
+                for (component_id, count) in per_component {
+                    let pool = pool_size_for_window(count);
+                    let entry = out.entry(component_id).or_insert(1);
+                    *entry = (*entry).max(pool);
+                }
+            }
+            for branch in branches {
+                collect_parallel_agent_components(static_data, branch, out);
+            }
+            collect_parallel_agent_components(static_data, merge_plan, out);
+        }
         P::Error { .. } | P::Finish { .. } | P::Join | P::ImplicitFinish => {}
     }
 }
@@ -422,7 +458,7 @@ fn emit_slot_ptr(
 /// Given an async-lowered call status in `status_local`: if the callee did not
 /// return eagerly, join its subtask into the window's waitable-set and bump the
 /// pending count. `SUBTASK_RETURNED` (packed low nibble == 2) means eager.
-fn emit_join_if_pending(body: &mut WasmFunction, status_local: u32, waitable_join: u32) {
+pub(super) fn emit_join_if_pending(body: &mut WasmFunction, status_local: u32, waitable_join: u32) {
     body.instruction(&Instruction::LocalGet(status_local));
     body.instruction(&Instruction::I32Const(0xF));
     body.instruction(&Instruction::I32And);
@@ -445,7 +481,7 @@ fn emit_join_if_pending(body: &mut WasmFunction, status_local: u32, waitable_joi
 /// completed subtask (agent invoke OR backoff timer — both are subtasks whose
 /// completion decrements pending). Emits the §4.3 lifecycle polls at each
 /// wakeup (flag-only; the suspend fires at the chunk boundary).
-fn emit_drain_pending(
+pub(super) fn emit_drain_pending(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     ws_wait: u32,
