@@ -5,10 +5,13 @@ Status: IMPLEMENTED — N1 (stdlib whitelist + shared `child_cache_prefix` +
 key-builder audit), N2 (`is_workflow_agent` manifest flag + `agent-scope-input`
 envelope wrap), N3 (`checkpoint-scope:1` capability-tag marker + stale-artifact
 compose gate + live e2e in `e2e/test_workflow_agent_parity.sh` steps 5–6).
-§4 signal-id scoping remains deferred to a separate PR. Note: the artifact
-marker landed as a capability TAG (`checkpoint-scope:1`) rather than a
-top-level `checkpointScope` meta field — same semantics, zero `AgentInfo`
-schema change._
+§4 signal-id scoping is ALSO IMPLEMENTED (N4): both signal-id builders fold
+`_cache_key_prefix` into the step segment (`{instance}/{workflow}/{prefix}::
+{step}{indices}`), covering embeds and composed children uniformly; the wait
+timeout deadline (checkpointed under the signal id) scopes with it. Top-level
+ids stay byte-identical. Note: the artifact marker landed as a capability TAG
+(`checkpoint-scope:1`) rather than a top-level `checkpointScope` meta field —
+same semantics, zero `AgentInfo` schema change._
 
 ## 1. The problem, precisely
 
@@ -124,7 +127,7 @@ composed-inside-embed chain through the same variable.
 | `DURABLE_SLEEP_CHECKPOINT_ID` alias (plain durable-sleep) | NO (host-side constant) | extend: prefix in the stdlib caller, or accept (single well-known key — colliding sleeps of the same duration are benign? NO: deadlines differ — extend) |
 | Wait-for-signal deadline checkpoint | **verify** | extend if not |
 | `ai-turn-cache-key` / memory keys | **verify** | extend if not |
-| `wait_signal_id` (custom signal ids) | **decision — see §4** | |
+| `wait_signal_id` (custom signal ids) | resolved: scoped (option (a), N4) | done |
 
 Any builder found NOT honoring the prefix is a latent bug for **EmbedWorkflow
 children too** — fixing it serves both paths.

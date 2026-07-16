@@ -528,4 +528,100 @@ RESP=$(api_post "/workflows/${GATE_PARENT_ID}/versions/${GATE_VERSION}/compile" 
     || { print_error "republish must heal the gate: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
 echo "  republish heals the gate ✓"
 
-print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate, all green"
+#-------------------------------------------------------------------------
+print_step "7. Signal-id scoping: discover the per-site id and signal a waiting child..."
+# A composed child that WAITS: the signal id must carry the invocation-site
+# scope, be discoverable via pending-input, and be addressable via the
+# public signals API — the full external round-trip on a scoped id.
+RESP=$(api_post /workflows/create '{"name":"Live Approve","description":"parity e2e","slug":"live-approve"}')
+SIG_CHILD_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${SIG_CHILD_ID}" ] || { print_error "sig child create failed: ${RESP}"; exit 1; }
+SIG_CHILD_GRAPH='{
+  "name": "Live Approve",
+  "steps": {
+    "approve": {
+      "stepType": "WaitForSignal",
+      "id": "approve",
+      "pollIntervalMs": 500,
+      "timeoutMs": { "valueType": "immediate", "value": 120000 }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" } }
+    }
+  },
+  "entryPoint": "approve",
+  "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+RESP=$(api_post "/workflows/${SIG_CHILD_ID}/update" "{\"executionGraph\": ${SIG_CHILD_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "sig child update failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${SIG_CHILD_ID}/publish-agent" "" 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "sig child publish failed: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+
+SIG_PARENT_GRAPH='{
+  "name": "Sig Parent Live",
+  "steps": {
+    "call": {
+      "stepType": "Agent",
+      "id": "call",
+      "agentId": "live-approve",
+      "capabilityId": "run",
+      "inputMapping": {}
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.call.outputs.decision" } }
+    }
+  },
+  "entryPoint": "call",
+  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+SIG_PARENT_ID=$(create_and_compile "Sig Parent Live" "${SIG_PARENT_GRAPH}")
+RESP=$(api_post "/workflows/${SIG_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
+SIG_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${SIG_INSTANCE}" ] || { print_error "sig parent execute failed: ${RESP}"; exit 1; }
+
+# Discover the scoped signal id from the pending-input listing.
+SIGNAL_ID=""
+for _ in {1..45}; do
+    RESP=$(curl -sS "${API}/workflows/${SIG_PARENT_ID}/instances/${SIG_INSTANCE}/pending-input")
+    SIGNAL_ID=$(echo "${RESP}" | jq -r '.data.pendingInputs[0].signalId // empty')
+    [ -n "${SIGNAL_ID}" ] && break
+    sleep 2
+done
+[ -n "${SIGNAL_ID}" ] || { print_error "no pending input surfaced: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+case "${SIGNAL_ID}" in
+    *"::call::approve"*) ;;
+    *) print_error "signal id must carry the invocation-site scope, got '${SIGNAL_ID}'"; exit 1 ;;
+esac
+echo "  scoped signal id discovered: ${SIGNAL_ID} ✓"
+
+# Address it through the public signals API — opaque round-trip.
+RESP=$(api_post "/signals/${SIG_INSTANCE}" "{\"signalId\": \"${SIGNAL_ID}\", \"payload\": {\"decision\": \"approved-live\"}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "signal submit failed: ${RESP}"; exit 1; }
+SIG_STATUS=""
+for _ in {1..45}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${SIG_INSTANCE}")
+    SIG_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${SIG_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+[ "${SIG_STATUS}" = "completed" ] \
+    || { print_error "signaled parent ended '${SIG_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
+OUT=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
+[ "${OUT}" = "approved-live" ] \
+    || { print_error "signal payload did not flow through, got: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
+echo "  scoped signal delivered, payload flowed to output ✓"
+
+print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals, all green"

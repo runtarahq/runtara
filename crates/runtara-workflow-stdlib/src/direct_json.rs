@@ -1165,6 +1165,19 @@ impl DirectJsonManifest {
     }
 
     /// Build the deterministic signal id used by generated WaitForSignal code.
+    ///
+    /// Unlike checkpoint ids, signal ids are EXTERNAL addressing — a sender
+    /// posts to `(instance, signal_id)` — but they must be equally
+    /// collision-free: the wait's timeout deadline is checkpointed under this
+    /// very string, and two waiters sharing one id both wake on one signal.
+    /// A child scope's `_cache_key_prefix` (embedded or composed
+    /// workflow-agent) therefore scopes the step segment as
+    /// `{prefix}::{step_id}`, exactly like the durable key builders — two
+    /// children waiting on the same step id get distinct, per-invocation-site
+    /// ids. Top-level ids are byte-identical to the legacy shape. Senders
+    /// discover the scoped id verbatim from the `external_input_requested`
+    /// event / pending-input listing, and every host-side consumer matches it
+    /// as an opaque string.
     pub fn wait_signal_id(
         &self,
         step_id: &str,
@@ -1181,8 +1194,12 @@ impl DirectJsonManifest {
             .and_then(Value::as_str)
             .unwrap_or("root");
         let indices_suffix = wait_loop_indices_suffix(&source);
+        let scoped_step = match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{step_id}"),
+            None => step_id.to_string(),
+        };
         Ok(format!(
-            "{instance_id}/{workflow_id}/{step_id}{indices_suffix}"
+            "{instance_id}/{workflow_id}/{scoped_step}{indices_suffix}"
         ))
     }
 
@@ -1209,8 +1226,13 @@ impl DirectJsonManifest {
             .and_then(Value::as_str)
             .unwrap_or("root");
         let indices_suffix = wait_loop_indices_suffix(&source);
+        // Child scopes fold `_cache_key_prefix` exactly like [`Self::wait_signal_id`].
+        let scoped_step = match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{step_id}"),
+            None => step_id.to_string(),
+        };
         Ok(format!(
-            "{instance_id}/{workflow_id}/{step_id}.tool.{label}.{call_counter}{indices_suffix}"
+            "{instance_id}/{workflow_id}/{scoped_step}.tool.{label}.{call_counter}{indices_suffix}"
         ))
     }
 
@@ -9892,6 +9914,82 @@ mod tests {
             .expect("signal id");
 
         assert_eq!(signal_id, "inst-1/child/wait/[0,2]");
+    }
+
+    #[test]
+    fn wait_signal_ids_fold_the_cache_key_prefix_per_invocation_site() {
+        // Two children (embedded or composed) waiting on the same step id must
+        // get DISTINCT signal ids: the invocation-site `_cache_key_prefix`
+        // scopes the step segment, exactly like the durable key builders. The
+        // wait's timeout deadline is checkpointed under this very string, so
+        // this also keeps deadline state per-site.
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Approve"
+        })))
+        .expect("manifest");
+
+        // Composed workflow-agent child: baked child _workflow_id + the
+        // parent-injected site prefix (whitelisted through build_source).
+        let scoped = build_source(
+            br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call"}}"#,
+            br#"{"_workflow_id":"child-wf"}"#,
+            b"{}",
+        )
+        .expect("scoped source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &scoped)
+                .expect("scoped signal id"),
+            "inst-1/child-wf/parent-wf::call::wait"
+        );
+
+        // A second invocation site of the SAME child → a different id.
+        let scoped_other = build_source(
+            br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call2"}}"#,
+            br#"{"_workflow_id":"child-wf"}"#,
+            b"{}",
+        )
+        .expect("second scoped source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &scoped_other)
+                .expect("second scoped signal id"),
+            "inst-1/child-wf/parent-wf::call2::wait"
+        );
+
+        // Embed-shaped scope (parent workflow id + chained prefix from
+        // `child_cache_prefix`, loop indices reset then re-accumulated).
+        let embed_scoped = build_source(
+            br#"{}"#,
+            br#"{"_workflow_id":"parent-wf","_cache_key_prefix":"parent-wf::embed1","_loop_indices":[3]}"#,
+            b"{}",
+        )
+        .expect("embed source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &embed_scoped)
+                .expect("embed signal id"),
+            "inst-1/parent-wf/parent-wf::embed1::wait/[3]"
+        );
+
+        // AiAgent wait-tool ids fold the same prefix...
+        assert_eq!(
+            manifest
+                .ai_wait_tool_signal_id("ai", "inst-1", "get_approval", 2, &scoped)
+                .expect("scoped tool signal id"),
+            "inst-1/child-wf/parent-wf::call::ai.tool.get_approval.2"
+        );
+        // ...and stay byte-identical to the legacy shape at top level.
+        let plain =
+            build_source(br#"{}"#, br#"{"_workflow_id":"child-wf"}"#, b"{}").expect("plain source");
+        assert_eq!(
+            manifest
+                .ai_wait_tool_signal_id("ai", "inst-1", "get_approval", 2, &plain)
+                .expect("plain tool signal id"),
+            "inst-1/child-wf/ai.tool.get_approval.2"
+        );
     }
 
     #[test]

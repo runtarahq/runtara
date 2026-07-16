@@ -1999,6 +1999,11 @@ struct PersistingRuntimeHost {
     sleep_ids: Mutex<Vec<String>>,
     /// Ids written via `checkpoint` (agent/split/embed outputs), in order.
     checkpoint_writes: Mutex<Vec<String>>,
+    /// Pending custom signals by exact id — mirrors the production
+    /// `pending_custom_signals` table (upsert + NON-destructive read).
+    signals: Mutex<HashMap<String, Vec<u8>>>,
+    /// Every id handed to `poll-custom-signal`, in order (with repeats).
+    polled_signal_ids: Mutex<Vec<String>>,
     completed: Mutex<Option<Vec<u8>>>,
     failed: Mutex<Option<Vec<u8>>>,
     complete_calls: std::sync::atomic::AtomicU32,
@@ -2011,10 +2016,21 @@ impl PersistingRuntimeHost {
             checkpoints: Mutex::new(HashMap::new()),
             sleep_ids: Mutex::new(Vec::new()),
             checkpoint_writes: Mutex::new(Vec::new()),
+            signals: Mutex::new(HashMap::new()),
+            polled_signal_ids: Mutex::new(Vec::new()),
             completed: Mutex::new(None),
             failed: Mutex::new(None),
             complete_calls: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Pre-deliver a custom signal to an exact id, as a sender posting to
+    /// `POST /signals/{instance}` would.
+    fn deliver_signal(&self, signal_id: &str, payload: &[u8]) {
+        self.signals
+            .lock()
+            .unwrap()
+            .insert(signal_id.to_string(), payload.to_vec());
     }
 }
 
@@ -2054,8 +2070,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     async fn check_signals(&self) -> Result<bool, String> {
         Ok(false)
     }
-    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        self.polled_signal_ids
+            .lock()
+            .unwrap()
+            .push(checkpoint_id.clone());
+        // Exact-id, non-destructive read — the production semantics.
+        Ok(self.signals.lock().unwrap().get(&checkpoint_id).cloned())
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         Ok(self
@@ -8279,5 +8300,557 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
         std::slice::from_ref(&staging),
     )
     .expect("a stale PURE child has no checkpoints to protect — composes freely");
+    std::mem::forget(temp);
+}
+
+/// Plan §4 (checkpoint-namespace plan): per-invocation-site CUSTOM SIGNAL ids.
+/// One durable workflow-agent child with a WaitForSignal step is invoked at
+/// TWO sites in the parent. Before scoping, both sites derived the SAME
+/// signal id (`{instance}/{child-wf}/{step}`) — one posted signal woke both
+/// waiters with one payload, and the timeout-deadline checkpoint (keyed by
+/// the signal id) was shared. With `_cache_key_prefix` folded in, each site
+/// polls its own id and receives its own payload.
+#[test]
+fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
+    let components_dir = direct_e2e_components_dir();
+
+    const WAIT_CHILD: &str = r#"{
+      "name": "Sig Approve Echo",
+      "steps": {
+        "approve": {
+          "stepType": "WaitForSignal",
+          "id": "approve",
+          "timeoutMs": { "valueType": "immediate", "value": 60000 },
+          "pollIntervalMs": 25
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "approve",
+      "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(WAIT_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "sig-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("sig-approve-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("waiting child publishes as an agent");
+    assert!(!child.omit_runtime, "a waiting child needs the runtime");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_sig_approve_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "sig-approve-echo",
+        "Sig Approve Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_sig_approve_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    const PARENT: &str = r#"{
+      "name": "Sig Parent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "sig-approve-echo",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "call2": {
+          "stepType": "Agent",
+          "id": "call2",
+          "agentId": "sig-approve-echo",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "first": { "valueType": "reference", "value": "steps.call.outputs.decision" },
+            "second": { "valueType": "reference", "value": "steps.call2.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [
+        { "fromStep": "call", "toStep": "call2" },
+        { "fromStep": "call2", "toStep": "finish" }
+      ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "sig-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the waiting child");
+
+    // Deliver a DIFFERENT payload to each site's scoped id — exactly what a
+    // sender does after discovering the ids from the two
+    // `external_input_requested` events.
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let site1 = "checkpoint-ns-e2e/sig-child-wf/sig-parent-wf::call::approve";
+    let site2 = "checkpoint-ns-e2e/sig-child-wf/sig-parent-wf::call2::approve";
+    host.deliver_signal(site1, br#"{"decision":"approve-first"}"#);
+    host.deliver_signal(site2, br#"{"decision":"approve-second"}"#);
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("both waits must receive their own signal, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "first": "approve-first", "second": "approve-second" }),
+        "each invocation site must receive ITS payload, not the other's"
+    );
+    let polled: std::collections::BTreeSet<String> = host
+        .polled_signal_ids
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    assert!(
+        polled.contains(site1) && polled.contains(site2),
+        "each site must poll its own scoped id; polled: {polled:?}"
+    );
+    // The wait's timeout deadline is checkpointed UNDER the signal id — the
+    // per-site ids keep the two deadlines from sharing one row.
+    let writes = host.checkpoint_writes.lock().unwrap().clone();
+    assert!(
+        writes.iter().any(|id| id == site1) && writes.iter().any(|id| id == site2),
+        "deadline checkpoints must be keyed by the scoped ids; writes: {writes:?}"
+    );
+    std::mem::forget(temp);
+}
+
+/// The EMBED twin of the composed test: one child workflow with a
+/// WaitForSignal step embedded at TWO sites of the same parent. Embedded
+/// children inherit the PARENT's `_workflow_id`, so before scoping both
+/// embeds derived literally identical signal ids.
+#[test]
+fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
+    let components_dir = direct_e2e_components_dir();
+
+    const WAIT_CHILD: &str = r#"{
+      "name": "Sig Embed Child",
+      "steps": {
+        "approve": {
+          "stepType": "WaitForSignal",
+          "id": "approve",
+          "pollIntervalMs": 25,
+          "timeoutMs": { "valueType": "immediate", "value": 60000 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "approve",
+      "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(WAIT_CHILD).expect("child parses");
+
+    const PARENT: &str = r#"{
+      "name": "Sig Embed Parent",
+      "steps": {
+        "embed1": {
+          "stepType": "EmbedWorkflow",
+          "id": "embed1",
+          "childWorkflowId": "sig-embed-child",
+          "childVersion": "latest",
+          "inputMapping": {}
+        },
+        "embed2": {
+          "stepType": "EmbedWorkflow",
+          "id": "embed2",
+          "childWorkflowId": "sig-embed-child",
+          "childVersion": "latest",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "first": { "valueType": "reference", "value": "steps.embed1.outputs.decision" },
+            "second": { "valueType": "reference", "value": "steps.embed2.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "embed1",
+      "executionPlan": [
+        { "fromStep": "embed1", "toStep": "embed2" },
+        { "fromStep": "embed2", "toStep": "finish" }
+      ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child_input = |step_id: &str| runtara_workflows::compile::ChildWorkflowInput {
+        step_id: step_id.to_string(),
+        workflow_id: "sig-embed-child".to_string(),
+        version_requested: "latest".to_string(),
+        version_resolved: 1,
+        execution_graph: child_graph.clone(),
+    };
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "sig-embed-parent".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![child_input("embed1"), child_input("embed2")],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("embed parent compiles");
+    runtara_workflows::direct_wasm::compose_direct_workflow(&mut parent, &components_dir)
+        .expect("embed parent composes");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    // Embedded children keep the PARENT's workflow id in the second segment;
+    // the site scope disambiguates the third.
+    let site1 = "checkpoint-ns-e2e/sig-embed-parent/sig-embed-parent::embed1::approve";
+    let site2 = "checkpoint-ns-e2e/sig-embed-parent/sig-embed-parent::embed2::approve";
+    host.deliver_signal(site1, br#"{"decision":"embed-first"}"#);
+    host.deliver_signal(site2, br#"{"decision":"embed-second"}"#);
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("both embedded waits must receive their own signal, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "first": "embed-first", "second": "embed-second" }),
+        "each embed site must receive ITS payload, not the other's"
+    );
+    let polled: std::collections::BTreeSet<String> = host
+        .polled_signal_ids
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    assert!(
+        polled.contains(site1) && polled.contains(site2),
+        "each embed site must poll its own scoped id; polled: {polled:?}"
+    );
+    // Deadline checkpoints keyed by the embed-scoped ids too.
+    let writes = host.checkpoint_writes.lock().unwrap().clone();
+    assert!(
+        writes.iter().any(|id| id == site1) && writes.iter().any(|id| id == site2),
+        "deadline checkpoints must be keyed by the embed-scoped ids; writes: {writes:?}"
+    );
+    std::mem::forget(temp);
+}
+
+/// Replay stability of scoped signal ids (plan §3 "replay-stable by
+/// construction"), modeled on the production resume shape: a drain kills the
+/// store mid-wait and resume relaunches CHECKPOINT-LESS (replay-from-start)
+/// against the surviving checkpoint rows. The pre-drain incarnation wrote the
+/// wait's timeout deadline under the scoped signal id and a sender posted the
+/// signal while the instance was down. The replay must re-derive the exact
+/// same scoped id — HITting the stored deadline (never re-writing it) and
+/// finding the pending signal.
+#[test]
+fn scoped_signal_wait_survives_drain_and_resume() {
+    let components_dir = direct_e2e_components_dir();
+
+    const WAIT_CHILD: &str = r#"{
+      "name": "Sig Drain Echo",
+      "steps": {
+        "approve": {
+          "stepType": "WaitForSignal",
+          "id": "approve",
+          "timeoutMs": { "valueType": "immediate", "value": 60000 },
+          "pollIntervalMs": 25
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "approve",
+      "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(WAIT_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "sigdrain-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("sig-drain-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("waiting child publishes as an agent");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_sig_drain_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "sig-drain-echo",
+        "Sig Drain Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_sig_drain_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    const PARENT: &str = r#"{
+      "name": "Sig Drain Parent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "sig-drain-echo",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "decision": { "valueType": "reference", "value": "steps.call.outputs.decision" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "sigdrain-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the waiting child");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let site = "checkpoint-ns-e2e/sigdrain-child-wf/sigdrain-parent-wf::call::approve";
+    // Surviving state from the pre-drain incarnation: the wait's absolute
+    // deadline (raw little-endian i64 ms, far in the future) stored under the
+    // SCOPED signal id, plus the signal a sender posted while the instance
+    // was down.
+    let deadline_ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64)
+        + 600_000;
+    host.checkpoints
+        .lock()
+        .unwrap()
+        .insert(site.to_string(), deadline_ms.to_le_bytes().to_vec());
+    host.deliver_signal(site, br#"{"decision":"approved-after-drain"}"#);
+
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed wait must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "decision": "approved-after-drain" }),
+        "the signal posted while down must reach the replayed wait"
+    );
+    // The replay re-derived the same scoped id: the deadline lookup HIT the
+    // pre-drain row, so the save branch never ran — zero checkpoint writes
+    // under the scoped id in this incarnation.
+    let deadline_writes = host
+        .checkpoint_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| id.as_str() == site)
+        .count();
+    assert_eq!(
+        deadline_writes, 0,
+        "the replay must HIT the stored deadline under the same scoped id, not re-write it"
+    );
     std::mem::forget(temp);
 }
