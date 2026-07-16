@@ -50,9 +50,14 @@ async fn seed_workflow(
     created_by: Option<&str>,
 ) -> String {
     let workflow_id = Uuid::new_v4().to_string();
-    repo.create(tenant, &workflow_id, created_by)
-        .await
-        .expect("seed workflow row");
+    repo.create(
+        tenant,
+        &workflow_id,
+        created_by,
+        &format!("wf-{workflow_id}"),
+    )
+    .await
+    .expect("seed workflow row");
     workflow_id
 }
 
