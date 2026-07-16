@@ -8,7 +8,7 @@
 //! functions here.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,10 +36,12 @@ use crate::template::render_template;
 //
 // To restore that, a large value is interned once: its raw JSON bytes are kept
 // host-side in a per-run arena and, where it sits in the scope, replaced with a
-// small handle `{"$wfref": <id>}`. Carrying the scope between steps then moves
-// only the handle; the bytes are parsed only when a path actually reads into the
-// value (`lookup_source_path` resolves handles as it traverses), and a value is
-// fully reconstituted only when it leaves the stdlib for an external consumer.
+// small handle `{"$wfref": <id>, "$wfnonce": <per-run nonce>}` (the nonce keeps
+// user data that merely looks like a handle from ever being dereferenced).
+// Carrying the scope between steps then moves only the handle; the bytes are
+// parsed only when a path actually reads into the value (`lookup_source_path`
+// resolves handles as it traverses), and a value is fully reconstituted only
+// when it leaves the stdlib for an external consumer.
 // Storing raw bytes (not a parsed Value) keeps the arena at ~1x the data.
 //
 // Safety property the rest of the code relies on: only values whose estimated
@@ -47,8 +49,18 @@ use crate::template::render_template;
 // byte-identical to before — the change is invisible to small-payload workflows.
 // ===========================================================================
 
-/// Sentinel object key marking an interned-value handle: `{"$wfref": <id>}`.
+/// Sentinel object key marking an interned-value handle:
+/// `{"$wfref": <id>, "$wfnonce": <nonce>}`.
 const WFREF_KEY: &str = "$wfref";
+
+/// Companion key carrying the per-run nonce that namespaces the sentinel. The
+/// arena only ever interns values it stored itself, but the handle shape lives
+/// in the same JSON namespace as user data — an input or agent output that
+/// happens to look like a handle must NOT be dereferenced (it would resolve to
+/// an unrelated arena entry, or to null). Requiring a run-local random nonce
+/// makes an accidental or forged match practically impossible, while keeping
+/// handle recognition a pure structural check (no arena lookup on read paths).
+const WFREF_NONCE_KEY: &str = "$wfnonce";
 
 /// Values whose estimated serialized size is at least this many bytes are
 /// interned and carried by handle instead of inline.
@@ -60,6 +72,26 @@ thread_local! {
     /// `init-manifest`; the stdlib component is instantiated per workflow run, so
     /// this never outlives a single execution.
     static VALUE_STORE: RefCell<ValueStore> = RefCell::new(ValueStore::default());
+
+    /// Per-run nonce embedded in every handle this run creates (see
+    /// [`WFREF_NONCE_KEY`]). Regenerated whenever the arena is reset, so a
+    /// handle from a previous run is treated as plain data, never resolved.
+    /// A `Cell` (not part of [`ValueStore`]) so the hot-path shape check in
+    /// [`wfref_id`] stays free of `RefCell` borrows.
+    static WFREF_NONCE: Cell<u64> = Cell::new(fresh_nonce());
+}
+
+/// A run-local unpredictable value namespacing the handle sentinel. Seeded from
+/// the platform's `RandomState` entropy — available in the WASI guest too,
+/// where std already wires `random_get` for its hash maps. Handles never
+/// outlive the run (the arena is reset at `init-manifest` and handles are
+/// materialized away at every external boundary), so per-run uniqueness is all
+/// this needs.
+fn fresh_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
 }
 
 #[derive(Default)]
@@ -80,7 +112,9 @@ struct StoreEntry {
 }
 
 /// Clear the interning arena. Called at run start (`init-manifest`) so a reused
-/// component instance never sees a previous run's handles.
+/// component instance never sees a previous run's handles. Also rotates the
+/// handle nonce, so any handle minted before the reset stops matching the
+/// sentinel shape instead of resolving against the wrong arena generation.
 pub fn reset_value_store() {
     VALUE_STORE.with(|store| {
         let mut store = store.borrow_mut();
@@ -88,6 +122,7 @@ pub fn reset_value_store() {
         store.content_index.clear();
         store.next_id = 0;
     });
+    WFREF_NONCE.with(|nonce| nonce.set(fresh_nonce()));
 }
 
 /// Free every interned value not reachable from `roots`. Called at a loop
@@ -151,15 +186,26 @@ fn content_hash(bytes: &[u8]) -> u64 {
 }
 
 fn make_wfref(id: u64) -> Value {
-    let mut handle = Map::with_capacity(1);
+    let mut handle = Map::with_capacity(2);
     handle.insert(WFREF_KEY.to_string(), Value::from(id));
+    handle.insert(
+        WFREF_NONCE_KEY.to_string(),
+        Value::from(WFREF_NONCE.with(Cell::get)),
+    );
     Value::Object(handle)
 }
 
-/// The interned-value id, if `value` is a `{"$wfref": <id>}` handle.
+/// The interned-value id, if `value` is a handle minted by this run — exactly
+/// `{"$wfref": <id>, "$wfnonce": <nonce>}` with the current run's nonce.
+/// Anything else — including user data shaped like a handle, or a handle from
+/// a previous run/nonce generation — is plain data and flows through verbatim.
 fn wfref_id(value: &Value) -> Option<u64> {
     let object = value.as_object()?;
-    if object.len() != 1 {
+    if object.len() != 2 {
+        return None;
+    }
+    let nonce = object.get(WFREF_NONCE_KEY).and_then(Value::as_u64)?;
+    if nonce != WFREF_NONCE.with(Cell::get) {
         return None;
     }
     object.get(WFREF_KEY).and_then(Value::as_u64)
@@ -6651,6 +6697,67 @@ mod tests {
             intern_if_large(small.clone()),
             small,
             "small values must be byte-identical (no handle)"
+        );
+    }
+
+    /// A user-supplied value shaped like an interning handle must round-trip
+    /// verbatim as plain data — never dereference into the arena. Ids start at
+    /// 0, so without the nonce namespace a `{"$wfref": 0}` field in workflow
+    /// input would silently resolve to whatever large value was interned first.
+    #[test]
+    fn user_data_shaped_like_a_handle_round_trips_verbatim() {
+        reset_value_store();
+        let user_field = json!({ WFREF_KEY: 0 });
+        let big = json!(vec!["z".repeat(100); 500]); // > 16 KiB — interned as id 0
+        let data = serde_json::to_vec(&json!({ "order": user_field.clone() })).unwrap();
+        let variables = serde_json::to_vec(&json!({ "big": big.clone() })).unwrap();
+        let steps = serde_json::to_vec(&json!({})).unwrap();
+        let source_bytes = build_source(&data, &variables, &steps).unwrap();
+        let source: Value = serde_json::from_slice(&source_bytes).unwrap();
+        // The real handle resolves to the interned value...
+        assert_eq!(lookup_source_path(&source, "variables.big"), Some(big));
+        // ...while the user field that merely looks like one stays verbatim.
+        assert_eq!(
+            lookup_source_path(&source, "data.order"),
+            Some(user_field.clone()),
+            "handle-shaped user data must not deref into the arena"
+        );
+        assert_eq!(
+            materialize(json!({ "out": user_field.clone() })),
+            json!({ "out": user_field }),
+            "materialize must leave handle-shaped user data intact"
+        );
+    }
+
+    /// A handle-shaped user value pointing at an id that was never interned
+    /// must also stay verbatim, not collapse to null (silent data loss).
+    #[test]
+    fn user_data_shaped_like_a_dangling_handle_is_not_nulled() {
+        reset_value_store();
+        let user_field = json!({ WFREF_KEY: 99 });
+        let source = json!({ "data": { "payload": user_field.clone() } });
+        assert_eq!(
+            lookup_source_path(&source, "data.payload"),
+            Some(user_field.clone()),
+            "handle-shaped user data must not resolve to null"
+        );
+        assert_eq!(materialize(user_field.clone()), user_field);
+    }
+
+    /// Resetting the store rotates the nonce, so a handle minted before the
+    /// reset is plain data afterwards — a stale handle can never resolve
+    /// against a fresh arena generation.
+    #[test]
+    fn reset_rotates_nonce_and_invalidates_prior_handles() {
+        reset_value_store();
+        let big = json!(vec!["n".repeat(100); 500]); // > 16 KiB
+        let handle = intern_if_large(big);
+        assert!(wfref_id(&handle).is_some());
+        reset_value_store();
+        assert_eq!(
+            wfref_id(&handle),
+            None,
+            "a handle from a previous run must not be recognized after reset"
         );
     }
 
