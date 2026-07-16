@@ -34,8 +34,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_return, emit_retptr_error_or_return, load_retptr_list, load_retptr_tag,
-    push_retptr_arg, push_retptr_u8_load, push_segment_args,
+    emit_entry_suspend_return, emit_get_checkpoint_has_value, emit_retptr_error_or_return,
+    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_u8_load, push_segment_args,
 };
 use std::collections::BTreeMap;
 
@@ -70,6 +70,7 @@ struct BranchAgent<'a> {
     agent_id: u32,
     agent_component_id: &'a str,
     input_mapping_id: u32,
+    durable_checkpoint: bool,
     max_retries: u32,
     retry_delay_ms: u64,
     rate_limit_budget_ms: u64,
@@ -83,6 +84,7 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         agent_id,
         agent_component_id,
         input_mapping_id,
+        durable_checkpoint,
         max_retries,
         retry_delay_ms,
         rate_limit_budget_ms,
@@ -100,6 +102,7 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         agent_id: *agent_id,
         agent_component_id,
         input_mapping_id: *input_mapping_id,
+        durable_checkpoint: *durable_checkpoint,
         max_retries: *max_retries,
         retry_delay_ms: *retry_delay_ms,
         rate_limit_budget_ms: *rate_limit_budget_ms,
@@ -150,7 +153,11 @@ fn emit_branch_agent(
         branch.agent_id,
         branch.agent_component_id,
         branch.input_mapping_id,
-        false, // durable_checkpoint (4a.1: non-durable branches only)
+        // Durable branches replay via the standard durable block; the launch gate
+        // (below) prevents a replay double-fire. The durable key ignores
+        // source.steps, so it matches across launch (fan-out source) and assemble
+        // (sibling-accumulating source).
+        branch.durable_checkpoint,
         false, // breakpoint (excluded by eligibility)
         // Retries run in assemble (memoized attempt 1 + sequential backoff), like
         // the Split window's non-concurrent-backoff path.
@@ -497,6 +504,28 @@ fn emit_branch_launch(
         load_retptr_tag(body);
         body.instruction(&Instruction::BrIf(0));
     };
+
+    // Durable: gate the launch on the step-level checkpoint. A HIT (resumed run)
+    // means the agent already ran on a prior life — skip the launch so it never
+    // double-fires; assemble's durable block replays the stored result. The key is
+    // computed from the fan-out source, but the durable key ignores `source.steps`,
+    // so it matches the assemble key despite sibling accumulation.
+    if branch.durable_checkpoint {
+        body.instruction(&Instruction::I32Const(branch.agent_id as i32));
+        body.instruction(&Instruction::LocalGet(source_ptr_local));
+        body.instruction(&Instruction::LocalGet(source_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
+        skip_on_error(body);
+        load_retptr_list(body, route_ptr_local, route_len_local);
+        body.instruction(&Instruction::LocalGet(route_ptr_local));
+        body.instruction(&Instruction::LocalGet(route_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+        skip_on_error(body);
+        emit_get_checkpoint_has_value(body);
+        body.instruction(&Instruction::BrIf(0)); // HIT -> skip launch
+    }
 
     // agent input = apply-mapping(mapping_id, source). All branches share the
     // fan-out point's source (each sees only its predecessors' context).

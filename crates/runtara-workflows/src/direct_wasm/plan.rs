@@ -1743,20 +1743,18 @@ fn plan_branch_diamond(
     }))
 }
 
-/// Phase-4a.1 branch eligibility: exactly one Agent step that ends the branch
-/// (`next_plan == Join`), non-durable and without a breakpoint. Retries ARE
-/// allowed — the launch fires attempt 1 concurrently and assemble owns the
-/// standard (sequential) retry loop via the memoized result, exactly like the
-/// Split window's non-concurrent-backoff path. Durable branches are excluded here
-/// (a later slice): the durable step key hashes the raw `source`, which assemble
-/// rebuilds to accumulate earlier siblings, so a launch-time gate key would drift
-/// from the assemble key and re-fire the agent on replay. A workflow-agent target
-/// is excluded at emission time, not here.
+/// Phase-4a branch eligibility: exactly one Agent step that ends the branch
+/// (`next_plan == Join`), without a breakpoint. Durable and retries are BOTH
+/// allowed (4a.2): retries run in assemble via the memoized attempt 1; durable
+/// branches gate the launch on the step checkpoint (replay-safe — the durable key
+/// is `{workflow_id}::agent::{agent_id}::{capability_id}::{step_id}` and ignores
+/// `source.steps`, so it's invariant to sibling accumulation and the launch-gate
+/// key matches the assemble key). A workflow-agent target is excluded at emission
+/// time, not here.
 fn is_single_agent_branch(plan: &DirectRunPlan) -> bool {
     matches!(
         plan,
         DirectRunPlan::Agent {
-            durable_checkpoint: false,
             breakpoint: false,
             next_plan,
             ..

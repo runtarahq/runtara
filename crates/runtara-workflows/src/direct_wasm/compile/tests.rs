@@ -3538,9 +3538,10 @@ fn direct_compile_supports_fanout_diamond_graph() {
         result.support_report.unsupported
     );
 
-    // The diamond linearizes topologically into a single chain that runs each
-    // step once: start -> left -> right -> join. The plan is a linear chain of
-    // Agent plans terminating in the join Finish.
+    // The diamond runs its two branches CONCURRENTLY: `start`, then a
+    // `ParallelBranches` window over the single-Agent branches {left, right}, then
+    // the `join` Finish as the shared merge continuation
+    // (docs/wasip3-parallel-branches-plan.md Phase 4a).
     let manifest: DirectWorkflowManifest =
         serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
             .expect("manifest json");
@@ -3551,27 +3552,43 @@ fn direct_compile_supports_fanout_diamond_graph() {
     )
     .expect("core config");
 
-    let mut plan = &core_config.run_plan;
-    let mut chain = Vec::new();
-    loop {
-        match plan {
+    let DirectRunPlan::Agent {
+        step_id, next_plan, ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected entry Agent, got {:?}", core_config.run_plan);
+    };
+    assert_eq!(step_id, "start", "entry agent");
+    let DirectRunPlan::ParallelBranches {
+        branches,
+        merge_plan,
+    } = next_plan.as_ref()
+    else {
+        panic!("expected ParallelBranches after start, got {next_plan:?}");
+    };
+    let branch_ids: Vec<&str> = branches
+        .iter()
+        .map(|branch| match branch {
             DirectRunPlan::Agent {
                 step_id, next_plan, ..
             } => {
-                chain.push(step_id.clone());
-                plan = next_plan;
+                assert!(
+                    matches!(**next_plan, DirectRunPlan::Join),
+                    "each branch ends in Join"
+                );
+                step_id.as_str()
             }
-            DirectRunPlan::Finish { step_id, .. } => {
-                chain.push(step_id.clone());
-                break;
-            }
-            other => panic!("unexpected plan node in fan-out chain: {other:?}"),
-        }
-    }
+            other => panic!("branch must be a single Agent, got {other:?}"),
+        })
+        .collect();
     assert_eq!(
-        chain,
-        vec!["start", "left", "right", "join"],
-        "fan-out diamond should linearize to start -> left -> right -> join"
+        branch_ids,
+        vec!["left", "right"],
+        "both branches run in the concurrent window"
+    );
+    assert!(
+        matches!(merge_plan.as_ref(), DirectRunPlan::Finish { step_id, .. } if step_id == "join"),
+        "merge is the join Finish, got {merge_plan:?}"
     );
 }
 

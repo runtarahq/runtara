@@ -9657,15 +9657,17 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     )
 }
 
-/// A non-durable single-Agent diamond `start → {b, c} → finish` whose two
-/// branches each hit the mock `/slow-item` endpoint (docs/wasip3-parallel-
-/// branches-plan.md Phase 4a). The branches run concurrently in one waitable-set
-/// window; the merge `finish` reads BOTH branch outputs.
-fn parallel_http_branches_graph(url: &str) -> String {
+/// A single-Agent diamond `start → {b, c} → finish` whose two branches each hit
+/// the mock `/slow-item` endpoint (docs/wasip3-parallel-branches-plan.md Phase
+/// 4a). The branches run concurrently in one waitable-set window; the merge
+/// `finish` reads BOTH branch outputs. `durable` toggles per-step checkpoints
+/// (4a.2): durable branches gate the launch on the step checkpoint so a replay
+/// never re-fires them.
+fn parallel_http_branches_graph(url: &str, durable: bool) -> String {
     format!(
         r#"{{
         "name": "Parallel HTTP Branches",
-        "durable": false,
+        "durable": {durable},
         "steps": {{
             "start": {{
                 "stepType": "Agent",
@@ -9811,7 +9813,7 @@ fn direct_wasm_execute_parallel_branches_http_overlap() {
     let components_dir = direct_e2e_components_dir();
     const DELAY: Duration = Duration::from_millis(400);
 
-    let graph = parallel_http_branches_graph("http://slow.invalid");
+    let graph = parallel_http_branches_graph("http://slow.invalid", false);
     let captured = run_direct_workflow_capture(
         &components_dir,
         "parallel-branches-http",
@@ -9852,6 +9854,77 @@ fn direct_wasm_execute_parallel_branches_http_overlap() {
         span < DELAY,
         "parallel branches failed to overlap agent I/O: arrivals span {span:?}"
     );
+}
+
+/// Phase-4a.2: a DURABLE branch diamond is replay-safe. A fresh run fires both
+/// branch agents (2 upstream arrivals) and checkpoints each. A resume that
+/// preloads those checkpoints must NOT re-fire either agent — the launch gate
+/// sees each step checkpoint HIT and skips the invoke; assemble replays the
+/// stored result. Zero new arrivals, identical merge output.
+#[test]
+fn direct_wasm_execute_parallel_branches_durable_resume_no_double_fire() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    let graph = parallel_http_branches_graph("http://slow.invalid", true);
+
+    // Fresh run: both branches fire and checkpoint.
+    let first = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-durable",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        first.status_success,
+        "durable branches fresh run failed: stderr={} error={:?}",
+        first.stderr, first.error_json
+    );
+    assert_eq!(
+        first.slow_item_arrivals.len(),
+        2,
+        "both branch agents fire on the fresh run"
+    );
+    let out1 = first.output_json.clone().expect("fresh output");
+    assert_eq!(out1["b_status"], 200, "fresh branch b: {out1}");
+    assert_eq!(out1["c_status"], 200, "fresh branch c: {out1}");
+
+    // Resume: preload the fresh run's durable writes; each branch's step
+    // checkpoint HITs, so the launch gate skips both invokes.
+    let preload: Vec<(String, Vec<u8>)> = first
+        .checkpoints
+        .iter()
+        .filter(|c| !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+    assert!(
+        !preload.is_empty(),
+        "durable fresh run must have written step checkpoints"
+    );
+    let second = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "parallel-branches-durable",
+        &graph,
+        br#"{}"#,
+        false,
+        preload,
+        Vec::new(),
+    );
+    assert!(
+        second.status_success,
+        "durable branches resume failed: stderr={} error={:?}",
+        second.stderr, second.error_json
+    );
+    assert_eq!(
+        second.slow_item_arrivals.len(),
+        0,
+        "durable replay must NOT re-fire the branch agents (double-fire)"
+    );
+    let out2 = second.output_json.expect("resume output");
+    assert_eq!(out2["b_status"], 200, "resume branch b: {out2}");
+    assert_eq!(out2["c_status"], 200, "resume branch c: {out2}");
 }
 
 /// A pause signalled DURING a parallel window is observed at the drain
