@@ -2303,6 +2303,26 @@ fn validate_references_with_inherited(
                 );
             }
         }
+
+        // A step's `connection_ref` is a bare MappingValue outside the input
+        // mapping — a typo'd reference (`data.con` vs `data.conn`) must fail
+        // at save time like any other reference, not opaquely at runtime as a
+        // "connection resolved to nothing" error.
+        let connection_ref = match step {
+            Step::Agent(agent_step) => agent_step.connection_ref.as_ref(),
+            Step::AiAgent(ai_step) => ai_step.connection_ref.as_ref(),
+            _ => None,
+        };
+        if let Some(value) = connection_ref {
+            validate_mapping_value_references(
+                step_id,
+                value,
+                &step_ids,
+                &step_types,
+                &variable_names,
+                result,
+            );
+        }
     }
 
     // Recursively validate subgraphs
@@ -6605,6 +6625,36 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::InvalidReferencePath { .. }))
+        );
+    }
+
+    /// A `connection_ref` referencing a nonexistent step must fail at save
+    /// time like any input-mapping reference — previously it was excluded
+    /// from reference validation and only failed opaquely at runtime.
+    #[test]
+    fn test_connection_ref_reference_is_validated() {
+        let mut steps = HashMap::new();
+        let mut agent = match create_agent_step("agent", "transform", None) {
+            Step::Agent(agent_step) => agent_step,
+            _ => unreachable!(),
+        };
+        agent.connection_ref = Some(ref_value("steps.no_such_step.outputs.conn"));
+        steps.insert("agent".to_string(), Step::Agent(agent));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.has_errors(),
+            "a connection_ref to a nonexistent step must be a save-time error"
         );
     }
 
