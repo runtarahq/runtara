@@ -2007,6 +2007,10 @@ struct PersistingRuntimeHost {
     completed: Mutex<Option<Vec<u8>>>,
     failed: Mutex<Option<Vec<u8>>>,
     complete_calls: std::sync::atomic::AtomicU32,
+    /// When true, `check-signals` reports a lifecycle signal (a pause): the
+    /// guest early-returns suspended from its wait poll loop — through the
+    /// composed-agent sentinel when the wait lives inside a child.
+    suspend_requested: std::sync::atomic::AtomicBool,
 }
 
 impl PersistingRuntimeHost {
@@ -2021,6 +2025,7 @@ impl PersistingRuntimeHost {
             completed: Mutex::new(None),
             failed: Mutex::new(None),
             complete_calls: std::sync::atomic::AtomicU32::new(0),
+            suspend_requested: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2068,7 +2073,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        Ok(false)
+        Ok(self
+            .suspend_requested
+            .load(std::sync::atomic::Ordering::SeqCst))
     }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.polled_signal_ids
@@ -8851,6 +8858,471 @@ fn scoped_signal_wait_survives_drain_and_resume() {
     assert_eq!(
         deadline_writes, 0,
         "the replay must HIT the stored deadline under the same scoped id, not re-write it"
+    );
+    std::mem::forget(temp);
+}
+
+/// N5 — in-guest suspend PROPAGATES through the composed-agent boundary.
+/// A lifecycle pause fires while a composed workflow-agent child is blocked
+/// in its WaitForSignal poll loop. The capability result type has no
+/// suspended arm, so the child raises the suspend sentinel error; the parent
+/// recognizes it at the invoke boundary and re-raises the suspend through
+/// its own ABI. Before the fix, the parent failed with "failed to parse
+/// Agent output". Resume (pause lifted, signal delivered) replays: the
+/// child's step checkpoint never completed, so the child re-invokes, its
+/// wait re-derives the same scoped id, HITs the stored deadline, and finds
+/// the signal.
+#[test]
+fn pause_during_composed_child_wait_suspends_and_resumes() {
+    let components_dir = direct_e2e_components_dir();
+
+    const WAIT_CHILD: &str = r#"{
+      "name": "Pause Approve Echo",
+      "steps": {
+        "approve": {
+          "stepType": "WaitForSignal",
+          "id": "approve",
+          "timeoutMs": { "valueType": "immediate", "value": 60000 },
+          "pollIntervalMs": 25
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" }
+          }
+        }
+      },
+      "entryPoint": "approve",
+      "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(WAIT_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "pause-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("pause-approve-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("waiting child publishes as an agent");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_pause_approve_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "pause-approve-echo",
+        "Pause Approve Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_pause_approve_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    const PARENT: &str = r#"{
+      "name": "Pause Parent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "pause-approve-echo",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "decision": { "valueType": "reference", "value": "steps.call.outputs.decision" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "pause-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the waiting child");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let site = "checkpoint-ns-e2e/pause-child-wf/pause-parent-wf::call::approve";
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run_once = |host: Arc<PersistingRuntimeHost>| {
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&parent.wasm_path)
+                .await
+                .expect("load parent artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    b"{}".to_vec(),
+                )
+                .await
+        })
+    };
+
+    // PAUSE: the lifecycle signal fires on the child wait's first poll. The
+    // suspend crosses the composition boundary and the PARENT suspends.
+    host.suspend_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = run_once(host.clone());
+    match first.exit {
+        runtara_component_host::InvokeExit::Suspended(wakes) => {
+            assert!(
+                matches!(
+                    wakes.first(),
+                    Some(runtara_component_host::lifecycle::WorkflowWake::OnResume)
+                ),
+                "a lifecycle suspend re-raises as an on-resume wake, got {wakes:?}"
+            );
+        }
+        other => panic!("pause during the child's wait must SUSPEND the parent, got {other:?}"),
+    }
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "the sentinel must never surface as a failure"
+    );
+    let deadline_writes = |host: &PersistingRuntimeHost| {
+        host.checkpoint_writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| id.as_str() == site)
+            .count()
+    };
+    assert_eq!(
+        deadline_writes(&host),
+        1,
+        "the wait's deadline was checkpointed under the scoped id before suspending"
+    );
+
+    // RESUME: pause lifted, the signal arrived while suspended. Replay
+    // re-invokes the child, re-derives the same scoped id, HITs the stored
+    // deadline and finds the signal.
+    host.suspend_requested
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    host.deliver_signal(site, br#"{"decision":"approved-after-pause"}"#);
+    let second = run_once(host.clone());
+    let output = match second.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed run must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "decision": "approved-after-pause" }),
+        "the signal posted while paused must reach the resumed wait"
+    );
+    assert_eq!(
+        deadline_writes(&host),
+        1,
+        "the resumed wait must HIT the stored deadline, not re-write it"
+    );
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one terminal complete — the resumed parent's"
+    );
+    std::mem::forget(temp);
+}
+
+/// N5 nesting: the suspend sentinel CHAINS. A pause fires inside the
+/// GRANDCHILD's wait (parent → mid agent → grandchild agent); the grandchild
+/// raises the sentinel, the mid re-raises it through ITS capability channel,
+/// and the top-level parent suspends. Resume completes through both
+/// boundaries.
+#[test]
+fn pause_inside_nested_composed_agents_chains_the_suspend() {
+    let components_dir = direct_e2e_components_dir();
+
+    const GRANDCHILD: &str = r#"{
+      "name": "Pause Grandchild",
+      "steps": {
+        "approve": {
+          "stepType": "WaitForSignal",
+          "id": "approve",
+          "pollIntervalMs": 25
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.approve.outputs.decision" } }
+        }
+      },
+      "entryPoint": "approve",
+      "executionPlan": [ { "fromStep": "approve", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let grandchild_graph: ExecutionGraph =
+        serde_json::from_str(GRANDCHILD).expect("grandchild parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let grandchild = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "pause-gc-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: grandchild_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("grandchild-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("pause-grandchild".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("grandchild publishes as an agent");
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &grandchild.wasm_path,
+        staging.join("runtara_agent_pause_grandchild.wasm"),
+    )
+    .expect("stage grandchild wasm");
+    let grandchild_info = runtara_dsl::agent_meta::workflow_agent_info(
+        "pause-grandchild",
+        "Pause Grandchild",
+        "",
+        &grandchild_graph.input_schema,
+        &grandchild_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_pause_grandchild.meta.json"),
+        serde_json::to_vec_pretty(&grandchild_info).expect("meta serializes"),
+    )
+    .expect("stage grandchild meta");
+
+    const MID: &str = r#"{
+      "name": "Pause Mid",
+      "steps": {
+        "gcall": {
+          "stepType": "Agent",
+          "id": "gcall",
+          "agentId": "pause-grandchild",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.gcall.outputs.echo" } }
+        }
+      },
+      "entryPoint": "gcall",
+      "executionPlan": [ { "fromStep": "gcall", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let mid_graph: ExecutionGraph = serde_json::from_str(MID).expect("mid parses");
+    let grandchild_catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        grandchild_info,
+    ]));
+    let mut mid = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "pause-mid-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: mid_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("mid-build"),
+            track_events: false,
+            agent_catalog: Some(grandchild_catalog),
+            agent_slug: Some("pause-mid".to_string()),
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("mid compiles as an agent");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut mid,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("mid composes the grandchild");
+    fs::copy(&mid.wasm_path, staging.join("runtara_agent_pause_mid.wasm")).expect("stage mid wasm");
+    let mid_info = runtara_dsl::agent_meta::workflow_agent_info(
+        "pause-mid",
+        "Pause Mid",
+        "",
+        &mid_graph.input_schema,
+        &mid_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_pause_mid.meta.json"),
+        serde_json::to_vec_pretty(&mid_info).expect("meta serializes"),
+    )
+    .expect("stage mid meta");
+
+    const TOP: &str = r#"{
+      "name": "Pause Top",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "pause-mid",
+          "capabilityId": "run",
+          "inputMapping": {}
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let top_graph: ExecutionGraph = serde_json::from_str(TOP).expect("top parses");
+    let mid_catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        mid_info,
+    ]));
+    let mut top = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "pause-top-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: top_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("top-build"),
+            track_events: false,
+            agent_catalog: Some(mid_catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("top compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut top,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("top composes the mid agent");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let site = "checkpoint-ns-e2e/pause-gc-wf/pause-top-wf::call__gcall::approve";
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run_once = |host: Arc<PersistingRuntimeHost>| {
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&top.wasm_path)
+                .await
+                .expect("load top artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    b"{}".to_vec(),
+                )
+                .await
+        })
+    };
+
+    host.suspend_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = run_once(host.clone());
+    assert!(
+        matches!(first.exit, runtara_component_host::InvokeExit::Suspended(_)),
+        "a pause two boundaries deep must suspend the top-level run, got {:?}",
+        first.exit
+    );
+    assert!(host.failed.lock().unwrap().is_none());
+
+    host.suspend_requested
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    host.deliver_signal(site, br#"{"decision":"nested-approved"}"#);
+    let second = run_once(host.clone());
+    let output = match second.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed nested run must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({ "echo": "nested-approved" }),
+        "the payload must flow back through both composed boundaries"
+    );
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "neither composed child may fire runtime.complete"
     );
     std::mem::forget(temp);
 }

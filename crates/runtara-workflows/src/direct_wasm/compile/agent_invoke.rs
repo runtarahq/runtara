@@ -14,7 +14,9 @@
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
-use super::abi::{push_retptr_arg, push_segment_args, push_zero_value};
+use super::abi::{
+    emit_agent_suspend_sentinel_check, push_retptr_arg, push_segment_args, push_zero_value,
+};
 use super::agent_io::emit_agent_connection_input;
 use super::{
     DirectAgentInvokeImport, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
@@ -65,4 +67,15 @@ pub(super) fn emit_agent_invoke(
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(invoke.function_index));
+
+    // A workflow-agent child shares this instance's runtime host, so a
+    // lifecycle suspend (pause/shutdown ack) can fire INSIDE the child; the
+    // capability channel carries it out as the suspend sentinel error.
+    // Re-raise it through our own ABI here — before retry classification,
+    // per-attempt checkpointing, or onError routing can misread it as a
+    // failure. Native agents never raise the sentinel (and the check is
+    // gated off their invokes entirely).
+    if static_data.agent_is_workflow_agent(agent_id) {
+        emit_agent_suspend_sentinel_check(body, indices);
+    }
 }

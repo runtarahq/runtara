@@ -23,6 +23,7 @@ use super::split::{
 use super::step_error::emit_step_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
+    DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
     DIRECT_RESULT_OPTION_LIST_LEN_OFFSET, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET,
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
@@ -260,6 +261,31 @@ pub(super) fn emit_invoke_err_return_from_locals(
     emit_invoke_err_finalize_from_scratch(function);
 }
 
+/// Reserved error code a composed workflow-agent raises through its
+/// capability error channel when a lifecycle suspend fires inside it. The
+/// capability result type (`result<list<u8>, error-info>`) has no suspended
+/// arm, so the suspend crosses the composition boundary as this sentinel;
+/// the composing parent recognizes it at the invoke boundary
+/// ([`emit_agent_suspend_sentinel_check`]) and re-raises the suspend through
+/// its OWN ABI — chaining however deep the composition nests. Exactly 16
+/// bytes so the parent's check is two immediate i64 compares, no memcmp loop.
+pub(super) const AGENT_SUSPEND_SENTINEL_CODE: &[u8; 16] = b"__rt_suspended__";
+
+/// The sentinel as two little-endian i64 immediates (low half, high half).
+fn suspend_sentinel_halves() -> (i64, i64) {
+    let lo = i64::from_le_bytes(
+        AGENT_SUSPEND_SENTINEL_CODE[..8]
+            .try_into()
+            .expect("8-byte half"),
+    );
+    let hi = i64::from_le_bytes(
+        AGENT_SUSPEND_SENTINEL_CODE[8..]
+            .try_into()
+            .expect("8-byte half"),
+    );
+    (lo, hi)
+}
+
 /// Suspend-and-exit for the entry function: the run stops early because a
 /// lifecycle signal (pause/shutdown/breakpoint) was handled and the instance
 /// will be re-invoked on relaunch.
@@ -270,21 +296,77 @@ pub(super) fn emit_invoke_err_return_from_locals(
 ///   real emission of the suspended arm. The single-element wake list lives
 ///   at offset 88 (past the 80-byte result area, inside the reserved
 ///   low-scratch region, 8-aligned; wake element stride is 32).
+/// - agent capabilities: a DURABLE workflow-agent composed into a parent CAN
+///   reach a suspend site (its runtime import is the parent instance's host),
+///   but its result type has no suspended arm — it raises the
+///   [`AGENT_SUSPEND_SENTINEL_CODE`] error instead, which the parent
+///   recognizes and re-raises (see [`emit_agent_suspend_sentinel_check`]).
 pub(super) fn emit_entry_suspend_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    // `AgentCapabilities` never reaches a suspend site (a pure agent workflow
-    // has no runtime signal check / breakpoint / durable sleep — gated at
-    // compile), so it rides the InvokeHostImports layout: correct if it were
-    // ever emitted, and provably dead otherwise.
     match indices.abi {
         crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::Return);
         }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
-        | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            let (lo, hi) = suspend_sentinel_halves();
+            // Zero the result area — every unset error-info field lifts as
+            // an empty string / false / none (the same shape the invoke-err
+            // fallback path relies on).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(120));
+            function.instruction(&Instruction::MemoryFill(0));
+            // Sentinel code bytes at @96, past the error-info record fields.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I64Const(lo));
+            function.instruction(&Instruction::I64Store(MemArg {
+                offset: 96,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I64Const(hi));
+            function.instruction(&Instruction::I64Store(MemArg {
+                offset: 104,
+                align: 0,
+                memory_index: 0,
+            }));
+            // error-info.code = the sentinel; message mirrors it so a caller
+            // that does NOT understand the sentinel still surfaces something
+            // legible instead of empty bytes.
+            for field_ptr_offset in [8u64, 16] {
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32Const(96));
+                function.instruction(&Instruction::I32Store(MemArg {
+                    offset: field_ptr_offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32Const(
+                    AGENT_SUSPEND_SENTINEL_CODE.len() as i32
+                ));
+                function.instruction(&Instruction::I32Store(MemArg {
+                    offset: field_ptr_offset + 4,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+            // result disc = 1 (err).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             // Zero result area + wake element (0..120).
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::I32Const(0));
@@ -325,6 +407,53 @@ pub(super) fn emit_entry_suspend_return(
             function.instruction(&Instruction::Return);
         }
     }
+}
+
+/// Re-raise a composed workflow-agent child's suspend. Emitted immediately
+/// after a workflow-agent invoke: when the call returned `err` and the
+/// error code is exactly [`AGENT_SUSPEND_SENTINEL_CODE`], the child hit a
+/// lifecycle suspend (pause/shutdown handled by the SHARED instance host) —
+/// the parent must suspend too, through its own ABI, before any retry
+/// classification, per-attempt checkpointing, or onError routing sees the
+/// sentinel as a failure. Under a parent that is itself a composed agent,
+/// [`emit_entry_suspend_return`] re-raises the sentinel — the chain unwinds
+/// to the real instance owner. On resume, replay re-invokes the child (its
+/// step checkpoint never completed) and the child replays into its wait.
+pub(super) fn emit_agent_suspend_sentinel_check(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    let (lo, hi) = suspend_sentinel_halves();
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
+    body.instruction(&Instruction::I32Const(
+        AGENT_SUSPEND_SENTINEL_CODE.len() as i32
+    ));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(lo));
+    body.instruction(&Instruction::I64Eq);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(hi));
+    body.instruction(&Instruction::I64Eq);
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 /// Store-freeing suspend at a timed deadline (durable Delay under the invoke

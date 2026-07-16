@@ -741,4 +741,63 @@ OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
     || { print_error "per-site payload routing broken, got: ${OUT}"; exit 1; }
 echo "  both sites resolved with their own payloads ✓"
 
-print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals + multi-site discovery, all green"
+#-------------------------------------------------------------------------
+print_step "9. Pause during a composed child's wait: suspend, resume, signal, complete..."
+# Before the suspend-sentinel fix, pausing an instance blocked inside a
+# composed workflow-agent's WaitForSignal FAILED it ("failed to parse Agent
+# output"); the suspend now crosses the composition boundary.
+RESP=$(api_post "/workflows/${SIG_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
+PAUSE_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${PAUSE_INSTANCE}" ] || { print_error "pause-target execute failed: ${RESP}"; exit 1; }
+
+# Let the composed child reach its wait (its pending-input event surfaces).
+PAUSE_SIG=""
+for _ in {1..45}; do
+    RESP=$(curl -sS "${API}/workflows/${SIG_PARENT_ID}/instances/${PAUSE_INSTANCE}/pending-input")
+    PAUSE_SIG=$(echo "${RESP}" | jq -r '.data.pendingInputs[0].signalId // empty')
+    [ -n "${PAUSE_SIG}" ] && break
+    sleep 2
+done
+[ -n "${PAUSE_SIG}" ] || { print_error "wait never surfaced before pause: ${RESP}"; exit 1; }
+
+RESP=$(api_post "/workflows/instances/${PAUSE_INSTANCE}/pause" "")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "pause request failed: ${RESP}"; exit 1; }
+PAUSE_STATUS=""
+for _ in {1..45}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${PAUSE_INSTANCE}")
+    PAUSE_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${PAUSE_STATUS}" in paused|suspended) break ;; esac
+    case "${PAUSE_STATUS}" in failed|crashed|stopped|completed)
+        print_error "pause mid-composed-wait must suspend, instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"
+        tail -40 "${TEST_LOG}"
+        exit 1 ;;
+    esac
+    sleep 2
+done
+case "${PAUSE_STATUS}" in
+    paused|suspended) echo "  instance ${PAUSE_STATUS} while composed child waited ✓" ;;
+    *) print_error "instance never paused (last status '${PAUSE_STATUS}')"; tail -40 "${TEST_LOG}"; exit 1 ;;
+esac
+
+RESP=$(api_post "/workflows/instances/${PAUSE_INSTANCE}/resume" "")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "resume request failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "{\"signalId\": \"${PAUSE_SIG}\", \"payload\": {\"decision\": \"resumed-live\"}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "post-resume signal submit failed: ${RESP}"; exit 1; }
+PAUSE_STATUS=""
+for _ in {1..60}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${PAUSE_INSTANCE}")
+    PAUSE_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${PAUSE_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+[ "${PAUSE_STATUS}" = "completed" ] \
+    || { print_error "resumed instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
+OUT=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
+[ "${OUT}" = "resumed-live" ] \
+    || { print_error "post-resume payload did not flow through: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
+echo "  resumed, signaled, completed with the post-resume payload ✓"
+
+print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals + multi-site discovery + pause-through-composition, all green"
