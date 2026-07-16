@@ -612,6 +612,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) runtime_load_input: u32,
+    // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,
     pub(super) runtime_custom_event: u32,
@@ -730,6 +731,25 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+}
+
+impl DirectCoreFunctionIndices {
+    /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
+    ///
+    /// Suppressed when the runtime is omitted (nothing to call) AND under the
+    /// `AgentCapabilities` export even when the runtime IS imported (a durable
+    /// workflow-agent): composed into a parent, the child shares the PARENT
+    /// instance's runtime — its terminal `complete` would mark the parent's
+    /// instance finished mid-flight. An agent capability's terminal result is
+    /// the return value; instance lifecycle belongs to the caller. Non-terminal
+    /// runtime calls (checkpoints, sleeps, signals, events) still lower.
+    pub(super) fn report_terminal_status(&self) -> bool {
+        !self.omit_runtime
+            && !matches!(
+                self.abi,
+                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+            )
+    }
 }
 
 #[derive(Debug, Clone)]

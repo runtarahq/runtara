@@ -894,23 +894,20 @@ fn compile_direct_workflow_inner(
     // a workflow that would call runtime keeps the import.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        // Workflow-as-agent: the capabilities export is agent-shaped by
-        // definition (zero runtime imports). A workflow that would call the
-        // runtime — anything durable, delaying, waiting, logging, sub-agent, or
-        // suspend-capable — cannot be an agent; reject it loudly rather than
-        // emit a poisoned import. This is the non-suspending gate.
-        super::component::WorkflowAbi::AgentCapabilities => {
-            if needs_runtime {
-                return Err(DirectCompileError::Component(format!(
-                    "workflow is not agent-eligible: it uses features that require the \
-                     runtime interface (durability, delay, wait-for-signal, logging, \
-                     sub-agents, breakpoints, or tracing), which the agent capability \
-                     shape forbids. Features: {:?}",
-                    manifest.feature_summary.features
-                )));
-            }
-            true
-        }
+        // Workflow-as-agent: a PURE workflow (nothing durable, delaying,
+        // waiting, logging, or sub-agent) omits the runtime entirely — the
+        // fully self-contained agent shape. A workflow that DOES need the
+        // runtime keeps the import (HostImport binding): composed into a
+        // parent, the interface bubbles up and is satisfied by the parent
+        // instance's runtime host, so checkpoints/sleeps/events work — this is
+        // what lets ANY workflow, durable ones included, publish as an agent.
+        // Its terminal complete/fail are suppressed either way (the caller
+        // owns instance lifecycle; see
+        // `DirectCoreFunctionIndices::report_terminal_status`). Durable
+        // semantics under a parent are BLOCKING (a Delay/Wait blocks inside
+        // the capability invoke); a graph-level `durable: false` opts a
+        // workflow out of durability wholesale to get the pure shape back.
+        super::component::WorkflowAbi::AgentCapabilities => !needs_runtime,
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime
         }
@@ -1304,10 +1301,10 @@ fn emit_runtime_fail_return(
     error_len_local: u32,
 ) {
     // The additive `runtime.fail` records the terminal error host-side during
-    // the migration. An omit-runtime component has no runtime import, so it is
-    // suppressed — the `Err(error-info)` return value (invoke export only) is
-    // the sole authoritative terminal error.
-    if !indices.omit_runtime {
+    // the migration. Suppressed when terminal status is suppressed
+    // (omit-runtime, or an AgentCapabilities child whose caller owns the
+    // instance) — the `Err(error-info)` return value is the sole terminal error.
+    if indices.report_terminal_status() {
         body.instruction(&Instruction::LocalGet(error_ptr_local));
         body.instruction(&Instruction::LocalGet(error_len_local));
         push_retptr_arg(body);

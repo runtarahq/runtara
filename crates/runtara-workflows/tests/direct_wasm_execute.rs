@@ -1893,6 +1893,10 @@ struct RecordingRuntimeHost {
     input: Vec<u8>,
     completed: Mutex<Option<Vec<u8>>>,
     failed: Mutex<Option<Vec<u8>>>,
+    /// Total `runtime.complete` calls — a composed workflow-agent child must
+    /// never fire one (the caller owns instance lifecycle), so a parent+child
+    /// run records exactly 1.
+    complete_calls: std::sync::atomic::AtomicU32,
 }
 
 impl RecordingRuntimeHost {
@@ -1901,6 +1905,7 @@ impl RecordingRuntimeHost {
             input: input.to_vec(),
             completed: Mutex::new(None),
             failed: Mutex::new(None),
+            complete_calls: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
@@ -1914,6 +1919,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
         Ok("host-import-e2e".to_string())
     }
     async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        self.complete_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.completed.lock().unwrap() = Some(output);
         Ok(())
     }
@@ -6205,27 +6212,27 @@ fn compile_agent_capabilities_artifact(
 }
 
 /// Workflow-as-agent slice a: a pure workflow compiled with the
-/// `AgentCapabilities` ABI exports `runtara:agent-<id>/capabilities.invoke(
-/// capability-id, input, connection) -> result<list<u8>, error-info>` — the
-/// exact agent shape — and is invocable AS an agent through a wasmtime typed
-/// call. This exercises the 17-param fold, the `result<list<u8>, error-info>`
-/// return layout, and the export naming end to end (a wrong local layout or
-/// return offset would surface as a typed-call trap or a wrong payload).
+/// `AgentCapabilities` ABI exports `runtara:agent-<slug>/capabilities.invoke(
+/// capability-id, input) -> result<list<u8>, error-info>` — the exact agent
+/// shape — and is invocable AS an agent through a wasmtime typed call. With no
+/// explicit slug, the export id derives from the graph name via the shared
+/// slug transform ("Pure Passthrough" → `pure-passthrough`), mirroring the
+/// server's auto-derived `workflows.slug`.
 #[test]
 fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
     let components_dir = direct_e2e_components_dir();
     let compiled =
         compile_agent_capabilities_artifact(&components_dir, "workflow-as-agent", PURE_PASSTHROUGH);
 
-    // Shape: agent-shaped export, zero runtime imports.
+    // Shape: agent-shaped export under the derived slug, zero runtime imports.
     assert!(
         compiled.omit_runtime,
         "AgentCapabilities implies omit-runtime"
     );
     let world = &compiled.component_artifacts.world_wit;
     assert!(
-        world.contains("export runtara:agent-workflow-agent/capabilities@0.3.0"),
-        "world must export the capabilities interface:\n{world}"
+        world.contains("export runtara:agent-pure-passthrough/capabilities@0.3.0"),
+        "world must export the capabilities interface under the derived slug:\n{world}"
     );
     assert!(
         !world.contains("workflow-runtime/runtime"),
@@ -6243,8 +6250,8 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         executor
             .invoke_capability(
                 &pre,
-                "runtara:agent-workflow-agent/capabilities@0.3.0",
-                "invoke",
+                "runtara:agent-pure-passthrough/capabilities@0.3.0",
+                "run",
                 br#"{"input":"as-agent"}"#.to_vec(),
             )
             .await
@@ -6258,26 +6265,28 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
     );
 }
 
-/// The non-suspending gate: a workflow that would call the runtime (here a
-/// durable Delay) is rejected when compiled as an agent, rather than silently
-/// producing a poisoned import — the agent capability shape cannot suspend.
+/// P6: ANY workflow can compile as an agent. A runtime-needing workflow (here
+/// a durable Delay) is no longer rejected — it keeps the runtime import
+/// (satisfied by the composing parent's runtime host / the embedding host),
+/// while a pure workflow still omits it. The graph-level `durable: false`
+/// off-switch turns a durability-only runtime need back into the pure shape.
 #[test]
-fn direct_wasm_execute_agent_capabilities_rejects_runtime_needing_workflow() {
+fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
     let components_dir = direct_e2e_components_dir();
     let graph: ExecutionGraph =
         serde_json::from_str(STORE_FREEING_DELAY).expect("delay fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
-    let err = compile_direct_workflow_composed_configured(
+    let compiled = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
-            workflow_id: "delay-not-agent".to_string(),
+            workflow_id: "delay-agent".to_string(),
             version: 1,
             source_checksum: None,
             execution_graph: graph,
             child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
+            output_dir: temp.path().join("durable"),
             track_events: false,
             agent_catalog: None,
-            agent_slug: None,
+            agent_slug: Some("delay-agent".to_string()),
         },
         &components_dir,
         RuntimeBinding::HostImport,
@@ -6285,11 +6294,79 @@ fn direct_wasm_execute_agent_capabilities_rejects_runtime_needing_workflow() {
         false,
         false,
     )
-    .expect_err("a durable-delay workflow must be rejected as an agent");
+    .expect("a durable workflow now compiles as an agent");
+    assert!(!compiled.omit_runtime);
     assert!(
-        format!("{err}").contains("not agent-eligible"),
-        "unexpected error: {err}"
+        compiled
+            .component_artifacts
+            .world_wit
+            .contains("import runtara:workflow-runtime/runtime@0.1.0;"),
+        "durable agent must keep the runtime import:\n{}",
+        compiled.component_artifacts.world_wit
     );
+    assert!(
+        compiled
+            .component_artifacts
+            .world_wit
+            .contains("export runtara:agent-delay-agent/capabilities@0.3.0;")
+    );
+
+    // 4a off-switch: durability is the ONLY runtime need of a plain transform
+    // workflow, so `durable: false` at the graph level restores the pure,
+    // zero-runtime-import agent shape.
+    const DURABLE_PASSTHROUGH: &str = r#"{
+      "name": "Durable Passthrough",
+      "steps": {
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "result": { "valueType": "reference", "value": "data.input" } }
+        }
+      },
+      "entryPoint": "finish",
+      "executionPlan": [],
+      "variables": {},
+      "inputSchema": {},
+      "outputSchema": {}
+    }"#;
+    let durable_default: ExecutionGraph =
+        serde_json::from_str(DURABLE_PASSTHROUGH).expect("parses");
+    assert_eq!(durable_default.durable, None, "durable defaults to true");
+    let compile_with = |graph: ExecutionGraph, id: &str| {
+        compile_direct_workflow_composed_configured(
+            DirectCompilationInput {
+                workflow_id: id.to_string(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir: temp.path().join(id),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: Some(id.to_string()),
+            },
+            &components_dir,
+            RuntimeBinding::HostImport,
+            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            false,
+            false,
+        )
+        .expect("agent compile succeeds")
+    };
+    let durable_agent = compile_with(durable_default, "durable-on");
+    assert!(
+        !durable_agent.omit_runtime,
+        "default-durable workflow keeps the runtime import"
+    );
+    let mut non_durable: ExecutionGraph =
+        serde_json::from_str(DURABLE_PASSTHROUGH).expect("parses");
+    non_durable.durable = Some(false);
+    let pure_agent = compile_with(non_durable, "durable-off");
+    assert!(
+        pure_agent.omit_runtime,
+        "durable:false restores the pure zero-runtime agent shape"
+    );
+    std::mem::forget(temp);
 }
 
 #[test]
@@ -7155,5 +7232,179 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         serde_json::json!({ "childEcho": "hello-child", "childMarker": "from-child" }),
         "the child's output must flow back through the standard agent-output shaping"
     );
+    std::mem::forget(temp);
+}
+
+/// P6 flagship: a DURABLE workflow published as an agent runs composed inside
+/// a parent. The child keeps the runtime import (a durable Delay checkpoints +
+/// sleeps through it); composition bubbles that import up to the composed
+/// artifact where the PARENT instance's runtime host satisfies it. Critically,
+/// the child's terminal `runtime.complete` is suppressed — exactly ONE
+/// complete fires for the whole run (the parent's) — because a child
+/// completing the shared instance would finish the parent mid-flight.
+#[test]
+fn parent_workflow_invokes_published_durable_workflow_agent() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Durable child: default durability + a short Delay — needs the runtime.
+    const DURABLE_CHILD: &str = r#"{
+      "name": "Durable Delay Echo",
+      "steps": {
+        "delay": {
+          "stepType": "Delay",
+          "id": "delay",
+          "durationMs": { "valueType": "immediate", "value": 25 }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
+        }
+      },
+      "entryPoint": "delay",
+      "executionPlan": [ { "fromStep": "delay", "toStep": "finish" } ],
+      "variables": {},
+      "inputSchema": { "value": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(DURABLE_CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "durable-child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("durable-delay-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("durable child publishes as an agent");
+    assert!(
+        !child.omit_runtime,
+        "the durable child must keep the runtime import"
+    );
+
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_durable_delay_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "durable-delay-echo",
+        "Durable Delay Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_durable_delay_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    const PARENT: &str = r#"{
+      "name": "Parent Of Durable Agent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "durable-delay-echo",
+          "capabilityId": "run",
+          "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": { "childEcho": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": { "msg": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "durable-parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent composes the durable child (runtime import bubbles up)");
+
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"msg":"durable-hello"}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("parent invoking a durable workflow-agent must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "childEcho": "durable-hello" }),
+        "the durable child's output must flow back through agent-output shaping"
+    );
+    // Exactly ONE terminal complete — the parent's. The child's suppression is
+    // what keeps a shared-instance runtime coherent; two completes would mean
+    // the child finished the parent's instance mid-flight.
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the composed child must never fire runtime.complete"
+    );
+    assert!(host.failed.lock().unwrap().is_none());
     std::mem::forget(temp);
 }

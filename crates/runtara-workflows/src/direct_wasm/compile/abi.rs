@@ -515,12 +515,13 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
         | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
             load_retptr_tag(function);
             function.instruction(&Instruction::If(BlockType::Empty));
-            // Additive host-side `runtime.fail` unless the runtime is omitted
-            // (agent-shaped component) — then the Err return value is authoritative.
-            let fail_index = if indices.omit_runtime {
-                None
-            } else {
+            // Additive host-side `runtime.fail` unless terminal status is
+            // suppressed (omit-runtime, or an AgentCapabilities child whose
+            // caller owns the instance) — the Err return value is authoritative.
+            let fail_index = if indices.report_terminal_status() {
                 Some(indices.runtime_fail)
+            } else {
+                None
             };
             emit_invoke_err_return_from_retptr(
                 function,

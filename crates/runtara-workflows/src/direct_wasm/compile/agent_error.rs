@@ -581,9 +581,10 @@ fn emit_terminal_run_plan_mapping(
         body.instruction(&Instruction::Br(branch_depth));
     } else {
         // Terminal completion from an onError handler — same per-ABI exit
-        // shape as the entry function's own tail, including the omit-runtime
-        // suppression of the additive `runtime.complete`.
-        if !indices.omit_runtime {
+        // shape as the entry function's own tail, including the terminal-status
+        // suppression (omit-runtime, and AgentCapabilities where the caller
+        // owns instance lifecycle).
+        if indices.report_terminal_status() {
             body.instruction(&Instruction::LocalGet(output_ptr_local));
             body.instruction(&Instruction::LocalGet(output_len_local));
             push_retptr_arg(body);
