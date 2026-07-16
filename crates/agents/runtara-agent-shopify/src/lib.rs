@@ -1555,14 +1555,12 @@ fn set_product_inner(conn: &RawConnection, input: &SetProductInput) -> Result<Va
 
     let mut product_options = vec![];
     if let Some(ref options) = input.options {
-        let mut position = 1;
-        for (key, value) in options {
+        for (position, (key, value)) in options.iter().enumerate() {
             product_options.push(json!({
                 "name": key,
-                "position": position,
+                "position": position + 1,
                 "values": [{ "name": value }]
             }));
-            position += 1;
         }
     } else {
         product_options.push(json!({

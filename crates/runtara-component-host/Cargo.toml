@@ -45,7 +45,7 @@ runtara-workflow-wit = { path = "../runtara-workflow-wit" }
 # wasmtime crate version is independent of the wasmtime CLI version pinned in
 # scripts/build-bundle.sh — the CLI is a separate process used by WasmRunner
 # and goes away in Phase 6.
-wasmtime = { version = "44", default-features = false, features = [
+wasmtime = { version = "46", default-features = false, features = [
     "std",
     "anyhow",
     "runtime",
@@ -60,8 +60,8 @@ wasmtime = { version = "44", default-features = false, features = [
     # Cranelift compile for every deployed image (see build_engine).
     "cache",
 ] }
-wasmtime-wasi = "44"
-wasmtime-wasi-http = "44"
+wasmtime-wasi = "46"
+wasmtime-wasi-http = "46"
 
 # Plumbing
 anyhow = "1"
@@ -81,7 +81,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 # Tests author minimal components in WAT; the `wat` feature lets
 # `Component::from_file` parse text-format components.
-wasmtime = { version = "44", default-features = false, features = ["wat"] }
+wasmtime = { version = "46", default-features = false, features = ["wat"] }
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.

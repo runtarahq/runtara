@@ -74,7 +74,7 @@ pub fn load_agent(
 fn find_capabilities_iface(engine: &Engine, component: &Component) -> Result<String> {
     let ty = component.component_type();
     for (name, item) in ty.exports(engine) {
-        if !matches!(item, ComponentItem::ComponentInstance(_)) {
+        if !matches!(item.ty, ComponentItem::ComponentInstance(_)) {
             continue;
         }
         if is_capabilities_iface_name(name) {

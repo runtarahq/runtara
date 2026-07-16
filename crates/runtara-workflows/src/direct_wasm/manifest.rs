@@ -699,39 +699,17 @@ fn graph_manifest(
         .map(|step| step_manifest(step, graph, durable, state, &mut collections, agent_catalog))
         .collect::<Result<Vec<_>, _>>()?;
 
-    collections
-        .mappings
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .conditions
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .splits
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .whiles
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .filters
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .switches
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .group_bys
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .delays
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .logs
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .errors
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    collections
-        .agents
-        .sort_by(|left, right| left.id.cmp(&right.id));
+    collections.mappings.sort_by_key(|left| left.id);
+    collections.conditions.sort_by_key(|left| left.id);
+    collections.splits.sort_by_key(|left| left.id);
+    collections.whiles.sort_by_key(|left| left.id);
+    collections.filters.sort_by_key(|left| left.id);
+    collections.switches.sort_by_key(|left| left.id);
+    collections.group_bys.sort_by_key(|left| left.id);
+    collections.delays.sort_by_key(|left| left.id);
+    collections.logs.sort_by_key(|left| left.id);
+    collections.errors.sort_by_key(|left| left.id);
+    collections.agents.sort_by_key(|left| left.id);
 
     let mut edges = graph
         .execution_plan

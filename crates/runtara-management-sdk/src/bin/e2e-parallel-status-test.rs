@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut other_count = 0;
     let mut incorrect_transitions = Vec::new();
 
-    for (_instance_id, history) in histories.iter() {
+    for history in histories.values() {
         match history.final_status() {
             Some(InstanceStatus::Completed) => completed_count += 1,
             Some(InstanceStatus::Failed) => failed_count += 1,

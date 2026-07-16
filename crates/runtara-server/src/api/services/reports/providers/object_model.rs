@@ -155,11 +155,9 @@ fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> 
     for interaction in &block.interactions {
         for action in &interaction.actions {
             if let Some(value_from) = &action.value_from {
-                match datum_field_ref(value_from) {
-                    Some(field) => {
-                        cols.insert(field);
-                    }
-                    None => return None,
+                {
+                    let field = datum_field_ref(value_from)?;
+                    cols.insert(field);
                 }
             }
         }
@@ -186,11 +184,9 @@ fn table_block_projection(block: &ReportBlockDefinition) -> Option<Vec<String>> 
         for button in &column.interaction_buttons {
             for action in &button.actions {
                 if let Some(value_from) = &action.value_from {
-                    match datum_field_ref(value_from) {
-                        Some(field) => {
-                            cols.insert(field);
-                        }
-                        None => return None,
+                    {
+                        let field = datum_field_ref(value_from)?;
+                        cols.insert(field);
                     }
                 }
             }

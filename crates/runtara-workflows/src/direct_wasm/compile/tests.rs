@@ -8200,11 +8200,10 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
                                 saw_error_call = true;
                             }
                             Operator::Call { function_index }
-                                if Some(function_index) == split_append_error_index =>
+                                if Some(function_index) == split_append_error_index
+                                    && saw_error_call =>
                             {
-                                if saw_error_call {
-                                    saw_split_append_error_after_error = true;
-                                }
+                                saw_split_append_error_after_error = true;
                             }
                             _ => {}
                         }
@@ -10101,10 +10100,10 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
                             Operator::Call { function_index } => {
                                 run_calls.push(function_index);
                             }
-                            Operator::I32Const { value } => {
-                                if mapping_ids.contains(&(value as u32)) {
-                                    seen_mapping_ids.push(value as u32);
-                                }
+                            Operator::I32Const { value }
+                                if mapping_ids.contains(&(value as u32)) =>
+                            {
+                                seen_mapping_ids.push(value as u32);
                             }
                             _ => {}
                         }
