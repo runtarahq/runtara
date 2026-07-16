@@ -373,6 +373,7 @@ struct CapturedRun {
     /// Number of custom-signal polls the mock answered with a signal — a
     /// replayed wait re-polls, so this is > the number of waits after a resume.
     custom_signal_polls: u32,
+    slow_item_arrivals: Vec<Instant>,
     status_success: bool,
     stderr: String,
     /// Peak guest linear memory observed by the embedded executor's limiter, when
@@ -392,6 +393,10 @@ enum CapturedMessage {
 #[derive(Debug, Default)]
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Arrival instants of /slow-item proxied requests (the parallel-split
+    /// overlap harness) — the load-robust concurrency signal: overlapping
+    /// requests arrive within one think-time regardless of machine load.
+    slow_item_arrivals: Mutex<Vec<Instant>>,
     /// Scripted LLM-proxy responses, served front-to-back to POST /llm-proxy.
     /// Each entry is the proxy envelope `{status, headers, body}` the
     /// workflow's `call_agent()` will deserialize into an HttpResponse.
@@ -1236,6 +1241,7 @@ fn run_direct_workflow_capture_attempt(
         sql_requests: Mutex::new(Vec::new()),
         custom_signals: Mutex::new(custom_signals),
         custom_signal_polls: Mutex::new(0),
+        slow_item_arrivals: Mutex::new(Vec::new()),
     });
     let server_state_for_assertions = server_state.clone();
     let capture_tx_for_host = capture_tx.clone();
@@ -1326,6 +1332,11 @@ fn run_direct_workflow_capture_attempt(
         .custom_signal_polls
         .lock()
         .expect("custom_signal_polls lock");
+    let slow_item_arrivals = server_state_for_assertions
+        .slow_item_arrivals
+        .lock()
+        .expect("slow_item_arrivals lock")
+        .clone();
     CapturedRun {
         output_json,
         error_json,
@@ -1335,6 +1346,7 @@ fn run_direct_workflow_capture_attempt(
         llm_requests,
         sql_requests,
         custom_signal_polls,
+        slow_item_arrivals,
         status_success,
         stderr,
         memory_peak_bytes,
@@ -5413,6 +5425,11 @@ fn run_direct_workflow_embedded(
         .custom_signal_polls
         .lock()
         .expect("custom_signal_polls lock");
+    let slow_item_arrivals = server_state_for_assertions
+        .slow_item_arrivals
+        .lock()
+        .expect("slow_item_arrivals lock")
+        .clone();
     let stderr = match &result.exit {
         runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
         _ => String::new(),
@@ -5426,6 +5443,7 @@ fn run_direct_workflow_embedded(
         llm_requests,
         sql_requests,
         custom_signal_polls,
+        slow_item_arrivals,
         status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
         stderr,
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -9634,12 +9652,22 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     )
 }
 
+/// Serializes the wall-clock-sensitive parallel-split tests against each
+/// other AND absorbs poisoning: they assert timing ratios and request
+/// interleavings that melt when they share cores with each other. The rest
+/// of the battery may still run alongside — CI runs single-threaded anyway;
+/// this only removes the local `cargo test` flake class.
+static PARALLEL_TIMING_LOCK: Mutex<()> = Mutex::new(());
+
 /// The Phase-3 payoff test: a Split with `parallelism` over http-agent calls
 /// completes with correct per-item results, and the run is TIMED under both
 /// parallelism=1 and parallelism=N so the log shows whether the window
 /// genuinely overlaps agent I/O on this host (p2 wasi:http binding permitting).
 #[test]
 fn direct_wasm_execute_parallel_split_http_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let components_dir = direct_e2e_components_dir();
     const DELAY: Duration = Duration::from_millis(400);
     const ITEMS: usize = 4;
@@ -9706,6 +9734,9 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
 /// resumed run replays from checkpoints and never re-fires the agents.
 #[test]
 fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let components_dir = direct_e2e_components_dir();
 
     // Slow proxy stub: the host-io hyper client POSTs the proxy envelope
@@ -9836,6 +9867,155 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
         hits.load(std::sync::atomic::Ordering::SeqCst),
         first_run_hits,
         "the resumed run must replay from checkpoints — zero new agent calls"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// Rate-limited upstreams inside a parallel window: every item's FIRST call
+/// (the four speculative launches) answers 429 + retry-after; assemble then
+/// classifies each memoized failure as rate-limited, takes the keyed backoff
+/// sleep, re-invokes, and succeeds. Proves the memo slots preserve the full
+/// error-info (retry_after_ms included), the per-item retry machinery engages
+/// per item, and nothing fails or double-fires.
+#[test]
+fn direct_wasm_execute_parallel_split_rate_limited_items_retry_and_succeed() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+
+    // Proxy stub: the first `ITEMS` requests are 429 (rate limited, with a
+    // retry-after-ms header the http agent folds into error-info); later
+    // requests answer 200. The parallel window launches all four attempt-1
+    // calls before any retry can arrive, so count-based scripting is exact.
+    const ITEMS: u32 = 4;
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind rate-limit stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Keep attempt-1 calls in flight briefly so the four
+                        // launches genuinely overlap before any 429 lands.
+                        thread::sleep(Duration::from_millis(100));
+                        let body = if n < ITEMS {
+                            // Proxy envelope for an upstream 429. The agent
+                            // reads retry-after-ms from the RESPONSE headers.
+                            br#"{"status":429,"headers":{"retry-after-ms":"50"},"body":{"error":"rate limited"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // Default agent retry policy (maxRetries absent => effective default) on
+    // a durable graph: the memoized 429 is consumed by the DURABLE per-attempt
+    // retry branch — the most intricate memo path.
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-rate-limited".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("parallel rate-limited split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load parallel artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match result.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("rate-limited items must retry and complete, got {other:?}"),
+    };
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "429s within the retry budget must never fail the workflow"
+    );
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), ITEMS as usize);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2 * ITEMS,
+        "each item must call exactly twice: the launched 429 + one retry"
+    );
+    // The rate-limited backoff engaged per item: each retry sleeps under its
+    // keyed retry-sleep checkpoint before re-invoking.
+    let sleep_ids = host.sleep_ids.lock().unwrap().clone();
+    assert_eq!(
+        sleep_ids.len(),
+        ITEMS as usize,
+        "one keyed backoff sleep per rate-limited item, got {sleep_ids:?}"
     );
 
     let _ = stub_stop_tx.send(());
