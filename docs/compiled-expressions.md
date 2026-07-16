@@ -127,7 +127,7 @@ All condition evaluation funnels through one function; all mapping/reference eva
 
 ### Interning / value store
 
-`build_source` (`:3007`) interns top-level scope entries ≥ 16 KiB (`WFREF_THRESHOLD_BYTES` `:55`) into `{"$wfref":<id>}` handles via `intern_if_large` (`:194`), content-deduped (`content_index` `:71`). `deref_handle` (`:245`) re-parses the stored bytes via `serde_json::from_slice` (`:249`) on **every** traversal with **no** memoization; `StoreEntry` (`:75`) holds only `bytes` + `nested` ids. `value_store_retain` (`:100`) GC requires handles to remain syntactically `{"$wfref":id}` in any onward-serialized scope.
+`build_source` (`:3007`) interns top-level scope entries ≥ 16 KiB (`WFREF_THRESHOLD_BYTES` `:55`) into `{"$wfref":<id>,"$wfnonce":<per-run nonce>}` handles via `intern_if_large` (`:194`), content-deduped (`content_index` `:71`); the nonce namespaces the sentinel so user data shaped like a handle is never dereferenced. `deref_handle` (`:245`) re-parses the stored bytes via `serde_json::from_slice` (`:249`) on **every** traversal with **no** memoization; `StoreEntry` (`:75`) holds only `bytes` + `nested` ids. `value_store_retain` (`:100`) GC requires handles to remain syntactically intact in any onward-serialized scope.
 
 ---
 
@@ -381,7 +381,7 @@ After regenerating WIT bindings (only if the manifest WIT world changes), **reve
 | **Query-only ops silently defaulting to false** | `CompiledOp::QueryOnlyError` returns the same `Err` (`:4929`); guarded by `eval_condition_errors_on_query_only_operators:6896` + Err-equality in the oracle. |
 | **Numeric/equality drift** | Reuse `conditions.rs` `values_equal`/`to_number`/`is_truthy` and the `apply_type_hint` table verbatim (move into `runtara-expr`); never reimplement with native `PartialEq`. |
 | **`$wfref` handle regression** — pre-materializing the whole source reintroduces large-scope OOM (MEMORY `bump_allocator_leak`, `interning_template_handle_opacity`); leaking bare handles reintroduces the 8.0.19 minijinja-undefined regression | Compiled references deref **lazily at traversal time** + materialize leaf only; Template node receives `materialize(source)` (handle-free). Tests: `template_resolves_through_interned_loop_outputs:6563`, `while_template_reads_interned_loop_outputs:4441`. |
-| **GC handle-shape breakage** — compiled refs must not strip `{"$wfref":id}` from onward-serialized scope (`value_store_retain:100`) | Compiled evaluation is read-only into a private result; never rewrites the scope that flows to the next step. |
+| **GC handle-shape breakage** — compiled refs must not strip `{"$wfref":id,"$wfnonce":nonce}` handles from onward-serialized scope (`value_store_retain:100`) | Compiled evaluation is read-only into a private result; never rewrites the scope that flows to the next step. |
 | **Debug byte-exact shapes** (BTreeMap key ordering, `_truncated/_keys/_bytes`, finish unwrap, agent immediate-unwrap) | Compiled layer changes only *how* inputs are computed; feed identical values into the existing `bounded_debug_value:3496`/`debug_event_base` builders; guarded by the debug-shape unit tests above. |
 | **Manifest size growth in guest linear memory** (`static_data.rs:160`) | Compact tags; at final cutover store compiled-form-**instead-of**-raw (drop the `Value`), net-shrinking the manifest. |
 | **Non-deterministic serialization breaks SHA-256 cache** (`manifest.rs:586`) | No `HashMap`; canonical float formatting; covered by a "byte-identical for identical graph" test. |
