@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
     };
     let run_both = get(&mut store, "run-both")?;
     let run_seq = get(&mut store, "run-seq")?;
+    let run_both_sync = get(&mut store, "run-both-sync")?;
 
     async fn call(
         store: &mut Store<Ctx>,
@@ -138,6 +139,11 @@ async fn main() -> Result<()> {
     println!("[run-seq ] sum={seq_sum} wall={}ms", seq_elapsed.as_millis());
     let (both_sum, both_elapsed) = call(&mut store, run_both, MS).await?;
     println!("[run-both] sum={both_sum} wall={}ms", both_elapsed.as_millis());
+    let (sync_sum, sync_elapsed) = call(&mut store, run_both_sync, MS).await?;
+    println!(
+        "[run-both-sync] sum={sync_sum} wall={}ms  (SYNC-lifted async-typed export using waitable-set)",
+        sync_elapsed.as_millis()
+    );
 
     // ── Assertions ─────────────────────────────────────────────────────────
     if seq_sum != 2 * MS || both_sum != 2 * MS {
@@ -152,6 +158,13 @@ async fn main() -> Result<()> {
     // sequential 2*MS, with generous slack for scheduling noise.
     if both_ms >= 2 * MS - 30 {
         bail!("NO OVERLAP: run-both took {both_ms}ms (sequential is ~{}ms)", 2 * MS);
+    }
+    let sync_ms = sync_elapsed.as_millis() as u64;
+    if sync_sum != 2 * MS {
+        bail!("wrong run-both-sync result: {sync_sum}");
+    }
+    if sync_ms >= 2 * MS - 30 {
+        bail!("NO OVERLAP via sync lift: {sync_ms}ms (sequential is ~{}ms)", 2 * MS);
     }
     println!(
         "\nPASS: overlap proven — run-both {both_ms}ms vs run-seq {seq_ms}ms (target ~{MS}ms vs ~{}ms)",

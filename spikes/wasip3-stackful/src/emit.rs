@@ -230,6 +230,7 @@ fn orchestrator_core() -> Vec<u8> {
     types.ty().function([ValType::I32], []); // 3: (i32) -> ()
     types.ty().function([ValType::I32, ValType::I32], []); // 4: join
     types.ty().function([ValType::I64], []); // 5: task-return / export shape
+    types.ty().function([ValType::I64], [ValType::I64]); // 6: sync-lifted export
 
     let mut imports = ImportSection::new();
     let f = wasm_encoder::EntityType::Function;
@@ -246,6 +247,7 @@ fn orchestrator_core() -> Vec<u8> {
     let mut funcs = FunctionSection::new();
     funcs.function(5); // run-both
     funcs.function(5); // run-seq
+    funcs.function(6); // run-both-sync (i64) -> (i64)
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
@@ -268,6 +270,8 @@ fn orchestrator_core() -> Vec<u8> {
         ExportKind::Func,
         10,
     );
+    // Plain legacy name = SYNC lift of the async-TYPED function.
+    exports.export("demo:app/runner@0.1.0#run-both-sync", ExportKind::Func, 11);
 
     // run-both: launch both, drain once — overlap.
     let mut both = Function::new([(3, ValType::I32)]);
@@ -288,9 +292,27 @@ fn orchestrator_core() -> Vec<u8> {
     emit_drain(&mut seq);
     emit_finish(&mut seq, F_TASK_RETURN_SEQ);
 
+    // run-both-sync: identical launch+drain, but a SYNC-ABI lift — the result
+    // is the core return value, no task-return.
+    let mut both_sync = Function::new([(3, ValType::I32)]);
+    both_sync.instruction(&I::Call(F_WS_NEW));
+    both_sync.instruction(&I::LocalSet(L_WS));
+    emit_launch(&mut both_sync, F_ALPHA, RETPTR_A);
+    emit_launch(&mut both_sync, F_BETA, RETPTR_B);
+    emit_drain(&mut both_sync);
+    both_sync.instruction(&I::LocalGet(L_WS));
+    both_sync.instruction(&I::Call(F_WS_DROP));
+    both_sync.instruction(&I::I32Const(RETPTR_A));
+    both_sync.instruction(&I::I64Load(mem64()));
+    both_sync.instruction(&I::I32Const(RETPTR_B));
+    both_sync.instruction(&I::I64Load(mem64()));
+    both_sync.instruction(&I::I64Add);
+    both_sync.instruction(&I::End);
+
     let mut code = CodeSection::new();
     code.function(&both);
     code.function(&seq);
+    code.function(&both_sync);
 
     let mut module = Module::new();
     module.section(&types);

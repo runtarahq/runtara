@@ -69,6 +69,10 @@ package demo:app@0.1.0 {
     interface runner {
         run-both: async func(ms: u64) -> u64;
         run-seq: async func(ms: u64) -> u64;
+        /// Same waitable-set machinery, but SYNC-ABI-lifted (async-typed):
+        /// the exact shape of the production invoke export in parallel
+        /// regions (docs/wasip3-parallelism.md Phase 3).
+        run-both-sync: async func(ms: u64) -> u64;
     }
 }
 
