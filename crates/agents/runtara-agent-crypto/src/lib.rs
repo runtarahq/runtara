@@ -376,18 +376,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // under `bindings::exports::runtara::agent_crypto::capabilities`. Shared
 // records (ConnectionInfo / ErrorInfo) are re-exported there too via the WIT
 // `use runtara:agent/types@0.3.0.{…};` import.
-use bindings::exports::runtara::agent_crypto::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_crypto::capabilities::{ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(
-        capability_id: String,
-        input: Vec<u8>,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<Vec<u8>, ErrorInfo> {
+    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
         let executor_result = match capability_id.as_str() {
             "hash" => __executor_hash(value),

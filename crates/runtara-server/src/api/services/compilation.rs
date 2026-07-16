@@ -164,12 +164,16 @@ struct WorkflowImageRegistration<'a> {
 pub struct DirectCompilationSettings {
     /// Directory containing prebuilt shared workflow and agent components.
     pub components_dir: Option<PathBuf>,
+    /// Additional agent-component search dirs (per-tenant workflow-agent
+    /// staging) consulted after `components_dir` during composition.
+    pub extra_component_dirs: Vec<PathBuf>,
 }
 
 /// Build direct compilation settings from the process configuration.
 pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     DirectCompilationSettings {
         components_dir: crate::config::direct_wasm_components_dir(),
+        extra_component_dirs: Vec::new(),
     }
 }
 
@@ -177,6 +181,7 @@ fn compile_workflow_direct_only(
     input: CompilationInput,
     source_checksum: String,
     components_dir: Option<PathBuf>,
+    extra_component_dirs: Vec<PathBuf>,
 ) -> std::io::Result<NativeCompilationResult> {
     let Some(components_dir) = components_dir else {
         return Err(std::io::Error::new(
@@ -189,6 +194,7 @@ fn compile_workflow_direct_only(
     let options = DirectWorkflowCompileOptions {
         output_dir: direct_output_dir(&input.tenant_id),
         components_dir,
+        extra_component_dirs,
         source_checksum: Some(source_checksum),
     };
 
@@ -284,6 +290,7 @@ impl CompilationService {
             redis_manager: None,
             direct_compilation: DirectCompilationSettings {
                 components_dir: None,
+                extra_component_dirs: Vec::new(),
             },
         }
     }
@@ -441,8 +448,13 @@ impl CompilationService {
             connection_service_url: self.connection_service_url.clone(),
             // When configured, the compile uses the runtime catalog from
             // the component dispatcher so the compiled view of agents
-            // matches what the runtime can actually invoke.
-            agent_catalog: self.agent_catalog.clone(),
+            // matches what the runtime can actually invoke — merged with the
+            // tenant's PUBLISHED workflow-agents so a parent can target them.
+            agent_catalog: self
+                .agent_catalog
+                .as_ref()
+                .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id)),
+            agent_slug: None,
             progress_callback,
         };
         let desired_compiler_mode = WorkflowCompilerMode::DirectWasm;
@@ -587,11 +599,20 @@ impl CompilationService {
         let compile_start_time = std::time::Instant::now();
         let direct_compilation = self.direct_compilation.clone();
         let compile_source_checksum = source_checksum.clone();
+        // A parent composing a published workflow-agent finds its staged
+        // `.wasm` in the tenant staging dir (searched after the primary
+        // components dir).
+        let mut extra_component_dirs = direct_compilation.extra_component_dirs.clone();
+        let tenant_staging = crate::workflow_agents::staging_dir(tenant_id);
+        if tenant_staging.is_dir() {
+            extra_component_dirs.push(tenant_staging);
+        }
         let result = tokio::task::spawn_blocking(move || {
             compile_workflow_direct_only(
                 compilation_input,
                 compile_source_checksum,
                 direct_compilation.components_dir,
+                extra_component_dirs,
             )
         })
         .await
@@ -770,6 +791,127 @@ impl CompilationService {
             binary_checksum: result.binary_checksum,
             image_id: Some(image_id),
         })
+    }
+
+    /// Publish a workflow version AS an agent: compile it with the
+    /// `AgentCapabilities` ABI (exports `runtara:agent-<slug>/capabilities`),
+    /// synthesize the catalog `AgentInfo` from its input/output schemas, and
+    /// stage both into the tenant's workflow-agent dir — after which any
+    /// parent workflow can target it as `agentId: <slug>, capabilityId: "run"`
+    /// (validation sees it through the catalog overlay; composition finds the
+    /// `.wasm` through the extra search dir).
+    ///
+    /// The agent artifact is compiled with `track_events: false` — a child's
+    /// step-debug events inside a parent's instance would misattribute.
+    pub async fn publish_workflow_agent(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        slug: String,
+    ) -> Result<serde_json::Value, ServiceError> {
+        // 1. Load the definition + graph + children (same assembly as compile).
+        let (definition, _track_events) = self
+            .repository
+            .get_definition_with_track_events(tenant_id, workflow_id, version)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::NotFound(format!(
+                    "Workflow '{workflow_id}' version {version} not found"
+                ))
+            })?;
+        let source_checksum = workflow_definition_checksum(&definition);
+        let execution_graph = parse_execution_graph(&definition).map_err(|e| {
+            ServiceError::CompilationError(format!("Failed to parse execution graph: {e}"))
+        })?;
+        let child_workflows = self
+            .load_child_workflows_as_input(tenant_id, workflow_id, version, &definition)
+            .await?;
+
+        let name = execution_graph.name.clone().unwrap_or_else(|| slug.clone());
+        let description = execution_graph.description.clone().unwrap_or_default();
+        let info = runtara_dsl::agent_meta::workflow_agent_info(
+            &slug,
+            &name,
+            &description,
+            &execution_graph.input_schema,
+            &execution_graph.output_schema,
+        );
+
+        // 2. Compile with the AgentCapabilities ABI + compose. Same catalog
+        //    overlay as a normal compile so a workflow-agent may itself invoke
+        //    previously-published workflow-agents.
+        let Some(components_dir) = self.direct_compilation.components_dir.clone() else {
+            return Err(ServiceError::CompilationError(
+                "direct WASM compilation requires a configured component directory".to_string(),
+            ));
+        };
+        let agent_catalog = self
+            .agent_catalog
+            .as_ref()
+            .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
+        let direct_input = runtara_workflows::direct_wasm::DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: version as u32,
+            source_checksum: Some(source_checksum),
+            execution_graph,
+            child_workflows,
+            output_dir: direct_output_dir(tenant_id).join("agent-publish"),
+            track_events: false,
+            agent_catalog,
+            agent_slug: Some(slug.clone()),
+        };
+        let mut extra_dirs = self.direct_compilation.extra_component_dirs.clone();
+        let tenant_staging = crate::workflow_agents::staging_dir(tenant_id);
+        if tenant_staging.is_dir() {
+            extra_dirs.push(tenant_staging);
+        }
+        let permit = compilation_semaphore().acquire().await.map_err(|e| {
+            ServiceError::CompilationError(format!("Compilation queue closed: {e}"))
+        })?;
+        let result = tokio::task::spawn_blocking(move || {
+            let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+                direct_input,
+                runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+                // Blocking durable-sleep (store-freeing suspend stays gated) and
+                // omit-runtime "requested" — the AgentCapabilities arm decides
+                // the effective shape.
+                false,
+                true,
+            )?;
+            runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+                &mut result,
+                &components_dir,
+                &extra_dirs,
+            )?;
+            Ok::<_, runtara_workflows::direct_wasm::DirectCompileError>(result)
+        })
+        .await
+        .map_err(|e| ServiceError::CompilationError(format!("Publish task panicked: {e}")))?
+        .map_err(|e| ServiceError::CompilationError(format!("Agent publish failed: {e}")))?;
+        drop(permit);
+
+        // 3. Stage the composed artifact + synthesized meta.
+        let (wasm_path, meta_path) =
+            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info)
+                .map_err(|e| ServiceError::CompilationError(format!("Staging failed: {e}")))?;
+
+        info!(
+            %tenant_id, %workflow_id, version, %slug,
+            wasm = %wasm_path.display(),
+            "published workflow as agent"
+        );
+        Ok(serde_json::json!({
+            "slug": slug,
+            "agentId": info.id,
+            "capabilityId": runtara_dsl::agent_meta::WORKFLOW_AGENT_CAPABILITY_ID,
+            "workflowId": workflow_id,
+            "version": version,
+            "wasmSizeBytes": result.wasm_size,
+            "stagedWasm": wasm_path.display().to_string(),
+            "stagedMeta": meta_path.display().to_string(),
+        }))
     }
 
     /// Load child workflows from database and convert to ChildWorkflowInput

@@ -54,6 +54,9 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
+    /// native runtime interface for HostImport-composed artifacts.
+    handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
 impl EmbeddedWasmRunner {
@@ -64,12 +67,16 @@ impl EmbeddedWasmRunner {
         spawn_epoch_ticker(Arc::clone(&engine));
         let executor = WorkflowExecutor::new(engine)
             .map_err(|e| RunnerError::Other(format!("build workflow executor: {e:#}")))?;
+        let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
+            Arc::clone(&persistence),
+        ));
         Ok(Self {
             config,
             limits: limits_from_env(),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            handler_state,
         })
     }
 
@@ -87,18 +94,45 @@ impl EmbeddedWasmRunner {
 
     fn run_spec(
         &self,
+        options: &LaunchOptions,
         env: HashMap<String, String>,
         stderr: Option<std::fs::File>,
         timeout: Duration,
         cancel: Option<CancelToken>,
     ) -> WorkflowRunSpec {
+        // Always attach the native runtime host. A HostImport-composed
+        // artifact consumes it; a legacy composed artifact satisfies the
+        // runtime interface internally (HTTP loopback) and never calls it —
+        // that indifference is the dual-ABI story: old workflows run
+        // unchanged, without a rebuild, through the same spec.
+        let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
+        let runtime = Arc::new(crate::runtime_host::PersistenceRuntimeHost::new(
+            Arc::clone(&self.handler_state),
+            options.instance_id.clone(),
+            debug_mode,
+        ));
         WorkflowRunSpec {
             env,
             stderr,
             timeout,
             cancel,
             limits: self.limits.clone(),
+            runtime: Some(runtime),
         }
+    }
+
+    /// The instance's persisted (enriched) input envelope — what
+    /// `runtime.load-input` served the legacy guest. Fetched fresh on every
+    /// launch so a woken instance re-reads the SAME stored bytes (never the
+    /// relaunch request's placeholder input).
+    async fn persisted_input(&self, instance_id: &str) -> Result<Vec<u8>> {
+        let instance = self
+            .persistence
+            .get_instance(instance_id)
+            .await
+            .map_err(|e| RunnerError::StartFailed(format!("load instance input: {e:#}")))?
+            .ok_or_else(|| RunnerError::StartFailed(format!("instance {instance_id} not found")))?;
+        Ok(instance.input.unwrap_or_else(|| b"{}".to_vec()))
     }
 
     fn task_of(&self, instance_id: &str) -> Option<Arc<InstanceTask>> {
@@ -140,6 +174,148 @@ fn exit_to_result(exit: &WorkflowExit) -> std::result::Result<(), RunnerError> {
     }
 }
 
+/// Map an invoke-shaped run to the same `Result<()>` shape. A suspension is a
+/// clean exit (the suspended status was recorded host-side by the signal
+/// ack), exactly as the legacy run path's Ok-exit-with-DB-suspended was; a
+/// Failed outcome mirrors GuestError (the error was recorded additively via
+/// runtime.fail, so `load_output` surfaces it downstream unchanged).
+fn invoke_exit_to_result(
+    exit: &runtara_component_host::InvokeExit,
+) -> std::result::Result<(), RunnerError> {
+    use runtara_component_host::InvokeExit;
+    match exit {
+        InvokeExit::Completed(_) | InvokeExit::Suspended(_) => Ok(()),
+        InvokeExit::Failed(_) => Err(RunnerError::ExitCode {
+            exit_code: 1,
+            stderr: String::new(),
+        }),
+        InvokeExit::Trapped { reason } => Err(RunnerError::ExitCode {
+            exit_code: 1,
+            stderr: reason.clone(),
+        }),
+        InvokeExit::Timeout => Err(RunnerError::Timeout),
+        InvokeExit::Cancelled => Err(RunnerError::Cancelled),
+    }
+}
+
+/// `termination_reason` stamped on an on-signal park — the discriminator the
+/// custom-signal waker requires before relaunching a suspended row. A suspend
+/// from a pause/breakpoint ack carries no marker and is never signal-woken.
+pub(crate) const WAITING_SIGNAL_TERMINATION: &str = "waiting_signal";
+
+/// The earliest timed wake deadline (ms since epoch) across a suspend's wake
+/// set, or `None` when every wake is deadline-less (`on-resume`, or a signal
+/// wait with no timeout). `suspended` is re-invoke-on-ANY, so the earliest
+/// deadline is when the scheduler must relaunch.
+fn earliest_wake_deadline_ms(
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> Option<u64> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes
+        .iter()
+        .filter_map(|wake| match wake {
+            WorkflowWake::At(ms) => Some(*ms),
+            WorkflowWake::OnSignal(wait) => wait.deadline_ms,
+            WorkflowWake::OnResume => None,
+        })
+        .min()
+}
+
+/// True when any wake is an `on-signal` — the instance is parked waiting for an
+/// externally-delivered custom signal (the store-freeing Wait path).
+fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake]) -> bool {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes.iter().any(|w| matches!(w, WorkflowWake::OnSignal(_)))
+}
+
+/// Park an invoke-shaped instance that returned `outcome::suspended` (the
+/// store-freeing durable-sleep / wait-for-signal paths). Stamps
+/// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
+/// (`at`, or `on-signal` with a timeout). The guest already persisted its resume
+/// checkpoint before exiting, so there is no output/checkpoint work here.
+///
+/// - `at(deadline)` / `on-signal{deadline}` → suspended + `sleep_until=deadline`
+///   (the wake scheduler relaunches at the deadline).
+/// - `on-signal` with NO deadline → suspended, `sleep_until` left NULL; the
+///   custom-signal waker stamps it when the signal arrives (the only wake path).
+/// - only `on-resume` (breakpoint/drain pause) → left untouched: those recorded
+///   `status=suspended` inline via their ack, and stamping `sleep_until` would
+///   wrongly schedule an immediate wake.
+///
+/// The park is `if_running`-guarded (a guest that already reported a terminal
+/// complete/fail must not be resurrected as suspended — the same race guard
+/// `handle_instance_event`'s suspend path uses), and stamps a
+/// `termination_reason` marker naming the wake shape: `waiting_signal` for
+/// on-signal parks (the ONLY rows the custom-signal waker may relaunch — a
+/// pause/breakpoint suspend has no marker and must never be signal-woken) or
+/// `sleeping` for pure timed parks. Relaunch clears the marker with the
+/// running transition.
+async fn park_invoke_suspend(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) {
+    let deadline_ms = earliest_wake_deadline_ms(wakes);
+    if deadline_ms.is_none() && !has_on_signal_wake(wakes) {
+        // Pure on-resume: already handled by the ack path.
+        return;
+    }
+    let wake_marker = if has_on_signal_wake(wakes) {
+        WAITING_SIGNAL_TERMINATION
+    } else {
+        "sleeping"
+    };
+    // status first, then sleep_until: the wake scan requires BOTH
+    // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
+    // exposes a half-parked instance to a premature claim.
+    match persistence
+        .complete_instance(
+            runtara_core::persistence::CompleteInstanceParams::new(instance_id, "suspended")
+                .if_running()
+                .with_termination(wake_marker, None),
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            // Already terminal (or otherwise not running) — a malformed guest
+            // that completed/failed and THEN returned suspended, or the
+            // monitor's timeout landed first. Never overwrite, never schedule.
+            warn!(
+                instance_id,
+                "Invoke suspend ignored: instance is not running (terminal status preserved)"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+        }
+    }
+    let Some(deadline_ms) = deadline_ms else {
+        // Deadline-less on-signal: parked as suspended; the waker relaunches it.
+        return;
+    };
+    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
+    else {
+        warn!(
+            instance_id,
+            deadline_ms, "Suspend deadline out of range; leaving sleep_until unset"
+        );
+        return;
+    };
+    if let Err(e) = persistence.set_instance_sleep(instance_id, deadline).await {
+        warn!(instance_id, error = %e, "Failed to set sleep_until after invoke suspend");
+    }
+}
+
+fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
+    ContainerMetrics {
+        memory_peak_bytes: Some(result.memory_peak_bytes),
+        memory_current_bytes: Some(result.memory_peak_bytes),
+        ..Default::default()
+    }
+}
+
 fn metrics_of(result: &runtara_component_host::WorkflowRunResult) -> ContainerMetrics {
     ContainerMetrics {
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -167,21 +343,68 @@ impl Runner for EmbeddedWasmRunner {
         }
 
         let env = self.merged_env(options);
-        let pre = self
+        let instance_pre = self
             .executor
-            .load(&wasm_path)
+            .load_instance_pre(&wasm_path)
             .await
             .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
 
-        let run = self
-            .executor
-            .execute(
-                &pre,
-                self.run_spec(env, None, options.timeout, cancel_token),
-            )
-            .await;
-        let metrics = metrics_of(&run);
-        let result = exit_to_result(&run.exit);
+        // Dual-ABI dispatch: an invoke-shaped artifact runs through the
+        // in-band entry (input fetched from persistence — the enriched
+        // stored envelope, first run AND wake alike); a legacy artifact
+        // keeps the wasi:cli/run path unchanged.
+        let (metrics, result) = if runtara_component_host::lifecycle::exports_lifecycle_invoke(
+            &instance_pre,
+            self.executor.engine(),
+        ) {
+            let input = self.persisted_input(&options.instance_id).await?;
+            // Run as `running` (see the detached path for why relaunches need
+            // this) — no-op on the first-run path, which is already running.
+            if let Err(e) = self
+                .persistence
+                .update_instance_status(&options.instance_id, "running", None)
+                .await
+            {
+                warn!(instance_id = %options.instance_id, error = %e, "Failed to mark invoke instance running");
+            }
+            let run = self
+                .executor
+                .execute_invoke(
+                    &instance_pre,
+                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                    input,
+                )
+                .await;
+            // A store-freeing suspend has no output yet — park it and report a
+            // clean, non-terminal result rather than letting `load_output` fail.
+            if let runtara_component_host::InvokeExit::Suspended(wakes) = &run.exit {
+                park_invoke_suspend(self.persistence.as_ref(), &options.instance_id, wakes).await;
+                return Ok(LaunchResult {
+                    instance_id: options.instance_id.clone(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    stderr: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    metrics: invoke_metrics_of(&run),
+                });
+            }
+            (invoke_metrics_of(&run), invoke_exit_to_result(&run.exit))
+        } else {
+            let pre = self
+                .executor
+                .load(&wasm_path)
+                .await
+                .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
+            let run = self
+                .executor
+                .execute(
+                    &pre,
+                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                )
+                .await;
+            (metrics_of(&run), exit_to_result(&run.exit))
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
@@ -279,38 +502,117 @@ impl Runner for EmbeddedWasmRunner {
         // Timeout is enforced by the container monitor via `stop()`, exactly
         // as it is for the detached CLI runner (which spawns with no timeout
         // of its own). MAX keeps the internal rings cancel-only.
-        let spec = self.run_spec(env, stderr_file, Duration::MAX, Some(cancel));
+        let spec = self.run_spec(options, env, stderr_file, Duration::MAX, Some(cancel));
 
         let executor = Arc::clone(&self.executor);
+        let persistence = Arc::clone(&self.persistence);
         let metrics_for_task = Arc::clone(&metrics);
         let task_for_run = Arc::clone(&task);
         let registry = Arc::clone(&self.tasks);
         let instance_id = options.instance_id.clone();
         tokio::spawn(async move {
-            match executor.load(&wasm_path).await {
-                Ok(pre) => {
-                    let run = executor.execute(&pre, spec).await;
-                    {
-                        let mut guard = metrics_for_task.lock().await;
-                        *guard = metrics_of(&run);
-                    }
-                    match &run.exit {
-                        WorkflowExit::Completed => {
-                            info!(instance_id = %instance_id, "Embedded workflow run completed");
+            match executor.load_instance_pre(&wasm_path).await {
+                Ok(instance_pre) => {
+                    if runtara_component_host::lifecycle::exports_lifecycle_invoke(
+                        &instance_pre,
+                        executor.engine(),
+                    ) {
+                        // Invoke-shaped artifact: input from persistence (the
+                        // enriched stored envelope), terminal result in-band.
+                        let input = match persistence.get_instance(&instance_id).await {
+                            Ok(Some(instance)) => instance.input.unwrap_or_else(|| b"{}".to_vec()),
+                            Ok(None) => {
+                                error!(instance_id = %instance_id, "Instance not found for invoke launch");
+                                b"{}".to_vec()
+                            }
+                            Err(e) => {
+                                error!(instance_id = %instance_id, error = %e, "Failed to load instance input");
+                                b"{}".to_vec()
+                            }
+                        };
+                        // Ensure the run executes as `running`. The first-run
+                        // launch also sets this after `launch_detached` returns,
+                        // but a wake-scheduler relaunch (`wake_instance`) does
+                        // NOT — and a guest that completes while still marked
+                        // `suspended` would have its `if_running`-guarded
+                        // terminal event silently dropped. Set it here so BOTH
+                        // paths run as `running` before the guest starts.
+                        if let Err(e) = persistence
+                            .update_instance_status(&instance_id, "running", None)
+                            .await
+                        {
+                            warn!(instance_id = %instance_id, error = %e, "Failed to mark invoke instance running");
                         }
-                        WorkflowExit::GuestError => {
-                            // Failure details were reported to runtara-core
-                            // by the SDK before run() returned.
-                            warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                        let run = executor.execute_invoke(&instance_pre, spec, input).await;
+                        {
+                            let mut guard = metrics_for_task.lock().await;
+                            *guard = invoke_metrics_of(&run);
                         }
-                        WorkflowExit::Failed { reason } => {
-                            error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                        use runtara_component_host::InvokeExit;
+                        match &run.exit {
+                            InvokeExit::Completed(_) => {
+                                info!(instance_id = %instance_id, "Embedded workflow run completed");
+                            }
+                            InvokeExit::Suspended(wakes) => {
+                                info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+                                // Store-freeing durable sleep: the guest exited
+                                // with a timed wake instead of blocking; park it
+                                // so the wake scheduler relaunches at the
+                                // deadline. (A deadline-less on-resume was
+                                // already recorded suspended by its ack.)
+                                park_invoke_suspend(persistence.as_ref(), &instance_id, wakes)
+                                    .await;
+                            }
+                            InvokeExit::Failed(_) => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                            }
+                            InvokeExit::Trapped { reason } => {
+                                error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                            }
+                            InvokeExit::Timeout => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                            }
+                            InvokeExit::Cancelled => {
+                                warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                            }
                         }
-                        WorkflowExit::Timeout => {
-                            warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                        }
-                        WorkflowExit::Cancelled => {
-                            warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                    } else {
+                        match runtara_component_host::WorkflowExecutor::load(&executor, &wasm_path)
+                            .await
+                        {
+                            Ok(pre) => {
+                                let run = executor.execute(&pre, spec).await;
+                                {
+                                    let mut guard = metrics_for_task.lock().await;
+                                    *guard = metrics_of(&run);
+                                }
+                                match &run.exit {
+                                    WorkflowExit::Completed => {
+                                        info!(instance_id = %instance_id, "Embedded workflow run completed");
+                                    }
+                                    WorkflowExit::GuestError => {
+                                        // Failure details were reported to runtara-core
+                                        // by the SDK before run() returned.
+                                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                                    }
+                                    WorkflowExit::Failed { reason } => {
+                                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                                    }
+                                    WorkflowExit::Timeout => {
+                                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                                    }
+                                    WorkflowExit::Cancelled => {
+                                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    instance_id = %instance_id,
+                                    error = format!("{e:#}"),
+                                    "Failed to load workflow component"
+                                );
+                            }
                         }
                     }
                 }
@@ -405,5 +707,206 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn get_pid(&self, _handle: &RunnerHandle) -> Option<u32> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_component_host::lifecycle::{SignalWait, WorkflowWake};
+    use runtara_core::persistence::SqlitePersistence;
+
+    #[test]
+    fn earliest_wake_deadline_is_the_min_timed_wake() {
+        // Re-invoke-on-ANY: the scheduler must relaunch at the EARLIEST wake.
+        let wakes = vec![
+            WorkflowWake::At(300),
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "sig".into(),
+                deadline_ms: Some(120),
+            }),
+            WorkflowWake::OnResume,
+        ];
+        assert_eq!(earliest_wake_deadline_ms(&wakes), Some(120));
+    }
+
+    #[test]
+    fn earliest_wake_deadline_is_none_when_all_deadline_less() {
+        let wakes = vec![
+            WorkflowWake::OnResume,
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "sig".into(),
+                deadline_ms: None,
+            }),
+        ];
+        assert_eq!(earliest_wake_deadline_ms(&wakes), None);
+    }
+
+    async fn running_instance() -> (Arc<dyn Persistence>, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let persistence: Arc<dyn Persistence> = Arc::new(
+            SqlitePersistence::from_path(dir.path().join("park.db"))
+                .await
+                .expect("sqlite persistence"),
+        );
+        let instance_id = "park-inst".to_string();
+        persistence
+            .register_instance(&instance_id, "park-tenant")
+            .await
+            .expect("register");
+        persistence
+            .update_instance_status(&instance_id, "running", None)
+            .await
+            .expect("mark running");
+        (persistence, instance_id, dir)
+    }
+
+    #[tokio::test]
+    async fn park_stamps_suspended_and_sleep_until_for_a_timed_wake() {
+        let (persistence, instance_id, _dir) = running_instance().await;
+        let deadline_ms = 1_900_000_000_000u64; // a fixed absolute epoch-ms
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::At(deadline_ms)],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(
+            inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "sleep_until must be the wake deadline so the wake scan selects it"
+        );
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some("sleeping"),
+            "a pure timed park is scheduler-woken, never signal-woken"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_leaves_a_deadline_less_suspend_untouched() {
+        // on-resume (breakpoint/drain pause) already recorded suspended via its
+        // ack; park must NOT stamp a premature sleep_until that would wake it.
+        let (persistence, instance_id, _dir) = running_instance().await;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnResume],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "running", "no timed wake => no status change");
+        assert!(
+            inst.sleep_until.is_none(),
+            "no timed wake => no sleep_until stamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_marks_deadline_less_on_signal_suspended_without_sleep() {
+        // A no-timeout wait: parked suspended so the custom-signal waker can
+        // find it, but with NO sleep_until (the waker stamps it on arrival).
+        let (persistence, instance_id, _dir) = running_instance().await;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "wait-sig".into(),
+                deadline_ms: None,
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended", "on-signal parks as suspended");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a deadline-less on-signal wait relies on the waker, not sleep_until"
+        );
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some(WAITING_SIGNAL_TERMINATION),
+            "the waker must be able to distinguish this park from a pause suspend"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_never_overwrites_a_terminal_status() {
+        // A malformed guest that reported terminal complete and THEN returned
+        // outcome::suspended must not be resurrected (and must not be
+        // scheduled for a wake) — the same if_running guard the event path's
+        // suspend uses.
+        let (persistence, instance_id, _dir) = running_instance().await;
+        persistence
+            .complete_instance(
+                runtara_core::persistence::CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running(),
+            )
+            .await
+            .expect("complete");
+
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::At(1_900_000_000_000u64)],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(
+            inst.status, "completed",
+            "a terminal status must survive a late suspend return"
+        );
+        assert!(
+            inst.sleep_until.is_none(),
+            "a rejected park must not schedule a wake for a completed instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn park_stamps_on_signal_timeout_deadline_as_the_fallback() {
+        let (persistence, instance_id, _dir) = running_instance().await;
+        let deadline_ms = 1_950_000_000_000u64;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "wait-sig".into(),
+                deadline_ms: Some(deadline_ms),
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(
+            inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "an on-signal timeout is the fallback wake if the signal never arrives"
+        );
     }
 }

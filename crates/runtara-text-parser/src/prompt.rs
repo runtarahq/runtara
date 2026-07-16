@@ -72,6 +72,7 @@ fn type_hint(field: &SchemaField) -> Option<String> {
         SchemaFieldType::Array => Some(array_hint(field)),
         SchemaFieldType::Object => Some("multiple fields".into()),
         SchemaFieldType::File => Some("file upload — not available in text channels".into()),
+        SchemaFieldType::Connection => Some("connection id".into()),
     }
 }
 
@@ -185,6 +186,7 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            integration: None,
             label: None,
             placeholder: None,
             order: None,

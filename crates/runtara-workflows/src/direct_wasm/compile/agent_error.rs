@@ -361,7 +361,7 @@ fn emit_error_steps(
     body.instruction(&Instruction::LocalGet(steps_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_error_steps));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 }
 
@@ -472,7 +472,7 @@ fn emit_error_route_dispatch_inner(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_eval_condition));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     body.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
     body.instruction(&Instruction::I32Load8U(MemArg {
@@ -580,12 +580,38 @@ fn emit_terminal_run_plan_mapping(
     if let Some(DirectHandledTarget { branch_depth }) = handled_target {
         body.instruction(&Instruction::Br(branch_depth));
     } else {
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_complete));
-        load_retptr_tag(body);
-        body.instruction(&Instruction::Return);
+        // Terminal completion from an onError handler — same per-ABI exit
+        // shape as the entry function's own tail, including the terminal-status
+        // suppression (omit-runtime, and AgentCapabilities where the caller
+        // owns instance lifecycle).
+        if indices.report_terminal_status() {
+            body.instruction(&Instruction::LocalGet(output_ptr_local));
+            body.instruction(&Instruction::LocalGet(output_len_local));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.runtime_complete));
+        }
+        match indices.abi {
+            crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+                load_retptr_tag(body);
+                body.instruction(&Instruction::Return);
+            }
+            crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+                super::core_module::emit_invoke_ok_completed_return(
+                    body,
+                    output_ptr_local,
+                    output_len_local,
+                );
+                body.instruction(&Instruction::Return);
+            }
+            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+                super::core_module::emit_capabilities_ok_return(
+                    body,
+                    output_ptr_local,
+                    output_len_local,
+                );
+                body.instruction(&Instruction::Return);
+            }
+        }
     }
 }
 
@@ -613,7 +639,7 @@ fn emit_agent_error(
     push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
@@ -631,6 +657,6 @@ fn emit_agent_error_from_info(
     body.instruction(&Instruction::LocalGet(error_info_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_error_from_info));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 }

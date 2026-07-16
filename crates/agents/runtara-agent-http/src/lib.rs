@@ -640,46 +640,15 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_http::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_http::capabilities::{ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(
-        capability_id: String,
-        input: Vec<u8>,
-        connection: Option<ConnectionInfo>,
-    ) -> Result<Vec<u8>, ErrorInfo> {
-        let mut value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        // Inject the WIT `connection` arg into the input JSON under
-        // `_connection` so the macro-generated executor can deserialize it
-        // into the capability input struct's `_connection: Option<RawConnection>`
-        // field. The http agent's connection is optional — if the host did
-        // not pass one, we leave `_connection` absent and the capability
-        // runs in plain (non-proxy) mode.
-        if let Some(c) = connection.as_ref() {
-            if let serde_json::Value::Object(ref mut obj) = value {
-                let parameters = serde_json::from_str::<serde_json::Value>(&c.parameters)
-                    .unwrap_or(serde_json::Value::Null);
-                let rate_limit_config = c
-                    .rate_limit_config
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-                obj.insert(
-                    "_connection".into(),
-                    serde_json::json!({
-                        "connection_id": c.connection_id,
-                        "integration_id": c.integration_id,
-                        "connection_subtype": c.connection_subtype,
-                        "parameters": parameters,
-                        "rate_limit_config": rate_limit_config,
-                    }),
-                );
-            }
-        }
+    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
             "http-request" => __executor_http_request(value),

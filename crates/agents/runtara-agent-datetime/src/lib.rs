@@ -1231,18 +1231,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_datetime::capabilities::{ConnectionInfo, ErrorInfo, Guest};
+use bindings::exports::runtara::agent_datetime::capabilities::{ErrorInfo, Guest};
 
 #[cfg(target_arch = "wasm32")]
 struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(
-        capability_id: String,
-        input: Vec<u8>,
-        _connection: Option<ConnectionInfo>,
-    ) -> Result<Vec<u8>, ErrorInfo> {
+    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         // Some capabilities (notably `get-current-date`) accept an empty body
         // and use type defaults. Normalize that into `null` so serde_json can
         // run the deserializer; the executor uses `coerce_input` + serde

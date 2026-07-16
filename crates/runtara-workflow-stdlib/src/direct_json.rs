@@ -1027,6 +1027,19 @@ impl DirectJsonManifest {
     }
 
     /// Build the generated-code-compatible checkpoint key for a step breakpoint.
+    /// The inherited checkpoint-namespace prefix, when running as a child
+    /// (embedded or composed). Empty at the top level — every builder that
+    /// folds this stays byte-identical for plain workflows.
+    fn source_cache_key_prefix(source: &Value) -> Option<String> {
+        source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_cache_key_prefix"))
+            .and_then(Value::as_str)
+            .filter(|prefix| !prefix.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn breakpoint_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse breakpoint-key source: {err}"))?;
@@ -1048,11 +1061,57 @@ impl DirectJsonManifest {
                     .join("_")
             })
             .unwrap_or_default();
-        if loop_indices.is_empty() {
-            Ok(format!("breakpoint::{step_id}"))
+        let base = if loop_indices.is_empty() {
+            format!("breakpoint::{step_id}")
         } else {
-            Ok(format!("breakpoint::{step_id}::{loop_indices}"))
-        }
+            format!("breakpoint::{step_id}::{loop_indices}")
+        };
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
+    }
+
+    /// Per-scope durability key for a durable Delay's sleep checkpoint.
+    ///
+    /// The bare step id at top level — byte-identical to the legacy static
+    /// key, so existing checkpoint rows and assertions are unaffected — and
+    /// `{step_id}::{indices}` inside Split/While iterations (folding
+    /// `variables._loop_indices` exactly like [`Self::breakpoint_key`]).
+    /// Without the fold, per-item durable delays collide on one key. A child
+    /// scope's `_cache_key_prefix` (embedded or composed) prepends as
+    /// `{prefix}::` so a durable child's delays never collide with the
+    /// parent's — or with another invocation of the same child.
+    pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse delay-sleep-key source: {err}"))?;
+        self.steps
+            .get(step_id)
+            .ok_or_else(|| format!("unknown direct delay step '{step_id}'"))?;
+
+        let loop_indices = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .and_then(|vars| vars.get("_loop_indices"))
+            .and_then(Value::as_array)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join("_")
+            })
+            .unwrap_or_default();
+        let base = if loop_indices.is_empty() {
+            step_id.to_string()
+        } else {
+            format!("{step_id}::{loop_indices}")
+        };
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
     }
 
     /// Build the generated-code-compatible custom event payload for a step breakpoint.
@@ -1152,6 +1211,19 @@ impl DirectJsonManifest {
     }
 
     /// Build the deterministic signal id used by generated WaitForSignal code.
+    ///
+    /// Unlike checkpoint ids, signal ids are EXTERNAL addressing — a sender
+    /// posts to `(instance, signal_id)` — but they must be equally
+    /// collision-free: the wait's timeout deadline is checkpointed under this
+    /// very string, and two waiters sharing one id both wake on one signal.
+    /// A child scope's `_cache_key_prefix` (embedded or composed
+    /// workflow-agent) therefore scopes the step segment as
+    /// `{prefix}::{step_id}`, exactly like the durable key builders — two
+    /// children waiting on the same step id get distinct, per-invocation-site
+    /// ids. Top-level ids are byte-identical to the legacy shape. Senders
+    /// discover the scoped id verbatim from the `external_input_requested`
+    /// event / pending-input listing, and every host-side consumer matches it
+    /// as an opaque string.
     pub fn wait_signal_id(
         &self,
         step_id: &str,
@@ -1168,8 +1240,12 @@ impl DirectJsonManifest {
             .and_then(Value::as_str)
             .unwrap_or("root");
         let indices_suffix = wait_loop_indices_suffix(&source);
+        let scoped_step = match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{step_id}"),
+            None => step_id.to_string(),
+        };
         Ok(format!(
-            "{instance_id}/{workflow_id}/{step_id}{indices_suffix}"
+            "{instance_id}/{workflow_id}/{scoped_step}{indices_suffix}"
         ))
     }
 
@@ -1196,8 +1272,13 @@ impl DirectJsonManifest {
             .and_then(Value::as_str)
             .unwrap_or("root");
         let indices_suffix = wait_loop_indices_suffix(&source);
+        // Child scopes fold `_cache_key_prefix` exactly like [`Self::wait_signal_id`].
+        let scoped_step = match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{step_id}"),
+            None => step_id.to_string(),
+        };
         Ok(format!(
-            "{instance_id}/{workflow_id}/{step_id}.tool.{label}.{call_counter}{indices_suffix}"
+            "{instance_id}/{workflow_id}/{scoped_step}.tool.{label}.{call_counter}{indices_suffix}"
         ))
     }
 
@@ -1633,7 +1714,11 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
         let indices_suffix = wait_loop_indices_suffix(&source);
-        Ok(format!("{step_id}.turn.{iteration}{indices_suffix}"))
+        let base = format!("{step_id}.turn.{iteration}{indices_suffix}");
+        Ok(match Self::source_cache_key_prefix(&source) {
+            Some(prefix) => format!("{prefix}::{base}"),
+            None => base,
+        })
     }
 
     /// Per-turn durability: wrap the post-turn loop state for the turn
@@ -2256,22 +2341,35 @@ impl DirectJsonManifest {
     }
 
     /// Inject generated-code-compatible connection fields into Agent JSON input.
-    pub fn agent_connection_input(&self, agent_id: u32, input: &[u8]) -> Result<Vec<u8>, String> {
+    /// Inject the Agent's connection into its input as `_connection` (plus a
+    /// top-level `connection_id`), evaluated against the execution `source`.
+    ///
+    /// This is the SINGLE connection channel: agents read `input._connection`
+    /// directly (there is no out-of-band `connection` WIT argument anymore).
+    /// The id is resolved by [`Self::resolve_connection_id`] — a resolvable
+    /// `connection_ref` wins over the literal `connection_id`; an empty result
+    /// (no connection, or a ref that resolves to null/absent) leaves the input
+    /// untouched. `integration_id`/`parameters` stay empty: a connection is an
+    /// opaque id, and the proxy resolves credentials by `(id, tenant)`
+    /// server-side, so nothing secret ever rides the input.
+    pub fn agent_connection_input(
+        &self,
+        agent_id: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let mut input: Value = serde_json::from_slice(input)
             .map_err(|err| format!("failed to parse Agent input for connection: {err}"))?;
-        let agent = self
-            .agents
-            .get(&agent_id)
-            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let Some(connection_id) = agent.connection_id.as_deref() else {
-            return serde_json::to_vec(&input)
-                .map_err(|err| format!("failed to serialize Agent input: {err}"));
-        };
 
-        if let Value::Object(ref mut map) = input {
+        let resolved = self.resolve_connection_id(agent_id, source)?;
+        if !resolved.is_empty()
+            && let Value::Object(ref mut map) = input
+        {
+            let connection_id = String::from_utf8(resolved)
+                .map_err(|err| format!("resolved connection id is not valid UTF-8: {err}"))?;
             map.insert(
                 "connection_id".to_string(),
-                Value::String(connection_id.to_string()),
+                Value::String(connection_id.clone()),
             );
             map.insert(
                 "_connection".to_string(),
@@ -2284,6 +2382,119 @@ impl DirectJsonManifest {
         }
 
         serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
+    }
+
+    /// Wrap a composed workflow-agent child's input in the canonical
+    /// `{data, variables}` envelope carrying the invocation-site checkpoint
+    /// namespace.
+    ///
+    /// A durable workflow-agent child shares the PARENT instance's checkpoint
+    /// store; its checkpoint ids were baked at its own compile time from its
+    /// own step ids, so without a per-site scope they collide across
+    /// invocations (Split over one child, the same child twice) and with the
+    /// parent's own steps. The scope is [`child_cache_prefix`] — the exact
+    /// compositional formula the EmbedWorkflow path injects — which the
+    /// child's `build_source` whitelists back into its variables, prefixing
+    /// every durable key it builds. Replay-stable by construction: step id is
+    /// compile-time, `_loop_indices` are deterministic, the inherited parent
+    /// prefix recurses (nested composition chains like nested embeds).
+    ///
+    /// The emitter calls this ONLY for workflow-agent targets, once per step
+    /// (before the retry loop — the wrapped buffer feeds every attempt).
+    /// Native agents never see an envelope-shaped input.
+    pub fn agent_scope_input(
+        &self,
+        agent_id: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        let input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse Agent input for scoping: {err}"))?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for Agent scoping: {err}"))?;
+
+        let envelope = serde_json::json!({
+            "data": input,
+            "variables": { "_cache_key_prefix": child_cache_prefix(&agent.step_id, &source) }
+        });
+        serde_json::to_vec(&envelope)
+            .map_err(|err| format!("failed to serialize scoped Agent input: {err}"))
+    }
+
+    /// The tool-call variant of [`Self::agent_scope_input`]: wrap a
+    /// workflow-agent TOOL's input in the `{data, variables}` envelope with a
+    /// PER-CALL checkpoint namespace.
+    ///
+    /// One tool can be dispatched many times in one AiAgent loop, so the
+    /// per-step site scope would collide across calls; the site here is
+    /// `{ai_step_id}.tool.{label}.{call_counter}` — the same shape the
+    /// wait-tool signal ids use, with the loop's replay-stable tool-call
+    /// counter (restored from the turn snapshot on replay, so a re-executed
+    /// turn re-derives identical scopes and the child's internal checkpoints
+    /// HIT).
+    pub fn agent_tool_scope_input(
+        ai_step_id: &str,
+        label: &str,
+        call_counter: u32,
+        input: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let input: Value = serde_json::from_slice(input)
+            .map_err(|err| format!("failed to parse tool input for scoping: {err}"))?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
+
+        let site = format!("{ai_step_id}.tool.{label}.{call_counter}");
+        let envelope = serde_json::json!({
+            "data": input,
+            "variables": { "_cache_key_prefix": child_cache_prefix(&site, &source) }
+        });
+        serde_json::to_vec(&envelope)
+            .map_err(|err| format!("failed to serialize scoped tool input: {err}"))
+    }
+
+    /// Resolve an Agent's connection to ONE concrete connection id, evaluated
+    /// against the execution `source`.
+    ///
+    /// A resolvable `connection_ref` (a `MappingValue`) wins over the literal
+    /// `connection_id`: it lets a step bind to a caller-supplied `connection`
+    /// input, rotate connections, or select one per record. Returns the id as
+    /// UTF-8 bytes, or an EMPTY vec when the agent has no connection or the ref
+    /// resolves to null/absent. Used by [`Self::agent_connection_input`] to
+    /// inject `input._connection` — uniformly for every agent kind (primary,
+    /// memory, MCP-tool), whose input at runtime need not be a mapping.
+    pub fn resolve_connection_id(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+
+        if let Some(connection_ref) = agent.connection_ref.as_ref() {
+            let source: Value = serde_json::from_slice(source).map_err(|err| {
+                format!("failed to parse source for connection resolution: {err}")
+            })?;
+            let resolved = apply_mapping_value(connection_ref, &source)?;
+            return Ok(match resolved {
+                Value::String(id) => id.into_bytes(),
+                // A ref that resolves to null/absent (e.g. an optional input the
+                // caller did not supply) yields no connection.
+                Value::Null => Vec::new(),
+                other => {
+                    return Err(format!(
+                        "connection_ref for Agent {agent_id} must resolve to a string id, got {other}"
+                    ));
+                }
+            });
+        }
+
+        Ok(match agent.connection_id.as_deref() {
+            Some(id) if !id.is_empty() => id.as_bytes().to_vec(),
+            _ => Vec::new(),
+        })
     }
 
     /// Build the generated-code-compatible durable cache key for an Agent step.
@@ -3166,7 +3377,12 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
     // stored verbatim as the instance input. Unwrap it so `data.*` resolves
     // against the inner payload, and merge the runtime `variables` over the
     // compile-time declared defaults (runtime wins). The `_`-prefixed identity
-    // variables are never overridable from input. Inputs with no `data` key
+    // variables are never overridable from input — with ONE whitelisted
+    // exception: `_cache_key_prefix`, the checkpoint-namespace a PARENT
+    // injects when invoking this workflow as a composed agent (see
+    // `child_cache_prefix`). It is a namespace hint, not identity — the worst
+    // a caller can do by setting it is namespace its own child's durable
+    // state, which is exactly the feature. Inputs with no `data` key
     // (low-level / direct runtime invocations) are used as-is.
     let inner_data = if let Value::Object(envelope) = &mut data {
         if envelope.contains_key("data") {
@@ -3174,7 +3390,7 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
                 && let Value::Object(defaults) = &mut variables
             {
                 for (key, value) in runtime_vars {
-                    if !key.starts_with('_') {
+                    if !key.starts_with('_') || key == "_cache_key_prefix" {
                         defaults.insert(key, value);
                     }
                 }
@@ -3574,6 +3790,7 @@ fn collect_graph_manifest(
                     agent_id: agent.agent_id.clone(),
                     capability_id: agent.capability_id.clone(),
                     connection_id: agent.connection_id.clone(),
+                    connection_ref: agent.connection_ref.clone(),
                     input_mapping_id: agent.input_mapping_id,
                     required_inputs: agent.required_inputs.clone(),
                 },
@@ -4457,6 +4674,80 @@ fn agent_error_info_envelope(
     Value::Object(object).to_string()
 }
 
+/// Structured fields for the invoke export's `Err(error-info)` arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectInvokeErrorFields {
+    pub code: String,
+    pub message: String,
+    pub category: String,
+    pub severity: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub attributes: Option<String>,
+}
+
+/// Best-effort decomposition of a terminal error payload into structured
+/// error-info fields. A JSON envelope (the `agent_error_info_envelope` /
+/// stdlib error-step shape: `{code, message, category, severity, retryable,
+/// retryAfterMs, attributes}`) maps field-for-field; anything else — plain
+/// strings, non-object JSON, invalid UTF-8 — rides `message` verbatim
+/// (lossily decoded), matching what `runtime.fail` records. Infallible by
+/// construction.
+pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
+    let raw = String::from_utf8_lossy(error).into_owned();
+    let Ok(Value::Object(envelope)) = serde_json::from_slice::<Value>(error) else {
+        return DirectInvokeErrorFields {
+            code: String::new(),
+            message: raw,
+            category: String::new(),
+            severity: String::new(),
+            retryable: false,
+            retry_after_ms: None,
+            attributes: None,
+        };
+    };
+    let field = |name: &str| {
+        envelope
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let message = match envelope.get("message").and_then(Value::as_str) {
+        Some(message) => message.to_string(),
+        // An object without a message string still surfaces everything.
+        None => raw,
+    };
+    // The `__rt_suspended__` code is RESERVED: it is how a composed
+    // workflow-agent's lifecycle suspend crosses the capability boundary, and
+    // the composing parent re-raises its own suspend on seeing it. Every
+    // user-authored terminal error (Error steps, bubbled agent errors) flows
+    // through here — remap a spoofed sentinel so a workflow error can never
+    // silently suspend its parent instead of failing it.
+    let mut code = field("code");
+    if code == "__rt_suspended__" {
+        code = "__rt_suspended__:user".to_string();
+    }
+    DirectInvokeErrorFields {
+        code,
+        message,
+        category: field("category"),
+        severity: field("severity"),
+        retryable: envelope
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        retry_after_ms: envelope.get("retryAfterMs").and_then(Value::as_u64),
+        // Agent envelopes carry `attributes`; workflow Error-step envelopes
+        // carry the resolved `context` — both surface as the attributes JSON.
+        attributes: envelope
+            .get("attributes")
+            .or_else(|| envelope.get("context"))
+            .filter(|value| !value.is_null())
+            .map(|value| value.to_string()),
+    }
+}
+
 fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
     let Ok(parsed) = serde_json::from_slice::<Value>(error) else {
         return DirectJsonWorkflowRetryInfo {
@@ -4821,6 +5112,44 @@ fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
     }
 }
 
+/// The checkpoint-namespace prefix for a CHILD invoked at `step_id` of the
+/// current scope — the compositional site scope every durable key builder
+/// honors via `variables._cache_key_prefix`:
+/// `{inherited_prefix}__{step_id}[loop,indices]`, falling back to
+/// `{workflow_id}::{step_id}[...]` at the root. Replay-stable by construction
+/// (compile-time step id + deterministic loop indices + recursion). One
+/// definition shared by EmbedWorkflow children (inlined; prefix rides the
+/// in-process variables) and composed workflow-agent children (prefix rides
+/// the child's input envelope) — so both child kinds are indistinguishable in
+/// checkpoint key-space. See docs/workflow-agent-checkpoint-namespace-plan.md.
+pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
+    let parent_variables = source.get("variables").and_then(Value::as_object);
+    let loop_indices_suffix = parent_variables
+        .and_then(|vars| vars.get("_loop_indices"))
+        .and_then(Value::as_array)
+        .filter(|indices| !indices.is_empty())
+        .map(|indices| {
+            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
+            format!("[{}]", indices.join(","))
+        })
+        .unwrap_or_default();
+    match parent_variables
+        .and_then(|vars| vars.get("_cache_key_prefix"))
+        .and_then(Value::as_str)
+    {
+        Some(prefix) if !prefix.is_empty() => {
+            format!("{prefix}__{step_id}{loop_indices_suffix}")
+        }
+        _ => {
+            let workflow_id = parent_variables
+                .and_then(|vars| vars.get("_workflow_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("root");
+            format!("{workflow_id}::{step_id}{loop_indices_suffix}")
+        }
+    }
+}
+
 fn embed_child_variables(
     step_id: &str,
     child: &DirectJsonChildWorkflow,
@@ -4853,33 +5182,9 @@ fn embed_child_variables(
         variables.insert("_tenant_id".to_string(), tenant_id.clone());
     }
 
-    let loop_indices_suffix = parent_variables
-        .and_then(|vars| vars.get("_loop_indices"))
-        .and_then(Value::as_array)
-        .filter(|indices| !indices.is_empty())
-        .map(|indices| {
-            let indices = indices.iter().map(Value::to_string).collect::<Vec<_>>();
-            format!("[{}]", indices.join(","))
-        })
-        .unwrap_or_default();
-    let child_cache_prefix = match parent_variables
-        .and_then(|vars| vars.get("_cache_key_prefix"))
-        .and_then(Value::as_str)
-    {
-        Some(prefix) if !prefix.is_empty() => {
-            format!("{prefix}__{step_id}{loop_indices_suffix}")
-        }
-        _ => {
-            let workflow_id = parent_variables
-                .and_then(|vars| vars.get("_workflow_id"))
-                .and_then(Value::as_str)
-                .unwrap_or("root");
-            format!("{workflow_id}::{step_id}{loop_indices_suffix}")
-        }
-    };
     variables.insert(
         "_cache_key_prefix".to_string(),
-        Value::String(child_cache_prefix),
+        Value::String(child_cache_prefix(step_id, source)),
     );
 
     if let Some(defaults) = child.variables.as_object() {
@@ -6558,6 +6863,10 @@ struct AgentWire {
     capability_id: String,
     #[serde(default)]
     connection_id: Option<String>,
+    /// Resolvable connection binding (a `MappingValue`), evaluated against the
+    /// execution source at runtime; wins over `connection_id` when present.
+    #[serde(default)]
+    connection_ref: Option<Value>,
     input_mapping_id: u32,
     #[serde(default)]
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
@@ -6659,6 +6968,7 @@ struct DirectJsonAgent {
     agent_id: String,
     capability_id: String,
     connection_id: Option<String>,
+    connection_ref: Option<Value>,
     input_mapping_id: u32,
     required_inputs: Vec<DirectJsonRequiredAgentInput>,
 }
@@ -7866,6 +8176,66 @@ mod tests {
                     "items": ["Ada", true]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn resolve_connection_id_prefers_ref_then_literal_then_none() {
+        // Three agents: one bound via a resolvable `connection_ref` to a
+        // caller-supplied `connection` input, one with a literal id, one with
+        // no connection. `resolve_connection_id` is the runtime source for the
+        // agent-invoke `connection` argument, so this is what threads a rotated
+        // / caller-supplied id to every agent kind uniformly.
+        let manifest_json = serde_json::to_vec(&json!({
+            "graph": {
+                "agents": [
+                    { "id": 0, "stepId": "a0", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "hubspot", "capabilityId": "create-contact", "inputMappingId": 0,
+                      "connectionRef": { "valueType": "reference", "value": "data.crm" } },
+                    { "id": 1, "stepId": "a1", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "hubspot", "capabilityId": "create-contact", "inputMappingId": 0,
+                      "connectionId": "conn-literal" },
+                    { "id": 2, "stepId": "a2", "stepType": "Agent", "purpose": "agent.config",
+                      "agentId": "utils", "capabilityId": "noop", "inputMappingId": 0 }
+                ],
+                "mappings": [{ "id": 0, "stepId": "a0", "stepType": "Agent",
+                    "purpose": "agent.inputMapping", "value": {} }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_json).expect("manifest");
+        let source = build_source(br#"{"crm":"conn-live-42"}"#, b"{}", b"{}").expect("source");
+
+        // Ref resolves from the runtime input.
+        assert_eq!(
+            manifest
+                .resolve_connection_id(0, &source)
+                .expect("resolve ref"),
+            b"conn-live-42".to_vec()
+        );
+        // Literal id passes through.
+        assert_eq!(
+            manifest
+                .resolve_connection_id(1, &source)
+                .expect("resolve literal"),
+            b"conn-literal".to_vec()
+        );
+        // No connection → empty (caller writes no connection argument).
+        assert!(
+            manifest
+                .resolve_connection_id(2, &source)
+                .expect("resolve none")
+                .is_empty()
+        );
+
+        // A ref that resolves to an absent input yields no connection.
+        let empty_source = build_source(b"{}", b"{}", b"{}").expect("source");
+        assert!(
+            manifest
+                .resolve_connection_id(0, &empty_source)
+                .expect("resolve absent")
+                .is_empty()
         );
     }
 
@@ -9696,6 +10066,82 @@ mod tests {
     }
 
     #[test]
+    fn wait_signal_ids_fold_the_cache_key_prefix_per_invocation_site() {
+        // Two children (embedded or composed) waiting on the same step id must
+        // get DISTINCT signal ids: the invocation-site `_cache_key_prefix`
+        // scopes the step segment, exactly like the durable key builders. The
+        // wait's timeout deadline is checkpointed under this very string, so
+        // this also keeps deadline state per-site.
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Approve"
+        })))
+        .expect("manifest");
+
+        // Composed workflow-agent child: baked child _workflow_id + the
+        // parent-injected site prefix (whitelisted through build_source).
+        let scoped = build_source(
+            br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call"}}"#,
+            br#"{"_workflow_id":"child-wf"}"#,
+            b"{}",
+        )
+        .expect("scoped source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &scoped)
+                .expect("scoped signal id"),
+            "inst-1/child-wf/parent-wf::call::wait"
+        );
+
+        // A second invocation site of the SAME child → a different id.
+        let scoped_other = build_source(
+            br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call2"}}"#,
+            br#"{"_workflow_id":"child-wf"}"#,
+            b"{}",
+        )
+        .expect("second scoped source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &scoped_other)
+                .expect("second scoped signal id"),
+            "inst-1/child-wf/parent-wf::call2::wait"
+        );
+
+        // Embed-shaped scope (parent workflow id + chained prefix from
+        // `child_cache_prefix`, loop indices reset then re-accumulated).
+        let embed_scoped = build_source(
+            br#"{}"#,
+            br#"{"_workflow_id":"parent-wf","_cache_key_prefix":"parent-wf::embed1","_loop_indices":[3]}"#,
+            b"{}",
+        )
+        .expect("embed source");
+        assert_eq!(
+            manifest
+                .wait_signal_id("wait", "inst-1", &embed_scoped)
+                .expect("embed signal id"),
+            "inst-1/parent-wf/parent-wf::embed1::wait/[3]"
+        );
+
+        // AiAgent wait-tool ids fold the same prefix...
+        assert_eq!(
+            manifest
+                .ai_wait_tool_signal_id("ai", "inst-1", "get_approval", 2, &scoped)
+                .expect("scoped tool signal id"),
+            "inst-1/child-wf/parent-wf::call::ai.tool.get_approval.2"
+        );
+        // ...and stay byte-identical to the legacy shape at top level.
+        let plain =
+            build_source(br#"{}"#, br#"{"_workflow_id":"child-wf"}"#, b"{}").expect("plain source");
+        assert_eq!(
+            manifest
+                .ai_wait_tool_signal_id("ai", "inst-1", "get_approval", 2, &plain)
+                .expect("plain tool signal id"),
+            "inst-1/child-wf/ai.tool.get_approval.2"
+        );
+    }
+
+    #[test]
     fn wait_timeout_and_poll_interval_use_step_body() {
         let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
             "id": "wait",
@@ -10195,6 +10641,98 @@ mod tests {
     }
 
     #[test]
+    fn agent_scope_input_wraps_workflow_agent_child_envelope() {
+        let manifest =
+            DirectJsonManifest::parse(&agent_manifest_with_required_inputs(json!({}), json!([])))
+                .expect("manifest");
+
+        // Root invocation site: the scope derives from `_workflow_id`.
+        let scoped = manifest
+            .agent_scope_input(
+                0,
+                br#"{"message":"hi"}"#,
+                br#"{"data":{},"variables":{"_workflow_id":"wf-1::inst-9"},"steps":{}}"#,
+            )
+            .expect("scoped input");
+        let scoped: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(scoped["data"], json!({ "message": "hi" }));
+        assert_eq!(
+            scoped["variables"],
+            json!({ "_cache_key_prefix": "wf-1::inst-9::agent" })
+        );
+
+        // Nested site (this workflow itself running as a child): the inherited
+        // prefix chains and loop indices append — the same compositional
+        // formula as nested embeds, so composition depth is unbounded.
+        let nested = manifest
+            .agent_scope_input(
+                0,
+                b"{}",
+                br#"{"variables":{"_cache_key_prefix":"wfP::call","_loop_indices":[2]}}"#,
+            )
+            .expect("nested scoped input");
+        let nested: Value = serde_json::from_slice(&nested).expect("nested json");
+        assert_eq!(
+            nested["variables"]["_cache_key_prefix"],
+            json!("wfP::call__agent[2]")
+        );
+    }
+
+    #[test]
+    fn agent_tool_scope_input_wraps_per_call_envelope() {
+        // A workflow-agent invoked as an AiAgent TOOL is scoped PER CALL:
+        // the site is `{ai_step}.tool.{label}.{counter}`, so two dispatches
+        // of one tool (or a replayed turn) get deterministic, disjoint
+        // namespaces — folded through the same compositional formula as
+        // every other child scope.
+        let scoped = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            0,
+            br#"{"value":"first"}"#,
+            br#"{"data":{},"variables":{"_workflow_id":"parent-wf"},"steps":{}}"#,
+        )
+        .expect("scoped tool input");
+        let scoped: Value = serde_json::from_slice(&scoped).expect("scoped json");
+        assert_eq!(scoped["data"], json!({ "value": "first" }));
+        assert_eq!(
+            scoped["variables"],
+            json!({ "_cache_key_prefix": "parent-wf::ai.tool.wf_echo.0" })
+        );
+
+        // The next call gets its own namespace...
+        let second = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            1,
+            b"{}",
+            br#"{"variables":{"_workflow_id":"parent-wf"}}"#,
+        )
+        .expect("second scoped tool input");
+        let second: Value = serde_json::from_slice(&second).expect("second json");
+        assert_eq!(
+            second["variables"]["_cache_key_prefix"],
+            json!("parent-wf::ai.tool.wf_echo.1")
+        );
+
+        // ...and an inherited prefix chains (this AiAgent itself running as
+        // a composed/embedded child), like every other site scope.
+        let nested = DirectJsonManifest::agent_tool_scope_input(
+            "ai",
+            "wf_echo",
+            2,
+            b"{}",
+            br#"{"variables":{"_cache_key_prefix":"top-wf::call","_loop_indices":[1]}}"#,
+        )
+        .expect("nested scoped tool input");
+        let nested: Value = serde_json::from_slice(&nested).expect("nested json");
+        assert_eq!(
+            nested["variables"]["_cache_key_prefix"],
+            json!("top-wf::call__ai.tool.wf_echo.2[1]")
+        );
+    }
+
+    #[test]
     fn agent_connection_input_matches_generated_injection_shape() {
         let manifest =
             DirectJsonManifest::parse(&agent_manifest_with_required_inputs_and_connection(
@@ -10205,7 +10743,7 @@ mod tests {
             .expect("manifest");
 
         let input = manifest
-            .agent_connection_input(0, br#"{"value":"present"}"#)
+            .agent_connection_input(0, br#"{"value":"present"}"#, b"{}")
             .expect("connection input");
         let input: Value = serde_json::from_slice(&input).expect("input json");
 
@@ -10503,6 +11041,96 @@ mod tests {
         let bare = build_source(br#"{"tpl":"bare"}"#, b"{}", b"{}").expect("bare source");
         let bare: Value = serde_json::from_slice(&bare).expect("bare json");
         assert_eq!(bare["data"], json!({ "tpl": "bare" }));
+    }
+
+    #[test]
+    fn build_source_whitelists_cache_key_prefix_but_not_identity_vars() {
+        // A parent invoking this workflow as a composed agent injects the
+        // checkpoint-namespace through the input envelope. `_cache_key_prefix`
+        // must survive the `_`-filter; the identity variables must NOT — a
+        // caller can namespace its child's state but never spoof identity.
+        let source = build_source(
+            br#"{"data":{"x":1},"variables":{"_cache_key_prefix":"wfP::call[2]","_workflow_id":"spoofed","_tenant_id":"spoofed","plain":"ok"}}"#,
+            br#"{"_workflow_id":"wf-real::inst-1"}"#,
+            b"{}",
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        let vars = source["variables"].as_object().expect("variables");
+        assert_eq!(vars["_cache_key_prefix"], json!("wfP::call[2]"));
+        assert_eq!(
+            vars["_workflow_id"],
+            json!("wf-real::inst-1"),
+            "identity variables must stay non-overridable from input"
+        );
+        assert_ne!(vars.get("_tenant_id"), Some(&json!("spoofed")));
+        assert_eq!(vars["plain"], json!("ok"));
+    }
+
+    #[test]
+    fn child_scoped_durable_keys_fold_the_cache_key_prefix() {
+        // With `_cache_key_prefix` set (a child scope — embedded or composed),
+        // every durable key builder prepends it; without it, keys stay
+        // byte-identical to the legacy shapes (top-level workflows unaffected).
+        let manifest =
+            DirectJsonManifest::parse(&debug_manifest("Delay", "wait-step", None, json!({})))
+                .expect("manifest");
+
+        let plain = br#"{"data":{},"variables":{},"steps":{}}"#;
+        let scoped = br#"{"data":{},"variables":{"_cache_key_prefix":"wfP::call[1]"},"steps":{}}"#;
+
+        assert_eq!(
+            manifest
+                .delay_sleep_key("wait-step", plain)
+                .expect("plain delay key"),
+            "wait-step"
+        );
+        assert_eq!(
+            manifest
+                .delay_sleep_key("wait-step", scoped)
+                .expect("scoped delay key"),
+            "wfP::call[1]::wait-step"
+        );
+        assert_eq!(
+            manifest
+                .breakpoint_key("wait-step", scoped)
+                .expect("scoped breakpoint key"),
+            "wfP::call[1]::breakpoint::wait-step"
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_cache_key("ai", 3, scoped).expect("scoped turn key"),
+            "wfP::call[1]::ai.turn.3"
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_cache_key("ai", 3, plain).expect("plain turn key"),
+            "ai.turn.3"
+        );
+        // Retry/attempt keys derive from the (already-prefixed) base key.
+        assert_eq!(
+            DirectJsonManifest::agent_retry_sleep_key("wfP::call[1]::wait-step", 2),
+            b"wfP::call[1]::wait-step::retry_sleep::2".to_vec()
+        );
+    }
+
+    #[test]
+    fn child_cache_prefix_matches_the_embed_formula() {
+        // One shared definition for both child kinds: root level derives from
+        // `_workflow_id`, nested levels chain with `__`, loop indices append.
+        let root: Value = serde_json::from_str(r#"{"variables":{"_workflow_id":"wf-1::inst-9"}}"#)
+            .expect("root source");
+        assert_eq!(child_cache_prefix("call", &root), "wf-1::inst-9::call");
+
+        let nested: Value = serde_json::from_str(
+            r#"{"variables":{"_cache_key_prefix":"wf-1::inst-9::call","_loop_indices":[2,5]}}"#,
+        )
+        .expect("nested source");
+        assert_eq!(
+            child_cache_prefix("inner", &nested),
+            "wf-1::inst-9::call__inner[2,5]"
+        );
+
+        let bare: Value = serde_json::from_str(r#"{"variables":{}}"#).expect("bare source");
+        assert_eq!(child_cache_prefix("call", &bare), "root::call");
     }
 
     #[test]
@@ -11767,5 +12395,101 @@ mod tests {
                 "route": "active"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod invoke_error_and_delay_key_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn user_error_cannot_spoof_the_suspend_sentinel() {
+        // `__rt_suspended__` is the reserved code a composed workflow-agent's
+        // lifecycle suspend uses to cross the capability boundary; a
+        // user-authored error carrying it must be remapped, or an Error step
+        // could silently SUSPEND its composing parent instead of failing it.
+        let fields =
+            invoke_error_fields(br#"{"code":"__rt_suspended__","message":"spoof attempt"}"#);
+        assert_eq!(fields.code, "__rt_suspended__:user");
+        assert_eq!(fields.message, "spoof attempt");
+    }
+
+    #[test]
+    fn invoke_error_fields_decomposes_structured_envelopes() {
+        let envelope = json!({
+            "code": "HTTP_TIMEOUT",
+            "message": "upstream timed out",
+            "category": "transient",
+            "severity": "error",
+            "retryable": true,
+            "retryAfterMs": 1500,
+            "attributes": {"host": "api.example.com"}
+        });
+        let fields = invoke_error_fields(envelope.to_string().as_bytes());
+        assert_eq!(fields.code, "HTTP_TIMEOUT");
+        assert_eq!(fields.message, "upstream timed out");
+        assert_eq!(fields.category, "transient");
+        assert_eq!(fields.severity, "error");
+        assert!(fields.retryable);
+        assert_eq!(fields.retry_after_ms, Some(1500));
+        assert_eq!(
+            fields.attributes.as_deref(),
+            Some(r#"{"host":"api.example.com"}"#)
+        );
+    }
+
+    #[test]
+    fn invoke_error_fields_rides_raw_bytes_as_message() {
+        for raw in [
+            "plain failure text",
+            "[1,2,3]",
+            "\"just a json string\"",
+            "{not json",
+        ] {
+            let fields = invoke_error_fields(raw.as_bytes());
+            assert_eq!(fields.message, raw, "raw payload must ride message");
+            assert_eq!(fields.code, "");
+            assert!(!fields.retryable);
+            assert_eq!(fields.retry_after_ms, None);
+            assert_eq!(fields.attributes, None);
+        }
+        // An object without a message string surfaces the whole envelope.
+        let fields = invoke_error_fields(br#"{"code":"X"}"#);
+        assert_eq!(fields.code, "X");
+        assert_eq!(fields.message, r#"{"code":"X"}"#);
+    }
+
+    #[test]
+    fn delay_sleep_key_folds_loop_indices_and_keeps_top_level_bare() {
+        let manifest_bytes = serde_json::to_vec(&json!({
+            "graph": {
+                "steps": [{
+                    "id": "tick",
+                    "stepType": "Delay",
+                    "name": "Tick"
+                }]
+            }
+        }))
+        .expect("manifest json");
+        let manifest = DirectJsonManifest::parse(&manifest_bytes).expect("manifest parses");
+
+        // Top level: byte-identical to the legacy static key.
+        let top = manifest
+            .delay_sleep_key("tick", br#"{"data":{},"variables":{}}"#)
+            .expect("top-level key");
+        assert_eq!(top, "tick");
+
+        // Inside a Split/While iteration: the indices fold in.
+        let nested = manifest
+            .delay_sleep_key(
+                "tick",
+                br#"{"data":{},"variables":{"_loop_indices":[2,0]}}"#,
+            )
+            .expect("nested key");
+        assert_eq!(nested, "tick::2_0");
+
+        // Unknown steps fail loudly.
+        assert!(manifest.delay_sleep_key("nope", b"{}").is_err());
     }
 }

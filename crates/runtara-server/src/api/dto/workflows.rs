@@ -758,6 +758,12 @@ pub struct WorkflowDto {
     /// Defaults to "/" (root folder)
     #[serde(default = "default_path")]
     pub path: String,
+    /// Stable, per-tenant-unique capability id — the workflow-as-agent exports
+    /// `runtara:agent-<slug>/capabilities`. Auto-derived from the name at
+    /// create time, editable via the dedicated slug endpoint, never re-derived
+    /// on rename. `None` only for rows created before the slug backfill ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 fn default_path() -> String {

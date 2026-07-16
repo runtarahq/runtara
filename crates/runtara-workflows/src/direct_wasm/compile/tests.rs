@@ -834,6 +834,7 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -882,7 +883,9 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     );
     assert_eq!(metadata.workflow_logic_wasm.size_bytes, wasm.len() as u64);
     assert!(metadata.composed_wasm.is_none());
-    assert_eq!(metadata.shared_components.len(), 2);
+    // HostImport default: only the stdlib is a compose-time dependency — the
+    // runtime interface is satisfied by the host at run time.
+    assert_eq!(metadata.shared_components.len(), 1);
     assert!(
         metadata
             .shared_components
@@ -931,6 +934,7 @@ fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("emit should succeed for a handler step that carries an onError edge");
 
@@ -984,6 +988,7 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("emit should succeed for fan-out inside a Conditional branch");
 
@@ -1064,6 +1069,7 @@ fn direct_compile_long_chain_compiles_from_small_stack_caller() {
                 output_dir,
                 track_events: true,
                 agent_catalog: None,
+                agent_slug: None,
             })
         })
         .expect("spawn 2 MiB caller thread");
@@ -1090,6 +1096,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -1110,13 +1117,18 @@ fn direct_compile_embeds_manifest_and_support_sections() {
                     serde_json::from_slice(section.data()).expect("abi json");
                 assert_eq!(
                     abi["abiVersion"].as_u64(),
-                    Some(u64::from(DIRECT_WORKFLOW_ABI_VERSION))
+                    Some(u64::from(
+                        crate::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+                    ))
                 );
-                assert_eq!(abi["artifactKind"], "direct-run-component");
-                assert_eq!(abi["componentRunExport"], "wasi:cli/run@0.2.3");
+                assert_eq!(abi["artifactKind"], "direct-invoke-component");
+                assert_eq!(
+                    abi["componentRunExport"],
+                    "runtara:workflow-lifecycle/lifecycle@0.1.0"
+                );
                 assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
-                assert_eq!(abi["outputMode"], "stdlib-apply-mapping");
+                assert_eq!(abi["outputMode"], "invoke-result-outcome");
                 assert_eq!(
                     abi["manifestVersion"].as_u64(),
                     Some(u64::from(DIRECT_WORKFLOW_MANIFEST_VERSION))
@@ -1164,6 +1176,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -1188,7 +1201,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.expect("component export");
-                    if export.name.0 == "wasi:cli/run@0.2.3" {
+                    if export.name.0 == "runtara:workflow-lifecycle/lifecycle@0.1.0" {
                         assert_eq!(export.kind, ComponentExternalKind::Instance);
                         saw_run_export = true;
                     }
@@ -1200,7 +1213,10 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
 
     assert!(saw_stdlib_import, "stdlib interface import should exist");
     assert!(saw_runtime_import, "runtime interface import should exist");
-    assert!(saw_run_export, "wasi:cli/run export should exist");
+    assert!(
+        saw_run_export,
+        "lifecycle invoke export should exist (the Phase-5 default)"
+    );
 }
 
 #[test]
@@ -1215,6 +1231,7 @@ fn direct_compile_supports_conditional_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct conditional compile should succeed");
 
@@ -1244,6 +1261,7 @@ fn direct_compile_supports_nested_conditional_tree() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested conditional compile should succeed");
 
@@ -1279,6 +1297,7 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow compile should succeed");
 
@@ -1347,6 +1366,7 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow breakpoint compile should succeed");
 
@@ -1532,6 +1552,7 @@ fn direct_compile_supports_static_embed_workflow_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow retry override compile should succeed");
 
@@ -1590,6 +1611,7 @@ fn direct_compile_supports_nested_static_embed_workflow_retry_frame_isolation() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow retry compile should succeed");
 
@@ -1655,6 +1677,7 @@ fn direct_compile_supports_static_embed_workflow_with_terminal_error_child() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow terminal Error child compile should succeed");
 
@@ -1702,6 +1725,7 @@ fn direct_compile_supports_static_embed_workflow_with_conditional_error_child() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow conditional Error child compile should succeed");
 
@@ -1753,6 +1777,7 @@ fn direct_compile_supports_static_embed_workflow_parent_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow parent onError compile should succeed");
 
@@ -1807,6 +1832,7 @@ fn direct_compile_supports_static_embed_workflow_child_local_on_error() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct EmbedWorkflow child-local onError compile should succeed");
 
@@ -1871,6 +1897,7 @@ fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow compile should succeed");
 
@@ -1960,6 +1987,7 @@ fn direct_compile_supports_nested_static_embed_workflow_failure_closure() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested EmbedWorkflow failure compile should succeed");
 
@@ -1991,6 +2019,7 @@ fn direct_compile_supports_group_by_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct GroupBy compile should succeed");
 
@@ -2022,6 +2051,7 @@ fn direct_compile_supports_sequential_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split compile should succeed");
 
@@ -2183,6 +2213,7 @@ fn direct_compile_supports_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested Split compile should succeed");
 
@@ -2222,6 +2253,7 @@ fn direct_compile_supports_dont_stop_split_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dontStop nested Split compile should succeed");
 
@@ -2267,6 +2299,7 @@ fn direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph() 
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dontStop deep nested Split/While compile should succeed");
 
@@ -2322,6 +2355,7 @@ fn direct_compile_supports_simple_while_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While compile should succeed");
 
@@ -2351,6 +2385,7 @@ fn direct_compile_supports_split_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split onError compile should succeed");
 
@@ -2396,6 +2431,7 @@ fn direct_compile_supports_ai_agent_single_shot_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct single-shot AiAgent compile should succeed");
 
@@ -2462,6 +2498,7 @@ fn direct_compile_supports_ai_agent_structured_output_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct structured-output AiAgent compile should succeed");
 
@@ -2511,6 +2548,7 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct tool-loop AiAgent compile should succeed");
 
@@ -2582,6 +2620,7 @@ fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-tool AiAgent compile should succeed");
 
@@ -2643,6 +2682,7 @@ fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct wait-tool AiAgent compile should succeed");
 
@@ -2697,6 +2737,7 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct wait-tool-with-onWait AiAgent compile should succeed");
 
@@ -2728,6 +2769,7 @@ fn direct_compile_supports_wait_for_signal_with_nested_on_wait() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested-onWait wait compile should succeed");
 
@@ -2762,6 +2804,7 @@ fn direct_compile_supports_embed_workflow_child_with_agent_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-with-agent-child compile should succeed");
 
@@ -2809,6 +2852,7 @@ fn direct_compile_supports_embed_workflow_child_with_split_step() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct embed-with-split-child compile should succeed");
 
@@ -2837,6 +2881,7 @@ fn direct_compile_supports_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct conditional-diamond compile should succeed");
 
@@ -2885,6 +2930,7 @@ fn direct_compile_supports_nested_conditional_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct nested conditional-diamond compile should succeed");
 
@@ -2913,6 +2959,7 @@ fn direct_compile_supports_edge_condition_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct edge-condition-diamond compile should succeed");
 
@@ -2942,6 +2989,7 @@ fn direct_compile_supports_ai_agent_with_inert_on_error_edge() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct AiAgent-with-onError compile should succeed");
 
@@ -2968,6 +3016,7 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct multi-tool AiAgent compile should succeed");
 
@@ -3020,6 +3069,7 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct multi-tool AiAgent compile should succeed");
 
@@ -3076,6 +3126,7 @@ fn direct_compile_injects_ai_agent_turn_timeout() {
         output_dir: temp0.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-shot AiAgent compile should succeed");
     let baseline_manifest: DirectWorkflowManifest =
@@ -3112,6 +3163,7 @@ fn direct_compile_injects_ai_agent_turn_timeout() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-shot AiAgent compile should succeed");
     let manifest: DirectWorkflowManifest =
@@ -3139,6 +3191,7 @@ fn direct_compile_supports_ai_agent_memory_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory AiAgent compile should succeed");
 
@@ -3213,6 +3266,7 @@ fn direct_compile_supports_ai_agent_memory_compaction_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory-compaction AiAgent compile should succeed");
 
@@ -3262,6 +3316,7 @@ fn direct_compile_supports_ai_agent_memory_summarize_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct memory-summarize AiAgent compile should succeed");
 
@@ -3318,6 +3373,7 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct MCP AiAgent compile should succeed");
 
@@ -3428,6 +3484,7 @@ fn direct_compile_supports_ai_agent_tool_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct tool-error AiAgent compile should succeed");
 
@@ -3454,6 +3511,7 @@ fn direct_compile_supports_fanout_diamond_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct fan-out diamond compile should succeed");
 
@@ -3516,6 +3574,7 @@ fn direct_compile_supports_split_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split timeout compile should succeed");
 
@@ -3549,6 +3608,7 @@ fn direct_compile_supports_while_timeout_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While timeout compile should succeed");
 
@@ -3582,6 +3642,7 @@ fn direct_compile_supports_while_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While onError compile should succeed");
 
@@ -3627,6 +3688,7 @@ fn direct_compile_supports_while_with_nested_split_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct While with nested Split compile should succeed");
 
@@ -3668,6 +3730,7 @@ fn direct_compile_supports_split_schema_validation_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split schema compile should succeed");
 
@@ -3705,6 +3768,7 @@ fn direct_compile_supports_split_dont_stop_on_failed_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Split dontStopOnFailed compile should succeed");
 
@@ -3733,6 +3797,7 @@ fn direct_compile_supports_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Delay compile should succeed");
 
@@ -3765,6 +3830,7 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct dynamic Delay compile should succeed");
 
@@ -3800,6 +3866,7 @@ fn direct_compile_supports_non_durable_delay() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("non-durable Delay should compile");
 
@@ -3829,6 +3896,7 @@ fn direct_compile_supports_filter_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Filter compile should succeed");
 
@@ -3858,6 +3926,7 @@ fn direct_compile_supports_value_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct value Switch compile should succeed");
 
@@ -3887,6 +3956,7 @@ fn direct_compile_supports_routing_switch_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct routing Switch compile should succeed");
 
@@ -3916,6 +3986,7 @@ fn direct_compile_supports_log_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Log compile should succeed");
 
@@ -3945,6 +4016,7 @@ fn direct_compile_supports_error_entry_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Error compile should succeed");
 
@@ -3974,6 +4046,7 @@ fn direct_compile_supports_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct edge-condition compile should succeed");
 
@@ -4004,6 +4077,7 @@ fn direct_compile_supports_non_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent compile should succeed");
 
@@ -4037,6 +4111,7 @@ fn direct_compile_supports_non_durable_agent_default_retry() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("non-durable Agent default retry compile should succeed");
 
@@ -4068,6 +4143,7 @@ fn direct_compile_supports_durable_agent_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent compile should succeed");
 
@@ -4101,6 +4177,7 @@ fn direct_compile_supports_durable_agent_retry_overrides() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent retry compile should succeed");
 
@@ -4133,6 +4210,7 @@ fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent connection compile should succeed");
 
@@ -4164,6 +4242,7 @@ fn direct_compile_supports_non_durable_agent_default_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent onError compile should succeed");
 
@@ -4199,6 +4278,7 @@ fn direct_compile_supports_non_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct Agent conditional onError compile should succeed");
 
@@ -4233,6 +4313,7 @@ fn direct_compile_supports_durable_agent_conditional_on_error_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct durable Agent conditional onError compile should succeed");
 
@@ -4270,6 +4351,7 @@ fn direct_compile_supports_next_label_edge_condition_graph() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct next edge-condition compile should succeed");
 
@@ -5215,7 +5297,20 @@ fn direct_core_lowers_non_durable_agent_call() {
         "invoke",
     );
     let signature = resolve.wasm_signature(ManglingAndAbi::Standard32.import_variant(), function);
-    assert_eq!(signature.params, vec![WasmType::Pointer, WasmType::Pointer]);
+    // invoke(capability-id: string, input: list<u8>) -> result<list<u8>,
+    // error-info> flattens DIRECTLY (4 value params ≤ 16): cap (ptr, len),
+    // input (ptr, len), then the trailing return pointer — no indirect args
+    // spill now that the `connection` argument is gone.
+    assert_eq!(
+        signature.params,
+        vec![
+            WasmType::Pointer,
+            WasmType::Length,
+            WasmType::Pointer,
+            WasmType::Length,
+            WasmType::Pointer,
+        ]
+    );
     assert!(signature.results.is_empty());
     assert_eq!(signature.params.last(), Some(&WasmType::Pointer));
 
@@ -6507,9 +6602,6 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     let mut agent_invoke_index = None;
     let mut agent_connection_input_index = None;
     let mut saw_connection_input_before_invoke = false;
-    let mut saw_connection_some_tag_store = false;
-    let mut pending_connection_tag_value = false;
-    let mut previous_i32_const = None;
     let mut code_body_index = 0;
     let mut next_function_index = 0;
 
@@ -6533,6 +6625,10 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
             }
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
+                    // The connection is delivered inside `input` under
+                    // `_connection`: `agent-connection-input` rewrites the input
+                    // BEFORE `invoke` is called (the invoke ABI has no
+                    // connection argument).
                     let mut saw_connection_input_call = false;
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
@@ -6546,21 +6642,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                             {
                                 saw_connection_input_before_invoke = saw_connection_input_call;
                             }
-                            Operator::I32Const { value } => {
-                                pending_connection_tag_value = previous_i32_const
-                                    == Some(DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET)
-                                    && value == 1;
-                                previous_i32_const = Some(value);
-                            }
-                            Operator::I32Store { .. } if pending_connection_tag_value => {
-                                saw_connection_some_tag_store = true;
-                                pending_connection_tag_value = false;
-                                previous_i32_const = None;
-                            }
-                            _ => {
-                                pending_connection_tag_value = false;
-                                previous_i32_const = None;
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -6577,10 +6659,6 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     assert!(
         saw_connection_input_before_invoke,
         "Agent connection input injection should run before capabilities.invoke"
-    );
-    assert!(
-        saw_connection_some_tag_store,
-        "Agent connection lowering should store option<connection-info> discriminant 1"
     );
 }
 
@@ -10083,6 +10161,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -10093,9 +10172,11 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
     assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
-    assert!(world_wit.contains("export wasi:cli/run@0.2.3;"));
+    assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.1.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
-    assert!(wac.contains("new runtara:workflow-runtime"));
+    // HostImport default: the runtime component is neither instantiated nor
+    // spread — its interface bubbles to the composed artifact's imports.
+    assert!(!wac.contains("new runtara:workflow-runtime"));
     assert!(wac.contains("new runtara:workflow-logic"));
     assert!(wac.contains("export wf...;"));
 }
@@ -10117,6 +10198,7 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
 
@@ -10184,6 +10266,7 @@ fn direct_compile_composition_rejects_stale_component_metadata() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct compile should succeed");
     let component = &result.component_artifacts.shared_components[0];
@@ -10230,6 +10313,7 @@ fn direct_compile_composition_reports_missing_agent_component() {
         output_dir: temp.path().join("out"),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("direct agent compile should succeed");
     for component in &result.component_artifacts.shared_components {
@@ -10268,6 +10352,7 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
             output_dir: temp.path().to_path_buf(),
             track_events: false,
             agent_catalog: None,
+            agent_slug: None,
         },
         &components_dir,
     )
@@ -10334,6 +10419,7 @@ fn direct_compile_rejects_unsupported_graphs_before_writing_artifacts() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect_err("parallel fan-out is not supported in direct mode");
 
@@ -10392,6 +10478,7 @@ fn direct_compile_supports_single_agent_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("single-agent-no-finish should compile direct (implicit finish)");
 
@@ -10455,6 +10542,7 @@ fn direct_compile_supports_agent_chain_without_finish() {
         output_dir: temp.path().to_path_buf(),
         track_events: false,
         agent_catalog: None,
+        agent_slug: None,
     })
     .expect("agent-chain-no-finish should compile direct (implicit finish)");
 
@@ -10467,4 +10555,70 @@ fn direct_compile_supports_agent_chain_without_finish() {
         "agent chain without a Finish must lower directly: {:?}",
         result.support_report.unsupported
     );
+}
+
+#[test]
+fn runtime_binding_env_lever_defaults_host_import() {
+    use crate::direct_wasm::component::RuntimeBinding;
+    // The operational rollback lever: only the literal "composed" reverts.
+    assert_eq!(
+        super::runtime_binding_from_raw(None),
+        RuntimeBinding::HostImport
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("composed")),
+        RuntimeBinding::Composed
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("host-import")),
+        RuntimeBinding::HostImport
+    );
+    assert_eq!(
+        super::runtime_binding_from_raw(Some("")),
+        RuntimeBinding::HostImport
+    );
+}
+
+#[test]
+fn workflow_abi_env_lever_defaults_invoke() {
+    use crate::direct_wasm::component::WorkflowAbi;
+    // Phase-5 default: the invoke export; only the literal "cli-run" reverts.
+    assert_eq!(
+        super::workflow_abi_from_raw(None),
+        WorkflowAbi::InvokeHostImports
+    );
+    assert_eq!(
+        super::workflow_abi_from_raw(Some("cli-run")),
+        WorkflowAbi::CliRunHttp
+    );
+    assert_eq!(
+        super::workflow_abi_from_raw(Some("invoke")),
+        WorkflowAbi::InvokeHostImports
+    );
+}
+
+#[test]
+fn generated_workflow_slugs_are_wit_valid_packages() {
+    // The slug plan allows leading digits (docs/workflow-slug-plan.md,
+    // decision 3) on the premise that wit-parser accepts digit-led words in
+    // package names. This asserts that premise against the REAL parser via
+    // the same `agent_wit_package` template the composition path uses — if a
+    // wit-parser upgrade tightens the grammar, this fails here instead of as
+    // an opaque compile error on a user's workflow.
+    for name in ["2FA Sync", "My 2nd Flow", "Order Sync", "", "123 steps"] {
+        let slug = runtara_dsl::agent_meta::generate_workflow_slug(
+            name,
+            "a1b2c3d4-e5f6-7890-abcd-ef0123456789",
+        );
+        runtara_dsl::agent_meta::validate_workflow_slug(&slug)
+            .unwrap_or_else(|e| panic!("slug {slug:?} from {name:?} invalid: {e}"));
+        let wit = super::agent_wit_package(&slug);
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str("runtara-agent-types.wit", super::AGENT_TYPES_WIT)
+            .expect("agent types WIT parses");
+        resolve
+            .push_str(format!("runtara-agent-{slug}.wit"), &wit)
+            .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
+    }
 }

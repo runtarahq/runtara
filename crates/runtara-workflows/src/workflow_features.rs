@@ -137,6 +137,46 @@ impl WorkflowFeatureSummary {
             )
         })
     }
+
+    /// Whether the emitted component must import `runtara:workflow-runtime/runtime`
+    /// — i.e. any lowered step would call a `runtime.*` host function beyond the
+    /// terminal `complete`/`fail` (which the omit path suppresses in favor of the
+    /// in-band invoke return value).
+    ///
+    /// A workflow that needs NO runtime import is a "pure" transformation
+    /// (mapping/conditional/switch/split/while/filter/group-by/finish, all
+    /// non-durable, no logging/error events, no debug/tracing): the degenerate
+    /// agent case. Everything here is SOUND-conservative — anything that might
+    /// emit a `runtime.*` call keeps the import. A misclassification that omits
+    /// when a call IS emitted fails loudly at component validation (the call
+    /// targets a poisoned import index), never silently miscompiles.
+    ///
+    /// `track_events` (per-run debug instrumentation) emits per-step
+    /// `runtime.custom-event`s, so it forces the import regardless of shape.
+    pub fn needs_runtime(&self, track_events: bool) -> bool {
+        if track_events || self.root_durable {
+            return true;
+        }
+        self.features.iter().any(|feature| {
+            matches!(
+                feature,
+                WorkflowFeature::AgentCall
+                    | WorkflowFeature::AiAgent
+                    | WorkflowFeature::ChildWorkflow
+                    | WorkflowFeature::LogEvent
+                    | WorkflowFeature::ExplicitError
+                    | WorkflowFeature::Delay
+                    | WorkflowFeature::WaitForSignal
+                    | WorkflowFeature::SuspendResume
+                    | WorkflowFeature::Durability
+                    | WorkflowFeature::RetryPolicy
+                    | WorkflowFeature::Timeout
+                    | WorkflowFeature::Compensation
+                    | WorkflowFeature::Breakpoint
+                    | WorkflowFeature::Connection
+            )
+        })
+    }
 }
 
 impl Default for WorkflowFeatureSummary {

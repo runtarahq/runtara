@@ -159,7 +159,7 @@ fn emit_wrapped_child_error(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 }
 
@@ -298,7 +298,7 @@ pub(super) fn emit_embed_workflow_tool_arm(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_DATA_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_variables));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(
         body,
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
@@ -576,7 +576,7 @@ pub(super) fn emit_embed_workflow_plan(
         body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_cache_key));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
         load_retptr_list(body, route_ptr_local, route_len_local);
 
         emit_checkpoint_lookup(
@@ -803,11 +803,11 @@ pub(super) fn emit_embed_workflow_plan(
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
 
     emit_run_plan_mapping(

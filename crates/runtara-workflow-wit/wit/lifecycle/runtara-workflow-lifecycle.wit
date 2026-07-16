@@ -1,0 +1,49 @@
+// Canonical WIT contract for the workflow invoke export (the unified
+// agent-shaped entry point — Phase 3 of docs/unify-agents-workflows-plan.md).
+//
+// A workflow compiled with the invoke ABI exports `lifecycle` instead of
+// `wasi:cli/run`: input arrives as the call argument (JSON bytes, the
+// `{data, variables}` envelope) and the terminal result is the return value.
+// An agent is the degenerate case of this shape — a component whose success
+// arm is always a terminal payload and which imports no runtime interface.
+//
+// `error-info` comes from the neutral `runtara:abi` package (the shared home
+// for the agent + workflow-lifecycle vocabulary); the per-agent WIT still
+// carries its own structurally-identical copy pending a coordinated migration.
+package runtara:workflow-lifecycle@0.1.0;
+
+interface lifecycle {
+    use runtara:abi/types@0.1.0.{error-info};
+
+    /// One pending wait: the deterministic signal id (checkpoint id) the
+    /// instance is parked on, plus the persisted absolute timeout deadline.
+    record signal-wait {
+        checkpoint-id: string,
+        deadline-ms: option<u64>,
+    }
+
+    /// Why the run stopped early — how to re-invoke it.
+    variant wake {
+        /// Re-invoke at (or after) this wall-clock ms-since-epoch.
+        at(u64),
+        /// Re-invoke when the signal arrives, or at its deadline.
+        on-signal(signal-wait),
+        /// Lifecycle pause/drain: re-invoke on relaunch.
+        on-resume,
+    }
+
+    /// The success arm. `suspended` carries a wake-SET with re-invoke-on-ANY
+    /// semantics: sequential lowering emits singletons today, but the set
+    /// shape is load-bearing for future parallel branches / joins (see the
+    /// plan's concurrency-forward note) — single-wake would be an ABI break.
+    variant outcome {
+        completed(list<u8>),         // terminal output (JSON bytes)
+        suspended(list<wake>),
+    }
+
+    invoke: func(input: list<u8>) -> result<outcome, error-info>;
+}
+
+world workflow-lifecycle {
+    export lifecycle;
+}

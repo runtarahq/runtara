@@ -1,53 +1,60 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Agent component invocation argument lowering for the direct core emitter.
+//! Agent component invocation lowering for the direct core emitter.
 //!
-//! Independently-built agent components share no Rust types, so the emitter speaks
-//! their lowered WIT ABI by hand. `emit_agent_invoke` handles both call shapes:
-//! the canonical two-pointer form writes the capability-id and input `(ptr, len)`
-//! plus a tagged connection sub-struct into a fixed args struct in linear memory
-//! and calls with a pointer to it; other shapes push the args directly on the
-//! stack. Connection metadata is written as a tagged struct carrying only the
-//! connection id (never secrets or provider/integration metadata).
+//! Independently-built agent components share no Rust types, so the emitter
+//! speaks their lowered WIT ABI by hand. The invoke signature is
+//! `invoke(capability-id: string, input: list<u8>) -> result<list<u8>,
+//! error-info>` — no out-of-band connection argument. A connection is delivered
+//! inside `input` under `_connection`: `emit_agent_connection_input` resolves it
+//! (a `connection_ref` wins over the literal, id-only) and rewrites the input in
+//! place before the call, uniformly for every agent kind (primary, memory,
+//! MCP-tool). Capability-id and input `(ptr, len)` are pushed directly; the ≤16
+//! flat params never spill to the indirect args form.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
-use wit_parser::abi::WasmType;
 
 use super::abi::{
-    push_retptr_arg, push_segment_args, push_zero_value, store_i32_at, store_local_i32_at,
+    emit_agent_suspend_sentinel_check, push_retptr_arg, push_segment_args, push_zero_value,
 };
+use super::agent_io::emit_agent_connection_input;
 use super::{
-    DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET, DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET,
-    DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET,
-    DIRECT_AGENT_ARGS_OFFSET, DirectAgentInvokeImport, DirectCoreStaticData, DirectDataSegment,
+    DirectAgentInvokeImport, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_agent_invoke(
     body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     invoke: &DirectAgentInvokeImport,
     capability_id: &DirectDataSegment,
     static_data: &DirectCoreStaticData,
     agent_id: u32,
     input_ptr_local: u32,
     input_len_local: u32,
+    // The execution `source` locals of the CURRENT scope — top-level or a
+    // per-iteration Split/While scope — against which a resolvable connection is
+    // evaluated. Threaded (not a fixed local) so a ref on an Agent nested inside
+    // a subgraph resolves against that subgraph's data, not the top level.
+    source_ptr_local: u32,
+    source_len_local: u32,
 ) {
-    if invoke.params == [WasmType::Pointer, WasmType::Pointer] {
-        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET, capability_id.offset);
-        store_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 4, capability_id.len_i32());
-        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 8, input_ptr_local);
-        store_local_i32_at(body, DIRECT_AGENT_ARGS_OFFSET + 12, input_len_local);
-        emit_agent_connection_args(body, static_data, agent_id);
-        body.instruction(&Instruction::I32Const(DIRECT_AGENT_ARGS_OFFSET));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(invoke.function_index));
-        return;
-    }
+    // Inject the connection into the input under `_connection` — the single
+    // connection channel. A connectionless agent is a no-op.
+    emit_agent_connection_input(
+        body,
+        indices,
+        static_data,
+        agent_id,
+        input_ptr_local,
+        input_len_local,
+        source_ptr_local,
+        source_len_local,
+    );
 
+    // invoke(capability-id, input): push cap `(ptr, len)` then input `(ptr,
+    // len)`. Any trailing lowered params (none for this signature) zero-fill;
+    // the last param is the return pointer.
     push_segment_args(body, capability_id);
     body.instruction(&Instruction::LocalGet(input_ptr_local));
     body.instruction(&Instruction::LocalGet(input_len_local));
@@ -60,45 +67,15 @@ pub(super) fn emit_agent_invoke(
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(invoke.function_index));
-}
 
-fn emit_agent_connection_args(
-    body: &mut WasmFunction,
-    static_data: &DirectCoreStaticData,
-    agent_id: u32,
-) {
-    let Some(connection_id) = static_data.agent_connection_id(agent_id) else {
-        store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 0);
-        return;
-    };
-
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_TAG_OFFSET, 1);
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_ID_PTR_OFFSET,
-        connection_id.offset,
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_ID_LEN_OFFSET,
-        connection_id.len_i32(),
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_PTR_OFFSET,
-        static_data.agent_empty_integration_id.offset,
-    );
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_INTEGRATION_LEN_OFFSET, 0);
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_SUBTYPE_TAG_OFFSET, 0);
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_PTR_OFFSET,
-        static_data.agent_empty_parameters.offset,
-    );
-    store_i32_at(
-        body,
-        DIRECT_AGENT_ARG_CONNECTION_PARAMETERS_LEN_OFFSET,
-        static_data.agent_empty_parameters.len_i32(),
-    );
-    store_i32_at(body, DIRECT_AGENT_ARG_CONNECTION_RATE_LIMIT_TAG_OFFSET, 0);
+    // A workflow-agent child shares this instance's runtime host, so a
+    // lifecycle suspend (pause/shutdown ack) can fire INSIDE the child; the
+    // capability channel carries it out as the suspend sentinel error.
+    // Re-raise it through our own ABI here — before retry classification,
+    // per-attempt checkpointing, or onError routing can misread it as a
+    // failure. Native agents never raise the sentinel (and the check is
+    // gated off their invokes entirely).
+    if static_data.agent_is_workflow_agent(agent_id) {
+        emit_agent_suspend_sentinel_check(body, indices);
+    }
 }

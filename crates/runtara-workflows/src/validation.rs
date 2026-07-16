@@ -2303,6 +2303,26 @@ fn validate_references_with_inherited(
                 );
             }
         }
+
+        // A step's `connection_ref` is a bare MappingValue outside the input
+        // mapping — a typo'd reference (`data.con` vs `data.conn`) must fail
+        // at save time like any other reference, not opaquely at runtime as a
+        // "connection resolved to nothing" error.
+        let connection_ref = match step {
+            Step::Agent(agent_step) => agent_step.connection_ref.as_ref(),
+            Step::AiAgent(ai_step) => ai_step.connection_ref.as_ref(),
+            _ => None,
+        };
+        if let Some(value) = connection_ref {
+            validate_mapping_value_references(
+                step_id,
+                value,
+                &step_ids,
+                &step_types,
+                &variable_names,
+                result,
+            );
+        }
     }
 
     // Recursively validate subgraphs
@@ -3149,11 +3169,14 @@ fn validate_agents(
                 continue;
             }
 
+            // A resolvable `connection_ref` binds the connection at runtime, so
+            // it satisfies the requirement even with no literal `connection_id`.
             if agent_capability_requires_connection(
                 &agent_step.agent_id,
                 &agent_step.capability_id,
                 agent,
             ) && connection_id_is_missing(agent_step.connection_id.as_ref())
+                && agent_step.connection_ref.is_none()
             {
                 result.errors.push(ValidationError::AgentMissingConnection {
                     step_id: step_id.clone(),
@@ -4901,6 +4924,7 @@ fn schema_field_type_name(field_type: &SchemaFieldType) -> &'static str {
         SchemaFieldType::Array => "array",
         SchemaFieldType::Object => "object",
         SchemaFieldType::File => "file",
+        SchemaFieldType::Connection => "connection",
     }
 }
 
@@ -5677,8 +5701,11 @@ fn extract_template_static_references_from_condition_argument(
 fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Step::AiAgent(ai_step) = step {
-            // Must have a connection_id
-            if connection_id_is_missing(ai_step.connection_id.as_ref()) {
+            // Must have a connection — a literal `connection_id` or a
+            // resolvable `connection_ref` bound at runtime.
+            if connection_id_is_missing(ai_step.connection_id.as_ref())
+                && ai_step.connection_ref.is_none()
+            {
                 result
                     .errors
                     .push(ValidationError::AiAgentMissingConnection {
@@ -5947,6 +5974,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             capability_id,
             connection_id: None,
+            connection_ref: None,
             input_mapping: mapping,
             max_retries: None,
             retry_delay: None,
@@ -5994,6 +6022,7 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            integration: None,
             label: None,
             placeholder: None,
             order: None,
@@ -6189,6 +6218,7 @@ mod tests {
                 agent_id: "object_model".to_string(),
                 capability_id: "query-instances".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: Some(input_mapping),
                 max_retries: None,
                 retry_delay: None,
@@ -6233,6 +6263,7 @@ mod tests {
                 agent_id: "object_model".to_string(),
                 capability_id: "query-instances".to_string(),
                 connection_id: Some("conn-postgres".to_string()),
+                connection_ref: None,
                 input_mapping: Some(input_mapping),
                 max_retries: None,
                 retry_delay: None,
@@ -6255,6 +6286,54 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_connection_ref_satisfies_connection_requirement() {
+        let mut input_mapping = InputMapping::new();
+        input_mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("Product"),
+            }),
+        );
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "query".to_string(),
+            Step::Agent(AgentStep {
+                id: "query".to_string(),
+                name: None,
+                agent_id: "object_model".to_string(),
+                capability_id: "query-instances".to_string(),
+                // No literal id — bound at runtime via a `connection` input.
+                connection_id: None,
+                connection_ref: Some(MappingValue::Reference(runtara_dsl::ReferenceValue {
+                    value: "data.db".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                input_mapping: Some(input_mapping),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+
+        let graph = create_basic_graph(steps, "query");
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::AgentMissingConnection { .. })),
+            "connection_ref should satisfy E026, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn test_http_agent_connection_id_remains_optional() {
         let mut input_mapping = InputMapping::new();
         input_mapping.insert(
@@ -6273,6 +6352,7 @@ mod tests {
                 agent_id: "http".to_string(),
                 capability_id: "http-request".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: Some(input_mapping),
                 max_retries: None,
                 retry_delay: None,
@@ -6303,6 +6383,7 @@ mod tests {
                 id: "assistant".to_string(),
                 name: None,
                 connection_id: Some("   ".to_string()),
+                connection_ref: None,
                 config: None,
                 breakpoint: None,
                 durable: None,
@@ -6326,6 +6407,7 @@ mod tests {
             id: id.to_string(),
             name: None,
             connection_id: Some("conn-openai".to_string()),
+            connection_ref: None,
             config: Some(AiAgentConfig {
                 system_prompt: MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("you are helpful"),
@@ -6356,6 +6438,7 @@ mod tests {
             agent_id: "mcp".to_string(),
             capability_id: "mcp-tool-search".to_string(),
             connection_id: Some("conn-mcp".to_string()),
+            connection_ref: None,
             input_mapping: None,
             max_retries: None,
             retry_delay: None,
@@ -6545,6 +6628,36 @@ mod tests {
         );
     }
 
+    /// A `connection_ref` referencing a nonexistent step must fail at save
+    /// time like any input-mapping reference — previously it was excluded
+    /// from reference validation and only failed opaquely at runtime.
+    #[test]
+    fn test_connection_ref_reference_is_validated() {
+        let mut steps = HashMap::new();
+        let mut agent = match create_agent_step("agent", "transform", None) {
+            Step::Agent(agent_step) => agent_step,
+            _ => unreachable!(),
+        };
+        agent.connection_ref = Some(ref_value("steps.no_such_step.outputs.conn"));
+        steps.insert("agent".to_string(), Step::Agent(agent));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.has_errors(),
+            "a connection_ref to a nonexistent step must be a save-time error"
+        );
+    }
+
     // === Configuration Warning Tests ===
 
     #[test]
@@ -6558,6 +6671,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: Some(100),
                 retry_delay: None,
@@ -7127,6 +7241,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "passthrough".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -7266,6 +7381,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: Some(5_000_000), // 5000 seconds
@@ -7307,6 +7423,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: Some(3),    // Normal
                 retry_delay: Some(1000), // 1 second - normal
@@ -9060,6 +9177,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9077,6 +9195,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9131,6 +9250,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9151,6 +9271,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9243,6 +9364,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9260,6 +9382,7 @@ mod tests {
                 agent_id: "transform".to_string(),
                 capability_id: "map".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,
@@ -9389,6 +9512,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             capability_id: "bulk-update-instances".to_string(),
             connection_id: None,
+            connection_ref: None,
             input_mapping: Some(mapping),
             max_retries: None,
             retry_delay: None,
@@ -9554,6 +9678,7 @@ mod tests {
                 agent_id: "object_model".to_string(),
                 capability_id: "query-instances".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: Some(mapping),
                 max_retries: None,
                 retry_delay: None,
@@ -10858,6 +10983,7 @@ mod tests {
                 agent_id: "http".to_string(),
                 capability_id: "http-request".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: Some({
                     let mut m = InputMapping::new();
                     m.insert(
@@ -10933,6 +11059,7 @@ mod tests {
                 agent_id: "object_model".to_string(),
                 capability_id: "create-instance".to_string(),
                 connection_id: None,
+                connection_ref: None,
                 input_mapping: None,
                 max_retries: None,
                 retry_delay: None,

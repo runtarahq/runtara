@@ -552,6 +552,7 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
         CreateWorkflowParams {
             name: "MCP Folder Test".to_string(),
             description: "round-trip".to_string(),
+            slug: None,
         },
     )
     .await

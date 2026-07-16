@@ -11,11 +11,27 @@ pub const STDLIB_PACKAGE: &str = "runtara:workflow-stdlib@0.1.0";
 /// WIT package name for the runtime/SDK lifecycle component.
 pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.1.0";
 
+/// WIT package name for the neutral shared ABI vocabulary.
+pub const ABI_PACKAGE: &str = "runtara:abi@0.1.0";
+
+/// WIT package name for the workflow invoke-export contract.
+pub const LIFECYCLE_PACKAGE: &str = "runtara:workflow-lifecycle@0.1.0";
+
+/// Fully-qualified component export name of the lifecycle interface — what a
+/// workflow compiled with the invoke ABI exports instead of `wasi:cli/run`.
+pub const LIFECYCLE_INTERFACE_NAME: &str = "runtara:workflow-lifecycle/lifecycle@0.1.0";
+
 /// WIT text for `runtara:workflow-stdlib@0.1.0`.
 pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib.wit");
 
 /// WIT text for `runtara:workflow-runtime@0.1.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
+
+/// WIT text for `runtara:abi@0.1.0` (the neutral shared vocabulary).
+pub const ABI_WIT: &str = include_str!("../wit/lifecycle/deps/abi/runtara-abi.wit");
+
+/// WIT text for `runtara:workflow-lifecycle@0.1.0`.
+pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-lifecycle.wit");
 
 #[cfg(test)]
 mod tests {
@@ -75,6 +91,8 @@ mod tests {
             "group-by",
             "delay-duration-ms",
             "delay",
+            "delay-sleep-key",
+            "invoke-error-fields",
             "breakpoint-key",
             "breakpoint-event",
             "wait-signal-id",
@@ -116,6 +134,72 @@ mod tests {
         let world_id = package.worlds["workflow-stdlib"];
         let world = &resolve.worlds[world_id];
         assert!(world.imports.is_empty());
+        assert_eq!(world.exports.len(), 1);
+        assert!(
+            world
+                .exports
+                .values()
+                .any(|item| matches!(item, WorldItem::Interface { id, .. } if *id == interface_id))
+        );
+    }
+
+    #[test]
+    fn abi_wit_parses_and_defines_shared_types() {
+        let mut resolve = Resolve::default();
+        let package_id = resolve
+            .push_file(crate_dir().join("wit/lifecycle/deps/abi/runtara-abi.wit"))
+            .expect("abi WIT parses");
+        let package = &resolve.packages[package_id];
+        assert_eq!(package.name.to_string(), super::ABI_PACKAGE);
+        let interface = &resolve.interfaces[package.interfaces["types"]];
+        for type_name in ["error-info", "connection-info"] {
+            assert!(
+                interface.types.contains_key(type_name),
+                "missing abi type {type_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_wit_parses_and_exports_invoke() {
+        // The lifecycle package `use`s runtara:abi, so both must be in the
+        // resolve — the same way the compiler stages them together via
+        // `push_str`. (`push_file` treats each file as a self-contained
+        // package and won't resolve cross-package `use`; `push_str` into one
+        // resolve does, matching `build_direct_component_resolve_configured`.)
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str("runtara-abi.wit", super::ABI_WIT)
+            .expect("abi WIT parses");
+        let package_id = resolve
+            .push_str("runtara-workflow-lifecycle.wit", super::LIFECYCLE_WIT)
+            .expect("lifecycle WIT parses");
+        let package = &resolve.packages[package_id];
+
+        assert_eq!(package.name.to_string(), super::LIFECYCLE_PACKAGE);
+        let interface_id = package.interfaces["lifecycle"];
+        let interface = &resolve.interfaces[interface_id];
+        assert!(interface.functions.contains_key("invoke"));
+        // error-info is now a `use`d type from runtara:abi; the locally
+        // declared types are the wait/wake/outcome set.
+        for type_name in ["signal-wait", "wake", "outcome"] {
+            assert!(
+                interface.types.contains_key(type_name),
+                "missing lifecycle type {type_name}"
+            );
+        }
+
+        let world_id = package.worlds["workflow-lifecycle"];
+        let world = &resolve.worlds[world_id];
+        // The world imports only the `use`d runtara:abi type(s); its single
+        // real export is the lifecycle interface.
+        assert!(
+            world
+                .imports
+                .values()
+                .all(|item| matches!(item, WorldItem::Type { .. } | WorldItem::Interface { .. })),
+            "unexpected non-type import on the lifecycle world"
+        );
         assert_eq!(world.exports.len(), 1);
         assert!(
             world

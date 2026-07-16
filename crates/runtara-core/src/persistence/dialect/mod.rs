@@ -69,6 +69,10 @@ pub trait Dialect: Send + Sync + 'static {
     /// - SQLite: `"status"` — `status` is already `TEXT`.
     fn select_status_col() -> &'static str;
 
+    /// Column expression selecting `termination_reason` as text (the Postgres
+    /// column is an enum; SQLite stores plain text).
+    fn select_termination_col() -> &'static str;
+
     /// Wrap a timestamp expression so it compares correctly with another
     /// normalized timestamp.
     ///

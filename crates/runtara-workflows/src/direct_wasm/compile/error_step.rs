@@ -63,7 +63,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_error_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     push_segment_args(body, workflow_error_kind);
@@ -71,7 +71,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 
     emit_step_debug_event(
         body,
@@ -91,7 +91,7 @@ pub(super) fn emit_error_plan(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_error));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
     if let Some(failure_target) = failure_target {
@@ -103,11 +103,8 @@ pub(super) fn emit_error_plan(
             output_len_local,
         );
     } else {
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_fail));
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::Return);
+        // Same terminal-failure convention as every other fail site — the
+        // helper owns the per-ABI return shape (tag vs Err result area).
+        super::emit_runtime_fail_return(body, indices, output_ptr_local, output_len_local);
     }
 }

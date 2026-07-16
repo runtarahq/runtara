@@ -124,6 +124,43 @@ fn agent_requires_connection(catalog: &AgentCatalog, agent_id: &str) -> bool {
         .is_some_and(|agent| agent.supports_connections)
 }
 
+/// The connection id a step's binding pins at SAVE time, if any: the literal
+/// `connection_id`, or a `connection_ref` whose value is an IMMEDIATE string —
+/// semantically the same literal, just spelled through the resolvable channel,
+/// so it gets the same existence/ownership validation. Reference / template /
+/// composite refs resolve at runtime and have nothing checkable here. An
+/// empty/whitespace immediate is treated as no binding (not a satisfied one).
+fn statically_bound_connection_id<'a>(
+    connection_id: Option<&'a String>,
+    connection_ref: Option<&'a runtara_dsl::MappingValue>,
+) -> Option<&'a str> {
+    if let Some(id) = connection_id.map(String::as_str).map(str::trim)
+        && !id.is_empty()
+    {
+        return Some(id);
+    }
+    if let Some(runtara_dsl::MappingValue::Immediate(imm)) = connection_ref
+        && let Some(id) = imm.value.as_str()
+        && !id.trim().is_empty()
+    {
+        return Some(id.trim());
+    }
+    None
+}
+
+/// Whether a `connection_ref` defers to runtime resolution (reference,
+/// template, or composite — anything but an immediate literal).
+fn is_runtime_resolved_ref(connection_ref: Option<&runtara_dsl::MappingValue>) -> bool {
+    matches!(
+        connection_ref,
+        Some(
+            runtara_dsl::MappingValue::Reference(_)
+                | runtara_dsl::MappingValue::Template(_)
+                | runtara_dsl::MappingValue::Composite(_)
+        )
+    )
+}
+
 /// Render up to 5 candidate connections as a human-readable list.
 fn format_candidates(candidates: &[&ConnectionRef]) -> String {
     const MAX: usize = 5;
@@ -155,13 +192,21 @@ fn validate_graph_connections(
     for step in graph.steps.values() {
         match step {
             Step::Agent(agent_step) => {
-                if agent_requires_connection(catalog, &agent_step.agent_id)
-                    && agent_step
-                        .connection_id
-                        .as_ref()
-                        .map(|conn_id| conn_id.trim().is_empty())
-                        .unwrap_or(true)
-                {
+                // A RUNTIME-resolved `connection_ref` (a caller-supplied
+                // `connection` input, a rotated value, a dynamic selection)
+                // satisfies the connection requirement — its concrete id is
+                // bound at runtime, so there is nothing to check for
+                // existence/ownership here. An IMMEDIATE-valued ref is a
+                // literal in disguise and gets the full literal treatment
+                // (and an empty immediate is NOT a binding).
+                let bound_literal = statically_bound_connection_id(
+                    agent_step.connection_id.as_ref(),
+                    agent_step.connection_ref.as_ref(),
+                );
+                let has_binding = bound_literal.is_some()
+                    || is_runtime_resolved_ref(agent_step.connection_ref.as_ref());
+
+                if agent_requires_connection(catalog, &agent_step.agent_id) && !has_binding {
                     issues.push(
                         ValidationIssue::error(
                             IssueCategory::MissingConnection,
@@ -176,8 +221,7 @@ fn validate_graph_connections(
                     continue;
                 }
 
-                if let Some(ref conn_id) = agent_step.connection_id
-                    && !conn_id.is_empty()
+                if let Some(conn_id) = bound_literal
                     && !existing_connections.contains(conn_id)
                 {
                     let agent_int_ids = catalog.integration_ids_for(&agent_step.agent_id);
@@ -280,7 +324,12 @@ fn validate_ai_agent_connection(
     issues: &mut Vec<ValidationIssue>,
     parent_context: Option<&str>,
 ) {
-    let Some(conn_id) = ai_step.connection_id.as_ref().filter(|id| !id.is_empty()) else {
+    // Same immediate-ref folding as the Agent arm: an immediate-valued
+    // `connection_ref` is a literal and gets the existence check.
+    let Some(conn_id) = statically_bound_connection_id(
+        ai_step.connection_id.as_ref(),
+        ai_step.connection_ref.as_ref(),
+    ) else {
         return;
     };
 
@@ -508,6 +557,153 @@ mod tests {
         );
         assert!(issues[0].message.contains("requires a connection"));
         assert!(issues[0].message.contains("shopify"));
+    }
+
+    /// An IMMEDIATE-valued `connection_ref` is a literal id in disguise: it
+    /// must get the same existence check as `connectionId`, not the runtime
+    /// free pass a reference/template ref gets.
+    #[test]
+    fn test_immediate_connection_ref_gets_existence_check() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionRef": { "valueType": "immediate", "value": "no-such-conn" }
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            }
+        }))
+        .expect("workflow parses");
+        let existing: HashSet<String> = ["real-conn".to_string()].into();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+
+        assert_eq!(
+            issues.len(),
+            1,
+            "an immediate ref naming a non-existent connection must be flagged, got {issues:?}"
+        );
+        assert!(issues[0].message.contains("no-such-conn"));
+        assert!(issues[0].message.contains("not found"));
+    }
+
+    #[test]
+    fn test_immediate_connection_ref_with_existing_id_passes() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionRef": { "valueType": "immediate", "value": "real-conn" }
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            }
+        }))
+        .expect("workflow parses");
+        let existing: HashSet<String> = ["real-conn".to_string()].into();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+        assert!(
+            issues.is_empty(),
+            "existing immediate id passes: {issues:?}"
+        );
+    }
+
+    /// An empty immediate is NOT a satisfied binding — the step is missing
+    /// its connection, same as no binding at all.
+    #[test]
+    fn test_empty_immediate_connection_ref_is_not_a_binding() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionRef": { "valueType": "immediate", "value": "" }
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            }
+        }))
+        .expect("workflow parses");
+        let existing: HashSet<String> = HashSet::new();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+        assert_eq!(issues.len(), 1, "empty immediate is no binding: {issues:?}");
+        assert!(issues[0].message.contains("requires a connection"));
+    }
+
+    /// A connection-requiring agent bound via `connection_ref` (a caller-supplied
+    /// `connection` input) carries no literal `connection_id`, yet must NOT be
+    /// flagged as missing a connection — the concrete id is bound at runtime, so
+    /// there is nothing to existence/ownership-check at author time.
+    #[test]
+    fn connection_ref_satisfies_the_requirement_without_a_literal_id() {
+        let workflow: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionRef": {"valueType": "reference", "value": "data.store"}
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": [],
+                "inputSchema": {
+                    "store": {"type": "connection", "integration": "shopify", "required": true}
+                }
+            },
+            "variables": []
+        }))
+        .unwrap();
+
+        let existing: HashSet<String> = HashSet::new();
+        let catalog = agent_catalog("shopify", &["shopify"]);
+        let issues = validate_connections(&workflow, &existing, &catalog);
+        assert!(
+            issues.is_empty(),
+            "connection_ref should satisfy the requirement, got {issues:?}"
+        );
+
+        // And a literal connection_id is still ownership-checked as before: an
+        // unknown id under the same agent is flagged.
+        let no_ref: Workflow = serde_json::from_value(json!({
+            "executionGraph": {
+                "steps": {
+                    "step1": {
+                        "stepType": "Agent",
+                        "id": "step1",
+                        "agentId": "shopify",
+                        "capabilityId": "get-products",
+                        "connectionId": "unknown-id"
+                    }
+                },
+                "entryPoint": "step1",
+                "executionPlan": []
+            },
+            "variables": []
+        }))
+        .unwrap();
+        let issues = validate_connections(&no_ref, &existing, &catalog);
+        assert_eq!(issues.len(), 1, "literal id still checked: {issues:?}");
+        assert!(issues[0].message.contains("unknown-id"));
     }
 
     #[test]

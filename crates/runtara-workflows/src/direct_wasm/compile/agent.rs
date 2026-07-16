@@ -24,7 +24,7 @@ use super::agent_error::{
     emit_agent_invoke_error_branch,
 };
 use super::agent_invoke::emit_agent_invoke;
-use super::agent_io::{emit_agent_cache_key, emit_agent_connection_input};
+use super::agent_io::{emit_agent_cache_key, emit_agent_scope_input};
 use super::agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_attempt_decode, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
@@ -159,13 +159,25 @@ pub(super) fn emit_agent_plan(
         handled_target,
     );
 
-    emit_agent_connection_input(
+    // The connection is injected into the input at the invoke boundary
+    // (`emit_agent_invoke` → `emit_agent_connection_input`), so it is resolved
+    // once, per invoke, for every agent kind — nothing to do here.
+
+    // A workflow-agent child shares this instance's checkpoint store: wrap its
+    // input in the `{data, variables}` envelope carrying the invocation-site
+    // namespace so the child's durable keys never collide with the parent's or
+    // another invocation's. Once, here — before the retry loop (every attempt
+    // reuses the wrapped buffer) and before the durable cache-key block (which
+    // reads `source`, not this buffer). No-op for native agents.
+    emit_agent_scope_input(
         body,
         indices,
         static_data,
         agent_id,
         output_ptr_local,
         output_len_local,
+        source_ptr_local,
+        source_len_local,
     );
 
     if durable_checkpoint {
@@ -216,7 +228,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_result_key));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             load_retptr_list(
                 body,
                 DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
@@ -248,12 +260,15 @@ pub(super) fn emit_agent_plan(
             // MISS: this attempt has not run. Invoke, then persist its outcome.
             emit_agent_invoke(
                 body,
+                indices,
                 invoke,
                 capability_id,
                 static_data,
                 agent_id,
                 output_ptr_local,
                 output_len_local,
+                source_ptr_local,
+                source_len_local,
             );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -285,7 +300,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_envelope));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             load_retptr_list(
                 body,
                 DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
@@ -302,7 +317,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-            return_if_retptr_error(body);
+            return_if_retptr_error(body, indices);
             body.instruction(&Instruction::End); // fresh-failure If
             body.instruction(&Instruction::End); // hit/miss If
         } else {
@@ -311,12 +326,15 @@ pub(super) fn emit_agent_plan(
             // to before this change.
             emit_agent_invoke(
                 body,
+                indices,
                 invoke,
                 capability_id,
                 static_data,
                 agent_id,
                 output_ptr_local,
                 output_len_local,
+                source_ptr_local,
+                source_len_local,
             );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -430,12 +448,15 @@ pub(super) fn emit_agent_plan(
     } else {
         emit_agent_invoke(
             body,
+            indices,
             invoke,
             capability_id,
             static_data,
             agent_id,
             output_ptr_local,
             output_len_local,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,

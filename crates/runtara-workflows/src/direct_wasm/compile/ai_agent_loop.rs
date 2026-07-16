@@ -184,12 +184,15 @@ pub(super) fn emit_ai_agent_loop_plan(
             .expect("AiAgent memory load has a static capability id");
         emit_agent_invoke(
             body,
+            indices,
             load_invoke,
             load_capability,
             static_data,
             memory.load_agent_id,
             DIRECT_AI_CONV_PTR_LOCAL,
             DIRECT_AI_CONV_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,
@@ -434,12 +437,15 @@ pub(super) fn emit_ai_agent_loop_plan(
     // turn_out = invoke chat-turn(turn_input)
     emit_agent_invoke(
         body,
+        indices,
         turn_invoke,
         turn_capability,
         static_data,
         agent_id,
         DIRECT_AI_TURN_INPUT_PTR_LOCAL,
         DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        source_ptr_local,
+        source_len_local,
     );
     emit_agent_invoke_error_branch(
         body,
@@ -619,6 +625,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             DirectAiToolPlan::Agent {
                 agent_id,
                 agent_component_id,
+                label,
                 timeout_ms,
             } => {
                 let tool_invoke = indices
@@ -652,14 +659,54 @@ pub(super) fn emit_ai_agent_loop_plan(
                         DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
                     );
                 }
+                // A workflow-agent tool shares this instance's checkpoint
+                // store: wrap its arguments in the namespace envelope with a
+                // PER-CALL scope ({ai_step}.tool.{label}.{counter}) — one
+                // tool can be dispatched many times in one loop, so the
+                // per-step scope would collide across calls. The counter is
+                // the replay-stable tool-call counter (restored from the
+                // turn snapshot), so replays re-derive identical scopes.
+                // No-op for native tool targets.
+                if static_data.agent_is_workflow_agent(*agent_id) {
+                    let ai_step_segment = static_data
+                        .step_id(step_id)
+                        .expect("AiAgent step id is present in static data");
+                    let label_segment = static_data
+                        .step_id(label)
+                        .expect("AiAgent tool label is interned in static data");
+                    push_segment_args(body, ai_step_segment);
+                    push_segment_args(body, label_segment);
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
+                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
+                    body.instruction(&Instruction::LocalGet(source_ptr_local));
+                    body.instruction(&Instruction::LocalGet(source_len_local));
+                    push_retptr_arg(body);
+                    body.instruction(&Instruction::Call(indices.stdlib_agent_tool_scope_input));
+                    emit_retptr_error_or_return(
+                        body,
+                        indices,
+                        None,
+                        route_ptr_local,
+                        route_len_local,
+                    );
+                    load_retptr_list(
+                        body,
+                        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+                        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                    );
+                }
                 emit_agent_invoke(
                     body,
+                    indices,
                     tool_invoke,
                     tool_capability,
                     static_data,
                     *agent_id,
                     DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
                     DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                    source_ptr_local,
+                    source_len_local,
                 );
                 // A tool failure is fed back to the LLM as the tool result (the
                 // error envelope) and the loop continues, rather than failing the
@@ -886,12 +933,15 @@ pub(super) fn emit_ai_agent_loop_plan(
                 .expect("AiAgent summarize has a static capability id");
             emit_agent_invoke(
                 body,
+                indices,
                 summarize_invoke,
                 summarize_capability,
                 static_data,
                 summarize.agent_id,
                 DIRECT_AI_TURN_INPUT_PTR_LOCAL,
                 DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+                source_ptr_local,
+                source_len_local,
             );
             emit_agent_invoke_error_branch(
                 body,
@@ -1005,12 +1055,15 @@ pub(super) fn emit_ai_agent_loop_plan(
             .expect("AiAgent memory save has a static capability id");
         emit_agent_invoke(
             body,
+            indices,
             save_invoke,
             save_capability,
             static_data,
             memory.save_agent_id,
             DIRECT_AI_TURN_INPUT_PTR_LOCAL,
             DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
         );
         emit_agent_invoke_error_branch(
             body,

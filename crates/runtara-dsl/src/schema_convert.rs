@@ -24,6 +24,8 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
         SchemaFieldType::Array => "array",
         SchemaFieldType::Object => "object",
         SchemaFieldType::File => "object",
+        // A connection binding is carried as a connection-id string.
+        SchemaFieldType::Connection => "string",
     };
     prop.insert("type".to_string(), Value::String(type_str.to_string()));
 
@@ -161,6 +163,7 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            integration: None,
             label: None,
             placeholder: None,
             order: None,
@@ -204,6 +207,7 @@ mod tests {
                 default: None,
                 example: None,
                 enum_values: None,
+                integration: None,
                 label: None,
                 placeholder: None,
                 order: None,
@@ -239,6 +243,7 @@ mod tests {
                 default: None,
                 example: None,
                 items: None,
+                integration: None,
                 label: None,
                 placeholder: None,
                 order: None,

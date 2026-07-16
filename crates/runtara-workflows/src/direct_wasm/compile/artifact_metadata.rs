@@ -22,6 +22,7 @@ use super::super::component::{
 use super::super::error::DirectCompileError;
 use super::super::manifest::DIRECT_WORKFLOW_MANIFEST_VERSION;
 use super::{DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, sha256_hex};
+use runtara_dsl::agent_meta::capability_tags;
 
 /// Metadata sidecar for direct workflow artifacts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -251,24 +252,40 @@ pub(super) fn resolve_shared_component_dependencies(
 
 pub(super) fn resolve_agent_component_dependencies(
     components_dir: &Path,
+    extra_component_dirs: &[std::path::PathBuf],
     components: &[DirectAgentComponentRequirement],
 ) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
     components
         .iter()
         .map(|component| {
-            let wasm_path = components_dir.join(&component.bundle_wasm_filename);
-            if !wasm_path.exists() {
+            // Search the primary components dir first (native agents), then the
+            // extra dirs — staged workflow-agents live in a per-tenant staging
+            // dir, and a parent composing `agentId: <slug>` finds the published
+            // child's `.wasm` there via the identical naming convention.
+            let dir = std::iter::once(components_dir)
+                .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
+                .find(|dir| dir.join(&component.bundle_wasm_filename).exists());
+            let Some(dir) = dir else {
+                let searched: Vec<String> = std::iter::once(components_dir)
+                    .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
+                    .map(|d| {
+                        d.join(&component.bundle_wasm_filename)
+                            .display()
+                            .to_string()
+                    })
+                    .collect();
                 return Err(DirectCompileError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!(
-                        "direct agent component `{}` missing at {}",
+                        "direct agent component `{}` missing — searched {}",
                         component.agent_id,
-                        wasm_path.display()
+                        searched.join(", ")
                     ),
                 )));
-            }
+            };
+            check_workflow_agent_checkpoint_scope(dir, component)?;
             resolve_component_dependency(
-                components_dir,
+                dir,
                 "agent",
                 Some(component.agent_id.as_str()),
                 &component.package,
@@ -278,6 +295,109 @@ pub(super) fn resolve_agent_component_dependencies(
             )
         })
         .collect()
+}
+
+/// Stale-artifact gate for composed workflow-agents (checkpoint namespacing,
+/// docs/workflow-agent-checkpoint-namespace-plan.md §5).
+///
+/// A DURABLE workflow-agent child shares the composing parent instance's
+/// checkpoint store; the parent namespaces the child's keys by injecting
+/// `variables._cache_key_prefix` through the input envelope. An artifact
+/// published BEFORE that whitelist existed silently drops the injected prefix
+/// (its `build_source` filters every `_`-variable), so its durable keys would
+/// collide across invocation sites — invisibly. Refuse to compose such a
+/// child; a republish rebuilds it against the current stdlib. Detection:
+/// - sidecar capability tagged `workflow-agent` → it is a published
+///   workflow-agent (native agents skip this gate entirely);
+/// - `checkpoint-scope:1` tag present → current artifact, compose freely;
+/// - otherwise, only a runtime-importing (durable) child is dangerous — a
+///   pure child has no checkpoints to protect and composes freely.
+fn check_workflow_agent_checkpoint_scope(
+    dir: &Path,
+    component: &DirectAgentComponentRequirement,
+) -> Result<(), DirectCompileError> {
+    let meta = fs::read(dir.join(&component.bundle_meta_filename))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let tags: Vec<String> = meta
+        .as_ref()
+        .and_then(|meta| meta.get("capabilities"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| capability.get("tags").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+
+    if tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE.to_string()) {
+        // Current artifact — compose freely.
+        return Ok(());
+    }
+    if meta.is_some() && !tags.contains(&capability_tags::WORKFLOW_AGENT.to_string()) {
+        // A parseable sidecar without the workflow-agent tag is a native
+        // agent — the fast path taken for every bundled agent on every
+        // compile; no wasm scan.
+        return Ok(());
+    }
+
+    // Anomalous branch only: a workflow-agent sidecar without the marker
+    // (stale publish), or a MISSING/unparseable sidecar (partial stage,
+    // manual copy). The wasm itself is the authority: only a
+    // runtime-importing component writes checkpoints into the composing
+    // parent's store, so only that shape is refused.
+    let wasm_bytes = fs::read(dir.join(&component.bundle_wasm_filename))?;
+    if component_imports_workflow_runtime(&wasm_bytes)? {
+        let cause = if meta.is_some() {
+            "is a stale artifact that predates checkpoint namespacing"
+        } else {
+            "has a missing or unreadable .meta.json sidecar"
+        };
+        return Err(DirectCompileError::Component(format!(
+            "published workflow-agent `{}` {} — composed into this workflow, its durable \
+             checkpoint ids would collide across invocations; republish it \
+             (POST /workflows/<id>/publish-agent) and recompile",
+            component.agent_id, cause
+        )));
+    }
+    Ok(())
+}
+
+/// True when the component's TOP-LEVEL imports include the workflow runtime
+/// (`runtara:workflow-runtime/runtime`) — the shape of a DURABLE published
+/// workflow-agent, whose checkpoint/sleep calls bubble up to the composing
+/// parent's instance host. Imports of nested (already-linked) components
+/// don't count: only what the composed child still asks the outside world
+/// for matters.
+fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
+    let parse_error = |err: wasmparser::BinaryReaderError| {
+        DirectCompileError::Component(format!(
+            "failed to parse staged workflow-agent component: {err}"
+        ))
+    };
+    let mut depth = 0usize;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.map_err(parse_error)? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader {
+                    let import = import.map_err(parse_error)?;
+                    if import
+                        .name
+                        .0
+                        .starts_with("runtara:workflow-runtime/runtime")
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn resolve_component_dependency(

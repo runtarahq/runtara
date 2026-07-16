@@ -201,6 +201,7 @@ impl SchemaFieldType {
             SchemaFieldType::Array => "array",
             SchemaFieldType::Object => "object",
             SchemaFieldType::File => "file",
+            SchemaFieldType::Connection => "connection",
         }
     }
 }

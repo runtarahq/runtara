@@ -448,6 +448,7 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
                             .map(|value| Value::String((*value).to_string()))
                             .collect()
                     }),
+                    integration: None,
                     label: field.display_name.map(str::to_string),
                     placeholder: field.placeholder.map(str::to_string),
                     order: Some(field.order),
@@ -717,6 +718,7 @@ fn empty_schema_field(field_type: SchemaFieldType) -> SchemaField {
         example: None,
         items: None,
         enum_values: None,
+        integration: None,
         label: None,
         placeholder: None,
         order: None,
@@ -1017,6 +1019,8 @@ fn value_matches_type(value: &Value, field_type: &SchemaFieldType) -> bool {
         SchemaFieldType::Boolean => value.is_boolean(),
         SchemaFieldType::Array => value.is_array(),
         SchemaFieldType::Object | SchemaFieldType::File => value.is_object(),
+        // A connection binding is a connection-id string.
+        SchemaFieldType::Connection => value.is_string(),
     }
 }
 
@@ -1121,6 +1125,7 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            integration: None,
             label: None,
             placeholder: None,
             order: None,

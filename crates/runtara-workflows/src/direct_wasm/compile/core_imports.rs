@@ -76,6 +76,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_while_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
+    stdlib_delay_sleep_key: Option<u32>,
+    stdlib_invoke_error_fields: Option<u32>,
     stdlib_breakpoint_key: Option<u32>,
     stdlib_breakpoint_event: Option<u32>,
     stdlib_wait_signal_id: Option<u32>,
@@ -126,6 +128,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_summarize_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
+    stdlib_agent_scope_input: Option<u32>,
+    stdlib_agent_tool_scope_input: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_retry_sleep_key: Option<u32>,
     stdlib_agent_attempt_result_key: Option<u32>,
@@ -143,64 +147,104 @@ pub(super) struct DirectCoreImportIndices {
 }
 
 impl DirectCoreImportIndices {
-    pub(super) fn require_all(self) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
+    pub(super) fn require_all(
+        self,
+        abi: crate::direct_wasm::component::WorkflowAbi,
+        store_freeing_sleep: bool,
+        omit_runtime: bool,
+    ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
-            runtime_load_input: require_import(self.runtime_load_input, "runtime.load-input")?,
-            runtime_complete: require_import(self.runtime_complete, "runtime.complete")?,
-            runtime_fail: require_import(self.runtime_fail, "runtime.fail")?,
-            runtime_custom_event: require_import(
+            abi,
+            store_freeing_sleep,
+            omit_runtime,
+            runtime_load_input: require_runtime(
+                self.runtime_load_input,
+                "runtime.load-input",
+                omit_runtime,
+            )?,
+            runtime_complete: require_runtime(
+                self.runtime_complete,
+                "runtime.complete",
+                omit_runtime,
+            )?,
+            runtime_fail: require_runtime(self.runtime_fail, "runtime.fail", omit_runtime)?,
+            runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
+                omit_runtime,
             )?,
-            runtime_debug_mode_enabled: require_import(
+            runtime_debug_mode_enabled: require_runtime(
                 self.runtime_debug_mode_enabled,
                 "runtime.debug-mode-enabled",
+                omit_runtime,
             )?,
-            runtime_breakpoint_pause: require_import(
+            runtime_breakpoint_pause: require_runtime(
                 self.runtime_breakpoint_pause,
                 "runtime.breakpoint-pause",
+                omit_runtime,
             )?,
-            runtime_heartbeat: require_import(self.runtime_heartbeat, "runtime.heartbeat")?,
-            runtime_instance_id: require_import(self.runtime_instance_id, "runtime.instance-id")?,
-            runtime_is_cancelled: require_import(
+            runtime_heartbeat: require_runtime(
+                self.runtime_heartbeat,
+                "runtime.heartbeat",
+                omit_runtime,
+            )?,
+            runtime_instance_id: require_runtime(
+                self.runtime_instance_id,
+                "runtime.instance-id",
+                omit_runtime,
+            )?,
+            runtime_is_cancelled: require_runtime(
                 self.runtime_is_cancelled,
                 "runtime.is-cancelled",
+                omit_runtime,
             )?,
-            runtime_check_signals: require_import(
+            runtime_check_signals: require_runtime(
                 self.runtime_check_signals,
                 "runtime.check-signals",
+                omit_runtime,
             )?,
-            runtime_poll_custom_signal: require_import(
+            runtime_poll_custom_signal: require_runtime(
                 self.runtime_poll_custom_signal,
                 "runtime.poll-custom-signal",
+                omit_runtime,
             )?,
-            runtime_now_ms: require_import(self.runtime_now_ms, "runtime.now-ms")?,
-            runtime_get_checkpoint: require_import(
+            runtime_now_ms: require_runtime(self.runtime_now_ms, "runtime.now-ms", omit_runtime)?,
+            runtime_get_checkpoint: require_runtime(
                 self.runtime_get_checkpoint,
                 "runtime.get-checkpoint",
+                omit_runtime,
             )?,
-            runtime_checkpoint: require_import(self.runtime_checkpoint, "runtime.checkpoint")?,
-            runtime_handle_checkpoint_signal: require_import(
+            runtime_checkpoint: require_runtime(
+                self.runtime_checkpoint,
+                "runtime.checkpoint",
+                omit_runtime,
+            )?,
+            runtime_handle_checkpoint_signal: require_runtime(
                 self.runtime_handle_checkpoint_signal,
                 "runtime.handle-checkpoint-signal",
+                omit_runtime,
             )?,
-            runtime_record_retry_attempt: require_import(
+            runtime_record_retry_attempt: require_runtime(
                 self.runtime_record_retry_attempt,
                 "runtime.record-retry-attempt",
+                omit_runtime,
             )?,
-            runtime_durable_sleep: require_import(
+            runtime_durable_sleep: require_runtime(
                 self.runtime_durable_sleep,
                 "runtime.durable-sleep",
+                omit_runtime,
             )?,
-            runtime_blocking_sleep: require_import(
+            runtime_blocking_sleep: require_runtime(
                 self.runtime_blocking_sleep,
                 "runtime.blocking-sleep",
+                omit_runtime,
             )?,
-            runtime_durable_sleep_checkpoint: require_import(
+            runtime_durable_sleep_checkpoint: require_runtime(
                 self.runtime_durable_sleep_checkpoint,
                 "runtime.durable-sleep-checkpoint",
+                omit_runtime,
             )?,
             stdlib_init_manifest: require_import(
                 self.stdlib_init_manifest,
@@ -300,6 +344,14 @@ impl DirectCoreImportIndices {
                 "stdlib.delay-duration-ms",
             )?,
             stdlib_delay: require_import(self.stdlib_delay, "stdlib.delay")?,
+            stdlib_delay_sleep_key: require_import(
+                self.stdlib_delay_sleep_key,
+                "stdlib.delay-sleep-key",
+            )?,
+            stdlib_invoke_error_fields: require_import(
+                self.stdlib_invoke_error_fields,
+                "stdlib.invoke-error-fields",
+            )?,
             stdlib_breakpoint_key: require_import(
                 self.stdlib_breakpoint_key,
                 "stdlib.breakpoint-key",
@@ -491,6 +543,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_connection_input,
                 "stdlib.agent-connection-input",
             )?,
+            stdlib_agent_scope_input: require_import(
+                self.stdlib_agent_scope_input,
+                "stdlib.agent-scope-input",
+            )?,
+            stdlib_agent_tool_scope_input: require_import(
+                self.stdlib_agent_tool_scope_input,
+                "stdlib.agent-tool-scope-input",
+            )?,
             stdlib_agent_cache_key: require_import(
                 self.stdlib_agent_cache_key,
                 "stdlib.agent-cache-key",
@@ -543,7 +603,26 @@ impl DirectCoreImportIndices {
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectCoreFunctionIndices {
+    /// The top-level export shape the module is emitted against. Threaded
+    /// through the indices because every lowerer already receives them, and
+    /// the return convention at fail sites depends on it (tag under
+    /// `wasi:cli/run`; result-area pointer under the invoke export).
+    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
+    /// Opt-in gate for the store-freeing durable-sleep lowering. When false
+    /// (the default), a durable Delay blocks in the host on
+    /// `durable-sleep-checkpoint` — byte-identical to the legacy path. When
+    /// true AND `abi == InvokeHostImports`, the Delay checkpoints its deadline
+    /// and exits with `outcome::suspended(at(deadline))` so the host frees the
+    /// Store and reschedules a relaunch. Only meaningful under the invoke
+    /// export (the only shape whose success arm can carry a wake).
+    pub(super) store_freeing_sleep: bool,
+    /// When true, the component imports no runtime; the terminal `complete`/
+    /// `fail` are NOT lowered and the result travels solely via the invoke
+    /// return value. Runtime index fields hold a poison sentinel and must never
+    /// be called (see [`RUNTIME_OMITTED_POISON`]).
+    pub(super) omit_runtime: bool,
     pub(super) runtime_load_input: u32,
+    // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,
     pub(super) runtime_custom_event: u32,
@@ -597,6 +676,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_while_output: u32,
     pub(super) stdlib_delay_duration_ms: u32,
     pub(super) stdlib_delay: u32,
+    pub(super) stdlib_delay_sleep_key: u32,
+    pub(super) stdlib_invoke_error_fields: u32,
     pub(super) stdlib_breakpoint_key: u32,
     pub(super) stdlib_breakpoint_event: u32,
     pub(super) stdlib_wait_signal_id: u32,
@@ -647,6 +728,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_summarize_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
     pub(super) stdlib_agent_connection_input: u32,
+    pub(super) stdlib_agent_scope_input: u32,
+    pub(super) stdlib_agent_tool_scope_input: u32,
     pub(super) stdlib_agent_cache_key: u32,
     pub(super) stdlib_agent_retry_sleep_key: u32,
     pub(super) stdlib_agent_attempt_result_key: u32,
@@ -662,6 +745,25 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
+impl DirectCoreFunctionIndices {
+    /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
+    ///
+    /// Suppressed when the runtime is omitted (nothing to call) AND under the
+    /// `AgentCapabilities` export even when the runtime IS imported (a durable
+    /// workflow-agent): composed into a parent, the child shares the PARENT
+    /// instance's runtime — its terminal `complete` would mark the parent's
+    /// instance finished mid-flight. An agent capability's terminal result is
+    /// the return value; instance lifecycle belongs to the caller. Non-terminal
+    /// runtime calls (checkpoints, sleeps, signals, events) still lower.
+    pub(super) fn report_terminal_status(&self) -> bool {
+        !self.omit_runtime
+            && !matches!(
+                self.abi,
+                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+            )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DirectAgentInvokeImport {
     pub(super) function_index: u32,
@@ -672,6 +774,28 @@ fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileEr
     value.ok_or_else(|| {
         DirectCompileError::Component(format!("missing {name} import in direct world"))
     })
+}
+
+/// Poison function index for a `runtime.*` slot when the component omits the
+/// runtime import. The omit path (a pure, agent-shaped workflow) lowers NO
+/// `runtime.*` call, so these slots are never referenced; if a lowerer emits
+/// one anyway, the call targets an out-of-bounds function index and the
+/// `ComponentEncoder::validate(true)` pass fails loudly at compile — a safety
+/// net for a `needs_runtime` misclassification, never a silent miscompile.
+const RUNTIME_OMITTED_POISON: u32 = u32::MAX;
+
+/// `require_import` for a runtime function, tolerant of its absence under
+/// `omit_runtime` (returns the poison index instead of erroring).
+fn require_runtime(
+    value: Option<u32>,
+    name: &str,
+    omit_runtime: bool,
+) -> Result<u32, DirectCompileError> {
+    if omit_runtime {
+        Ok(value.unwrap_or(RUNTIME_OMITTED_POISON))
+    } else {
+        require_import(value, name)
+    }
 }
 
 fn is_runtime_import(
@@ -714,6 +838,35 @@ pub(super) fn is_wasi_cli_run_export(
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name.starts_with("wasi:cli/run"))
+}
+
+/// True for `runtara:workflow-lifecycle/lifecycle.invoke` — the entry export
+/// under [`WorkflowAbi::InvokeHostImports`].
+pub(super) fn is_lifecycle_invoke_export(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "invoke"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("runtara:workflow-lifecycle/lifecycle"))
+}
+
+/// True for the workflow-as-agent capability export: an `invoke` in a
+/// `runtara:agent-<id>/capabilities` interface. The compiled workflow is the
+/// agent, so the package is `runtara:agent-*` (not a composed dependency).
+pub(super) fn is_capabilities_invoke_export(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+) -> bool {
+    function.name == "invoke"
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| {
+                name.starts_with("runtara:agent-") && name.contains("/capabilities")
+            })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -847,6 +1000,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
         import_indices.stdlib_delay = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "delay-sleep-key") {
+        import_indices.stdlib_delay_sleep_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "invoke-error-fields") {
+        import_indices.stdlib_invoke_error_fields = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "breakpoint-key") {
         import_indices.stdlib_breakpoint_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "breakpoint-event") {
@@ -957,6 +1114,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_validate_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {
         import_indices.stdlib_agent_connection_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-scope-input") {
+        import_indices.stdlib_agent_scope_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-tool-scope-input") {
+        import_indices.stdlib_agent_tool_scope_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {
         import_indices.stdlib_agent_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-sleep-key") {

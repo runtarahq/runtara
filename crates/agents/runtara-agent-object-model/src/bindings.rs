@@ -12,29 +12,6 @@ pub mod runtara {
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
             #[derive(Clone)]
-            pub struct ConnectionInfo {
-                pub connection_id: _rt::String,
-                pub integration_id: _rt::String,
-                pub connection_subtype: Option<_rt::String>,
-                pub parameters: _rt::String,
-                /// JSON object
-                pub rate_limit_config: Option<_rt::String>,
-            }
-            impl ::core::fmt::Debug for ConnectionInfo {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("ConnectionInfo")
-                        .field("connection-id", &self.connection_id)
-                        .field("integration-id", &self.integration_id)
-                        .field("connection-subtype", &self.connection_subtype)
-                        .field("parameters", &self.parameters)
-                        .field("rate-limit-config", &self.rate_limit_config)
-                        .finish()
-                }
-            }
-            #[derive(Clone)]
             pub struct ErrorInfo {
                 pub code: _rt::String,
                 pub message: _rt::String,
@@ -85,249 +62,131 @@ pub mod exports {
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
                 use super::super::super::super::_rt;
-                pub type ConnectionInfo = super::super::super::super::runtara::agent::types::ConnectionInfo;
                 pub type ErrorInfo = super::super::super::super::runtara::agent::types::ErrorInfo;
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
-                pub unsafe fn _export_invoke_cabi<T: Guest>(arg0: *mut u8) -> *mut u8 {
+                pub unsafe fn _export_invoke_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                ) -> *mut u8 {
                     #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                    let l0 = *arg0.add(0).cast::<*mut u8>();
-                    let l1 = *arg0
-                        .add(::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len2 = l1;
-                    let bytes2 = _rt::Vec::from_raw_parts(l0.cast(), len2, len2);
-                    let l3 = *arg0
-                        .add(2 * ::core::mem::size_of::<*const u8>())
-                        .cast::<*mut u8>();
-                    let l4 = *arg0
-                        .add(3 * ::core::mem::size_of::<*const u8>())
-                        .cast::<usize>();
-                    let len5 = l4;
-                    let l6 = i32::from(
-                        *arg0.add(4 * ::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let len1 = arg3;
+                    let result2 = T::invoke(
+                        _rt::string_lift(bytes0),
+                        _rt::Vec::from_raw_parts(arg2.cast(), len1, len1),
                     );
-                    let result24 = T::invoke(
-                        _rt::string_lift(bytes2),
-                        _rt::Vec::from_raw_parts(l3.cast(), len5, len5),
-                        match l6 {
-                            0 => None,
-                            1 => {
-                                let e = {
-                                    let l7 = *arg0
-                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l8 = *arg0
-                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len9 = l8;
-                                    let bytes9 = _rt::Vec::from_raw_parts(
-                                        l7.cast(),
-                                        len9,
-                                        len9,
-                                    );
-                                    let l10 = *arg0
-                                        .add(7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l11 = *arg0
-                                        .add(8 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len12 = l11;
-                                    let bytes12 = _rt::Vec::from_raw_parts(
-                                        l10.cast(),
-                                        len12,
-                                        len12,
-                                    );
-                                    let l13 = i32::from(
-                                        *arg0
-                                            .add(9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    let l17 = *arg0
-                                        .add(12 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l18 = *arg0
-                                        .add(13 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len19 = l18;
-                                    let bytes19 = _rt::Vec::from_raw_parts(
-                                        l17.cast(),
-                                        len19,
-                                        len19,
-                                    );
-                                    let l20 = i32::from(
-                                        *arg0
-                                            .add(14 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    super::super::super::super::runtara::agent::types::ConnectionInfo {
-                                        connection_id: _rt::string_lift(bytes9),
-                                        integration_id: _rt::string_lift(bytes12),
-                                        connection_subtype: match l13 {
-                                            0 => None,
-                                            1 => {
-                                                let e = {
-                                                    let l14 = *arg0
-                                                        .add(10 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l15 = *arg0
-                                                        .add(11 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len16 = l15;
-                                                    let bytes16 = _rt::Vec::from_raw_parts(
-                                                        l14.cast(),
-                                                        len16,
-                                                        len16,
-                                                    );
-                                                    _rt::string_lift(bytes16)
-                                                };
-                                                Some(e)
-                                            }
-                                            _ => _rt::invalid_enum_discriminant(),
-                                        },
-                                        parameters: _rt::string_lift(bytes19),
-                                        rate_limit_config: match l20 {
-                                            0 => None,
-                                            1 => {
-                                                let e = {
-                                                    let l21 = *arg0
-                                                        .add(15 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l22 = *arg0
-                                                        .add(16 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len23 = l22;
-                                                    let bytes23 = _rt::Vec::from_raw_parts(
-                                                        l21.cast(),
-                                                        len23,
-                                                        len23,
-                                                    );
-                                                    _rt::string_lift(bytes23)
-                                                };
-                                                Some(e)
-                                            }
-                                            _ => _rt::invalid_enum_discriminant(),
-                                        },
-                                    }
-                                };
-                                Some(e)
-                            }
-                            _ => _rt::invalid_enum_discriminant(),
-                        },
-                    );
-                    _rt::cabi_dealloc(
-                        arg0,
-                        17 * ::core::mem::size_of::<*const u8>(),
-                        ::core::mem::size_of::<*const u8>(),
-                    );
-                    let ptr25 = (&raw mut _RET_AREA.0).cast::<u8>();
-                    match result24 {
+                    let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result2 {
                         Ok(e) => {
-                            *ptr25.add(0).cast::<u8>() = (0i32) as u8;
-                            let vec26 = (e).into_boxed_slice();
-                            let ptr26 = vec26.as_ptr().cast::<u8>();
-                            let len26 = vec26.len();
-                            ::core::mem::forget(vec26);
-                            *ptr25
+                            *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec4 = (e).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr3
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len26;
-                            *ptr25.add(8).cast::<*mut u8>() = ptr26.cast_mut();
+                                .cast::<usize>() = len4;
+                            *ptr3.add(8).cast::<*mut u8>() = ptr4.cast_mut();
                         }
                         Err(e) => {
-                            *ptr25.add(0).cast::<u8>() = (1i32) as u8;
+                            *ptr3.add(0).cast::<u8>() = (1i32) as u8;
                             let super::super::super::super::runtara::agent::types::ErrorInfo {
-                                code: code27,
-                                message: message27,
-                                category: category27,
-                                severity: severity27,
-                                retryable: retryable27,
-                                retry_after_ms: retry_after_ms27,
-                                attributes: attributes27,
+                                code: code5,
+                                message: message5,
+                                category: category5,
+                                severity: severity5,
+                                retryable: retryable5,
+                                retry_after_ms: retry_after_ms5,
+                                attributes: attributes5,
                             } = e;
-                            let vec28 = (code27.into_bytes()).into_boxed_slice();
-                            let ptr28 = vec28.as_ptr().cast::<u8>();
-                            let len28 = vec28.len();
-                            ::core::mem::forget(vec28);
-                            *ptr25
+                            let vec6 = (code5.into_bytes()).into_boxed_slice();
+                            let ptr6 = vec6.as_ptr().cast::<u8>();
+                            let len6 = vec6.len();
+                            ::core::mem::forget(vec6);
+                            *ptr3
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len28;
-                            *ptr25.add(8).cast::<*mut u8>() = ptr28.cast_mut();
-                            let vec29 = (message27.into_bytes()).into_boxed_slice();
-                            let ptr29 = vec29.as_ptr().cast::<u8>();
-                            let len29 = vec29.len();
-                            ::core::mem::forget(vec29);
-                            *ptr25
+                                .cast::<usize>() = len6;
+                            *ptr3.add(8).cast::<*mut u8>() = ptr6.cast_mut();
+                            let vec7 = (message5.into_bytes()).into_boxed_slice();
+                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                            let len7 = vec7.len();
+                            ::core::mem::forget(vec7);
+                            *ptr3
                                 .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len29;
-                            *ptr25
+                                .cast::<usize>() = len7;
+                            *ptr3
                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr29.cast_mut();
-                            let vec30 = (category27.into_bytes()).into_boxed_slice();
-                            let ptr30 = vec30.as_ptr().cast::<u8>();
-                            let len30 = vec30.len();
-                            ::core::mem::forget(vec30);
-                            *ptr25
+                                .cast::<*mut u8>() = ptr7.cast_mut();
+                            let vec8 = (category5.into_bytes()).into_boxed_slice();
+                            let ptr8 = vec8.as_ptr().cast::<u8>();
+                            let len8 = vec8.len();
+                            ::core::mem::forget(vec8);
+                            *ptr3
                                 .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len30;
-                            *ptr25
+                                .cast::<usize>() = len8;
+                            *ptr3
                                 .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr30.cast_mut();
-                            let vec31 = (severity27.into_bytes()).into_boxed_slice();
-                            let ptr31 = vec31.as_ptr().cast::<u8>();
-                            let len31 = vec31.len();
-                            ::core::mem::forget(vec31);
-                            *ptr25
+                                .cast::<*mut u8>() = ptr8.cast_mut();
+                            let vec9 = (severity5.into_bytes()).into_boxed_slice();
+                            let ptr9 = vec9.as_ptr().cast::<u8>();
+                            let len9 = vec9.len();
+                            ::core::mem::forget(vec9);
+                            *ptr3
                                 .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>() = len31;
-                            *ptr25
+                                .cast::<usize>() = len9;
+                            *ptr3
                                 .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>() = ptr31.cast_mut();
-                            *ptr25
+                                .cast::<*mut u8>() = ptr9.cast_mut();
+                            *ptr3
                                 .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>() = (match retryable27 {
+                                .cast::<u8>() = (match retryable5 {
                                 true => 1,
                                 false => 0,
                             }) as u8;
-                            match retry_after_ms27 {
+                            match retry_after_ms5 {
                                 Some(e) => {
-                                    *ptr25
+                                    *ptr3
                                         .add(16 + 8 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (1i32) as u8;
-                                    *ptr25
+                                    *ptr3
                                         .add(24 + 8 * ::core::mem::size_of::<*const u8>())
                                         .cast::<i64>() = _rt::as_i64(e);
                                 }
                                 None => {
-                                    *ptr25
+                                    *ptr3
                                         .add(16 + 8 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
                                 }
                             };
-                            match attributes27 {
+                            match attributes5 {
                                 Some(e) => {
-                                    *ptr25
+                                    *ptr3
                                         .add(32 + 8 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (1i32) as u8;
-                                    let vec32 = (e.into_bytes()).into_boxed_slice();
-                                    let ptr32 = vec32.as_ptr().cast::<u8>();
-                                    let len32 = vec32.len();
-                                    ::core::mem::forget(vec32);
-                                    *ptr25
+                                    let vec10 = (e.into_bytes()).into_boxed_slice();
+                                    let ptr10 = vec10.as_ptr().cast::<u8>();
+                                    let len10 = vec10.len();
+                                    ::core::mem::forget(vec10);
+                                    *ptr3
                                         .add(32 + 10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>() = len32;
-                                    *ptr25
+                                        .cast::<usize>() = len10;
+                                    *ptr3
                                         .add(32 + 9 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>() = ptr32.cast_mut();
+                                        .cast::<*mut u8>() = ptr10.cast_mut();
                                 }
                                 None => {
-                                    *ptr25
+                                    *ptr3
                                         .add(32 + 8 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
                                 }
                             };
                         }
                     };
-                    ptr25
+                    ptr3
                 }
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
@@ -391,10 +250,13 @@ pub mod exports {
                     }
                 }
                 pub trait Guest {
+                    /// The connection (if any) is delivered inside `input` under `_connection`;
+                    /// there is no out-of-band connection argument. A connection is an opaque
+                    /// id — the host proxy resolves credentials by (id, tenant), so nothing
+                    /// secret ever crosses this boundary.
                     fn invoke(
                         capability_id: _rt::String,
                         input: _rt::Vec<u8>,
-                        connection: Option<ConnectionInfo>,
                     ) -> Result<_rt::Vec<u8>, ErrorInfo>;
                 }
                 #[doc(hidden)]
@@ -402,9 +264,10 @@ pub mod exports {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
                         "runtara:agent-object-model/capabilities@0.3.0#invoke")] unsafe
-                        extern "C" fn export_invoke(arg0 : * mut u8,) -> * mut u8 {
-                        unsafe { $($path_to_types)*:: _export_invoke_cabi::<$ty > (arg0)
-                        } } #[unsafe (export_name =
+                        extern "C" fn export_invoke(arg0 : * mut u8, arg1 : usize, arg2 :
+                        * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_invoke_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3) } } #[unsafe (export_name =
                         "cabi_post_runtara:agent-object-model/capabilities@0.3.0#invoke")]
                         unsafe extern "C" fn _post_return_invoke(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_invoke::<$ty > (arg0)
@@ -443,20 +306,6 @@ mod _rt {
             String::from_utf8_unchecked(bytes)
         }
     }
-    pub unsafe fn invalid_enum_discriminant<T>() -> T {
-        if cfg!(debug_assertions) {
-            panic!("invalid enum discriminant")
-        } else {
-            unsafe { core::hint::unreachable_unchecked() }
-        }
-    }
-    pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
-        if size == 0 {
-            return;
-        }
-        let layout = alloc::Layout::from_size_align_unchecked(size, align);
-        alloc::dealloc(ptr, layout);
-    }
     pub fn as_i64<T: AsI64>(t: T) -> i64 {
         t.as_i64()
     }
@@ -479,6 +328,13 @@ mod _rt {
         fn as_i64(self) -> i64 {
             self as i64
         }
+    }
+    pub unsafe fn cabi_dealloc(ptr: *mut u8, size: usize, align: usize) {
+        if size == 0 {
+            return;
+        }
+        let layout = alloc::Layout::from_size_align_unchecked(size, align);
+        alloc::dealloc(ptr, layout);
     }
     extern crate alloc as alloc_crate;
     pub use alloc_crate::alloc;
@@ -518,19 +374,16 @@ pub(crate) use __export_agent_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.41.0:runtara:agent-object-model@0.3.0:agent:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 608] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe4\x03\x01A\x02\x01\
-A\x06\x01B\x06\x01ks\x01r\x05\x0dconnection-ids\x0eintegration-ids\x12connection\
--subtype\0\x0aparameterss\x11rate-limit-config\0\x04\0\x0fconnection-info\x03\0\x01\
-\x01kw\x01r\x07\x04codes\x07messages\x08categorys\x08severitys\x09retryable\x7f\x0e\
-retry-after-ms\x03\x0aattributes\0\x04\0\x0aerror-info\x03\0\x04\x03\0\x19runtar\
-a:agent/types@0.3.0\x05\0\x02\x03\0\0\x0fconnection-info\x02\x03\0\0\x0aerror-in\
-fo\x01B\x09\x02\x03\x02\x01\x01\x04\0\x0fconnection-info\x03\0\0\x02\x03\x02\x01\
-\x02\x04\0\x0aerror-info\x03\0\x02\x01p}\x01k\x01\x01j\x01\x04\x01\x03\x01@\x03\x0d\
-capability-ids\x05input\x04\x0aconnection\x05\0\x06\x04\0\x06invoke\x01\x07\x04\0\
--runtara:agent-object-model/capabilities@0.3.0\x05\x03\x04\0&runtara:agent-objec\
-t-model/agent@0.3.0\x04\0\x0b\x0b\x01\0\x05agent\x03\0\0\0G\x09producers\x01\x0c\
-processed-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 441] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xbd\x02\x01A\x02\x01\
+A\x05\x01B\x04\x01kw\x01ks\x01r\x07\x04codes\x07messages\x08categorys\x08severit\
+ys\x09retryable\x7f\x0eretry-after-ms\0\x0aattributes\x01\x04\0\x0aerror-info\x03\
+\0\x02\x03\0\x19runtara:agent/types@0.3.0\x05\0\x02\x03\0\0\x0aerror-info\x01B\x06\
+\x02\x03\x02\x01\x01\x04\0\x0aerror-info\x03\0\0\x01p}\x01j\x01\x02\x01\x01\x01@\
+\x02\x0dcapability-ids\x05input\x02\0\x03\x04\0\x06invoke\x01\x04\x04\0-runtara:\
+agent-object-model/capabilities@0.3.0\x05\x02\x04\0&runtara:agent-object-model/a\
+gent@0.3.0\x04\0\x0b\x0b\x01\0\x05agent\x03\0\0\0G\x09producers\x01\x0cprocessed\
+-by\x02\x0dwit-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

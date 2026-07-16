@@ -14,6 +14,11 @@ use wasm_encoder::{Function as WasmFunction, Instruction};
 use super::abi::{emit_fail_if_retptr_error_inplace, load_retptr_list, push_retptr_arg};
 use super::{DirectCoreFunctionIndices, DirectCoreStaticData};
 
+/// Inject the Agent's connection into its input under `_connection` (the single
+/// connection channel — the invoke ABI has no connection argument). The stdlib
+/// resolves the id against `source` (a `connection_ref` wins over the literal)
+/// and rewrites the input in place; a connectionless agent is a no-op.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_agent_connection_input(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -21,16 +26,53 @@ pub(super) fn emit_agent_connection_input(
     agent_id: u32,
     input_ptr_local: u32,
     input_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
 ) {
-    if static_data.agent_connection_id(agent_id).is_none() {
+    if !static_data.agent_has_connection(agent_id) {
         return;
     }
 
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(input_ptr_local));
     body.instruction(&Instruction::LocalGet(input_len_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, input_ptr_local, input_len_local);
+}
+
+/// Wrap a workflow-agent child's input in the canonical `{data, variables}`
+/// envelope carrying the invocation-site checkpoint namespace
+/// (`variables._cache_key_prefix`). Only for workflow-agent targets — native
+/// agents receive the bare input. Emitted ONCE per step, before the durable
+/// checkpoint / retry loop: the wrapped buffer feeds every attempt (a second
+/// pass would double-wrap), and the parent's own cache key derives from
+/// `source`, not this buffer, so its dedup semantics are untouched.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_agent_scope_input(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+) {
+    if !static_data.agent_is_workflow_agent(agent_id) {
+        return;
+    }
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_scope_input));
     emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, input_ptr_local, input_len_local);
 }

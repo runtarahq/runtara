@@ -18,6 +18,7 @@ compiler = [
     "dep:wac-parser",
     "dep:wac-resolver",
     "dep:wac-graph",
+    "dep:wasmparser",
     # AgentCatalog::from_meta_dir for the runtara-compile CLI.
     "runtara-dsl/fs",
 ]
@@ -53,8 +54,10 @@ wit-parser = { version = "0.247", optional = true }
 wac-parser = { version = "0.10", optional = true }
 wac-resolver = { version = "0.10", default-features = false, optional = true }
 wac-graph = { version = "0.10", optional = true }
+wasmparser = { version = "0.247", optional = true }
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3"
 base64 = { workspace = true }
 wasmparser = "0.247"

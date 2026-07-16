@@ -13,7 +13,7 @@
 //! `memory_min_pages`, telling the module how much memory to declare and where its
 //! runtime bump heap may safely begin.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::DirectCompileError;
 use super::manifest::{DirectChildWorkflowGraphManifest, DirectGraphManifest};
@@ -133,7 +133,18 @@ pub(super) struct DirectCoreStaticData {
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: BTreeMap<u32, DirectDataSegment>,
+    /// Agents with a literal `connection_id`. Not baked — the stdlib injects the
+    /// connection from the manifest (`agent-connection-input`); this only gates
+    /// the pre-invoke injection call.
+    agent_connection_literals: BTreeSet<u32>,
+    /// Agents whose connection is a resolvable `connection_ref` (evaluated at
+    /// runtime), not a baked literal. The invoke path resolves these via the
+    /// stdlib `resolve-connection-id` instead of reading a static segment.
+    agent_connection_refs: BTreeSet<u32>,
+    /// Agents targeting a published workflow-agent. Gates the pre-invoke
+    /// `agent-scope-input` envelope wrap that namespaces the composed child's
+    /// checkpoint ids under the invocation site.
+    agent_workflow_agents: BTreeSet<u32>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -256,19 +267,25 @@ impl DirectCoreStaticData {
         }
 
         let mut agent_capability_ids = BTreeMap::new();
-        let mut agent_connection_ids = BTreeMap::new();
+        let mut agent_connection_literals = BTreeSet::new();
+        let mut agent_connection_refs = BTreeSet::new();
+        let mut agent_workflow_agents = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
             &mut agent_capability_ids,
-            &mut agent_connection_ids,
+            &mut agent_connection_literals,
+            &mut agent_connection_refs,
+            &mut agent_workflow_agents,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
                 &child.graph,
                 &mut offset,
                 &mut agent_capability_ids,
-                &mut agent_connection_ids,
+                &mut agent_connection_literals,
+                &mut agent_connection_refs,
+                &mut agent_workflow_agents,
             )?;
         }
 
@@ -293,7 +310,9 @@ impl DirectCoreStaticData {
             split_timeout_error,
             step_ids,
             agent_capability_ids,
-            agent_connection_ids,
+            agent_connection_literals,
+            agent_connection_refs,
+            agent_workflow_agents,
             heap_base: offset,
             memory_min_pages,
         })
@@ -316,8 +335,19 @@ impl DirectCoreStaticData {
         })
     }
 
-    pub(super) fn agent_connection_id(&self, agent_id: u32) -> Option<&DirectDataSegment> {
-        self.agent_connection_ids.get(&agent_id)
+    /// True when the Agent has a connection to inject into its input — a literal
+    /// `connection_id` or a resolvable `connection_ref`. Gates the pre-invoke
+    /// `agent-connection-input` call (the single connection channel).
+    pub(super) fn agent_has_connection(&self, agent_id: u32) -> bool {
+        self.agent_connection_literals.contains(&agent_id)
+            || self.agent_connection_refs.contains(&agent_id)
+    }
+
+    /// True when the Agent targets a published workflow-agent — its input is
+    /// wrapped in the checkpoint-namespace envelope before the invoke. Gates
+    /// the pre-invoke `agent-scope-input` call.
+    pub(super) fn agent_is_workflow_agent(&self, agent_id: u32) -> bool {
+        self.agent_workflow_agents.contains(&agent_id)
     }
 
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
@@ -342,7 +372,6 @@ impl DirectCoreStaticData {
         ];
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());
-        segments.extend(self.agent_connection_ids.values());
         segments
     }
 }
@@ -381,17 +410,31 @@ fn collect_static_agent_data(
     graph: &DirectGraphManifest,
     offset: &mut i32,
     agent_capability_ids: &mut BTreeMap<u32, DirectDataSegment>,
-    agent_connection_ids: &mut BTreeMap<u32, DirectDataSegment>,
+    agent_connection_literals: &mut BTreeSet<u32>,
+    agent_connection_refs: &mut BTreeSet<u32>,
+    agent_workflow_agents: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
         *offset = align_i32(checked_offset_add(*offset, agent.capability_id.len())?, 16);
         agent_capability_ids.insert(agent.id, segment);
 
-        if let Some(connection_id) = agent.connection_id.as_deref() {
-            let segment = DirectDataSegment::new(*offset, connection_id.as_bytes());
-            *offset = align_i32(checked_offset_add(*offset, connection_id.len())?, 16);
-            agent_connection_ids.insert(agent.id, segment);
+        // Both connection forms are resolved from the manifest at the invoke
+        // boundary (`agent-connection-input`) and injected into the input — no
+        // id is baked. Record which agents have a connection so the emitter
+        // knows to emit the injection call; a `connection_ref` wins at runtime.
+        if agent.connection_ref.is_some() {
+            agent_connection_refs.insert(agent.id);
+        }
+        if agent
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        {
+            agent_connection_literals.insert(agent.id);
+        }
+        if agent.is_workflow_agent {
+            agent_workflow_agents.insert(agent.id);
         }
     }
     for step in &graph.steps {
@@ -400,7 +443,9 @@ fn collect_static_agent_data(
                 &nested.graph,
                 offset,
                 agent_capability_ids,
-                agent_connection_ids,
+                agent_connection_literals,
+                agent_connection_refs,
+                agent_workflow_agents,
             )?;
         }
     }
@@ -505,11 +550,10 @@ mod tests {
                 .data,
             b"nested-capability"
         );
-        assert_eq!(
-            static_data.agent_connection_id(1).expect("connection").data,
-            b"conn-1"
-        );
-        assert!(static_data.agent_connection_id(2).is_none());
+        // Agent 1 has a literal connection (injected at the invoke boundary, not
+        // baked); agent 2 (nested) has none.
+        assert!(static_data.agent_has_connection(1));
+        assert!(!static_data.agent_has_connection(2));
         assert_eq!(static_data.memory_min_pages, 1);
         assert_eq!(static_data.heap_base % 16, 0);
     }
@@ -627,8 +671,10 @@ mod tests {
             agent_id: "utils".to_string(),
             capability_id: capability_id.to_string(),
             connection_id: connection_id.map(ToOwned::to_owned),
+            connection_ref: None,
             durable: false,
             rate_limited: false,
+            is_workflow_agent: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries: None,

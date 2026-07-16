@@ -363,10 +363,12 @@ fn run() -> Result<(), String> {
             child_workflows,
             connection_service_url: None,
             agent_catalog: Some(Arc::new(catalog)),
+            agent_slug: None,
             progress_callback,
         },
         DirectWorkflowCompileOptions {
             output_dir: build_output_dir(&args),
+            extra_component_dirs: Vec::new(),
             components_dir,
             source_checksum: Some(source_checksum),
         },

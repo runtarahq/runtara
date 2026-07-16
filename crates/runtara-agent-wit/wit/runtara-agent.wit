@@ -13,14 +13,6 @@
 package runtara:agent@0.3.0;
 
 interface types {
-    record connection-info {
-        connection-id: string,
-        integration-id: string,
-        connection-subtype: option<string>,
-        parameters: string,                  // JSON object
-        rate-limit-config: option<string>,   // JSON object
-    }
-
     record error-info {
         code: string,
         message: string,
@@ -33,12 +25,15 @@ interface types {
 }
 
 interface capabilities {
-    use types.{connection-info, error-info};
+    use types.{error-info};
 
+    // The connection (if any) is delivered inside `input` under `_connection`;
+    // there is no out-of-band connection argument. A connection is an opaque
+    // id — the host proxy resolves credentials by (id, tenant), so nothing
+    // secret crosses this boundary.
     invoke: func(
         capability-id: string,
         input: list<u8>,                     // JSON-encoded value
-        connection: option<connection-info>, // out-of-band, not inside input
     ) -> result<list<u8>, error-info>;       // JSON-encoded value on success
 }
 

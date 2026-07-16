@@ -63,6 +63,16 @@ pub struct CreateWorkflowRequest {
     #[serde(default)]
     #[serde(rename = "trackEvents")]
     pub track_events: Option<bool>,
+    /// Capability id override (lowercase kebab, ≤64 chars). Auto-derived from
+    /// the name when absent; a supplied slug that is taken or reserved is a 409.
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateWorkflowSlugRequest {
+    /// The new slug (lowercase kebab, ≤64 chars, per-tenant unique).
+    pub slug: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -163,6 +173,7 @@ pub async fn create_workflow_handler(
             request.memory_tier,
             request.track_events,
             &user_id,
+            request.slug,
         )
         .await
     {
@@ -578,6 +589,199 @@ pub async fn toggle_track_events_handler(
     }
 }
 
+/// Update a workflow's slug — the stable capability id a workflow-as-agent
+/// exports. Identity-level write (never rides the graph-JSON path); always
+/// allowed — a parent that composed `agent-<oldslug>` keeps that pin until it
+/// recompiles.
+#[utoipa::path(
+    put,
+    path = "/api/runtime/workflows/{id}/slug",
+    request_body = UpdateWorkflowSlugRequest,
+    params(
+        ("id" = String, Path, description = "Workflow identifier")
+    ),
+    responses(
+        (status = 200, description = "Slug updated successfully", body = Value),
+        (status = 400, description = "Invalid slug", body = Value),
+        (status = 404, description = "Workflow not found", body = Value),
+        (status = 409, description = "Slug already taken or reserved", body = Value),
+        (status = 500, description = "Internal server error", body = Value)
+    ),
+    tag = "workflow-controller"
+)]
+#[instrument(skip(pool, connections, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
+pub async fn update_workflow_slug_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
+    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    Path(workflow_id): Path<String>,
+    Json(request): Json<UpdateWorkflowSlugRequest>,
+) -> (StatusCode, Json<Value>) {
+    let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization: a Member may edit only workflows they created.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        &tenant_id,
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
+    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    match service
+        .update_workflow_slug(&tenant_id, &workflow_id, &request.slug)
+        .await
+    {
+        Ok(slug) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Slug updated successfully",
+                "data": { "slug": slug }
+            })),
+        ),
+        Err(e) => map_service_error_to_response(e),
+    }
+}
+
+/// Publish a workflow AS an agent: compile the current (or latest) version
+/// with the AgentCapabilities ABI, synthesize catalog metadata from its
+/// input/output schemas, and stage both into the tenant's workflow-agent dir.
+/// Any parent workflow can then target it as `agentId: <slug>,
+/// capabilityId: "run"`.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/workflows/{id}/publish-agent",
+    params(
+        ("id" = String, Path, description = "Workflow identifier")
+    ),
+    responses(
+        (status = 200, description = "Workflow published as agent", body = Value),
+        (status = 404, description = "Workflow not found", body = Value),
+        (status = 409, description = "Workflow has no slug", body = Value),
+        (status = 500, description = "Compilation or staging failed", body = Value)
+    ),
+    tag = "workflow-controller"
+)]
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(pool, runtime_client, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
+pub async fn publish_workflow_agent_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
+    State(pool): State<PgPool>,
+    State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    Path(workflow_id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+
+    // Own-scoped authorization, like every other workflow mutation.
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        &tenant_id,
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+
+    // The slug is the capability id — a publish without one is ambiguous.
+    let slug = match repository.get_slug(&tenant_id, &workflow_id).await {
+        Ok(Some(slug)) => slug,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "success": false,
+                    "message": "Workflow has no slug; set one via PUT /api/runtime/workflows/{id}/slug before publishing"
+                })),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"success": false, "message": format!("Failed to load slug: {e}")})),
+            );
+        }
+    };
+
+    // Publish the CURRENT (or latest) version — the same resolution execute uses.
+    let version = match repository
+        .get_current_or_latest_version(&tenant_id, &workflow_id)
+        .await
+    {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"success": false, "message": "Workflow not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"success": false, "message": format!("Failed to resolve version: {e}")}),
+                ),
+            );
+        }
+    };
+
+    let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").ok();
+    let compilation_service = crate::api::services::compilation::CompilationService::new(
+        repository,
+        connection_service_url,
+        runtime_client,
+    )
+    .with_agent_catalog(agent_catalog)
+    .with_direct_compilation(
+        crate::api::services::compilation::direct_compilation_settings_from_config(),
+    );
+
+    match compilation_service
+        .publish_workflow_agent(&tenant_id, &workflow_id, version, slug)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Workflow published as agent",
+                "data": result
+            })),
+        ),
+        Err(e) => {
+            use crate::api::services::compilation::ServiceError as CompilationServiceError;
+            let status = match &e {
+                CompilationServiceError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (
+                status,
+                Json(json!({"success": false, "message": e.to_string()})),
+            )
+        }
+    }
+}
+
 /// List all workflows for a tenant with pagination and optional folder filtering
 #[utoipa::path(
     get,
@@ -980,6 +1184,7 @@ pub async fn compile_workflow_handler(
                         crate::config::entitlements(),
                         &workflow.execution_graph,
                         child_graphs.iter(),
+                        &crate::workflow_agents::published_agent_ids(&tenant_id),
                     ) {
                         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
                     }

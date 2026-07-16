@@ -333,8 +333,8 @@ pub(super) fn emit_while_plan(
     );
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::I32Const(while_id as i32));
@@ -447,8 +447,8 @@ pub(super) fn emit_while_plan(
     );
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::Return);
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::I32Const(while_id as i32));

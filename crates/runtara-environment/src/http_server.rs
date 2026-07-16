@@ -1385,7 +1385,10 @@ async fn handle_send_custom_signal(
         .insert_custom_signal(&instance_id, &body.checkpoint_id, &payload)
         .await
     {
-        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Ok(()) => {
+            wake_suspended_on_signal(state.persistence.as_ref(), &instance_id).await;
+            Json(json!({ "success": true })).into_response()
+        }
         Err(e) => {
             error!("Send custom signal error: {}", e);
             error_response_from(
@@ -1395,6 +1398,45 @@ async fn handle_send_custom_signal(
             )
             .into_response()
         }
+    }
+}
+
+/// On-signal waker (store-freeing Wait): a Wait compiled with the store-freeing
+/// gate parks as `status='suspended'` with `sleep_until` = its timeout deadline
+/// (or NULL when the wait has no timeout). The wake scheduler only relaunches on
+/// a due `sleep_until`, so a custom signal for such an instance must stamp
+/// `sleep_until=now` to relaunch it BEFORE the timeout (or at all, when there is
+/// no timeout). The instance replays, re-polls the now-present signal
+/// (non-destructive read), and proceeds.
+///
+/// No-op unless the instance is currently `suspended` AND was parked by an
+/// on-signal wait (`termination_reason = 'waiting_signal'`, stamped by
+/// `park_invoke_suspend`). `status='suspended'` alone is NOT sufficient: in
+/// the default (blocking) configuration every suspended row is a
+/// pause/breakpoint/shutdown ack whose pause signal was already consumed —
+/// stamping `sleep_until` on those would relaunch a replay that runs PAST the
+/// pause, silently auto-resuming a paused instance on any custom signal.
+async fn wake_suspended_on_signal(
+    persistence: &dyn runtara_core::persistence::Persistence,
+    instance_id: &str,
+) {
+    match persistence.get_instance(instance_id).await {
+        Ok(Some(inst))
+            if inst.status == "suspended"
+                && inst.termination_reason.as_deref()
+                    == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
+        {
+            if let Err(e) = persistence
+                .set_instance_sleep(instance_id, chrono::Utc::now())
+                .await
+            {
+                warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");
+            } else {
+                info!(instance_id, "Woke suspended instance for a custom signal");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!(instance_id, error = %e, "Waker could not read instance status"),
     }
 }
 
@@ -2123,6 +2165,95 @@ pub async fn run_http_server(
 mod tests {
     use super::*;
     use runtara_core::error::CoreError;
+
+    use runtara_core::persistence::{CompleteInstanceParams, Persistence, SqlitePersistence};
+    use std::sync::Arc;
+
+    /// A suspended instance with the given `termination_reason` marker.
+    async fn suspended_instance(
+        marker: Option<&str>,
+    ) -> (Arc<dyn Persistence>, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let persistence: Arc<dyn Persistence> = Arc::new(
+            SqlitePersistence::from_path(dir.path().join("waker.db"))
+                .await
+                .expect("sqlite persistence"),
+        );
+        let instance_id = "waker-inst".to_string();
+        persistence
+            .register_instance(&instance_id, "waker-tenant")
+            .await
+            .expect("register");
+        persistence
+            .update_instance_status(&instance_id, "running", None)
+            .await
+            .expect("mark running");
+        let mut params = CompleteInstanceParams::new(&instance_id, "suspended").if_running();
+        if let Some(marker) = marker {
+            params = params.with_termination(marker, None);
+        }
+        persistence
+            .complete_instance(params)
+            .await
+            .expect("suspend");
+        (persistence, instance_id, dir)
+    }
+
+    #[tokio::test]
+    async fn waker_ignores_a_pause_shaped_suspend() {
+        // A pause/breakpoint ack parks `suspended` with NO wake marker and its
+        // pause signal already consumed — a custom signal must NOT relaunch it
+        // (the replay would run straight past the pause).
+        let (persistence, instance_id, _dir) = suspended_instance(None).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a custom signal must never schedule a wake for a paused instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn waker_stamps_sleep_for_an_on_signal_park() {
+        let (persistence, instance_id, _dir) =
+            suspended_instance(Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION)).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_some(),
+            "an on-signal park must be scheduled for relaunch when its signal arrives"
+        );
+    }
+
+    #[tokio::test]
+    async fn waker_ignores_a_timed_sleep_park() {
+        // A store-freeing durable Delay parks with the `sleeping` marker and a
+        // deadline; a custom signal must not fast-forward it.
+        let (persistence, instance_id, _dir) = suspended_instance(Some("sleeping")).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a timed sleep is scheduler-woken at its deadline, not signal-woken"
+        );
+    }
 
     fn body_of(resp: (StatusCode, Json<Value>)) -> Value {
         resp.1.0

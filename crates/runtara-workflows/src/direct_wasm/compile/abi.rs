@@ -23,32 +23,13 @@ use super::split::{
 use super::step_error::emit_step_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
+    DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
     DIRECT_RESULT_OPTION_LIST_LEN_OFFSET, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET,
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectFailureTarget, DirectVariables,
 };
 use crate::direct_wasm::static_data::DirectDataSegment;
-
-pub(super) fn store_i32_at(function: &mut WasmFunction, offset: i32, value: i32) {
-    function.instruction(&Instruction::I32Const(offset));
-    function.instruction(&Instruction::I32Const(value));
-    function.instruction(&Instruction::I32Store(MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }));
-}
-
-pub(super) fn store_local_i32_at(function: &mut WasmFunction, offset: i32, local: u32) {
-    function.instruction(&Instruction::I32Const(offset));
-    function.instruction(&Instruction::LocalGet(local));
-    function.instruction(&Instruction::I32Store(MemArg {
-        offset: 0,
-        align: 2,
-        memory_index: 0,
-    }));
-}
 
 /// Store the i64 in `local` at fixed linear-memory `offset` (8-byte aligned).
 pub(super) fn store_local_i64_at(function: &mut WasmFunction, offset: i32, local: u32) {
@@ -93,12 +74,542 @@ pub(super) fn push_retptr_arg(function: &mut WasmFunction) {
     function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
 }
 
-pub(super) fn return_if_retptr_error(function: &mut WasmFunction) {
+fn return_if_retptr_error_tag(function: &mut WasmFunction) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
+}
+
+/// "Check the retptr tag; on error, exit the entry function" — ABI-aware:
+/// under `wasi:cli/run` the classic bare `Err` tag; under the invoke export a
+/// bare tag would be lifted as a result-area POINTER, so the retptr error
+/// bytes are wrapped as `Err(error-info)` instead. No locals needed — the
+/// message ptr/len are copied out of the retptr region before it is
+/// clobbered.
+pub(super) fn return_if_retptr_error(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    if indices.abi.is_invoke_export() {
+        load_retptr_tag(function);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        emit_invoke_err_return_from_retptr(function, None, indices.stdlib_invoke_error_fields);
+        function.instruction(&Instruction::End);
+    } else {
+        return_if_retptr_error_tag(function);
+    }
+}
+
+/// Write `Err(error-info)` into the fixed invoke result area at offset 0 and
+/// `Return` its pointer, sourcing the error bytes from the retptr error
+/// payload (ptr @+4, len @+8). When `fail_index` is given, `runtime.fail`
+/// fires additively with the same bytes first. Free of locals by design (some
+/// call sites have none): the error ptr/len are staged into the low scratch
+/// at @88/@92 — beyond every host call's retptr write — BEFORE anything
+/// clobbers the retptr.
+///
+/// The structured decomposition is delegated to `stdlib.invoke-error-fields`,
+/// called with the RESULT AREA as its retptr: the canonical layout of
+/// `result<invoke-error, string>`'s ok arm at +8 is byte-identical to
+/// error-info at +8, so all that remains is flipping the result discriminant
+/// to err. If the stdlib call itself errored (infallible by construction, but
+/// defended), the raw bytes ride `message` with empty structured fields.
+pub(super) fn emit_invoke_err_return_from_retptr(
+    function: &mut WasmFunction,
+    fail_index: Option<u32>,
+    stdlib_invoke_error_fields: u32,
+) {
+    // Stage the error ptr/len out of the retptr region.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    if let Some(fail) = fail_index {
+        // Additive host-side recording (its retptr write cannot reach @88+).
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: 88,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: 92,
+            align: 2,
+            memory_index: 0,
+        }));
+        push_retptr_arg(function);
+        function.instruction(&Instruction::Call(fail));
+    }
+    // Structured decomposition, written directly at the result area.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0)); // retptr = the result area
+    function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
+    emit_invoke_err_finalize_from_scratch(function);
+}
+
+/// Finalize the invoke `Err` result after `stdlib.invoke-error-fields` wrote
+/// its result at the area: on the (defended) err arm fall back to the raw
+/// bytes staged at @88/@92 as `message` with empty structured fields; either
+/// way flip the result discriminant to err and return the area pointer.
+fn emit_invoke_err_finalize_from_scratch(function: &mut WasmFunction) {
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    // Fallback: zero the record, message = staged raw bytes.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(80));
+    function.instruction(&Instruction::MemoryFill(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Load(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 20,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::End);
+    // result disc = 1 (err) — on the ok arm this flips 0 -> 1 over the
+    // stdlib result whose record @8 is already the error-info payload.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+}
+
+/// Locals-sourced variant of the invoke `Err` writer (fail already fired by
+/// the caller or not wanted): stage the locals into @88/@92 so the shared
+/// finalizer's fallback can reach them, then decompose + finalize.
+pub(super) fn emit_invoke_err_return_from_locals(
+    function: &mut WasmFunction,
+    stdlib_invoke_error_fields: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+) {
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(error_ptr_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 88,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(error_len_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 92,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::LocalGet(error_ptr_local));
+    function.instruction(&Instruction::LocalGet(error_len_local));
+    function.instruction(&Instruction::I32Const(0)); // retptr = the result area
+    function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
+    emit_invoke_err_finalize_from_scratch(function);
+}
+
+/// Reserved error code a composed workflow-agent raises through its
+/// capability error channel when a lifecycle suspend fires inside it. The
+/// capability result type (`result<list<u8>, error-info>`) has no suspended
+/// arm, so the suspend crosses the composition boundary as this sentinel;
+/// the composing parent recognizes it at the invoke boundary
+/// ([`emit_agent_suspend_sentinel_check`]) and re-raises the suspend through
+/// its OWN ABI — chaining however deep the composition nests. Exactly 16
+/// bytes so the parent's check is two immediate i64 compares, no memcmp loop.
+pub(super) const AGENT_SUSPEND_SENTINEL_CODE: &[u8; 16] = b"__rt_suspended__";
+
+/// The sentinel as two little-endian i64 immediates (low half, high half).
+fn suspend_sentinel_halves() -> (i64, i64) {
+    let lo = i64::from_le_bytes(
+        AGENT_SUSPEND_SENTINEL_CODE[..8]
+            .try_into()
+            .expect("8-byte half"),
+    );
+    let hi = i64::from_le_bytes(
+        AGENT_SUSPEND_SENTINEL_CODE[8..]
+            .try_into()
+            .expect("8-byte half"),
+    );
+    (lo, hi)
+}
+
+/// Suspend-and-exit for the entry function: the run stops early because a
+/// lifecycle signal (pause/shutdown/breakpoint) was handled and the instance
+/// will be re-invoked on relaunch.
+///
+/// - `wasi:cli/run`: the classic clean-exit `Ok` tag; the suspended status
+///   was already recorded host-side by the signal ack / suspended event.
+/// - invoke export: `Ok(outcome::suspended([wake::on-resume]))` — the first
+///   real emission of the suspended arm. The single-element wake list lives
+///   at offset 88 (past the 80-byte result area, inside the reserved
+///   low-scratch region, 8-aligned; wake element stride is 32).
+/// - agent capabilities: a DURABLE workflow-agent composed into a parent CAN
+///   reach a suspend site (its runtime import is the parent instance's host),
+///   but its result type has no suspended arm — it raises the
+///   [`AGENT_SUSPEND_SENTINEL_CODE`] error instead, which the parent
+///   recognizes and re-raises (see [`emit_agent_suspend_sentinel_check`]).
+pub(super) fn emit_entry_suspend_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            let (lo, hi) = suspend_sentinel_halves();
+            // Zero the result area — every unset error-info field lifts as
+            // an empty string / false / none (the same shape the invoke-err
+            // fallback path relies on).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(120));
+            function.instruction(&Instruction::MemoryFill(0));
+            // Sentinel code bytes at @96, past the error-info record fields.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I64Const(lo));
+            function.instruction(&Instruction::I64Store(MemArg {
+                offset: 96,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I64Const(hi));
+            function.instruction(&Instruction::I64Store(MemArg {
+                offset: 104,
+                align: 0,
+                memory_index: 0,
+            }));
+            // error-info.code = the sentinel; message mirrors it so a caller
+            // that does NOT understand the sentinel still surfaces something
+            // legible instead of empty bytes.
+            for field_ptr_offset in [8u64, 16] {
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32Const(96));
+                function.instruction(&Instruction::I32Store(MemArg {
+                    offset: field_ptr_offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32Const(
+                    AGENT_SUSPEND_SENTINEL_CODE.len() as i32
+                ));
+                function.instruction(&Instruction::I32Store(MemArg {
+                    offset: field_ptr_offset + 4,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+            // result disc = 1 (err).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            // Zero result area + wake element (0..120).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(120));
+            function.instruction(&Instruction::MemoryFill(0));
+            // result disc = 0 (ok, zeroed); outcome disc @8 = 1 (suspended).
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 8,
+                align: 0,
+                memory_index: 0,
+            }));
+            // list<wake> @12: ptr = 88, len = 1.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(88));
+            function.instruction(&Instruction::I32Store(MemArg {
+                offset: 12,
+                align: 2,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::I32Store(MemArg {
+                offset: 16,
+                align: 2,
+                memory_index: 0,
+            }));
+            // wake element @88: disc = 2 (on-resume), no payload.
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::I32Const(2));
+            function.instruction(&Instruction::I32Store8(MemArg {
+                offset: 88,
+                align: 0,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+    }
+}
+
+/// Re-raise a composed workflow-agent child's suspend. Emitted immediately
+/// after a workflow-agent invoke: when the call returned `err` and the
+/// error code is exactly [`AGENT_SUSPEND_SENTINEL_CODE`], the child hit a
+/// lifecycle suspend (pause/shutdown handled by the SHARED instance host) —
+/// the parent must suspend too, through its own ABI, before any retry
+/// classification, per-attempt checkpointing, or onError routing sees the
+/// sentinel as a failure. Under a parent that is itself a composed agent,
+/// [`emit_entry_suspend_return`] re-raises the sentinel — the chain unwinds
+/// to the real instance owner. On resume, replay re-invokes the child (its
+/// step checkpoint never completed) and the child replays into its wait.
+pub(super) fn emit_agent_suspend_sentinel_check(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    let (lo, hi) = suspend_sentinel_halves();
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
+    body.instruction(&Instruction::I32Const(
+        AGENT_SUSPEND_SENTINEL_CODE.len() as i32
+    ));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(lo));
+    body.instruction(&Instruction::I64Eq);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(hi));
+    body.instruction(&Instruction::I64Eq);
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+}
+
+/// Store-freeing suspend at a timed deadline (durable Delay under the invoke
+/// export): `Ok(outcome::suspended([wake::at(deadline)]))`.
+///
+/// The host tears down the Store and schedules a relaunch at `deadline_local`
+/// (ms since epoch) via `sleep_until`; on relaunch the replay re-reaches the
+/// delay, whose sleep checkpoint now HITS and skips. This is a NO-OP under
+/// `wasi:cli/run` — that ABI keeps the blocking `durable-sleep-checkpoint`
+/// (the caller only invokes this on the InvokeHostImports arm).
+///
+/// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
+/// = 0 (at), payload u64 @96 = deadline.
+pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local: u32) {
+    // Zero result area + wake element (0..120).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(120));
+    function.instruction(&Instruction::MemoryFill(0));
+    // result disc = 0 (ok); outcome disc @8 = 1 (suspended).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    // list<wake> @12: ptr = 88, len = 1.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(88));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    // wake element @88: disc = 0 (at, already zeroed); u64 deadline @96.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(deadline_local));
+    function.instruction(&Instruction::I64Store(MemArg {
+        offset: 96,
+        align: 3,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+}
+
+/// Store-freeing suspend on an external signal (durable Wait under the invoke
+/// export): `Ok(outcome::suspended([wake::on-signal(signal-wait{checkpoint-id,
+/// deadline-ms})]))`.
+///
+/// The host parks the instance `suspended` with `sleep_until` = the timeout
+/// deadline (or NULL when `deadline_local` is `None`); the custom-signal waker
+/// relaunches it when the signal arrives, and the replay re-polls the
+/// (non-destructively read) signal and proceeds. NO-OP under `wasi:cli/run`
+/// (caller only invokes this on the InvokeHostImports arm).
+///
+/// `signal_id_ptr_local`/`len` must reference the deterministic wait signal id
+/// — a heap-allocated string well above the 0..120 result scratch, so the
+/// `MemoryFill` below does not clobber it and wasmtime lifts it intact at the
+/// call boundary.
+///
+/// `deadline` is the timeout fallback: `Some((present_flag_local, value_local))`
+/// writes the `option<u64>` tag from the RUNTIME present flag (a wait's timeout
+/// is dynamic) and the value from `value_local`; `None` is a wait with no
+/// timeout (tag stays 0/none — the custom-signal waker is the only wake path).
+///
+/// wake element layout (past the 80-byte result area): disc u8 @88 = 1
+/// (on-signal); signal-wait record @96 = { checkpoint-id: string (ptr @96,
+/// len @100), deadline-ms: option<u64> (tag @104, value @112) }.
+pub(super) fn emit_entry_suspend_on_signal(
+    function: &mut WasmFunction,
+    signal_id_ptr_local: u32,
+    signal_id_len_local: u32,
+    deadline: Option<(u32, u32)>,
+) {
+    // Zero result area + wake element (0..120).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(120));
+    function.instruction(&Instruction::MemoryFill(0));
+    // result disc = 0 (ok); outcome disc @8 = 1 (suspended).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    // list<wake> @12: ptr = 88, len = 1.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(88));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 12,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 16,
+        align: 2,
+        memory_index: 0,
+    }));
+    // wake element @88: disc = 1 (on-signal).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 88,
+        align: 0,
+        memory_index: 0,
+    }));
+    // signal-wait.checkpoint-id string: ptr @96, len @100.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(signal_id_ptr_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 96,
+        align: 2,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalGet(signal_id_len_local));
+    function.instruction(&Instruction::I32Store(MemArg {
+        offset: 100,
+        align: 2,
+        memory_index: 0,
+    }));
+    // signal-wait.deadline-ms option<u64>: tag @104 (runtime present flag),
+    // value @112. When the flag is 0 the value is ignored, so it is written
+    // unconditionally; when there is no timeout at all the tag stays 0 (none).
+    if let Some((present_flag_local, value_local)) = deadline {
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::LocalGet(present_flag_local));
+        function.instruction(&Instruction::I32Store8(MemArg {
+            offset: 104,
+            align: 0,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::LocalGet(value_local));
+        function.instruction(&Instruction::I64Store(MemArg {
+            offset: 112,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
+    // else: tag @104 stays 0 (none), value @112 stays 0 (both zeroed above).
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
 }
 
 /// Like `emit_fail_if_retptr_error` but reads the error list directly from the
@@ -107,25 +618,48 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    load_retptr_tag(function);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-    function.instruction(&Instruction::I32Load(MemArg {
-        offset: 4,
-        align: 2,
-        memory_index: 0,
-    }));
-    function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-    function.instruction(&Instruction::I32Load(MemArg {
-        offset: 8,
-        align: 2,
-        memory_index: 0,
-    }));
-    push_retptr_arg(function);
-    function.instruction(&Instruction::Call(indices.runtime_fail));
-    function.instruction(&Instruction::I32Const(1));
-    function.instruction(&Instruction::Return);
-    function.instruction(&Instruction::End);
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            function.instruction(&Instruction::I32Load(MemArg {
+                offset: 4,
+                align: 2,
+                memory_index: 0,
+            }));
+            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+            function.instruction(&Instruction::I32Load(MemArg {
+                offset: 8,
+                align: 2,
+                memory_index: 0,
+            }));
+            push_retptr_arg(function);
+            function.instruction(&Instruction::Call(indices.runtime_fail));
+            function.instruction(&Instruction::I32Const(1));
+            function.instruction(&Instruction::Return);
+            function.instruction(&Instruction::End);
+        }
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+        | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            load_retptr_tag(function);
+            function.instruction(&Instruction::If(BlockType::Empty));
+            // Additive host-side `runtime.fail` unless terminal status is
+            // suppressed (omit-runtime, or an AgentCapabilities child whose
+            // caller owns the instance) — the Err return value is authoritative.
+            let fail_index = if indices.report_terminal_status() {
+                Some(indices.runtime_fail)
+            } else {
+                None
+            };
+            emit_invoke_err_return_from_retptr(
+                function,
+                fail_index,
+                indices.stdlib_invoke_error_fields,
+            );
+            function.instruction(&Instruction::End);
+        }
+    }
 }
 
 /// Like `return_if_retptr_error`, but reports the error via `runtime.fail`

@@ -77,7 +77,7 @@ pub(super) fn emit_embed_retry_error_info(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_workflow_error_retryable));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRYABLE_LOCAL));
 
@@ -87,7 +87,7 @@ pub(super) fn emit_embed_retry_error_info(
     body.instruction(&Instruction::Call(
         indices.stdlib_workflow_error_rate_limited,
     ));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RATE_LIMITED_LOCAL));
 
@@ -97,7 +97,7 @@ pub(super) fn emit_embed_retry_error_info(
     body.instruction(&Instruction::Call(
         indices.stdlib_workflow_error_retry_after_ms,
     ));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_U64_TAG_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL));
@@ -158,7 +158,7 @@ fn emit_embed_retry_delay(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_retry_delay_ms));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
 }
@@ -179,7 +179,7 @@ fn emit_embed_retry_sleep(
         body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_retry_sleep_key));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
         load_retptr_list(
             body,
             DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
@@ -196,7 +196,7 @@ fn emit_embed_retry_sleep(
         body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-        return_if_retptr_error(body);
+        return_if_retptr_error(body, indices);
         body.instruction(&Instruction::Else);
         emit_blocking_sleep(body, indices);
         body.instruction(&Instruction::End);
@@ -209,7 +209,7 @@ fn emit_blocking_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndi
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 }
 
 fn emit_embed_record_retry_attempt(
@@ -228,5 +228,5 @@ fn emit_embed_record_retry_attempt(
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_record_retry_attempt));
-    return_if_retptr_error(body);
+    return_if_retptr_error(body, indices);
 }

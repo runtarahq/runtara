@@ -47,6 +47,8 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::create_workflow_handler,
         api::handlers::workflows::update_workflow_handler,
         api::handlers::workflows::toggle_track_events_handler,
+        api::handlers::workflows::update_workflow_slug_handler,
+        api::handlers::workflows::publish_workflow_agent_handler,
         api::handlers::workflows::list_workflows_handler,
         api::handlers::workflows::get_workflow_handler,
         api::handlers::workflows::list_workflow_versions_handler,
@@ -1029,6 +1031,26 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         connections_state,
     ));
 
+    // Slug backfill: rows created before `workflows.slug` existed get a slug
+    // derived from their current definition's name (WIT-safe transform +
+    // reserved-native-agent-id + per-tenant collision handling live in Rust,
+    // not SQL — hence a startup pass, guarded by `slug IS NULL`, idempotent).
+    {
+        let slug_repo = Arc::new(api::repositories::workflows::WorkflowRepository::new(
+            pool.clone(),
+        ));
+        let slug_service = api::services::workflows::WorkflowService::new(
+            slug_repo,
+            connections_facade.clone(),
+            agent_catalog.clone(),
+        );
+        match slug_service.backfill_workflow_slugs().await {
+            Ok(0) => {}
+            Ok(filled) => println!("   \u{2713} Backfilled slugs for {filled} workflow(s)"),
+            Err(e) => eprintln!("   \u{26a0} Workflow slug backfill failed (continuing): {e}"),
+        }
+    }
+
     // Spawn background task to warn when pool usage is high
     let pool_monitor = pool.clone();
     tokio::spawn(async move {
@@ -1569,6 +1591,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/track-events",
             put(api::handlers::workflows::toggle_track_events_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/slug",
+            put(api::handlers::workflows::update_workflow_slug_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/publish-agent",
+            post(api::handlers::workflows::publish_workflow_agent_handler),
         )
         .route(
             "/api/runtime/workflows",
