@@ -21,6 +21,8 @@ mod native;
 pub use native::NativeHttpClient as HttpClient;
 
 #[cfg(all(feature = "wasi", not(feature = "native")))]
+mod host_io;
+#[cfg(all(feature = "wasi", not(feature = "native")))]
 mod wasi_backend;
 #[cfg(all(feature = "wasi", not(feature = "native")))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
@@ -262,11 +264,14 @@ impl RequestBuilder {
                 .push(("X-Org-Id".to_string(), tenant_id.clone()));
         }
 
-        // Execute directly (bypass proxy check to avoid recursion)
+        // Execute directly (bypass proxy check to avoid recursion). Under
+        // WASI the proxy hop rides the host-io import (func_wrap_concurrent
+        // host-side) so concurrent Split subtasks overlap their agent I/O —
+        // the p2 wasi:http pollable wait would hold the whole store.
         #[cfg(feature = "native")]
         let proxy_response = native::execute(proxy_request)?;
         #[cfg(all(feature = "wasi", not(feature = "native")))]
-        let proxy_response = wasi_backend::execute(proxy_request)?;
+        let proxy_response = host_io::execute(proxy_request)?;
         #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
         let proxy_response = wasm_js_backend::execute(proxy_request)?;
 

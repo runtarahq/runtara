@@ -42,6 +42,7 @@ mod error_step;
 mod log;
 mod mapping;
 mod split;
+mod split_parallel;
 mod split_retry;
 mod step_context;
 mod step_error;
@@ -362,6 +363,33 @@ const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
 const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
 const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 
+// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ─────────────────────
+// Scratch for the chunked launch/drain/assemble item pipeline. Only one
+// parallel split is ever ACTIVE at a time (eligible bodies are single Agent
+// steps, so parallel splits cannot nest), so these are plain fixed locals with
+// no save/restore frame.
+const DIRECT_PSPLIT_WS_LOCAL: u32 = 118;
+const DIRECT_PSPLIT_PENDING_LOCAL: u32 = 119;
+const DIRECT_PSPLIT_SLOTS_LOCAL: u32 = 120;
+const DIRECT_PSPLIT_CHUNK_START_LOCAL: u32 = 121;
+const DIRECT_PSPLIT_CHUNK_END_LOCAL: u32 = 122;
+/// Launch-pass item cursor; reused during assemble as the CURRENT item's slot
+/// pointer (the memoized-invoke operand).
+const DIRECT_PSPLIT_LAUNCH_LOCAL: u32 = 123;
+
+/// Per-item slot: `{ state: u32, pad: u32, result: [u8; 104] }`. `state` is 0
+/// until a launch stores 1; the async-lowered invoke writes the canonical
+/// `result<list<u8>, error-info>` through the slot retptr (offset 8). 104
+/// bytes comfortably covers the inline store footprint (~68 bytes worst-case
+/// error-info) — payload pointers land in the bump heap, which is not rewound
+/// during a chunk.
+const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 112;
+const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 8;
+/// Event scratch for `waitable-set.wait` `{handle: u32, state: u32}` — lives
+/// in the reserved low-memory region above the wait-deadline scratch (208..216)
+/// and below the static data base (256).
+const DIRECT_PSPLIT_EVENT_OFFSET: i32 = 216;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {
@@ -448,6 +476,10 @@ pub struct DirectCompilationResult {
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
     pub omit_runtime: bool,
+    /// Parallel-Split instance pools the emitted module was compiled against
+    /// (docs/wasip3-parallelism.md §3.5). Re-emit paths must thread this so
+    /// the world/wac keep the phantom pool imports the module actually calls.
+    pub parallel_pools: std::collections::BTreeMap<String, u32>,
 }
 
 /// Compose a direct workflow logic component with prebuilt shared components.
@@ -725,12 +757,13 @@ pub fn compile_direct_workflow_composed_configured(
     // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
     // the import even when omit was requested), so the on-disk world/wac match
     // the module that was actually emitted.
-    result.component_artifacts = super::component::emit_direct_component_artifacts_configured(
+    result.component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
         &agent_ids,
         binding,
         abi,
         result.omit_runtime,
         export_agent_id.as_deref(),
+        &result.parallel_pools,
     );
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
@@ -952,7 +985,7 @@ fn compile_direct_workflow_inner(
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
-    let wasm = emit_direct_artifact(
+    let (wasm, parallel_pools) = emit_direct_artifact(
         &manifest,
         &manifest_json,
         &support_json,
@@ -965,12 +998,13 @@ fn compile_direct_workflow_inner(
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
-    let component_artifacts = super::component::emit_direct_component_artifacts_configured(
+    let component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
         &manifest.feature_summary.agent_ids,
         runtime_binding_from_env(),
         abi,
         omit_runtime,
         export_agent_id.as_deref(),
+        &parallel_pools,
     );
 
     let build_dir = input.output_dir.join(format!(
@@ -1027,6 +1061,7 @@ fn compile_direct_workflow_inner(
         component_artifacts,
         artifact_metadata,
         omit_runtime,
+        parallel_pools,
     })
 }
 
@@ -1041,7 +1076,7 @@ fn emit_direct_artifact(
     store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
-) -> Result<Vec<u8>, DirectCompileError> {
+) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let abi_json = match abi {
         super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
             "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -1085,7 +1120,7 @@ fn emit_direct_artifact(
         }
     };
 
-    let mut component = emit_direct_component(
+    let (mut component, parallel_pools) = emit_direct_component(
         manifest,
         manifest_json,
         track_events,
@@ -1107,7 +1142,7 @@ fn emit_direct_artifact(
         support_json,
     );
 
-    Ok(component)
+    Ok((component, parallel_pools))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1120,28 +1155,35 @@ fn emit_direct_component(
     store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
-) -> Result<Vec<u8>, DirectCompileError> {
-    let (resolve, world) = build_direct_component_resolve_configured(
-        &manifest.feature_summary.agent_ids,
-        abi,
-        omit_runtime,
-        export_agent_id,
-    )?;
+) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
             .with_store_freeing_sleep(store_freeing_sleep)
             .with_omit_runtime(omit_runtime);
+    // Parallel-split instance pools (docs/wasip3-parallelism.md §3.5): each
+    // pooled agent contributes phantom world imports (`…-par<n>`) that the wac
+    // composition satisfies with extra instantiations of the SAME package.
+    let parallel_pools =
+        split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
+    let (resolve, world) = build_direct_component_resolve_configured(
+        &manifest.feature_summary.agent_ids,
+        abi,
+        omit_runtime,
+        export_agent_id,
+        &parallel_pools,
+    )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
-    ComponentEncoder::default()
+    let component = ComponentEncoder::default()
         .module(&core_module)
         .map_err(component_error)?
         .validate(true)
         .encode()
-        .map_err(component_error)
+        .map_err(component_error)?;
+    Ok((component, parallel_pools))
 }
 
 #[cfg(test)]
@@ -1153,6 +1195,7 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
         super::component::WorkflowAbi::CliRunHttp,
         false,
         None,
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -1166,6 +1209,7 @@ fn build_direct_component_resolve_with_agents(
         super::component::WorkflowAbi::CliRunHttp,
         false,
         None,
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -1174,6 +1218,7 @@ fn build_direct_component_resolve_configured(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
+    parallel_pools: &std::collections::BTreeMap<String, u32>,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -1227,6 +1272,19 @@ fn build_direct_component_resolve_configured(
                     &agent_wit_package(agent),
                 )
                 .map_err(component_error)?;
+            // Phantom pool-member packages (structurally identical interface
+            // under a distinct package id).
+            if let Some(pool) = parallel_pools.get(agent) {
+                for member in 1..*pool {
+                    let phantom = split_parallel::pool_member_component_id(agent, member);
+                    resolve
+                        .push_str(
+                            format!("runtara-agent-{phantom}.wit"),
+                            &agent_wit_package(&phantom),
+                        )
+                        .map_err(component_error)?;
+                }
+            }
         }
     }
 
@@ -1245,6 +1303,14 @@ fn build_direct_component_resolve_configured(
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION};\n",
         ));
+        if let Some(pool) = parallel_pools.get(agent) {
+            for member in 1..*pool {
+                let phantom = split_parallel::pool_member_component_id(agent, member);
+                workflow_wit.push_str(&format!(
+                    "    import runtara:agent-{phantom}/capabilities@{AGENT_WIT_VERSION};\n",
+                ));
+            }
+        }
     }
     match abi {
         super::component::WorkflowAbi::CliRunHttp => {
@@ -1347,7 +1413,10 @@ fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8])
 }
 
 fn component_error(error: impl fmt::Display) -> DirectCompileError {
-    DirectCompileError::Component(error.to_string())
+    // `{:#}` on anyhow-style errors keeps the CAUSE chain — a bare
+    // `to_string` flattens "failed to validate component output" into an
+    // undebuggable one-liner.
+    DirectCompileError::Component(format!("{error:#}"))
 }
 
 fn sanitize_path_segment(value: &str) -> String {

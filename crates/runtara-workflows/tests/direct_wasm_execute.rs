@@ -613,6 +613,24 @@ fn route(
     // so the workflow fails loudly instead of hanging on `{success: true}`.
     if method == "POST" && path == "/llm-proxy" {
         let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        // Parallel-split overlap harness: a proxied request whose TARGET url
+        // ends in /slow-item answers 200 after a fixed think time. Concurrent
+        // requests overlap (thread-per-connection), so the workflow-side wall
+        // clock reveals whether the guest truly parallelized the calls.
+        if envelope["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/slow-item"))
+        {
+            thread::sleep(Duration::from_millis(400));
+            return (
+                200,
+                serde_json::json!({
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"ok": true}
+                }),
+            );
+        }
         server_state
             .llm_requests
             .lock()
@@ -9559,4 +9577,125 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         "each tool call must own a per-call child checkpoint scope"
     );
     std::mem::forget(temp);
+}
+
+// ── Parallel Split overlap (docs/wasip3-parallelism.md Phase 3) ──────────────
+
+fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Split",
+        "steps": {{
+            "split": {{
+                "stepType": "Split",
+                "id": "split",
+                "config": {{
+                    "value": {{"valueType": "reference", "value": "data.items"}},
+                    "parallelism": {parallelism}
+                }},
+                "subgraph": {{
+                    "name": "Fetch",
+                    "steps": {{
+                        "fetch": {{
+                            "stepType": "Agent",
+                            "id": "fetch",
+                            "agentId": "http",
+                            "capabilityId": "http-request",
+                            "maxRetries": 0,
+                            "inputMapping": {{
+                                "method": {{"valueType": "immediate", "value": "GET"}},
+                                "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                            }}
+                        }},
+                        "finish": {{
+                            "stepType": "Finish",
+                            "id": "finish",
+                            "inputMapping": {{
+                                "status": {{"valueType": "reference", "value": "steps.fetch.outputs.status_code"}}
+                            }}
+                        }}
+                    }},
+                    "entryPoint": "fetch",
+                    "executionPlan": [{{"fromStep": "fetch", "toStep": "finish"}}]
+                }}
+            }},
+            "finish": {{
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {{
+                    "results": {{"valueType": "reference", "value": "steps.split.outputs"}}
+                }}
+            }}
+        }},
+        "entryPoint": "split",
+        "executionPlan": [{{"fromStep": "split", "toStep": "finish"}}],
+        "variables": {{}}
+    }}"#
+    )
+}
+
+/// The Phase-3 payoff test: a Split with `parallelism` over http-agent calls
+/// completes with correct per-item results, and the run is TIMED under both
+/// parallelism=1 and parallelism=N so the log shows whether the window
+/// genuinely overlaps agent I/O on this host (p2 wasi:http binding permitting).
+#[test]
+fn direct_wasm_execute_parallel_split_http_overlap() {
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+    const ITEMS: usize = 4;
+
+    let mut timings = Vec::new();
+    for parallelism in [1u32, ITEMS as u32] {
+        // The http agent forwards through RUNTARA_HTTP_PROXY_URL (the harness
+        // mock); the target URL is carried in the proxy envelope and answered
+        // by the mock's /slow-item branch — no real dial happens.
+        let graph = parallel_http_split_graph("http://slow.invalid", parallelism);
+        let start = Instant::now();
+        let captured = run_direct_workflow_capture(
+            &components_dir,
+            &format!("parallel-http-{parallelism}"),
+            &graph,
+            br#"{"items":[1,2,3,4]}"#,
+            false,
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            captured.status_success,
+            "parallel http split run failed: stderr={} error={:?}",
+            captured.stderr, captured.error_json
+        );
+        let output = captured.output_json.expect("completed output");
+
+        let results = output["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("split results missing: {output}"));
+        assert_eq!(results.len(), ITEMS, "all items must complete");
+        for result in results {
+            assert_eq!(result["status"], 200, "item result: {result}");
+        }
+        eprintln!(
+            "[parallel-split-timing] parallelism={parallelism} wall={}ms",
+            elapsed.as_millis()
+        );
+        timings.push(elapsed);
+    }
+
+    // Compile-time floor: the sequential run must take at least ITEMS*DELAY.
+    assert!(
+        timings[0] >= DELAY * (ITEMS as u32),
+        "sequential run implausibly fast: {:?}",
+        timings[0]
+    );
+    // True overlap: the four 400ms requests fly together (the mock logs them
+    // arriving in the same millisecond), so the request phase collapses from
+    // ~1600ms to ~400ms. Wall time includes compile+startup on both sides;
+    // 1.5x is a CI-safe floor for what measures ~2.4x locally.
+    let speedup = timings[0].as_secs_f64() / timings[1].as_secs_f64();
+    eprintln!("[parallel-split-timing] speedup: {speedup:.2}x");
+    assert!(
+        speedup >= 1.5,
+        "parallel window failed to overlap agent I/O: sequential {:?} vs parallel {:?}",
+        timings[0],
+        timings[1]
+    );
 }

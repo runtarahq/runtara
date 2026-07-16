@@ -144,6 +144,15 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_step_debug_end: Option<u32>,
     stdlib_step_debug_error: Option<u32>,
     agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+    // Parallel-split surface (docs/wasip3-parallelism.md Phase 3): the CM-async
+    // builtins and per-agent async-lowered invokes, populated directly by
+    // `core_module` (they are extra CORE imports, not WIT world functions).
+    pub(super) waitable_set_new: Option<u32>,
+    pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_drop: Option<u32>,
+    pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_drop: Option<u32>,
+    pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
 impl DirectCoreImportIndices {
@@ -597,6 +606,12 @@ impl DirectCoreImportIndices {
                 "stdlib.step-debug-error",
             )?,
             agent_invokes: self.agent_invokes,
+            waitable_set_new: self.waitable_set_new,
+            waitable_set_wait: self.waitable_set_wait,
+            waitable_set_drop: self.waitable_set_drop,
+            waitable_join: self.waitable_join,
+            subtask_drop: self.subtask_drop,
+            agent_invokes_async: self.agent_invokes_async,
         })
     }
 }
@@ -743,6 +758,15 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+    /// CM-async builtins — present only when the plan contains an eligible
+    /// parallel Split (kept `Option` so sequential-only workflows emit
+    /// byte-identical import sections).
+    pub(super) waitable_set_new: Option<u32>,
+    pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_drop: Option<u32>,
+    pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_drop: Option<u32>,
+    pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
 impl DirectCoreFunctionIndices {
@@ -822,7 +846,10 @@ fn is_stdlib_import(
             .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
 }
 
-fn agent_id_for_import(resolve: &Resolve, interface: Option<&WorldKey>) -> Option<String> {
+pub(super) fn agent_id_for_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+) -> Option<String> {
     let name = interface.map(|key| resolve.name_world_key(key))?;
     name.strip_prefix("runtara:agent-")?
         .split_once('/')

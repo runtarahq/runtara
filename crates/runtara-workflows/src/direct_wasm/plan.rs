@@ -82,6 +82,12 @@ pub(super) enum DirectRunPlan {
         max_retries: u32,
         retry_delay_ms: u64,
         dont_stop_on_failed: bool,
+        /// Requested concurrency window from the Split's `parallelism` config
+        /// (None / Some(0|1) = sequential). Whether the window actually runs
+        /// concurrently is decided at emission time by the eligibility rules
+        /// in `split.rs` (docs/wasip3-parallelism.md Phase 3); ineligible
+        /// bodies degrade to the sequential lowering.
+        parallel_window: Option<u32>,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
@@ -653,6 +659,7 @@ fn step_run_plan_inner(
                 max_retries: split_effective_max_retries(split),
                 retry_delay_ms: split_effective_retry_delay_ms(split),
                 dont_stop_on_failed,
+                parallel_window: split_parallel_window(graph, step_id)?,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -1863,6 +1870,26 @@ fn split_config<'a>(
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Split config for step '{step_id}'"))
         })
+}
+
+/// The Split's requested `parallelism` window. 0 means "unlimited" per the
+/// DSL contract — normalized here to u32::MAX and clamped at emission time to
+/// the item count; absent/1 = sequential.
+fn split_parallel_window(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<Option<u32>, DirectCompileError> {
+    Ok(split_config(graph, step_id)?
+        .get("parallelism")
+        .and_then(serde_json::Value::as_u64)
+        .map(|window| {
+            if window == 0 {
+                u32::MAX
+            } else {
+                u32::try_from(window).unwrap_or(u32::MAX)
+            }
+        })
+        .filter(|window| *window > 1))
 }
 
 fn split_dont_stop_on_failed(

@@ -51,6 +51,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "split_timeout" => include_str!("../../../tests/fixtures/split_timeout.json"),
         "split_with_error" => include_str!("../../../tests/fixtures/split_with_error.json"),
         "split_with_schemas" => include_str!("../../../tests/fixtures/split_with_schemas.json"),
+        "split_parallel" => {
+            include_str!("../../../tests/fixtures/split_parallel_workflow.json")
+        }
         "split_with_schemas_failing" => {
             include_str!("../../../tests/fixtures/split_with_schemas_failing.json")
         }
@@ -10620,4 +10623,82 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
             .push_str(format!("runtara-agent-{slug}.wit"), &wit)
             .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
     }
+}
+
+// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ──────────────────────
+
+/// `parallelism > 1` over an eligible single-Agent body lowers to the
+/// launch/drain/assemble windows: the logic component must carry the
+/// CM-async waitable builtins and the `[async-lower]invoke` import.
+#[test]
+fn direct_compile_parallel_split_emits_async_lowered_invoke() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-parallel".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_parallel"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect("parallel split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("parallel split artifact should validate");
+
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(has("[waitable-set-new]"), "waitable-set.new import missing");
+    assert!(
+        has("[waitable-set-wait]"),
+        "waitable-set.wait import missing"
+    );
+    assert!(has("[waitable-join]"), "waitable.join import missing");
+    assert!(has("[subtask-drop]"), "subtask.drop import missing");
+    assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
+}
+
+/// The SAME graph without `parallelism` stays on the sequential lowering:
+/// no CM-async imports appear (byte-preservation of the sequential path).
+#[test]
+fn direct_compile_sequential_split_has_no_async_imports() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("split_parallel");
+    let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
+        panic!("split step missing");
+    };
+    split.config.as_mut().expect("split config").parallelism = None;
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-sequential".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect("sequential split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(
+        !has("[waitable-set-new]"),
+        "sequential compile grew async imports"
+    );
+    assert!(
+        !has("[async-lower]invoke"),
+        "sequential compile grew async lowers"
+    );
 }

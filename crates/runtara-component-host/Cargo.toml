@@ -69,6 +69,13 @@ wasmtime-wasi-http = "46"
 
 # Plumbing
 anyhow = "1"
+# host-io concurrent HTTP hop (docs/wasip3-parallelism.md route (b)). Same
+# hyper family wasmtime-wasi-http already pulls in.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+base64 = { workspace = true }
 # Dyn-compatible async for the RuntimeHost trait (implemented in
 # runtara-environment; this crate stays persistence-agnostic).
 async-trait = "0.1"

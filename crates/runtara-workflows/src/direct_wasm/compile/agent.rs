@@ -84,6 +84,13 @@ pub(super) fn emit_agent_plan(
     // `chat-completion` choice into the `{response, iterations, toolCalls}`
     // envelope). Both share the rest of the invoke/checkpoint/retry path.
     output_fn: u32,
+    // Parallel-split memoization (docs/wasip3-parallelism.md Phase 3): a local
+    // holding this item's slot pointer. When the slot's state is non-zero the
+    // launch pass already ran the invoke — its canonical result is copied from
+    // the slot to the retptr scratch instead of re-invoking; an EMPTY slot
+    // falls back to the synchronous invoke. Only reachable on the
+    // no-retry/non-durable path (parallel eligibility excludes the others).
+    memo_slot_ptr_local: Option<u32>,
 ) {
     // Resolve the input mapping. An unhandled failure (e.g. a template render
     // error) is attributed to this step — a start + error step-debug pair — so
@@ -258,6 +265,39 @@ pub(super) fn emit_agent_plan(
             );
             body.instruction(&Instruction::Else);
             // MISS: this attempt has not run. Invoke, then persist its outcome.
+            if let Some(slot_ptr_local) = memo_slot_ptr_local {
+                // Parallel-split memoization (consume-once): the launch pass's
+                // speculative result substitutes for THIS attempt's invoke;
+                // later attempts find the slot consumed and re-invoke.
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::If(BlockType::Empty));
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Const(
+                    super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+                ));
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::I32Const(
+                    super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+                ));
+                body.instruction(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::Else);
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -270,6 +310,9 @@ pub(super) fn emit_agent_plan(
                 source_ptr_local,
                 source_len_local,
             );
+            if memo_slot_ptr_local.is_some() {
+                body.instruction(&Instruction::End);
+            }
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -324,6 +367,42 @@ pub(super) fn emit_agent_plan(
             // Non-durable: no per-attempt durability. `HIT_FLAG` is never set (stays
             // 0), so the shared sleep gate below always sleeps — identical behavior
             // to before this change.
+            //
+            // Parallel-split memoization: attempt 1 consumes the launch pass's
+            // slot result (see the no-retry site for the layout); attempts 2+
+            // find the slot consumed and re-invoke synchronously.
+            if let Some(slot_ptr_local) = memo_slot_ptr_local {
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::If(BlockType::Empty));
+                body.instruction(&Instruction::I32Const(0)); // dst: retptr scratch
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Const(
+                    super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+                ));
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::I32Const(
+                    super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+                ));
+                body.instruction(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+                // Consume-once: a retry attempt must re-invoke, not replay the
+                // same memoized outcome.
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::Else);
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -336,6 +415,9 @@ pub(super) fn emit_agent_plan(
                 source_ptr_local,
                 source_len_local,
             );
+            if memo_slot_ptr_local.is_some() {
+                body.instruction(&Instruction::End);
+            }
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -446,18 +528,71 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::End);
         body.instruction(&Instruction::End);
     } else {
-        emit_agent_invoke(
-            body,
-            indices,
-            invoke,
-            capability_id,
-            static_data,
-            agent_id,
-            output_ptr_local,
-            output_len_local,
-            source_ptr_local,
-            source_len_local,
-        );
+        if let Some(slot_ptr_local) = memo_slot_ptr_local {
+            // Parallel-split memoized invoke: a filled slot (state != 0) holds
+            // the canonical `result<list<u8>, error-info>` the launch pass's
+            // async-lowered call wrote through the slot retptr — copy it to
+            // the retptr scratch so every downstream consumer (tag check,
+            // error envelope, output materialization) reads the usual layout.
+            // An EMPTY slot (launch skipped or failed) falls back to the
+            // synchronous invoke, reproducing sequential semantics exactly.
+            body.instruction(&Instruction::LocalGet(slot_ptr_local));
+            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            body.instruction(&Instruction::I32Const(0)); // dst: retptr scratch
+            body.instruction(&Instruction::LocalGet(slot_ptr_local));
+            body.instruction(&Instruction::I32Const(
+                super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+            ));
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::I32Const(
+                super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+            ));
+            body.instruction(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+            // Consume-once (symmetry with the retry path; a single-attempt
+            // step never re-reads it, but the slot must not look filled).
+            body.instruction(&Instruction::LocalGet(slot_ptr_local));
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::Else);
+            emit_agent_invoke(
+                body,
+                indices,
+                invoke,
+                capability_id,
+                static_data,
+                agent_id,
+                output_ptr_local,
+                output_len_local,
+                source_ptr_local,
+                source_len_local,
+            );
+            body.instruction(&Instruction::End);
+        } else {
+            emit_agent_invoke(
+                body,
+                indices,
+                invoke,
+                capability_id,
+                static_data,
+                agent_id,
+                output_ptr_local,
+                output_len_local,
+                source_ptr_local,
+                source_len_local,
+            );
+        }
         emit_agent_invoke_error_branch(
             body,
             indices,

@@ -342,6 +342,7 @@ pub(super) fn emit_run_plan_mapping(
             max_retries,
             retry_delay_ms,
             dont_stop_on_failed,
+            parallel_window,
             nested_plan,
             next_plan,
             error_plan,
@@ -360,6 +361,7 @@ pub(super) fn emit_run_plan_mapping(
                 *max_retries,
                 *retry_delay_ms,
                 *dont_stop_on_failed,
+                *parallel_window,
                 nested_plan,
                 next_plan,
                 error_plan.as_ref(),
@@ -605,6 +607,7 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
                 indices.stdlib_agent_output,
+                None,
             );
         }
         DirectRunPlan::AiAgent {
@@ -657,6 +660,7 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
                 indices.stdlib_ai_agent_output,
+                None,
             );
         }
         DirectRunPlan::AiAgentLoop {

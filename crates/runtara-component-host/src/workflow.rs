@@ -247,6 +247,9 @@ impl WorkflowExecutor {
         // WASI surface above works the same way), so legacy composed artifacts
         // are unaffected by this registration.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
+        // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
+        // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
+        crate::host_io::add_host_io_to_linker(&mut linker)?;
         Ok(Self {
             engine,
             linker,

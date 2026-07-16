@@ -64,3 +64,13 @@ pub use support::{
     DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
     analyze_direct_wasm_support_with_child_workflows,
 };
+
+/// Component id of parallel-pool member `n` (docs/wasip3-parallelism.md §3.5)
+/// — shared naming between the emitter, the world WIT, and the wac script.
+pub(crate) fn split_parallel_pool_member_component_id(base: &str, member: u32) -> String {
+    if member == 0 {
+        base.to_string()
+    } else {
+        format!("{base}-par{member}")
+    }
+}

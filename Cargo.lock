@@ -4638,7 +4638,12 @@ version = "8.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
+ "bytes",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "runtara-agent-crypto",
  "runtara-agent-wit",
  "runtara-dsl",
@@ -4766,6 +4771,7 @@ dependencies = [
  "thiserror 2.0.18",
  "ureq 2.12.1",
  "wasi 0.14.1+wasi-0.2.3",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]
