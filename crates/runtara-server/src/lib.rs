@@ -27,6 +27,7 @@ pub(crate) mod test_env;
 pub mod types;
 pub mod valkey;
 pub mod workers;
+pub mod workflow_agents;
 
 pub use server::start;
 

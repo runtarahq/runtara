@@ -48,6 +48,7 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::update_workflow_handler,
         api::handlers::workflows::toggle_track_events_handler,
         api::handlers::workflows::update_workflow_slug_handler,
+        api::handlers::workflows::publish_workflow_agent_handler,
         api::handlers::workflows::list_workflows_handler,
         api::handlers::workflows::get_workflow_handler,
         api::handlers::workflows::list_workflow_versions_handler,
@@ -1594,6 +1595,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/workflows/{id}/slug",
             put(api::handlers::workflows::update_workflow_slug_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/publish-agent",
+            post(api::handlers::workflows::publish_workflow_agent_handler),
         )
         .route(
             "/api/runtime/workflows",

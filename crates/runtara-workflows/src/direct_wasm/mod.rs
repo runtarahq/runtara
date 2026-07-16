@@ -42,6 +42,7 @@ pub use compile::{
     compile_direct_workflow, compile_direct_workflow_composed,
     compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
     compile_direct_workflow_with_abi, compose_direct_workflow,
+    compose_direct_workflow_with_extra_dirs,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

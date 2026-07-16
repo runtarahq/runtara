@@ -670,10 +670,14 @@ impl WorkflowService {
         )
         .map_err(ServiceError::EntitlementDenied)?;
 
+        // Published workflow-agents are visible to validation via the tenant
+        // catalog overlay (a parent may target `agentId: <slug>`).
+        let effective_catalog =
+            crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id);
         let report = runtara_workflows::validate_workflow_closure(
             workflow_id,
             &workflow.execution_graph,
-            &self.agent_catalog,
+            &effective_catalog,
             &closure_children,
         );
 
@@ -740,7 +744,10 @@ impl WorkflowService {
                 crate::api::utils::connection_validation::validate_connections_with_candidates(
                     &workflow,
                     &tenant_refs,
-                    &self.agent_catalog,
+                    &crate::workflow_agents::catalog_with_workflow_agents(
+                        &self.agent_catalog,
+                        tenant_id,
+                    ),
                 );
 
             let conn_errors: Vec<String> = connection_issues
@@ -1149,7 +1156,10 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(&workflow.execution_graph, &self.agent_catalog);
+        let validation_result = validate_workflow(
+            &workflow.execution_graph,
+            &crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id),
+        );
 
         // Convert workflow errors to ValidationIssue format
         for error in &validation_result.errors {
@@ -1204,7 +1214,10 @@ impl WorkflowService {
                 crate::api::utils::connection_validation::validate_connections_with_candidates(
                     &workflow,
                     &tenant_refs,
-                    &self.agent_catalog,
+                    &crate::workflow_agents::catalog_with_workflow_agents(
+                        &self.agent_catalog,
+                        tenant_id,
+                    ),
                 );
 
             // Convert connection issues to the same format

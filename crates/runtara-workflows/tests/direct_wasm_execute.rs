@@ -1697,6 +1697,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
         },
         DirectWorkflowCompileOptions {
             output_dir: temp.path().to_path_buf(),
+            extra_component_dirs: Vec::new(),
             components_dir,
             source_checksum: Some("source-sha256".to_string()),
         },
@@ -6979,4 +6980,180 @@ fn direct_wasm_execute_invoke_store_freeing_wait_suspends_on_signal_then_resumes
         blocking_output, output,
         "store-freeing wait output must byte-match the blocking output"
     );
+}
+
+/// P5 full-parity loop, in process: a child workflow PUBLISHED as an agent
+/// (compiled with the AgentCapabilities ABI under its slug, staged under the
+/// native-agent naming convention with a synthesized meta sidecar) is composed
+/// into a PARENT workflow like any native agent — targeted by an ordinary
+/// Agent step as `agentId: <slug>, capabilityId: "run"` — and the parent
+/// executes end to end, the child's output flowing back through the standard
+/// agent-output shaping.
+#[test]
+fn parent_workflow_composes_and_invokes_published_workflow_agent() {
+    let components_dir = direct_e2e_components_dir();
+
+    // 1. The child: a pure workflow with a typed input, published as an agent.
+    const CHILD: &str = r#"{
+      "name": "Shout Echo",
+      "durable": false,
+      "steps": {
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "echoed": { "valueType": "reference", "value": "data.text" },
+            "marker": { "valueType": "immediate", "value": "from-child" }
+          }
+        }
+      },
+      "entryPoint": "finish",
+      "executionPlan": [],
+      "variables": {},
+      "inputSchema": { "text": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let child_graph: ExecutionGraph = serde_json::from_str(CHILD).expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "child-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("shout-echo".to_string()),
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        false,
+        false,
+    )
+    .expect("child agent compile+compose succeeds");
+    assert!(
+        child
+            .component_artifacts
+            .world_wit
+            .contains("export runtara:agent-shout-echo/capabilities@0.3.0;"),
+        "child must export under its slug:\n{}",
+        child.component_artifacts.world_wit
+    );
+
+    // 2. Stage exactly the way the server publish path does: the composed
+    //    `.wasm` + the synthesized meta under the agent naming convention.
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_shout_echo.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "shout-echo",
+        "Shout Echo",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_shout_echo.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+
+    // 3. The parent: an ordinary Agent step targeting the published child.
+    const PARENT: &str = r#"{
+      "name": "Parent Of Published Agent",
+      "steps": {
+        "call": {
+          "stepType": "Agent",
+          "id": "call",
+          "agentId": "shout-echo",
+          "capabilityId": "run",
+          "inputMapping": { "text": { "valueType": "reference", "value": "data.msg" } }
+        },
+        "finish": {
+          "stepType": "Finish",
+          "id": "finish",
+          "inputMapping": {
+            "childEcho": { "valueType": "reference", "value": "steps.call.outputs.echoed" },
+            "childMarker": { "valueType": "reference", "value": "steps.call.outputs.marker" }
+          }
+        }
+      },
+      "entryPoint": "call",
+      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+      "variables": {},
+      "inputSchema": { "msg": { "type": "string", "required": true } },
+      "outputSchema": {}
+    }"#;
+    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    // The catalog overlay (synthesized meta) is what lets the manifest builder
+    // resolve `shout-echo` / capability `run` / its required inputs.
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parent-wf".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent-build"),
+            track_events: false,
+            agent_catalog: Some(catalog),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        false,
+    )
+    .expect("parent compile succeeds");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components_dir,
+        std::slice::from_ref(&staging),
+    )
+    .expect("parent compose finds the staged child in the extra search dir");
+
+    // 4. Run the parent — the child executes composed-in like a native agent.
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&parent.wasm_path)
+            .await
+            .expect("load parent artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"msg":"hello-child"}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match run.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("parent invoking a published workflow-agent must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "childEcho": "hello-child", "childMarker": "from-child" }),
+        "the child's output must flow back through the standard agent-output shaping"
+    );
+    std::mem::forget(temp);
 }

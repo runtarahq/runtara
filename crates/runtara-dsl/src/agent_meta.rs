@@ -2011,16 +2011,19 @@ pub fn workflow_agent_info(
         ids.dedup();
         ids
     };
-    let supports_connections = input_schema
-        .values()
-        .any(|field| matches!(field.field_type, crate::SchemaFieldType::Connection));
 
     AgentInfo {
         id: slug.to_string(),
         name: name.to_string(),
         description: description.to_string(),
         has_side_effects: true,
-        supports_connections,
+        // `supportsConnections` means "the agent takes a STEP-LEVEL connection"
+        // (validators then require one on every step targeting it). A
+        // workflow-agent never does — its connections are ordinary
+        // `connection`-typed INPUTS, enforced through required-input
+        // validation like any other field. `integrationIds` stays populated
+        // (informational: which integrations those inputs want).
+        supports_connections: false,
         integration_ids,
         capabilities: vec![CapabilityInfo {
             id: WORKFLOW_AGENT_CAPABILITY_ID.to_string(),
@@ -2751,8 +2754,11 @@ mod workflow_agent_info_tests {
         );
 
         assert_eq!(info.id, "order-sync");
-        // Connection-typed inputs drive the agent-level connection metadata.
-        assert!(info.supports_connections);
+        // A workflow-agent's connections are INPUTS, never a step-level
+        // connection — supportsConnections=true would wrongly force parents to
+        // configure a connection on the step. integrationIds stays
+        // informational.
+        assert!(!info.supports_connections);
         assert_eq!(info.integration_ids, vec!["hubspot"]);
 
         assert_eq!(info.capabilities.len(), 1);

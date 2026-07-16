@@ -279,6 +279,13 @@ pub struct CreateWorkflowParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct PublishWorkflowAgentParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetWorkflowSlugParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -775,6 +782,23 @@ pub async fn create_workflow(
         obj.insert("slug".to_string(), serde_json::json!(slug));
     }
     let result = api_post(server, "/api/runtime/workflows/create", Some(body)).await?;
+    json_result(result)
+}
+
+pub async fn publish_workflow_agent(
+    server: &SmoMcpServer,
+    params: PublishWorkflowAgentParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let result = api_post(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}/publish-agent",
+            params.workflow_id
+        ),
+        None,
+    )
+    .await?;
     json_result(result)
 }
 

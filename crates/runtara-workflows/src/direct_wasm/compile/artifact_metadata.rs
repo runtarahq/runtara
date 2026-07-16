@@ -251,24 +251,39 @@ pub(super) fn resolve_shared_component_dependencies(
 
 pub(super) fn resolve_agent_component_dependencies(
     components_dir: &Path,
+    extra_component_dirs: &[std::path::PathBuf],
     components: &[DirectAgentComponentRequirement],
 ) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
     components
         .iter()
         .map(|component| {
-            let wasm_path = components_dir.join(&component.bundle_wasm_filename);
-            if !wasm_path.exists() {
+            // Search the primary components dir first (native agents), then the
+            // extra dirs — staged workflow-agents live in a per-tenant staging
+            // dir, and a parent composing `agentId: <slug>` finds the published
+            // child's `.wasm` there via the identical naming convention.
+            let dir = std::iter::once(components_dir)
+                .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
+                .find(|dir| dir.join(&component.bundle_wasm_filename).exists());
+            let Some(dir) = dir else {
+                let searched: Vec<String> = std::iter::once(components_dir)
+                    .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
+                    .map(|d| {
+                        d.join(&component.bundle_wasm_filename)
+                            .display()
+                            .to_string()
+                    })
+                    .collect();
                 return Err(DirectCompileError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!(
-                        "direct agent component `{}` missing at {}",
+                        "direct agent component `{}` missing — searched {}",
                         component.agent_id,
-                        wasm_path.display()
+                        searched.join(", ")
                     ),
                 )));
-            }
+            };
             resolve_component_dependency(
-                components_dir,
+                dir,
                 "agent",
                 Some(component.agent_id.as_str()),
                 &component.package,

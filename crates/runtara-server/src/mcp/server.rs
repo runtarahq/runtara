@@ -138,6 +138,16 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Publish a workflow AS an agent: compiles the current version with the agent-capability ABI and stages it in the tenant catalog. Other workflows can then invoke it via an Agent step with agentId=<slug>, capabilityId=\"run\" — its inputSchema fields (including connection-typed ones) become the capability's inputs."
+    )]
+    async fn publish_workflow_agent(
+        &self,
+        params: Parameters<tools::workflows::PublishWorkflowAgentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::publish_workflow_agent(self, params.0).await
+    }
+
+    #[tool(
         description = "Set a workflow's slug — the stable capability id a workflow-as-agent exports (runtara:agent-<slug>). Lowercase kebab, max 64 chars, per-tenant unique; 409 if taken or reserved by a native agent id."
     )]
     async fn set_workflow_slug(

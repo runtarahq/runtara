@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::direct_wasm::{
     DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectCompilationInput, DirectCompileError,
-    compile_direct_workflow, compose_direct_workflow,
+    compile_direct_workflow, compose_direct_workflow_with_extra_dirs,
 };
 
 /// Major version of the workflow compiler. Stored in image metadata as
@@ -120,6 +120,10 @@ pub struct DirectWorkflowCompileOptions {
     /// Directory containing prebuilt workflow stdlib/runtime and agent
     /// components used for static composition.
     pub components_dir: PathBuf,
+    /// Additional agent-component search dirs (after `components_dir`) — the
+    /// server passes the tenant's workflow-agent staging dir here so parents
+    /// can compose published workflow-agents.
+    pub extra_component_dirs: Vec<PathBuf>,
     /// Optional checksum of the original workflow DSL source.
     pub source_checksum: Option<String>,
 }
@@ -236,8 +240,12 @@ pub fn compile_workflow_direct(
         "composing",
         "Linking direct workflow components",
     );
-    compose_direct_workflow(&mut direct_result, options.components_dir)
-        .map_err(direct_compile_error_to_io)?;
+    compose_direct_workflow_with_extra_dirs(
+        &mut direct_result,
+        options.components_dir,
+        &options.extra_component_dirs,
+    )
+    .map_err(direct_compile_error_to_io)?;
 
     let package_size = direct_artifact_package_size(&direct_result.build_dir);
 
@@ -367,6 +375,7 @@ mod tests {
             DirectWorkflowCompileOptions {
                 output_dir: output_dir.clone(),
                 components_dir: temp.path().join("missing-components"),
+                extra_component_dirs: Vec::new(),
                 source_checksum: Some("source-sha256".to_string()),
             },
         )

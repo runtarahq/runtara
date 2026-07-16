@@ -459,6 +459,22 @@ pub fn compose_direct_workflow(
     result: &mut DirectCompilationResult,
     components_dir: impl AsRef<Path>,
 ) -> Result<PathBuf, DirectCompileError> {
+    compose_direct_workflow_with_extra_dirs(result, components_dir, &[])
+}
+
+/// [`compose_direct_workflow`] with additional agent-component search dirs.
+///
+/// `extra_component_dirs` are searched (after the primary dir) for agent
+/// `.wasm`/`.meta.json` pairs — the seam that lets a parent workflow compose a
+/// PUBLISHED workflow-agent: the server passes the tenant's staging dir, where
+/// `runtara_agent_<slug>.wasm` artifacts live under the same naming convention
+/// as native agents. Shared components (stdlib/runtime) always come from the
+/// primary dir.
+pub fn compose_direct_workflow_with_extra_dirs(
+    result: &mut DirectCompilationResult,
+    components_dir: impl AsRef<Path>,
+    extra_component_dirs: &[PathBuf],
+) -> Result<PathBuf, DirectCompileError> {
     let components_dir = components_dir.as_ref();
     let composed_path = result.build_dir.join("workflow.wasm");
     let resolve_deps_start = Instant::now();
@@ -468,6 +484,7 @@ pub fn compose_direct_workflow(
     )?;
     let agent_components = resolve_agent_component_dependencies(
         components_dir,
+        extra_component_dirs,
         &result.component_artifacts.agent_components,
     )?;
     tracing::debug!(

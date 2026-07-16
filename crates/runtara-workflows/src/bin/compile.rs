@@ -368,6 +368,7 @@ fn run() -> Result<(), String> {
         },
         DirectWorkflowCompileOptions {
             output_dir: build_output_dir(&args),
+            extra_component_dirs: Vec::new(),
             components_dir,
             source_checksum: Some(source_checksum),
         },
