@@ -28,7 +28,17 @@ use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
-mod bindings;
+mod bindings {
+    // Bindings are generated at compile time by the wit-bindgen macro (no
+    // committed bindings.rs, no cargo-component). `path` lists the shared
+    // `runtara:agent` package first (dependency), then this crate's
+    // build.rs-generated `wit/agent.wit`.
+    wit_bindgen::generate!({
+        path: ["../../runtara-agent-wit/wit", "wit"],
+        world: "runtara:agent-s3-storage/agent",
+        generate_all,
+    });
+}
 
 // ============================================================================
 // Local AgentError shim

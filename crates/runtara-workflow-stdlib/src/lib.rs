@@ -25,7 +25,15 @@
 
 #[cfg(all(target_arch = "wasm32", feature = "direct-component"))]
 #[allow(warnings)]
-mod bindings;
+mod bindings {
+    // Generated at compile time by the wit-bindgen macro (no committed
+    // bindings.rs, no cargo-component).
+    wit_bindgen::generate!({
+        path: "../runtara-workflow-wit/wit/stdlib",
+        world: "workflow-stdlib",
+        generate_all,
+    });
+}
 
 // Runtime module (wraps runtara-sdk)
 #[cfg(feature = "sdk-runtime")]

@@ -16,7 +16,15 @@ use runtara_sdk::{
 
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
-mod bindings;
+mod bindings {
+    // Generated at compile time by the wit-bindgen macro (no committed
+    // bindings.rs, no cargo-component).
+    wit_bindgen::generate!({
+        path: "../runtara-workflow-wit/wit/runtime",
+        world: "workflow-runtime",
+        generate_all,
+    });
+}
 
 fn sdk_error(error: impl std::fmt::Display) -> String {
     error.to_string()

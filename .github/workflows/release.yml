@@ -24,7 +24,6 @@ env:
   RUST_BACKTRACE: 1
   SQLX_OFFLINE: true
   WASM_PACK_VERSION: "0.13.1"
-  CARGO_COMPONENT_VERSION: "0.21.1"
 
 jobs:
   bundle:
@@ -103,22 +102,12 @@ jobs:
             cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
           fi
 
-      # build-bundle.sh installs cargo-component (~5 min cold, used to build
-      # the agent/shared components) into this directory keyed by version.
-      # Cache it so re-runs of the release matrix amortize the install. Cache
-      # key includes the pinned version so any version bump invalidates.
-      - name: Cache bundle build dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/runtara-bundle-build
-          key: bundle-build-deps-${{ runner.os }}-${{ runner.arch }}-cargo-component-${{ env.CARGO_COMPONENT_VERSION }}-locked
-
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
 
       # The bundle's agent-component gate lives in
       # scripts/build-bundle.sh, which invokes scripts/build-agent-components.sh
-      # to drive `cargo component build` and emit the sidecar meta.json for all
+      # to drive `cargo build --target wasm32-wasip2` and emit the sidecar meta.json for all
       # agent crates. Any breakage there fails the bundle build itself before
       # this step would run. The downstream `smoke:` job extracts the resulting
       # tarball and runs the full server end-to-end (with

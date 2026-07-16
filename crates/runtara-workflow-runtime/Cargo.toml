@@ -18,11 +18,4 @@ wasi = ["runtara-sdk/wasi"]
 
 [dependencies]
 runtara-sdk = { path = "../runtara-sdk", version = "8.2", default-features = false, features = ["http"] }
-wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
-
-[package.metadata.component]
-package = "runtara:workflow-runtime"
-
-[package.metadata.component.target]
-path = "../runtara-workflow-wit/wit/runtime"
-world = "workflow-runtime"
+wit-bindgen = "0.58"

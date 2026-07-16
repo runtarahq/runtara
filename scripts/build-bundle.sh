@@ -11,7 +11,7 @@
 #
 # Workflow compilation is fully in-process (the direct WASM emitter byte-emits
 # the workflow-logic module and composes the final workflow.wasm via wac-graph),
-# so the bundle ships NO Rust toolchain, cargo-component, wac CLI, or source
+# so the bundle ships NO Rust toolchain, wac CLI, or source
 # mirror — only the prebuilt components the server reads at runtime.
 #
 # Usage:
@@ -22,7 +22,6 @@
 # Prerequisites (BUILD-time only — used to build the agent/shared components):
 #   - rustup with the version from rust-toolchain.toml installed
 #   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
-#   - cargo-component (installed by this script) for building components
 
 set -euo pipefail
 
@@ -35,11 +34,6 @@ cd "$ROOT_DIR"
 
 SKIP_BUILD=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
-# cargo-component: subcommand used to build the agent + shared workflow
-# components at bundle-build time. No prebuilt binaries upstream — installed
-# via `cargo install` into a per-version cache dir during bundle build.
-# Must match scripts/build-agent-components.sh and .github/workflows/ci.yml.
-CARGO_COMPONENT_VERSION="0.21.1"
 DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
@@ -113,7 +107,6 @@ resolve_versions() {
     info "Stamped version: ${RUNTARA_STAMP_VERSION} (reported in binary/UI)"
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
-    info "cargo-component: ${CARGO_COMPONENT_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
 }
 
@@ -181,52 +174,12 @@ build_stdlib() {
     cargo build -p runtara-workflow-stdlib --release
 }
 
-# ─── Install cargo-component into a versioned cache ─────────────────────────
-#
-# Upstream doesn't ship prebuilt binaries — `cargo install` is the only
-# option. We isolate by version under DOWNLOAD_CACHE so a re-run with the
-# same version is a no-op, and bumping CARGO_COMPONENT_VERSION triggers a
-# fresh install without polluting the user's ~/.cargo/bin.
-
-install_cargo_component() {
-    step "Installing cargo-component ${CARGO_COMPONENT_VERSION} (host build)"
-
-    local root="${DOWNLOAD_CACHE}/cargo-component-${CARGO_COMPONENT_VERSION}"
-    local bin="${root}/bin/cargo-component"
-
-    if [ -x "$bin" ]; then
-        info "Using cached cargo-component at ${bin}"
-    else
-        # --locked is required for reproducibility. Without it, cargo
-        # re-resolves cargo-component's transitive deps (wit-parser,
-        # wasmparser, wit-component) to whatever's newest in the Cargo.toml
-        # range — and those versions affect the *component encoding* the
-        # tool emits. We've observed two installs of the same 0.21.1 version
-        # produce subtly different workflow.wasm bytes, causing the second
-        # to trap at runtime ("cannot leave component instance" inside the
-        # wasi:random shim) while the first runs cleanly. Locking pins all
-        # transitive deps to cargo-component's own Cargo.lock, eliminating
-        # that drift. (An earlier comment claimed --locked failed on yanked
-        # wit-parser 0.219.1; that crate is still downloadable, so cargo
-        # accepts it under --locked. If a future yank actually blocks the
-        # install, fix it by patching the crate version in cargo-component's
-        # repo, not by dropping --locked.)
-        info "cargo install cargo-component --version ${CARGO_COMPONENT_VERSION} --locked --root ${root}"
-        cargo install cargo-component \
-            --version "$CARGO_COMPONENT_VERSION" \
-            --locked \
-            --root "$root"
-    fi
-
-    CARGO_COMPONENT_BINARY="$bin"
-}
-
 # ─── Build agent components ─────────────────────────────────────────────────
 #
 # Produces target/wasm32-wasip2/release/runtara_agent_<x>.wasm plus the
-# sibling .meta.json for each of the 23 agent crates. The build script
-# itself depends on cargo-component + wit-deps being on PATH; we've already
-# installed the right cargo-component into the cache, so prepend it.
+# sibling .meta.json for each agent crate. Components build with plain
+# `cargo build --target wasm32-wasip2` (bindings via each crate's
+# wit_bindgen::generate! macro) — no cargo-component needed.
 
 build_agent_components() {
     if [ "$SKIP_BUILD" = "1" ]; then
@@ -247,8 +200,7 @@ ${TARGET_DIR}/wasm32-wasip2/release/runtara_workflow_*.wasm" >&2
     fi
 
     step "Building agent and direct workflow WASM components"
-    PATH="$(dirname "$CARGO_COMPONENT_BINARY"):${PATH}" \
-        "$SCRIPT_DIR/build-agent-components.sh"
+    "$SCRIPT_DIR/build-agent-components.sh"
 }
 
 # ─── Assemble bundle ────────────────────────────────────────────────────────
@@ -273,10 +225,8 @@ assemble_bundle() {
     # The same directory also carries the direct workflow stdlib/runtime
     # components used by static direct composition.
     info "Copying agent and direct workflow WASM components"
-    # `wasm32-wasip2/release/` is cargo-component's finalized component output.
-    # Same as for workflow-logic: do NOT read from wasm32-wasip1/, which is the
-    # intermediate rustc pass cargo-component leaves behind — that file is the
-    # malformed Frankenstein wac silently mis-composes on linux.
+    # `wasm32-wasip2/release/` holds the finalized components emitted by
+    # rustc's wasm-component-ld (plain cargo build --target wasm32-wasip2).
     local agent_src="${TARGET_DIR}/wasm32-wasip2/release"
     local wasm_count=0
     local meta_count=0
@@ -328,7 +278,6 @@ assemble_bundle() {
   "runtara_version": "${RUNTARA_STAMP_VERSION}",
   "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
-  "cargo_component_version": "${CARGO_COMPONENT_VERSION}",
   "agent_component_count": ${wasm_count},
   "workflow_shared_component_count": ${workflow_component_count},
   "host_target": "${HOST_TARGET}",
@@ -383,7 +332,6 @@ main() {
     build_frontend
     build_server
     build_stdlib
-    install_cargo_component
     build_agent_components
     assemble_bundle
     create_tarball

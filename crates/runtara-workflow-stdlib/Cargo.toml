@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["native"]
 sdk-runtime = ["dep:runtara-ai", "dep:runtara-http", "dep:runtara-sdk"]
-direct-component = ["dep:wit-bindgen-rt"]
+direct-component = ["dep:wit-bindgen"]
 
 # Native platform — uses the native SDK backend (blocking ureq HTTP).
 # Also forwards tracing to runtara-sdk and runtara-ai so native consumers
@@ -36,7 +36,7 @@ wasi = ["sdk-runtime", "runtara-sdk/wasi", "runtara-http/wasi"]
 wasm-js = ["sdk-runtime", "runtara-sdk/wasm-js", "runtara-http/wasm-js"]
 
 [dependencies]
-wit-bindgen-rt = { version = "0.44", features = ["bitflags"], optional = true }
+wit-bindgen = { version = "0.58", optional = true }
 
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
 # per-agent WIT bindings injected by `wac compose`, not by linking the
@@ -62,10 +62,3 @@ runtara-http = { workspace = true, default-features = false, optional = true }
 # Template rendering for MappingValue::Template.
 # `json` enables the `tojson` filter (default features stay on).
 minijinja = { version = "2.5", features = ["json"] }
-
-[package.metadata.component]
-package = "runtara:workflow-stdlib"
-
-[package.metadata.component.target]
-path = "../runtara-workflow-wit/wit/stdlib"
-world = "workflow-stdlib"
