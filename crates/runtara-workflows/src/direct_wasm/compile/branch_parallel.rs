@@ -33,6 +33,16 @@
 //! the parent runtime host and checkpoint scope) degrades to emitting the branches
 //! sequentially — no window, no memo — which is the same instruction stream the
 //! linearised path would have produced.
+//!
+//! **T2.1 (docs §4.3.1):** when every branch is a pure async-Agent chain
+//! (`schedulable_branches`), `emit_branch_scheduler` replaces the depth-wavefront
+//! with a per-branch SEGMENT SCHEDULER — each branch carries its own chain CURSOR +
+//! drive STATE in its slot and advances independently as its subtask settles
+//! (`waitable-set.wait` for ANY, not drain-all), so a fast branch races ahead of a
+//! slow sibling instead of lock-stepping by depth. Assemble is the same memoized
+//! Agent lowering, so it stays sequential-identical. Shapes with sync steps,
+//! composites, or suspensions still use the wavefront (later T2.1 slices widen the
+//! scheduler to them).
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
@@ -48,12 +58,26 @@ use super::split_parallel::{
     emit_drain_pending, emit_join_if_pending, pool_member_component_id, pool_size_for_window,
 };
 use super::{
-    DIRECT_PSPLIT_LAUNCH_LOCAL, DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
-    DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOTS_LOCAL,
-    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
-    DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends,
+    DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET, DIRECT_PSPLIT_LAUNCH_LOCAL,
+    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
+    DIRECT_PSPLIT_SLOT_CURSOR_OFFSET, DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
+    DIRECT_PSPLIT_SLOT_SCHED_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET,
+    DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL,
+    DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
+    DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
+    node_body_suspends,
 };
+
+/// The waitable-set event code for a settled subtask (mirrors
+/// `split_parallel::SUBTASK_RETURNED`, packed low nibble == 2).
+const SUBTASK_RETURNED: i32 = 2;
+
+/// T2.1 branch-scheduler drive states, stored at `slot + SCHED_OFFSET`. Zero-filled
+/// slots start at NEEDS_LAUNCH / cursor 0.
+const SCHED_NEEDS_LAUNCH: i32 = 0;
+const SCHED_PENDING: i32 = 1;
+const SCHED_NEEDS_ASSEMBLE: i32 = 2;
+const SCHED_DONE: i32 = 3;
 
 /// Slot state: an agent result has been launched into this slot (non-zero, so the
 /// memoized invoke in assemble copies it instead of re-invoking).
@@ -62,6 +86,16 @@ const SLOT_AGENT_READY: i32 = 1;
 fn mem32() -> wasm_encoder::MemArg {
     wasm_encoder::MemArg {
         offset: 0,
+        align: 2,
+        memory_index: 0,
+    }
+}
+
+/// A `MemArg` for a fixed byte offset within a slot record (the caller pushes the
+/// slot base pointer as the address operand). T2.1 scheduler slot fields.
+fn slot_mem(offset: i32) -> wasm_encoder::MemArg {
+    wasm_encoder::MemArg {
+        offset: offset as u64,
         align: 2,
         memory_index: 0,
     }
@@ -555,6 +589,352 @@ fn emit_branch_agent(
     );
 }
 
+/// T2.1 gate: every branch is a pure chain of async Agent nodes — the shape the
+/// intra-invocation scheduler drives with yield-granular interleaving. Any sync
+/// step, composite, or suspension (or a non-async ABI / workflow-agent target)
+/// falls back to the depth-wavefront (`emit_concurrent_branches`), which the later
+/// T2.1 slices widen to.
+fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRunPlan]) -> bool {
+    if !static_data.parallel_enabled {
+        return false;
+    }
+    branches.iter().all(|b| {
+        let chain = branch_chain(b);
+        !chain.is_empty()
+            && chain.iter().all(|node| match node {
+                DirectRunPlan::Agent { agent_id, .. } => {
+                    !static_data.agent_is_workflow_agent(*agent_id)
+                }
+                _ => false,
+            })
+    })
+}
+
+/// T2.1 intra-invocation per-branch segment scheduler (docs §4.3.1). Each branch is
+/// a pure async-Agent chain driven by its own CURSOR + drive STATE
+/// (NEEDS_LAUNCH → PENDING → NEEDS_ASSEMBLE → DONE) in its slot. Unlike the
+/// depth-wavefront (which drains ALL of a depth before any branch advances), this
+/// launches every runnable branch's current node, then `waitable-set.wait`s for ANY
+/// to settle and advances only that branch — so a fast branch races ahead of a slow
+/// sibling instead of lock-stepping by depth. Assemble is the memoized Agent
+/// lowering, sequential-identical by construction. Durability, retries, and pooling
+/// carry over from the wavefront (per-branch launch gate; retries in assemble).
+#[allow(clippy::too_many_arguments)]
+fn emit_branch_scheduler(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    variables: DirectVariables<'_>,
+    branches: &[DirectRunPlan],
+    data_ptr_local: u32,
+    data_len_local: u32,
+    steps_ptr_local: u32,
+    steps_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    workflow_log_kind: &DirectDataSegment,
+    workflow_error_kind: &DirectDataSegment,
+    failure_target: Option<DirectFailureTarget>,
+    handled_target: Option<DirectHandledTarget>,
+) {
+    let ws_new = indices
+        .waitable_set_new
+        .expect("scheduler imports waitable builtins");
+    let ws_wait = indices
+        .waitable_set_wait
+        .expect("scheduler imports waitable builtins");
+    let ws_drop = indices
+        .waitable_set_drop
+        .expect("scheduler imports waitable builtins");
+    let waitable_join = indices
+        .waitable_join
+        .expect("scheduler imports waitable builtins");
+    let subtask_drop = indices
+        .subtask_drop
+        .expect("scheduler imports waitable builtins");
+
+    let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
+    let (members, _pools) = plan_branch_pools(&chains);
+    let k = branches.len();
+    let join = DirectRunPlan::Join;
+    let slots_bytes = k as i32 * DIRECT_PSPLIT_SLOT_STRIDE;
+
+    // Allocate K slots (align8, zero-filled → cursor 0 / SCHED NEEDS_LAUNCH).
+    body.instruction(&Instruction::GlobalGet(0));
+    body.instruction(&Instruction::I32Const(7));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::I32Const(-8));
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::I32Const(slots_bytes));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::GlobalSet(0));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(slots_bytes));
+    body.instruction(&Instruction::MemoryFill(0));
+
+    body.instruction(&Instruction::Call(ws_new));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+
+    // ── SCHEDULER LOOP ────────────────────────────────────────────────────────
+    body.instruction(&Instruction::Block(BlockType::Empty)); // $sched_done
+    body.instruction(&Instruction::Loop(BlockType::Empty)); // $sched
+
+    // DRIVE pass: run every runnable branch forward to its next PENDING (or DONE).
+    for (b, chain) in chains.iter().enumerate() {
+        let l = chain.len();
+        // slot ptr for branch b -> LAUNCH.
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+        body.instruction(&Instruction::I32Const(b as i32 * DIRECT_PSPLIT_SLOT_STRIDE));
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+
+        body.instruction(&Instruction::Block(BlockType::Empty)); // $drive_done (L0)
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // $drive (L1)
+
+        // if SCHED == NEEDS_LAUNCH: launch node[cursor].
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::I32Const(SCHED_NEEDS_LAUNCH));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty)); // L2
+        for (j, node) in chain.iter().enumerate() {
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+            body.instruction(&Instruction::I32Load(slot_mem(
+                DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
+            )));
+            body.instruction(&Instruction::I32Const(j as i32));
+            body.instruction(&Instruction::I32Eq);
+            body.instruction(&Instruction::If(BlockType::Empty)); // L3
+            emit_branch_launch(
+                body,
+                indices,
+                static_data,
+                &branch_agent(node),
+                b as i32,
+                members[b][j],
+                waitable_join,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                Some(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL),
+            );
+            body.instruction(&Instruction::End); // L3
+        }
+        // pending? -> SCHED=PENDING, br $drive_done (Br 3: If pending, If NEEDS_LAUNCH, Loop, Block).
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty)); // L3
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Const(SCHED_PENDING));
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::Br(3)); // -> $drive_done
+        body.instruction(&Instruction::End); // L3
+        // eager/skip -> SCHED=NEEDS_ASSEMBLE, continue $drive (Br 1: If NEEDS_LAUNCH, Loop).
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Const(SCHED_NEEDS_ASSEMBLE));
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::Br(1)); // -> $drive (continue)
+        body.instruction(&Instruction::End); // L2 (if NEEDS_LAUNCH)
+
+        // if SCHED == NEEDS_ASSEMBLE: assemble node[cursor], advance.
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::I32Const(SCHED_NEEDS_ASSEMBLE));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty)); // L2
+        for (j, node) in chain.iter().enumerate() {
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+            body.instruction(&Instruction::I32Load(slot_mem(
+                DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
+            )));
+            body.instruction(&Instruction::I32Const(j as i32));
+            body.instruction(&Instruction::I32Eq);
+            body.instruction(&Instruction::If(BlockType::Empty)); // L3
+            emit_branch_agent(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                &branch_agent(node),
+                &join,
+                Some(DIRECT_PSPLIT_LAUNCH_LOCAL),
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+            );
+            body.instruction(&Instruction::End); // L3
+        }
+        // cursor += 1.
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
+        )));
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
+        )));
+        // cursor == len? -> SCHED=DONE, br $drive_done (Br 3).
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
+        )));
+        body.instruction(&Instruction::I32Const(l as i32));
+        body.instruction(&Instruction::I32GeU);
+        body.instruction(&Instruction::If(BlockType::Empty)); // L3
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Const(SCHED_DONE));
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::Br(3)); // -> $drive_done
+        body.instruction(&Instruction::End); // L3
+        // more nodes -> SCHED=NEEDS_LAUNCH, continue $drive (Br 1).
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        body.instruction(&Instruction::I32Const(SCHED_NEEDS_LAUNCH));
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::Br(1)); // -> $drive (continue)
+        body.instruction(&Instruction::End); // L2 (if NEEDS_ASSEMBLE)
+
+        // SCHED is PENDING or DONE -> nothing to drive; exit (Br 1: Loop, then Block).
+        body.instruction(&Instruction::Br(1)); // -> $drive_done
+        body.instruction(&Instruction::End); // L1 Loop $drive
+        body.instruction(&Instruction::End); // L0 Block $drive_done
+    }
+
+    // All branches PENDING or DONE now. If none PENDING -> everyone DONE -> break.
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(1)); // -> $sched_done (Br 1: Loop $sched, Block $sched_done)
+
+    // WAIT for ANY settle. Poll pause/cancel at the wakeup (flag into SIGNAL, acted
+    // on at the loop exit — a replay-safe boundary, every subtask resolved).
+    if !indices.omit_runtime {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(poll));
+            load_retptr_tag(body);
+            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+            body.instruction(&Instruction::I32Or);
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+            body.instruction(&Instruction::I32Or);
+            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        }
+    }
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
+    body.instruction(&Instruction::Call(ws_wait));
+    body.instruction(&Instruction::Drop);
+    // Only a settled subtask advances a branch.
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
+    body.instruction(&Instruction::I32Load(mem32()));
+    body.instruction(&Instruction::I32Const(SUBTASK_RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // handle = event.handle; drop the subtask; PENDING -= 1.
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
+    body.instruction(&Instruction::I32Load(mem32()));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
+    body.instruction(&Instruction::Call(subtask_drop));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    // Match the settled handle to its PENDING branch -> mark NEEDS_ASSEMBLE.
+    for b in 0..k {
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+        body.instruction(&Instruction::I32Const(b as i32 * DIRECT_PSPLIT_SLOT_STRIDE));
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET,
+        )));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
+        body.instruction(&Instruction::I32Load(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::I32Const(SCHED_PENDING));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::I32And);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
+        body.instruction(&Instruction::I32Const(SCHED_NEEDS_ASSEMBLE));
+        body.instruction(&Instruction::I32Store(slot_mem(
+            DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+        )));
+        body.instruction(&Instruction::End);
+    }
+    body.instruction(&Instruction::End); // if SUBTASK_RETURNED
+
+    body.instruction(&Instruction::Br(0)); // continue $sched
+    body.instruction(&Instruction::End); // Loop $sched
+    body.instruction(&Instruction::End); // Block $sched_done
+
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::Call(ws_drop));
+
+    // Act on a pause/cancel observed during the wait — a replay-safe suspend point.
+    if !indices.omit_runtime {
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(poll));
+            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            emit_entry_suspend_return(body, indices);
+            body.instruction(&Instruction::End);
+        }
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+        body.instruction(&Instruction::End);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_parallel_branches(
     body: &mut WasmFunction,
@@ -581,7 +961,31 @@ pub(super) fn emit_parallel_branches(
 ) {
     let concurrent = concurrent_branch_pools(static_data, branches).is_some();
 
-    if concurrent {
+    if schedulable_branches(static_data, branches) {
+        // T2.1: pure async-Agent-chain fan-out → the yield-granular scheduler.
+        emit_branch_scheduler(
+            body,
+            indices,
+            static_data,
+            track_events,
+            variables,
+            branches,
+            data_ptr_local,
+            data_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            failure_target,
+            handled_target,
+        );
+    } else if concurrent {
         emit_concurrent_branches(
             body,
             indices,
@@ -768,6 +1172,7 @@ fn emit_concurrent_branches(
                     output_len_local,
                     route_ptr_local,
                     route_len_local,
+                    None, // wavefront: drain-all, no per-branch pending flag
                 );
             }
         }
@@ -892,6 +1297,11 @@ fn emit_branch_launch(
     output_len_local: u32,
     route_ptr_local: u32,
     route_len_local: u32,
+    // T2.1 scheduler mode: when `Some(flag)`, a PENDING launch stores its subtask
+    // handle in `slot + SUBTASK_OFFSET`, bumps PENDING, and sets `flag` to 1 so the
+    // driver waits for it; an EAGER/skipped launch leaves `flag` at 0 so the driver
+    // assembles immediately. `None` = the wavefront's fire-and-drain-all join.
+    sched_pending_flag: Option<u32>,
 ) {
     let component_id = pool_member_component_id(branch.agent_component_id, pool_member);
     let invoke = indices
@@ -901,6 +1311,13 @@ fn emit_branch_launch(
     let capability_id = static_data
         .agent_capability_id(branch.agent_id)
         .expect("parallel branch agents have static capability ids");
+
+    // Scheduler mode: assume EAGER (flag 0) until the join proves otherwise; the
+    // $skip paths (durable HIT / input error) leave it 0 so the driver assembles.
+    if let Some(flag) = sched_pending_flag {
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(flag));
+    }
 
     // slot_ptr = slots + index * STRIDE -> launch scratch.
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
@@ -984,7 +1401,40 @@ fn emit_branch_launch(
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::Call(invoke.function_index));
     body.instruction(&Instruction::LocalSet(route_len_local)); // status
-    emit_join_if_pending(body, route_len_local, waitable_join);
+    match sched_pending_flag {
+        None => emit_join_if_pending(body, route_len_local, waitable_join),
+        Some(flag) => {
+            // Pending (low nibble != SUBTASK_RETURNED): store the subtask handle in
+            // slot.SUBTASK, join it, bump PENDING, and flag the branch as waiting.
+            body.instruction(&Instruction::LocalGet(route_len_local));
+            body.instruction(&Instruction::I32Const(0xF));
+            body.instruction(&Instruction::I32And);
+            body.instruction(&Instruction::I32Const(SUBTASK_RETURNED));
+            body.instruction(&Instruction::I32Ne);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            // slot.SUBTASK = status >> 4 (the subtask handle == the ws.wait event handle)
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+            body.instruction(&Instruction::LocalGet(route_len_local));
+            body.instruction(&Instruction::I32Const(4));
+            body.instruction(&Instruction::I32ShrU);
+            body.instruction(&Instruction::I32Store(slot_mem(
+                DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET,
+            )));
+            // waitable.join(handle, ws)
+            body.instruction(&Instruction::LocalGet(route_len_local));
+            body.instruction(&Instruction::I32Const(4));
+            body.instruction(&Instruction::I32ShrU);
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
+            body.instruction(&Instruction::Call(waitable_join));
+            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::LocalSet(flag));
+            body.instruction(&Instruction::End);
+        }
+    }
 
     body.instruction(&Instruction::End); // $skip
 }

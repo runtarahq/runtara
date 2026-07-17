@@ -10208,6 +10208,54 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_while_delay() {
     assert_eq!(output["c"], "C2", "branch c terminal: {output}");
 }
 
+/// T2.1: the per-branch SEGMENT SCHEDULER drives UNBALANCED pure-Agent chains —
+/// branch a is 3 steps (a1→a2→a3), branch b is 1 step (b1). The scheduler advances
+/// each branch by its own cursor as its subtask settles (branch b reaches DONE while
+/// branch a is still driving a2/a3), rather than lock-stepping by depth. The merge
+/// must read a's terminal (A3) and b's terminal (B1) regardless of interleaving —
+/// proving the cursor/drive state machine is correct for asymmetric chain lengths.
+#[test]
+fn direct_wasm_execute_parallel_branches_scheduler_unbalanced_chains() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches Scheduler Unbalanced",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "a1": {"stepType":"Agent","id":"a1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"A1"}}},
+            "a2": {"stepType":"Agent","id":"a2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.a1.outputs"}}},
+            "a3": {"stepType":"Agent","id":"a3","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"A3"}}},
+            "b1": {"stepType":"Agent","id":"b1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B1"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"a":{"valueType":"reference","value":"steps.a3.outputs"},"b":{"valueType":"reference","value":"steps.b1.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"a1"},
+            {"fromStep":"start","toStep":"b1"},
+            {"fromStep":"a1","toStep":"a2"},
+            {"fromStep":"a2","toStep":"a3"},
+            {"fromStep":"a3","toStep":"finish"},
+            {"fromStep":"b1","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-scheduler-unbalanced",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "scheduler unbalanced-chains run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["a"], "A3", "branch a 3-step terminal: {output}");
+    assert_eq!(output["b"], "B1", "branch b 1-step terminal: {output}");
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run

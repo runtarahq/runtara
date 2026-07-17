@@ -413,6 +413,15 @@ const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
 /// rewound during a chunk).
 const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 160;
 const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
+/// T2.1 branch scheduler only (never overlaps the split-retry fields above): the
+/// in-flight subtask handle stored at launch so a `waitable-set.wait` settle can be
+/// matched back to its branch (offset 20, in the split's `_pad:u64` gap); the
+/// branch's chain CURSOR (offset 40) and drive STATE (offset 44) — both in the gap
+/// between the durable key and the result, zero-filled to the initial
+/// NEEDS_LAUNCH/cursor-0 state.
+const DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET: i32 = 20;
+const DIRECT_PSPLIT_SLOT_CURSOR_OFFSET: i32 = 40;
+const DIRECT_PSPLIT_SLOT_SCHED_OFFSET: i32 = 44;
 const DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET: i32 = 4;
 const DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET: i32 = 8;
 const DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET: i32 = 12;
