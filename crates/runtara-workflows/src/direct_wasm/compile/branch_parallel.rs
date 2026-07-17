@@ -67,7 +67,8 @@ fn mem32() -> wasm_encoder::MemArg {
     }
 }
 
-/// Borrowed fields of a single-Agent branch (`Agent { next_plan: Join, .. }`).
+/// Borrowed fields of an Agent chain node. The wavefront supplies `next_plan`
+/// explicitly (`Join`), so it is not carried here.
 struct BranchAgent<'a> {
     step_id: &'a str,
     agent_id: u32,
@@ -77,10 +78,11 @@ struct BranchAgent<'a> {
     max_retries: u32,
     retry_delay_ms: u64,
     rate_limit_budget_ms: u64,
-    next_plan: &'a DirectRunPlan,
     error_plan: Option<&'a DirectErrorRoutePlan>,
 }
 
+/// Extract an Agent chain node's fields. Only called for `Agent` nodes (the
+/// wavefront dispatches sync nodes elsewhere).
 fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
     let DirectRunPlan::Agent {
         step_id,
@@ -91,14 +93,11 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         max_retries,
         retry_delay_ms,
         rate_limit_budget_ms,
-        next_plan,
         error_plan,
         ..
     } = plan
     else {
-        // `try_parallel_branches` only builds `ParallelBranches` from single-Agent
-        // branches; the dispatcher never reaches here with anything else.
-        unreachable!("parallel branch is not a single Agent step");
+        unreachable!("branch_agent called on a non-Agent chain node");
     };
     BranchAgent {
         step_id,
@@ -109,27 +108,92 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         max_retries: *max_retries,
         retry_delay_ms: *retry_delay_ms,
         rate_limit_budget_ms: *rate_limit_budget_ms,
-        next_plan,
         error_plan: error_plan.as_ref(),
     }
 }
 
-/// Walk a branch plan into its linear Agent chain `[s0, s1, …]` (4b). A 4a
-/// single-Agent branch yields a length-1 chain. `plan.rs::is_linear_agent_chain_branch`
-/// guarantees every node is an `Agent` ending in `Join`.
-fn branch_chain(plan: &DirectRunPlan) -> Vec<BranchAgent<'_>> {
+/// Walk a branch plan into its linear chain of nodes `[s0, s1, …]` — Agents (4a/4b)
+/// interleaved with SYNC non-Agent steps (4c.1: Log/Filter/SwitchValue/GroupBy) —
+/// stopping before `Join`. `plan.rs::is_linear_chain_branch` guarantees each node
+/// is a supported linear type.
+fn branch_chain(plan: &DirectRunPlan) -> Vec<&DirectRunPlan> {
     let mut chain = Vec::new();
     let mut node = plan;
     loop {
-        let agent = branch_agent(node);
-        let next = agent.next_plan;
-        chain.push(agent);
-        match next {
-            DirectRunPlan::Agent { .. } => node = next,
-            _ => break, // Join
+        chain.push(node);
+        match chain_next(node) {
+            Some(next) if !matches!(next, DirectRunPlan::Join) => node = next,
+            _ => break,
         }
     }
     chain
+}
+
+/// The `next_plan` of a linear chain node (Agent or sync non-Agent), else `None`.
+fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
+    match node {
+        DirectRunPlan::Agent { next_plan, .. }
+        | DirectRunPlan::Log { next_plan, .. }
+        | DirectRunPlan::Filter { next_plan, .. }
+        | DirectRunPlan::SwitchValue { next_plan, .. }
+        | DirectRunPlan::GroupBy { next_plan, .. } => Some(next_plan),
+        _ => None,
+    }
+}
+
+/// A sync chain node has no async op, so the wavefront runs it in assemble via
+/// the standard dispatcher — but with its `next_plan` replaced by `Join`, so ONLY
+/// this step emits (its successor runs at the next depth). Agents go through
+/// `emit_branch_agent` (memoized) instead and never reach here.
+fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
+    let next_plan = Box::new(DirectRunPlan::Join);
+    match node {
+        DirectRunPlan::Log {
+            step_id,
+            log_id,
+            breakpoint,
+            ..
+        } => DirectRunPlan::Log {
+            step_id: step_id.clone(),
+            log_id: *log_id,
+            breakpoint: *breakpoint,
+            next_plan,
+        },
+        DirectRunPlan::Filter {
+            step_id,
+            filter_id,
+            breakpoint,
+            ..
+        } => DirectRunPlan::Filter {
+            step_id: step_id.clone(),
+            filter_id: *filter_id,
+            breakpoint: *breakpoint,
+            next_plan,
+        },
+        DirectRunPlan::SwitchValue {
+            step_id,
+            switch_id,
+            breakpoint,
+            ..
+        } => DirectRunPlan::SwitchValue {
+            step_id: step_id.clone(),
+            switch_id: *switch_id,
+            breakpoint: *breakpoint,
+            next_plan,
+        },
+        DirectRunPlan::GroupBy {
+            step_id,
+            group_id,
+            breakpoint,
+            ..
+        } => DirectRunPlan::GroupBy {
+            step_id: step_id.clone(),
+            group_id: *group_id,
+            breakpoint: *breakpoint,
+            next_plan,
+        },
+        other => other.clone(),
+    }
 }
 
 /// `Some(pool_sizes)` when the whole fan-out may run concurrently — async ABI
@@ -144,12 +208,12 @@ pub(super) fn concurrent_branch_pools(
     if !static_data.parallel_enabled {
         return None;
     }
-    let chains: Vec<Vec<BranchAgent<'_>>> = branches.iter().map(branch_chain).collect();
-    if !chains
-        .iter()
-        .flatten()
-        .all(|step| !static_data.agent_is_workflow_agent(step.agent_id))
-    {
+    let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
+    let ok = chains.iter().flatten().all(|node| match node {
+        DirectRunPlan::Agent { agent_id, .. } => !static_data.agent_is_workflow_agent(*agent_id),
+        _ => true, // sync steps have no invoke
+    });
+    if !ok {
         return None;
     }
     let (_, pool_sizes) = plan_branch_pools(&chains);
@@ -162,21 +226,30 @@ pub(super) fn concurrent_branch_pools(
 /// branches invoking it at any single depth (clamped to PARALLEL_POOL_MAX). A
 /// component reused across depths (sequential rounds) needs no extra instance.
 #[allow(clippy::needless_range_loop)] // depth indexes chains, raw, and members in parallel
-fn plan_branch_pools(chains: &[Vec<BranchAgent<'_>>]) -> (Vec<Vec<u32>>, BTreeMap<String, u32>) {
+fn plan_branch_pools(chains: &[Vec<&DirectRunPlan>]) -> (Vec<Vec<u32>>, BTreeMap<String, u32>) {
+    // Only Agent nodes invoke; sync steps get member 0 (unused).
+    let component_of = |node: &DirectRunPlan| -> Option<String> {
+        match node {
+            DirectRunPlan::Agent {
+                agent_component_id, ..
+            } => Some(agent_component_id.clone()),
+            _ => None,
+        }
+    };
     let max_depth = chains.iter().map(Vec::len).max().unwrap_or(0);
     let mut raw: Vec<Vec<u32>> = chains.iter().map(|c| vec![0u32; c.len()]).collect();
     let mut pool_max: BTreeMap<String, u32> = BTreeMap::new();
     for depth in 0..max_depth {
-        let mut per_depth: BTreeMap<&str, u32> = BTreeMap::new();
+        let mut per_depth: BTreeMap<String, u32> = BTreeMap::new();
         for (branch, chain) in chains.iter().enumerate() {
-            if let Some(step) = chain.get(depth) {
-                let count = per_depth.entry(step.agent_component_id).or_insert(0);
+            if let Some(component) = chain.get(depth).and_then(|node| component_of(node)) {
+                let count = per_depth.entry(component).or_insert(0);
                 raw[branch][depth] = *count;
                 *count += 1;
             }
         }
         for (component, count) in per_depth {
-            let entry = pool_max.entry(component.to_string()).or_insert(0);
+            let entry = pool_max.entry(component).or_insert(0);
             *entry = (*entry).max(count);
         }
     }
@@ -189,13 +262,15 @@ fn plan_branch_pools(chains: &[Vec<BranchAgent<'_>>]) -> (Vec<Vec<u32>>, BTreeMa
         .enumerate()
         .map(|(branch, chain)| {
             (0..chain.len())
-                .map(|depth| {
-                    let size = pool_sizes
-                        .get(chain[depth].agent_component_id)
-                        .copied()
-                        .unwrap_or(1);
-                    raw[branch][depth] % size
-                })
+                .map(
+                    |depth| match chain.get(depth).and_then(|node| component_of(node)) {
+                        Some(component) => {
+                            let size = pool_sizes.get(&component).copied().unwrap_or(1);
+                            raw[branch][depth] % size
+                        }
+                        None => 0,
+                    },
+                )
                 .collect()
         })
         .collect();
@@ -417,8 +492,9 @@ fn emit_concurrent_branches(
         .subtask_drop
         .expect("parallel-branch compiles import the waitable builtins");
 
-    // Walk each branch into its Agent chain and assign per-depth pool members.
-    let chains: Vec<Vec<BranchAgent<'_>>> = branches.iter().map(branch_chain).collect();
+    // Walk each branch into its chain (Agents + sync steps) and assign per-depth
+    // pool members (Agent nodes only).
+    let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
     let (members, _pool_sizes) = plan_branch_pools(&chains);
     let max_depth = chains.iter().map(Vec::len).max().unwrap_or(0);
 
@@ -464,14 +540,17 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
 
-        // LAUNCH depth d.
+        // LAUNCH depth d — only Agent steps have an async invoke; sync steps
+        // (Log/Filter/…) run in assemble with no launch.
         for (index, chain) in chains.iter().enumerate() {
-            if let Some(step) = chain.get(depth) {
+            if let Some(node) = chain.get(depth)
+                && matches!(node, DirectRunPlan::Agent { .. })
+            {
                 emit_branch_launch(
                     body,
                     indices,
                     static_data,
-                    step,
+                    &branch_agent(node),
                     index as i32,
                     members[index][depth],
                     waitable_join,
@@ -490,40 +569,68 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
         body.instruction(&Instruction::Call(ws_drop));
 
-        // ASSEMBLE depth d (branch order).
+        // ASSEMBLE depth d (branch order): Agent steps consume their memoized
+        // slot; sync steps run through the standard dispatcher, one step only
+        // (`next = Join`), updating the shared context depth d+1 reads.
         for (index, chain) in chains.iter().enumerate() {
-            if let Some(step) = chain.get(depth) {
-                body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
-                body.instruction(&Instruction::I32Const(
-                    index as i32 * DIRECT_PSPLIT_SLOT_STRIDE,
-                ));
-                body.instruction(&Instruction::I32Add);
-                body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+            if let Some(node) = chain.get(depth) {
+                if matches!(node, DirectRunPlan::Agent { .. }) {
+                    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+                    body.instruction(&Instruction::I32Const(
+                        index as i32 * DIRECT_PSPLIT_SLOT_STRIDE,
+                    ));
+                    body.instruction(&Instruction::I32Add);
+                    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
 
-                emit_branch_agent(
-                    body,
-                    indices,
-                    static_data,
-                    track_events,
-                    variables,
-                    step,
-                    &join,
-                    Some(DIRECT_PSPLIT_LAUNCH_LOCAL),
-                    data_ptr_local,
-                    data_len_local,
-                    steps_ptr_local,
-                    steps_len_local,
-                    source_ptr_local,
-                    source_len_local,
-                    output_ptr_local,
-                    output_len_local,
-                    route_ptr_local,
-                    route_len_local,
-                    workflow_log_kind,
-                    workflow_error_kind,
-                    failure_target,
-                    handled_target,
-                );
+                    emit_branch_agent(
+                        body,
+                        indices,
+                        static_data,
+                        track_events,
+                        variables,
+                        &branch_agent(node),
+                        &join,
+                        Some(DIRECT_PSPLIT_LAUNCH_LOCAL),
+                        data_ptr_local,
+                        data_len_local,
+                        steps_ptr_local,
+                        steps_len_local,
+                        source_ptr_local,
+                        source_len_local,
+                        output_ptr_local,
+                        output_len_local,
+                        route_ptr_local,
+                        route_len_local,
+                        workflow_log_kind,
+                        workflow_error_kind,
+                        failure_target,
+                        handled_target,
+                    );
+                } else {
+                    let single = with_next_join(node);
+                    emit_run_plan_mapping(
+                        body,
+                        indices,
+                        static_data,
+                        track_events,
+                        variables,
+                        &single,
+                        data_ptr_local,
+                        data_len_local,
+                        steps_ptr_local,
+                        steps_len_local,
+                        source_ptr_local,
+                        source_len_local,
+                        output_ptr_local,
+                        output_len_local,
+                        route_ptr_local,
+                        route_len_local,
+                        workflow_log_kind,
+                        workflow_error_kind,
+                        failure_target,
+                        handled_target,
+                    );
+                }
             }
         }
     }

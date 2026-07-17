@@ -9909,6 +9909,58 @@ fn direct_wasm_execute_parallel_branches_http_overlap() {
     );
 }
 
+/// Phase-4c.1: a parallel branch chain may contain SYNC non-Agent steps. Branch b
+/// is `b1(agent) → blog(Log) → b2(agent)`; branch c is `c1 → c2`. The Log runs at
+/// depth 1 (assemble-only, no launch) alongside sibling agent `c2`, and the merge
+/// still reads both chains' terminal agent outputs — proving sync steps interleave
+/// correctly in the wavefront.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_sync_log_step() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With Sync Step",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "b1": {"stepType":"Agent","id":"b1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B1"}}},
+            "blog": {"stepType":"Log","id":"blog","name":"branch log","level":"info","message":"in branch b"},
+            "b2": {"stepType":"Agent","id":"b2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B2"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.b2.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"b1"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"b1","toStep":"blog"},
+            {"fromStep":"blog","toStep":"b2"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"b2","toStep":"finish"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-sync-step",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "sync-step branch run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "B2",
+        "branch b (through a Log step) terminal: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run

@@ -254,8 +254,13 @@ component's pool = max over depths of its per-depth branch count (clamped). Dura
 retries carry over from 4a unchanged (per-step launch gate; retries in assemble). A
 branch that is length 1 emits exactly the 4a window.
 
-Non-Agent chain steps (Delay/Log/Conditional-in-branch), waits, and ragged async
-shapes are the **general scheduler** below (a later slice).
+**4c.1 (landed):** the chain may also contain SYNC non-Agent steps (Log, Filter,
+SwitchValue, GroupBy). Those depths run assemble-only (no launch) via the standard
+dispatcher on a clone of the node whose `next_plan` is replaced by `Join` (so exactly
+one step emits; its successor runs at the next depth). Pooling counts Agent nodes only.
+
+Delay-in-branch (async timer), in-branch Conditional/Wait, and nested While/Split are
+the **general scheduler** below (later slices).
 
 ### 4.1+ General segment scheduler (later slice)
 

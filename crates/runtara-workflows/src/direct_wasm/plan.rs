@@ -1727,7 +1727,7 @@ fn plan_branch_diamond(
             &edge.to_step,
             orders,
         )?;
-        if !is_linear_agent_chain_branch(&plan) {
+        if !is_linear_chain_branch(&plan) {
             return Ok(None);
         }
         let mut ids = Vec::new();
@@ -1759,10 +1759,23 @@ fn plan_branch_diamond(
     }))
 }
 
-/// Collect the Agent step ids along a linear branch chain (stops at `Join`).
+/// Collect the step ids along a linear branch chain (Agent + sync non-Agent
+/// nodes), stopping at `Join`.
 fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
     let mut node = plan;
     while let DirectRunPlan::Agent {
+        step_id, next_plan, ..
+    }
+    | DirectRunPlan::Log {
+        step_id, next_plan, ..
+    }
+    | DirectRunPlan::Filter {
+        step_id, next_plan, ..
+    }
+    | DirectRunPlan::SwitchValue {
+        step_id, next_plan, ..
+    }
+    | DirectRunPlan::GroupBy {
         step_id, next_plan, ..
     } = node
     {
@@ -1814,25 +1827,58 @@ fn branches_independent(
 ///   handles it, `next == Join`). Durable and retries are allowed throughout
 ///   (per-step launch gate; retries in assemble). Breakpoints are excluded. A
 ///   workflow-agent target is excluded at emission time, not here.
-fn is_linear_agent_chain_branch(plan: &DirectRunPlan) -> bool {
+/// - 4c.1: the chain may also contain SYNC non-Agent steps (Log, Filter,
+///   SwitchValue, GroupBy) — those depths run assemble-only in the wavefront (no
+///   async launch). Branching/async/loop steps (Conditional, Delay, Wait, While,
+///   Split, Embed, AiAgent) are NOT linear-chain nodes (later 4c slices).
+fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
     let mut node = plan;
     loop {
-        let DirectRunPlan::Agent {
-            breakpoint: false,
-            error_plan,
-            next_plan,
-            ..
-        } = node
-        else {
-            return false;
-        };
-        match next_plan.as_ref() {
-            // Terminal chain step: onError allowed (assemble routes it).
-            DirectRunPlan::Join => return true,
-            // Intermediate chain step: must not recover via onError.
-            next @ DirectRunPlan::Agent { .. } if error_plan.is_none() => node = next,
+        let next_plan = match node {
+            // Agent: terminal (next==Join) may carry onError; intermediate may not.
+            DirectRunPlan::Agent {
+                breakpoint: false,
+                error_plan,
+                next_plan,
+                ..
+            } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                if error_plan.is_some() {
+                    return false; // intermediate agent must not recover via onError
+                }
+                next_plan
+            }
+            // Sync non-Agent steps: no async op, no onError to worry about.
+            DirectRunPlan::Log {
+                breakpoint: false,
+                next_plan,
+                ..
+            }
+            | DirectRunPlan::Filter {
+                breakpoint: false,
+                next_plan,
+                ..
+            }
+            | DirectRunPlan::SwitchValue {
+                breakpoint: false,
+                next_plan,
+                ..
+            }
+            | DirectRunPlan::GroupBy {
+                breakpoint: false,
+                next_plan,
+                ..
+            } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
             _ => return false,
-        }
+        };
+        node = next_plan;
     }
 }
 
