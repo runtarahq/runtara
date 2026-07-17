@@ -1867,9 +1867,15 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
             DirectRunPlan::AiAgent {
                 step_id, next_plan, ..
             }
+            | DirectRunPlan::AiAgentLoop {
+                step_id, next_plan, ..
+            }
             | DirectRunPlan::Delay {
                 step_id, next_plan, ..
             } => {
+                // Collect only the loop's OWN step_id; its tool-target steps (Wait /
+                // Embed) are reached via tool edges, off the normal-flow graph
+                // `branches_independent` inspects.
                 out.push(step_id.clone());
                 node = next_plan;
             }
@@ -1943,7 +1949,18 @@ fn error_route_suspends(e: &Option<DirectErrorRoutePlan>) -> bool {
     })
 }
 
-fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
+/// Whether an AiAgent-loop tool suspends the instance when the LLM dispatches it:
+/// a `Wait` tool is a durable human-in-the-loop suspend; an `Embed` tool suspends
+/// if its composed child workflow does. Agent / MCP tools never suspend.
+pub(super) fn ai_tool_suspends(tool: &DirectAiToolPlan) -> bool {
+    match tool {
+        DirectAiToolPlan::Wait { .. } => true,
+        DirectAiToolPlan::Embed { child_plan, .. } => plan_contains_suspension(child_plan),
+        DirectAiToolPlan::Agent { .. } => false,
+    }
+}
+
+pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     use DirectRunPlan as P;
     let err = error_route_suspends;
     match plan {
@@ -1958,12 +1975,20 @@ fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
             next_plan,
             error_plan,
             ..
-        }
-        | P::AiAgentLoop {
+        } => plan_contains_suspension(next_plan) || err(error_plan),
+        // An AiAgent LOOP additionally suspends if any dispatchable tool does (a
+        // Wait tool, or an Embed tool whose child suspends) — the loop yields to
+        // the tool mid-turn.
+        P::AiAgentLoop {
             next_plan,
             error_plan,
+            tools,
             ..
-        } => plan_contains_suspension(next_plan) || err(error_plan),
+        } => {
+            plan_contains_suspension(next_plan)
+                || err(error_plan)
+                || tools.iter().any(ai_tool_suspends)
+        }
         P::Filter { next_plan, .. }
         | P::SwitchValue { next_plan, .. }
         | P::GroupBy { next_plan, .. }
@@ -2036,6 +2061,61 @@ fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     }
 }
 
+/// Whether THIS node suspends on its OWN account, IGNORING its continuation
+/// (`next_plan` / `merge_plan` — that is the next wavefront depth, classified on
+/// its own). Routes a suspending composite / AiAgentLoop-with-Wait-tool / top-level
+/// Wait|Delay into the wavefront's pass-2 (assemble-last, `branch_parallel::
+/// is_suspending_node`) so every sibling at the depth checkpoints before this
+/// node's inline suspend exits the instance. A non-suspending composite returns
+/// false and runs blocking in pass-1, exactly as before.
+pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    match node {
+        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::Conditional {
+            true_plan,
+            false_plan,
+            ..
+        } => plan_contains_suspension(true_plan) || plan_contains_suspension(false_plan),
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+        }
+        P::While {
+            nested_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(nested_plan) || error_route_suspends(error_plan),
+        P::EmbedWorkflow {
+            child_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(child_plan) || error_route_suspends(error_plan),
+        P::AiAgent { error_plan, .. } => error_route_suspends(error_plan),
+        P::AiAgentLoop {
+            tools, error_plan, ..
+        } => tools.iter().any(ai_tool_suspends) || error_route_suspends(error_plan),
+        _ => false,
+    }
+}
+
 /// Branch eligibility for the concurrent window:
 /// - 4a: a single Agent step (`Agent → Join`).
 /// - 4b: a linear CHAIN of Agent steps (`Agent → Agent → … → Join`), run as a
@@ -2046,8 +2126,15 @@ fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
 ///   workflow-agent target is excluded at emission time, not here.
 /// - 4c.1: the chain may also contain SYNC non-Agent steps (Log, Filter,
 ///   SwitchValue, GroupBy) — those depths run assemble-only in the wavefront (no
-///   async launch). Branching/async/loop steps (Conditional, Delay, Wait, While,
-///   Split, Embed, AiAgent) are NOT linear-chain nodes (later 4c slices).
+///   async launch).
+/// - 4c.3 / T2.0: the chain may also contain COMPOSITE nodes (Conditional, Switch,
+///   Edge, While, Split, Embed, AiAgent, AiAgentLoop) that run BLOCKING at their
+///   depth via `emit_run_plan_mapping(with_next_join(node))`. A composite whose body
+///   nests a suspension (a Wait in a Conditional arm / loop body, an AiAgentLoop
+///   Wait tool) is allowed: `node_body_suspends` routes it to pass-2 and
+///   `plan_branch_diamond` gates the branch on `graph.durable` for replay-safety.
+///   A top-level Wait/Delay chain node is likewise pass-2. Breakpoints excluded; a
+///   workflow-agent Agent target is excluded at emission time, not here.
 fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
     let mut node = plan;
     loop {
@@ -2093,108 +2180,69 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                 }
                 next_plan
             }
-            // 4c.3: an in-branch Conditional runs BLOCKING as a composite node
-            // (§4.0.1) — allowed when its arms are suspension-free (else a suspend
-            // mid-assemble would risk a replay double-fire). Its continuation is
-            // `merge_plan`; a terminal Conditional (no merge) ends the branch.
+            // In-branch Conditional runs BLOCKING as a composite node (§4.0.1). A
+            // suspension inside an arm is allowed (T2.0): `node_body_suspends` routes
+            // the composite to pass-2 (assemble-last) and `plan_branch_diamond` gates
+            // the whole branch on `graph.durable`, so the inline suspend is
+            // replay-safe. Continuation = `merge_plan`; a terminal Conditional ends
+            // the branch.
             DirectRunPlan::Conditional {
                 breakpoint: false,
-                true_plan,
-                false_plan,
                 merge_plan,
                 ..
-            } => {
-                if plan_contains_suspension(true_plan) || plan_contains_suspension(false_plan) {
-                    return false;
-                }
-                match merge_plan {
-                    Some(merge) => merge,
-                    None => return true,
-                }
-            }
+            } => match merge_plan {
+                Some(merge) => merge,
+                None => return true,
+            },
             // Routing Switch / conditioned-edge fan-out: same composite treatment as
-            // Conditional (continuation = merge_plan), suspension-free routes.
+            // Conditional (continuation = merge_plan). Suspending routes are allowed
+            // (T2.0: pass-2 + durable gate).
             DirectRunPlan::SwitchRoute {
                 breakpoint: false,
-                branches,
-                default_plan,
                 merge_plan,
                 ..
-            } => {
-                if branches.iter().any(|b| plan_contains_suspension(&b.plan))
-                    || plan_contains_suspension(default_plan)
-                {
-                    return false;
-                }
-                match merge_plan {
-                    Some(merge) => merge,
-                    None => return true,
-                }
             }
-            DirectRunPlan::EdgeRoute {
-                branches,
-                default_plan,
-                merge_plan,
-            } => {
-                if branches.iter().any(|b| plan_contains_suspension(&b.plan))
-                    || plan_contains_suspension(default_plan)
-                {
-                    return false;
-                }
-                match merge_plan {
-                    Some(merge) => merge,
-                    None => return true,
-                }
-            }
+            | DirectRunPlan::EdgeRoute { merge_plan, .. } => match merge_plan {
+                Some(merge) => merge,
+                None => return true,
+            },
             // next_plan composites — nested loop bodies / child graphs run BLOCKING
-            // at this depth; continuation is `next_plan`. Suspension-free body/error
-            // required (same replay-safety guard).
+            // at this depth; continuation is `next_plan`. A suspension inside the
+            // body / error route is allowed (T2.0: pass-2 + durable gate).
             DirectRunPlan::While {
                 breakpoint: false,
-                nested_plan,
                 next_plan,
-                error_plan,
                 ..
             }
             | DirectRunPlan::Split {
                 breakpoint: false,
-                nested_plan,
                 next_plan,
-                error_plan,
                 ..
-            } => {
-                if plan_contains_suspension(nested_plan) || error_route_suspends(error_plan) {
-                    return false;
-                }
-                if matches!(**next_plan, DirectRunPlan::Join) {
-                    return true;
-                }
-                next_plan
             }
-            DirectRunPlan::EmbedWorkflow {
+            | DirectRunPlan::EmbedWorkflow {
                 breakpoint: false,
-                child_plan,
                 next_plan,
-                error_plan,
                 ..
             } => {
-                if plan_contains_suspension(child_plan) || error_route_suspends(error_plan) {
-                    return false;
-                }
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
                 next_plan
             }
+            // Single-shot AiAgent and the AiAgent tool LOOP both run BLOCKING as a
+            // composite; a suspension on the error route (AiAgent) or via a Wait /
+            // suspending-Embed tool (AiAgentLoop) is allowed (T2.0: pass-2 + durable
+            // gate).
             DirectRunPlan::AiAgent {
                 breakpoint: false,
                 next_plan,
-                error_plan,
+                ..
+            }
+            | DirectRunPlan::AiAgentLoop {
+                breakpoint: false,
+                next_plan,
                 ..
             } => {
-                if error_route_suspends(error_plan) {
-                    return false;
-                }
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
@@ -3297,6 +3345,138 @@ mod tests {
                 "Finish:finish",
             ],
             "chain diamond should lower to ParallelBranches with 2-step branches: {emitted:?}"
+        );
+    }
+
+    /// T2.0: an AiAgent tool LOOP suspends when the LLM can dispatch a Wait tool
+    /// (durable human-in-the-loop) or an Embed tool whose child suspends. Regression
+    /// for the latent gap where `plan_contains_suspension` walked only `next_plan` /
+    /// `error_plan` and NOT the loop's `tools` — misclassifying such a loop as
+    /// suspension-free, which would run it blocking and risk a replay double-fire.
+    #[test]
+    fn ai_agent_loop_wait_tool_is_detected_as_suspension() {
+        use DirectRunPlan as P;
+        let wait_tool = DirectAiToolPlan::Wait {
+            step_id: "w".into(),
+            label: "ask-human".into(),
+        };
+        let agent_tool = DirectAiToolPlan::Agent {
+            agent_id: 1,
+            agent_component_id: "utils".into(),
+            label: "lookup".into(),
+            timeout_ms: None,
+        };
+        assert!(ai_tool_suspends(&wait_tool), "a Wait tool suspends");
+        assert!(!ai_tool_suspends(&agent_tool), "an Agent tool does not");
+
+        let make_loop = |tools: Vec<DirectAiToolPlan>| P::AiAgentLoop {
+            step_id: "ai".into(),
+            agent_id: 0,
+            agent_component_id: "ai-tools".into(),
+            input_mapping_id: 0,
+            durable_checkpoint: true,
+            breakpoint: false,
+            max_iterations: 10,
+            tools,
+            memory: None,
+            next_plan: Box::new(P::Join),
+            error_plan: None,
+        };
+
+        let with_wait = make_loop(vec![agent_tool.clone(), wait_tool]);
+        assert!(
+            plan_contains_suspension(&with_wait),
+            "an AiAgentLoop whose tools include a Wait suspends"
+        );
+        assert!(
+            node_body_suspends(&with_wait),
+            "…and is routed to the wavefront's pass-2 (assemble-last)"
+        );
+
+        let no_wait = make_loop(vec![agent_tool]);
+        assert!(
+            !plan_contains_suspension(&no_wait),
+            "an AiAgentLoop with only Agent tools does not suspend"
+        );
+        assert!(!node_body_suspends(&no_wait));
+    }
+
+    /// T2.0: a DURABLE diamond whose branch nests a suspension INSIDE a composite (a
+    /// durable Delay in a While loop body) lowers to `ParallelBranches` — the While is
+    /// a suspending composite (pass-2), gated on `durable`. The SAME graph when
+    /// non-durable declines (linearises), because the replay would re-fire the
+    /// pre-suspend siblings with no checkpoints to HIT. (The suspension is nested one
+    /// level down; the While is a single OUTER node, so the fan-out re-converges and
+    /// passes the E073 reconvergence validator.)
+    #[test]
+    fn durable_diamond_with_inbranch_while_delay_lowers_to_parallel_branches() {
+        let build = |durable: bool| {
+            let mut steps = serde_json::Map::new();
+            for id in ["a", "bafter", "c1", "c2"] {
+                steps.insert(id.to_string(), agent_step_json(id));
+            }
+            steps.insert(
+                "bloop".to_string(),
+                serde_json::json!({
+                    "id": "bloop", "stepType": "While", "name": "loop",
+                    "condition": {"type":"operation","op":"LT","arguments":[
+                        {"valueType":"reference","value":"loop.index"},
+                        {"valueType":"immediate","value":2}]},
+                    "subgraph": {
+                        "name":"iter", "entryPoint":"idelay",
+                        "steps": {
+                            "idelay": {"stepType":"Delay","id":"idelay","durationMs":{"valueType":"immediate","value":0}},
+                            "iterfin": {"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}
+                        },
+                        "executionPlan": [{"fromStep":"idelay","toStep":"iterfin"}]
+                    },
+                    "config": {"maxIterations": 10}
+                }),
+            );
+            steps.insert(
+                "finish".to_string(),
+                serde_json::json!({
+                    "id": "finish", "stepType": "Finish",
+                    "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+                }),
+            );
+            let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "entryPoint": "a",
+                "durable": durable,
+                "steps": steps,
+                "executionPlan": [
+                    {"fromStep":"a","toStep":"bloop"},
+                    {"fromStep":"a","toStep":"c1"},
+                    {"fromStep":"bloop","toStep":"bafter"},
+                    {"fromStep":"bafter","toStep":"finish"},
+                    {"fromStep":"c1","toStep":"c2"},
+                    {"fromStep":"c2","toStep":"finish"}
+                ]
+            }))
+            .expect("graph parses");
+            let manifest = super::super::manifest::build_direct_workflow_manifest(&graph)
+                .expect("build manifest");
+            let plan = direct_run_plan(&manifest).expect("build plan");
+            let mut emitted = Vec::new();
+            collect_plan_steps(&plan, &mut emitted);
+            emitted
+        };
+
+        let durable = build(true);
+        assert!(
+            durable.iter().any(|s| s == "ParallelBranches"),
+            "durable while-with-in-body-delay diamond must parallelize: {durable:?}"
+        );
+        assert!(
+            durable.iter().any(|s| s == "While:bloop") && durable.iter().any(|s| s == "idelay"),
+            "the suspending While composite (with its nested Delay) is in a branch: {durable:?}"
+        );
+
+        let non_durable = build(false);
+        assert!(
+            !non_durable.iter().any(|s| s == "ParallelBranches"),
+            "a NON-durable in-branch suspension must decline to linearise (no checkpoints \
+             to replay-HIT): {non_durable:?}"
         );
     }
 

@@ -10145,6 +10145,69 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
     );
 }
 
+/// T2.0: a DURABLE parallel branch may contain a suspending COMPOSITE — here a While
+/// loop whose body runs a durable Delay (a suspension NESTED one level down, the R2
+/// remnant that previously linearised). Branch b is `bloop(While) → bafter`;
+/// `node_body_suspends(While)` (its body contains a Delay) routes it to pass-2 so
+/// sibling `c1` checkpoints before the composite may suspend, and
+/// `plan_branch_diamond` gates the branch on `durable`. The merge reads `bafter`
+/// (after the loop) and `c2` — proving a suspending composite compiles and executes
+/// in a parallel branch. (A Wait/Delay nested inside a *Conditional* arm instead
+/// would trip the separate E073 reconvergence validator, which sees the arm as a
+/// second fan-out; the loop body keeps the composite a single re-converging node.)
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_while_delay() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With While+Delay",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bloop": {
+                "stepType":"While","id":"bloop","name":"loop",
+                "condition":{"type":"operation","op":"LT","arguments":[{"valueType":"reference","value":"loop.index"},{"valueType":"immediate","value":2}]},
+                "subgraph":{"name":"iter","entryPoint":"idelay","steps":{
+                    "idelay":{"stepType":"Delay","id":"idelay","durationMs":{"valueType":"immediate","value":0}},
+                    "iterfin":{"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}
+                },"executionPlan":[{"fromStep":"idelay","toStep":"iterfin"}]},
+                "config":{"maxIterations":10}
+            },
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER_LOOP"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bloop"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bloop","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-while-delay",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch while+delay run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "AFTER_LOOP",
+        "branch b step after the suspending loop ran: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run

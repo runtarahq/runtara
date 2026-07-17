@@ -52,7 +52,7 @@ use super::{
     DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOTS_LOCAL,
     DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
-    DirectHandledTarget, DirectRunPlan, DirectVariables,
+    DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends,
 };
 
 /// Slot state: an agent result has been launched into this slot (non-zero, so the
@@ -145,19 +145,22 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         | DirectRunPlan::Split { next_plan, .. }
         | DirectRunPlan::EmbedWorkflow { next_plan, .. }
         | DirectRunPlan::AiAgent { next_plan, .. }
+        | DirectRunPlan::AiAgentLoop { next_plan, .. }
         | DirectRunPlan::WaitForSignal { next_plan, .. }
         | DirectRunPlan::Delay { next_plan, .. } => Some(next_plan),
         _ => None,
     }
 }
 
-/// A chain node that SUSPENDS the instance (WaitForSignal / durable Delay). The
-/// wavefront assembles these LAST at each depth so siblings checkpoint first.
+/// A chain node that SUSPENDS the instance on its OWN account — a top-level
+/// WaitForSignal / durable Delay, OR a composite whose body nests a suspension (a
+/// Conditional arm with a Wait, a While/Split body or Embed child that suspends, an
+/// AiAgentLoop with a Wait / suspending-Embed tool). The wavefront assembles these
+/// LAST at each depth (pass-2) so every sibling checkpoints before the inline
+/// suspend exits the instance; `plan_branch_diamond` gates such branches on
+/// `graph.durable` so the resume replay HITs instead of re-firing.
 fn is_suspending_node(node: &DirectRunPlan) -> bool {
-    matches!(
-        node,
-        DirectRunPlan::WaitForSignal { .. } | DirectRunPlan::Delay { .. }
-    )
+    node_body_suspends(node)
 }
 
 /// A sync chain node has no async op, so the wavefront runs it in assemble via
@@ -340,6 +343,34 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             max_retries: *max_retries,
             retry_delay_ms: *retry_delay_ms,
+            next_plan,
+            error_plan: error_plan.clone(),
+        },
+        // AiAgent tool LOOP: run the whole loop blocking (each turn's tool calls on
+        // the sync invoke); its post-loop continuation becomes Join so only this
+        // composite emits. A Wait / suspending-Embed tool suspends inline (pass-2).
+        DirectRunPlan::AiAgentLoop {
+            step_id,
+            agent_id,
+            agent_component_id,
+            input_mapping_id,
+            durable_checkpoint,
+            breakpoint,
+            max_iterations,
+            tools,
+            memory,
+            error_plan,
+            ..
+        } => DirectRunPlan::AiAgentLoop {
+            step_id: step_id.clone(),
+            agent_id: *agent_id,
+            agent_component_id: agent_component_id.clone(),
+            input_mapping_id: *input_mapping_id,
+            durable_checkpoint: *durable_checkpoint,
+            breakpoint: *breakpoint,
+            max_iterations: *max_iterations,
+            tools: tools.clone(),
+            memory: memory.clone(),
             next_plan,
             error_plan: error_plan.clone(),
         },
