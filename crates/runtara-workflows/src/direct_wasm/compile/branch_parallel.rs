@@ -144,9 +144,20 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         DirectRunPlan::While { next_plan, .. }
         | DirectRunPlan::Split { next_plan, .. }
         | DirectRunPlan::EmbedWorkflow { next_plan, .. }
-        | DirectRunPlan::AiAgent { next_plan, .. } => Some(next_plan),
+        | DirectRunPlan::AiAgent { next_plan, .. }
+        | DirectRunPlan::WaitForSignal { next_plan, .. }
+        | DirectRunPlan::Delay { next_plan, .. } => Some(next_plan),
         _ => None,
     }
+}
+
+/// A chain node that SUSPENDS the instance (WaitForSignal / durable Delay). The
+/// wavefront assembles these LAST at each depth so siblings checkpoint first.
+fn is_suspending_node(node: &DirectRunPlan) -> bool {
+    matches!(
+        node,
+        DirectRunPlan::WaitForSignal { .. } | DirectRunPlan::Delay { .. }
+    )
 }
 
 /// A sync chain node has no async op, so the wavefront runs it in assemble via
@@ -331,6 +342,32 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             retry_delay_ms: *retry_delay_ms,
             next_plan,
             error_plan: error_plan.clone(),
+        },
+        DirectRunPlan::WaitForSignal {
+            step_id,
+            breakpoint,
+            on_wait_plan,
+            error_plan,
+            ..
+        } => DirectRunPlan::WaitForSignal {
+            step_id: step_id.clone(),
+            breakpoint: *breakpoint,
+            on_wait_plan: on_wait_plan.clone(),
+            next_plan,
+            error_plan: error_plan.clone(),
+        },
+        DirectRunPlan::Delay {
+            step_id,
+            delay_id,
+            durable,
+            breakpoint,
+            ..
+        } => DirectRunPlan::Delay {
+            step_id: step_id.clone(),
+            delay_id: *delay_id,
+            durable: *durable,
+            breakpoint: *breakpoint,
+            next_plan,
         },
         other => other.clone(),
     }
@@ -709,11 +746,20 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
         body.instruction(&Instruction::Call(ws_drop));
 
-        // ASSEMBLE depth d (branch order): Agent steps consume their memoized
-        // slot; sync steps run through the standard dispatcher, one step only
+        // ASSEMBLE depth d in TWO passes: non-suspending nodes first, then
+        // suspending nodes (Wait/durable-Delay) last — so every sibling at this
+        // depth has checkpointed before an inline suspend exits the instance, and
+        // the resume replay never re-fires them. Agent steps consume their memoized
+        // slot; everything else runs through the dispatcher one step only
         // (`next = Join`), updating the shared context depth d+1 reads.
-        for (index, chain) in chains.iter().enumerate() {
-            if let Some(node) = chain.get(depth) {
+        for suspending_pass in [false, true] {
+            for (index, chain) in chains.iter().enumerate() {
+                let Some(node) = chain.get(depth) else {
+                    continue;
+                };
+                if is_suspending_node(node) != suspending_pass {
+                    continue;
+                }
                 if matches!(node, DirectRunPlan::Agent { .. }) {
                     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
                     body.instruction(&Instruction::I32Const(

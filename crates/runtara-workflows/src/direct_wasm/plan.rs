@@ -1730,6 +1730,13 @@ fn plan_branch_diamond(
         if !is_linear_chain_branch(&plan) {
             return Ok(None);
         }
+        // A branch that suspends (in-branch Wait / durable Delay) is replay-safe
+        // only when the workflow is durable — its agents must HIT checkpoints on
+        // the resume replay instead of re-firing. A non-durable wait-branch
+        // linearizes (a wait already implies durability, so this is rare/degenerate).
+        if plan_contains_suspension(&plan) && !graph.durable {
+            return Ok(None);
+        }
         let mut ids = Vec::new();
         chain_step_ids(&plan, &mut ids);
         branch_id_sets.push(ids.into_iter().collect());
@@ -1859,8 +1866,23 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
             }
             DirectRunPlan::AiAgent {
                 step_id, next_plan, ..
+            }
+            | DirectRunPlan::Delay {
+                step_id, next_plan, ..
             } => {
                 out.push(step_id.clone());
+                node = next_plan;
+            }
+            DirectRunPlan::WaitForSignal {
+                step_id,
+                on_wait_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                if let Some(on_wait) = on_wait_plan {
+                    chain_step_ids(on_wait, out);
+                }
                 node = next_plan;
             }
             _ => break,
@@ -2173,6 +2195,41 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                 if error_route_suspends(error_plan) {
                     return false;
                 }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            // 4c.2 + in-branch Wait: a top-level suspending node (WaitForSignal /
+            // Delay). It runs LAST at its depth (branch_parallel orders it after
+            // siblings so they checkpoint before the inline suspend); on resume the
+            // wavefront replays and durable steps HIT. `plan_branch_diamond` gates
+            // this on `graph.durable` for replay safety. The wait's own on-wait /
+            // timeout routing must be suspension-free. Continuation = next_plan.
+            DirectRunPlan::WaitForSignal {
+                breakpoint: false,
+                on_wait_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if on_wait_plan
+                    .as_ref()
+                    .is_some_and(|p| plan_contains_suspension(p))
+                    || error_route_suspends(error_plan)
+                {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::Delay {
+                breakpoint: false,
+                next_plan,
+                ..
+            } => {
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }

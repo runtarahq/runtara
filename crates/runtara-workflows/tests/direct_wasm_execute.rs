@@ -10070,6 +10070,81 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_while() {
     assert_eq!(output["c"], "C2", "branch c terminal: {output}");
 }
 
+/// Phase-4c (final shape): a DURABLE parallel branch may contain an in-branch
+/// WaitForSignal. Branch b is `bwait(WaitForSignal) → bafter`; the wait runs LAST
+/// at depth 0 (after sibling `c1` checkpoints), reads the delivered signal, and the
+/// merge reads `bafter` (after the wait) and `c2`. A second run (resume with the
+/// signal retained) reproduces the result without hanging or re-firing — proving
+/// the wavefront's deferred-suspend ordering + replay are correct.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "parallel-branches-wait";
+    let signal = serde_json::json!({ "approved": true });
+    let graph = r#"{
+        "name": "Parallel Branches With Wait",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bwait": {"stepType":"WaitForSignal","id":"bwait","name":"Approval","pollIntervalMs":0,"responseSchema":{"approved":{"type":"boolean","required":true}}},
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.bwait.outputs.approved"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bwait"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bwait","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+
+    let first = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        vec![signal.clone()],
+    );
+    assert!(
+        first.status_success,
+        "in-branch wait run failed: stderr={} error={:?}",
+        first.stderr, first.error_json
+    );
+    let out1 = first.output_json.clone().expect("completed output");
+    assert_eq!(
+        out1["b"], true,
+        "branch b read the delivered signal: {out1}"
+    );
+    assert_eq!(out1["c"], "C2", "branch c terminal: {out1}");
+
+    // Resume (replay with the signal retained): completes identically, no hang.
+    let second = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        vec![signal],
+    );
+    assert!(
+        second.status_success,
+        "in-branch wait resume failed: stderr={}",
+        second.stderr
+    );
+    assert_eq!(
+        second.output_json,
+        Some(serde_json::json!({ "b": true, "c": "C2" })),
+        "resume reproduces the delivered-signal result"
+    );
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run
