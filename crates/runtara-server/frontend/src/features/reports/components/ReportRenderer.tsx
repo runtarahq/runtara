@@ -139,6 +139,7 @@ function LayoutNodes({
   definition,
   renderResponse,
   filters,
+  inGrid = false,
   onFilterChange,
   onFiltersChange,
   onNavigateView,
@@ -149,6 +150,10 @@ function LayoutNodes({
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  /** True when these nodes render inside a grid cell: the grid's gap owns
+   *  the spacing, so cell content drops its own vertical margins and
+   *  stretches to equalize row heights. */
+  inGrid?: boolean;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (
     updates: Record<string, unknown>,
@@ -171,6 +176,7 @@ function LayoutNodes({
             definition={definition}
             renderResponse={renderResponse}
             filters={filters}
+            inGrid={inGrid}
             onFilterChange={onFilterChange}
             onFiltersChange={onFiltersChange}
             onNavigateView={onNavigateView}
@@ -188,6 +194,7 @@ function LayoutNode({
   definition,
   renderResponse,
   filters,
+  inGrid = false,
   onFilterChange,
   onFiltersChange,
   onNavigateView,
@@ -198,6 +205,7 @@ function LayoutNode({
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  inGrid?: boolean;
   onFilterChange?: (filterId: string, value: unknown) => void;
   onFiltersChange?: (
     updates: Record<string, unknown>,
@@ -217,6 +225,7 @@ function LayoutNode({
         definition={definition}
         renderResponse={renderResponse}
         filters={filters}
+        className={inGrid ? 'h-full' : undefined}
         onFilterChange={onFilterChange}
         onFiltersChange={onFiltersChange}
         onNavigateView={onNavigateView}
@@ -233,7 +242,7 @@ function LayoutNode({
         ? widths.map((w) => `${Math.max(w, 0.0001)}fr`).join(' ')
         : `repeat(${columns}, minmax(0, 1fr))`;
     return (
-      <section className="my-5 w-full">
+      <section className={inGrid ? 'w-full' : 'my-6 w-full'}>
         {(node.title || node.description) && (
           <div className="mb-3">
             {node.title && (
@@ -294,6 +303,7 @@ function LayoutNode({
                   definition={definition}
                   renderResponse={renderResponse}
                   filters={filters}
+                  inGrid
                   onFilterChange={onFilterChange}
                   onFiltersChange={onFiltersChange}
                   onNavigateView={onNavigateView}
@@ -342,7 +352,7 @@ function ReportBlockById({
   const block = getBlockById(definition, blockId);
   if (!block) {
     return (
-      <div className="my-5 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+      <div className="my-6 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
         Unknown report block: {blockId}
       </div>
     );
@@ -389,14 +399,17 @@ function ReportViewHeader({
   );
   if (!title && breadcrumbs.length === 0) return null;
 
+  // Ancestors render as a small breadcrumb trail; the current view always
+  // gets a real heading underneath so detail views don't demote their title
+  // to a breadcrumb fragment.
   return (
-    <div className="report-print-hidden mb-5 flex flex-col gap-2">
+    <div className="report-print-hidden mb-6 flex flex-col gap-1">
       {breadcrumbs.length > 0 && (
         <nav
           aria-label="Report view breadcrumb"
           className="text-sm text-muted-foreground"
         >
-          <ol className="flex flex-wrap items-center gap-2">
+          <ol className="flex flex-wrap items-center gap-1.5">
             {breadcrumbs.map((breadcrumb, index) => (
               <Fragment key={`${breadcrumb.label}-${index}`}>
                 <li>
@@ -405,17 +418,18 @@ function ReportViewHeader({
                     onNavigateView={onNavigateView}
                   />
                 </li>
-                {(index < breadcrumbs.length - 1 || title) && (
-                  <li aria-hidden="true">/</li>
+                {index < breadcrumbs.length - 1 && (
+                  <li aria-hidden="true" className="text-muted-foreground/60">
+                    /
+                  </li>
                 )}
               </Fragment>
             ))}
-            {title && <li className="font-medium text-foreground">{title}</li>}
           </ol>
         </nav>
       )}
-      {title && breadcrumbs.length === 0 && (
-        <h1 className="text-xl font-semibold tracking-normal text-foreground">
+      {title && (
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           {title}
         </h1>
       )}

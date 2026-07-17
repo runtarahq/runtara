@@ -78,7 +78,7 @@
     --secondary: 0 0% 7%; /* #111111 - Slightly lighter dark background */
     --secondary-foreground: 0 0% 45%; /* #737373 - Darker gray for secondary text */
     --muted: 0 0% 13%; /* #222222 - Card hover background */
-    --muted-foreground: 0 0% 35%; /* #595959 - Even darker gray for muted text */
+    --muted-foreground: 0 0% 55%; /* #8c8c8c - Muted text that still clears ~4.5:1 on elevated surfaces */
     --accent: 217 91% 60%; /* #3b82f6 - Same as primary */
     --accent-foreground: 0 0% 100%; /* white */
     --destructive: 0 84% 60%; /* #ef4444 - Red for errors */
@@ -137,9 +137,10 @@
     color: hsl(0 0% 75%);
   }
 
-  /* Muted text should be even more subtle */
+  /* Muted text stays quieter than foreground but keeps ~4.5:1 on cards —
+     12px uppercase labels (table headers, metric labels) must stay legible. */
   .dark .text-muted-foreground {
-    color: hsl(0 0% 45%);
+    color: hsl(0 0% 55%);
   }
 
   /* Table and list specific styles for softer text */
@@ -148,7 +149,7 @@
   }
 
   .dark th {
-    color: hsl(0 0% 50%);
+    color: hsl(0 0% 55%);
     font-weight: 500;
   }
 

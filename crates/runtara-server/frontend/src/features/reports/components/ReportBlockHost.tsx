@@ -45,7 +45,7 @@ export function ReportBlockHost({
   block,
   initialResult,
   filters,
-  className = 'my-5',
+  className = 'my-6',
   onFilterChange,
   onFiltersChange,
   onNavigateView,
@@ -298,17 +298,11 @@ export function ReportBlockHost({
                 </Button>
               </Link>
             )}
-            {result?.status === 'error' && (
-              <Button variant="outline" size="sm" onClick={() => refetch()}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Retry
-              </Button>
-            )}
           </div>
         </div>
       )}
       {(block.filters?.length ?? 0) > 0 && (
-        <div className="report-print-hidden mb-3 rounded-lg border bg-muted/20 p-3">
+        <div className="report-print-hidden mb-3">
           <ReportFilterBar
             reportId={reportId}
             definition={{
@@ -487,7 +481,9 @@ function MarkdownBlock({
   const rendered = interpolateMarkdownSource(content, source);
 
   return (
-    <div className="prose prose-slate max-w-none dark:prose-invert">
+    // prose-sm keeps markdown body copy on the report's 14px scale, and the
+    // heading caps keep authored markdown below the view title in hierarchy.
+    <div className="prose prose-sm prose-slate max-w-none dark:prose-invert prose-headings:font-semibold prose-headings:tracking-tight prose-h1:text-2xl prose-h2:text-xl prose-h3:text-base">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{rendered}</ReactMarkdown>
     </div>
   );
@@ -580,7 +576,7 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
 
   if (block.type === 'table') {
     return (
-      <div className="overflow-hidden rounded-lg border" aria-label="Loading report block">
+      <div className="overflow-hidden rounded-lg border bg-card" aria-label="Loading report block">
         <div className="h-9 animate-pulse bg-muted/40" />
         <div className="divide-y">
           {Array.from({ length: 6 }).map((_, index) => (

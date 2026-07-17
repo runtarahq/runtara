@@ -330,7 +330,7 @@ export function TableBlock({
 
   return (
     <TooltipProvider delayDuration={150} skipDelayDuration={0}>
-      <div className="overflow-x-auto rounded-lg border bg-background">
+      <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
       {tableActions.length > 0 && (
         <TableActionsToolbar
           blockId={block.id}
@@ -352,7 +352,7 @@ export function TableBlock({
           ))}
           {hasFlexibleFillerColumn && <col aria-hidden="true" />}
         </colgroup>
-        <TableHeader className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
+        <TableHeader className="sticky top-0 z-10 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
           <TableRow className="group/header border-b-0 bg-muted/30 hover:bg-muted/30">
             {selectable && (
               <TableHead className="report-print-hidden h-9 w-10">
@@ -900,19 +900,17 @@ function getColumnWidthStyle(column: TableColumn): CSSProperties | undefined {
 
 const SAMPLE_LIMIT = 100;
 
-const FORMAT_WIDTHS: Record<string, string> = {
-  pill: '160px',
-  date: '120px',
-  datetime: '180px',
-  bytes: '120px',
-  percent: '100px',
-  currency: '140px',
-  currency_compact: '120px',
-  number: '120px',
-  number_compact: '100px',
-  decimal: '120px',
-  bar_indicator: '140px',
-  avatar_label: '220px',
+const FORMAT_WIDTHS: Record<string, number> = {
+  date: 116,
+  datetime: 184,
+  bytes: 110,
+  percent: 96,
+  currency: 128,
+  currency_compact: 110,
+  number: 104,
+  number_compact: 96,
+  decimal: 110,
+  bar_indicator: 140,
 };
 
 type ColumnLayout = {
@@ -952,18 +950,48 @@ function inferColumnLayout(
     return { style: { width: '160px' } };
   }
 
+  const labelLen = Array.from(
+    column.label ?? humanizeFieldName(column.key)
+  ).length;
+  // Uppercase text-xs + tracking-wide glyphs run ~8px, and the header also
+  // holds the sort caret and cell padding. Every width below floors on this
+  // so a fixed-format column can never truncate its own header
+  // ("CREDIT SC…" over a 120px number column).
+  const headerPx = Math.ceil(labelLen * 8) + 48;
+
   const formatName = (column.format ?? '').split(':', 1)[0];
+
+  // Pills and avatar cells render decorated content, so their width comes
+  // from the decorated sample (humanized label / derived display name), not
+  // from raw value length.
+  if (formatName === 'pill') {
+    const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
+    const longest = sample.reduce(
+      (acc, value) => Math.max(acc, humanizeFieldName(value).length),
+      0
+    );
+    const pillPx = clampPx(longest * 6.5 + 58, 96, 200);
+    return { style: { width: `${Math.max(pillPx, headerPx)}px` } };
+  }
+
+  if (formatName === 'avatar_label') {
+    const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
+    const longest = sample.reduce(
+      (acc, value) => Math.max(acc, displayNameFromValue(value).length),
+      0
+    );
+    const avatarPx = clampPx(longest * 7 + 64, 140, 240);
+    return { style: { width: `${Math.max(avatarPx, headerPx)}px` } };
+  }
+
   const formatWidth = FORMAT_WIDTHS[formatName];
   if (formatWidth) {
-    return { style: { width: formatWidth } };
+    return { style: { width: `${Math.max(formatWidth, headerPx)}px` } };
   }
 
   const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
   const maxLen = sample.reduce((acc, value) => Math.max(acc, value.length), 0);
 
-  const labelLen = Array.from(
-    column.label ?? humanizeFieldName(column.key)
-  ).length;
   // Header glyphs render uppercase + tracking-wide + semibold next to a sort
   // caret, so budget ~1.1× per glyph plus padding/icon allowance — otherwise
   // a header like "DTI" truncates to "D..." in a column sized for its data.
@@ -977,6 +1005,10 @@ function inferColumnLayout(
     Math.max(headerChars, dataChars, MIN_TEXT_CH)
   );
   return { style: { width: `${widthChars}ch` } };
+}
+
+function clampPx(value: number, min: number, max: number): number {
+  return Math.round(Math.min(Math.max(value, min), max));
 }
 
 function sampleColumnValues(
@@ -1468,7 +1500,7 @@ function AvatarLabelCell({
     <div className="flex min-w-0 items-center gap-2">
       <span
         className={cn(
-          'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-wide text-white',
+          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-wide',
           colorClass
         )}
         aria-hidden
@@ -1497,14 +1529,16 @@ function initialsFromValue(display: string): string {
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
+// Soft tint + dark ink in both themes: initials stay readable where a white
+// glyph on a mid-500 fill (amber, cyan) dropped below comfortable contrast.
 const AVATAR_COLORS = [
-  'bg-violet-500',
-  'bg-emerald-500',
-  'bg-amber-500',
-  'bg-sky-500',
-  'bg-rose-500',
-  'bg-cyan-500',
-  'bg-indigo-500',
+  'bg-violet-100 text-violet-700 dark:bg-violet-500/25 dark:text-violet-300',
+  'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/25 dark:text-emerald-300',
+  'bg-amber-100 text-amber-700 dark:bg-amber-500/25 dark:text-amber-300',
+  'bg-sky-100 text-sky-700 dark:bg-sky-500/25 dark:text-sky-300',
+  'bg-rose-100 text-rose-700 dark:bg-rose-500/25 dark:text-rose-300',
+  'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/25 dark:text-cyan-300',
+  'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/25 dark:text-indigo-300',
 ];
 
 function colorClassForKey(key: string): string {
@@ -1653,6 +1687,7 @@ function InlineTableChart({
               dataKey={seriesField}
               fill={INLINE_CHART_COLOR}
               radius={[3, 3, 0, 0]}
+              isAnimationActive={false}
             />
           </BarChart>
         ) : chart.kind === 'area' ? (
@@ -1670,6 +1705,7 @@ function InlineTableChart({
               fillOpacity={0.16}
               strokeWidth={2}
               dot={false}
+              isAnimationActive={false}
             />
           </AreaChart>
         ) : (
@@ -1685,6 +1721,7 @@ function InlineTableChart({
               stroke={INLINE_CHART_COLOR}
               strokeWidth={2}
               dot={false}
+              isAnimationActive={false}
             />
           </LineChart>
         )}

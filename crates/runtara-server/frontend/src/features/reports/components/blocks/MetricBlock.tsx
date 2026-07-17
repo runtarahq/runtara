@@ -47,10 +47,15 @@ export function MetricBlock({
       : null;
 
   return (
-    <div className="rounded-lg border bg-background p-4">
-      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+    <div className="h-full rounded-lg border bg-card p-4 shadow-sm">
       <p
-        className="mt-2 text-3xl font-semibold tracking-normal tabular-nums text-foreground"
+        className="truncate text-sm font-medium text-muted-foreground"
+        title={label}
+      >
+        {label}
+      </p>
+      <p
+        className="mt-2 text-3xl font-semibold tracking-tight tabular-nums text-foreground"
         title={compact ? full : undefined}
         aria-label={compact ? full : undefined}
       >

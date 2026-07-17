@@ -20,17 +20,20 @@ import {
 } from 'recharts';
 import { ReportBlockDefinition, ReportBlockResult } from '../../types';
 
+// Categorical palette, assigned in fixed order (never cycled by rank). The
+// sequence alternates hue families so adjacent series stay distinguishable
+// under protan/deutan/tritan vision, every step reads against both the light
+// and the dark card surface (>= 3:1), and slot 1 stays on brand primary.
 const COLORS = [
   'hsl(var(--primary))',
-  '#14b8a6',
-  '#8b5cf6',
-  '#f59e0b',
-  '#ef4444',
-  '#06b6d4',
-  '#22c55e',
-  '#ec4899',
-  '#64748b',
-  '#a855f7',
+  '#d97706',
+  '#0d9488',
+  '#c026d3',
+  '#16a34a',
+  '#7c3aed',
+  '#ea580c',
+  '#0284c7',
+  '#dc2626',
 ];
 const GRID_COLOR = 'hsl(var(--border))';
 const AXIS_COLOR = 'hsl(var(--muted-foreground))';
@@ -87,11 +90,26 @@ export function ChartBlock({
 
   if (!chart || chartRows.length === 0 || series.length === 0) {
     return (
-      <div className="flex min-h-72 items-center justify-center rounded-lg border bg-background p-6 text-sm text-muted-foreground">
+      <div className="flex min-h-72 items-center justify-center rounded-lg border border-dashed bg-muted/10 p-6 text-sm text-muted-foreground">
         No chart data for the current filters.
       </div>
     );
   }
+
+  // A lone series is already named by the block title; a legend box would
+  // just repeat it. Multi-series charts always get one.
+  const showLegend = series.length > 1;
+  // Bar categories are identities, not a continuum — every bar deserves its
+  // label as long as they can physically fit.
+  const showEveryCategoryTick =
+    chart.kind === 'bar' && chartRows.length <= 16;
+  // Counts must never grid on 2.25 / 0.75; fractional measures keep decimals.
+  const yAllowsDecimals = !series.every((entry) =>
+    chartRows.every((row) => {
+      const value = toChartNumber(row[entry.field]);
+      return value === null || Number.isInteger(value);
+    })
+  );
 
   if (chart.kind === 'pie' || chart.kind === 'donut') {
     const seriesField = series[0].field;
@@ -106,7 +124,9 @@ export function ChartBlock({
             <Tooltip content={<ChartTooltip />} />
             <Legend
               iconType="circle"
-              wrapperStyle={{ color: MUTED_TEXT_COLOR, fontSize: 12 }}
+              iconSize={8}
+              formatter={legendText}
+              wrapperStyle={{ fontSize: 12 }}
             />
             <Pie
               data={chartRows}
@@ -194,10 +214,14 @@ export function ChartBlock({
                 />
               }
             />
-            <Legend
-              iconType="circle"
-              wrapperStyle={{ color: MUTED_TEXT_COLOR, fontSize: 12 }}
-            />
+            {clouds.length > 1 && (
+              <Legend
+                iconType="circle"
+                iconSize={8}
+                formatter={legendText}
+                wrapperStyle={{ fontSize: 12 }}
+              />
+            )}
             {clouds.map((cloud, index) => (
               <Scatter
                 key={cloud.name}
@@ -226,20 +250,29 @@ export function ChartBlock({
         axisLine={false}
         tickLine={false}
         tickMargin={10}
-        minTickGap={20}
+        minTickGap={showEveryCategoryTick ? 0 : 20}
+        interval={showEveryCategoryTick ? 0 : 'preserveStartEnd'}
+        tickFormatter={truncateTickLabel}
         tick={{ fill: AXIS_COLOR, fontSize: 12 }}
       />
       <YAxis
         axisLine={false}
         tickLine={false}
         tickMargin={10}
+        width={52}
+        allowDecimals={yAllowsDecimals}
+        tickFormatter={compactNumber}
         tick={{ fill: AXIS_COLOR, fontSize: 12 }}
       />
       <Tooltip content={<ChartTooltip />} />
-      <Legend
-        iconType="circle"
-        wrapperStyle={{ color: MUTED_TEXT_COLOR, fontSize: 12 }}
-      />
+      {showLegend && (
+        <Legend
+          iconType="circle"
+          iconSize={8}
+          formatter={legendText}
+          wrapperStyle={{ fontSize: 12 }}
+        />
+      )}
     </>
   );
 
@@ -254,40 +287,18 @@ export function ChartBlock({
           <BarChart
             data={chartRows}
             margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+            barCategoryGap="24%"
             onClick={handleChartClick}
           >
-            <defs>
-              {series.map((series, index) => (
-                <linearGradient
-                  key={series.field}
-                  id={gradientId(block.id, series.field)}
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="1"
-                >
-                  <stop
-                    offset="0%"
-                    stopColor={COLORS[index % COLORS.length]}
-                    stopOpacity={0.95}
-                  />
-                  <stop
-                    offset="100%"
-                    stopColor={COLORS[index % COLORS.length]}
-                    stopOpacity={0.58}
-                  />
-                </linearGradient>
-              ))}
-            </defs>
             {common}
-            {series.map((series) => (
+            {series.map((entry, index) => (
               <Bar
-                key={series.field}
-                dataKey={series.field}
-                name={series.label ?? series.field}
-                fill={`url(#${gradientId(block.id, series.field)})`}
-                maxBarSize={42}
-                radius={[6, 6, 0, 0]}
+                key={entry.field}
+                dataKey={entry.field}
+                name={entry.label ?? entry.field}
+                fill={COLORS[index % COLORS.length]}
+                maxBarSize={36}
+                radius={[4, 4, 0, 0]}
               />
             ))}
           </BarChart>
@@ -433,7 +444,9 @@ function ChartTooltip({
             className="flex min-w-40 items-center justify-between gap-4"
           >
             <span className="truncate text-muted-foreground">{row.field}</span>
-            <span className="font-medium">{formatTooltipValue(row.value)}</span>
+            <span className="font-medium tabular-nums">
+              {formatTooltipValue(row.value)}
+            </span>
           </div>
         ))}
         {payload.map((item) => (
@@ -450,7 +463,7 @@ function ChartTooltip({
                 {String(item.name ?? item.dataKey)}
               </span>
             </span>
-            <span className="font-medium">
+            <span className="font-medium tabular-nums">
               {formatTooltipValue(item.value)}
             </span>
           </div>
@@ -547,6 +560,23 @@ function toChartNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+// Legend text wears the muted text token; the colored dot beside it carries
+// series identity. (Recharts' default paints the label in the series color.)
+function legendText(value: unknown) {
+  return (
+    <span style={{ color: MUTED_TEXT_COLOR, verticalAlign: 'middle' }}>
+      {String(value ?? '')}
+    </span>
+  );
+}
+
+// Keeps long category names from colliding when every bar is labeled; the
+// full value stays available in the hover tooltip header.
+function truncateTickLabel(value: unknown): string {
+  const text = String(value ?? '');
+  return text.length > 14 ? `${text.slice(0, 13)}…` : text;
 }
 
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat(undefined, {

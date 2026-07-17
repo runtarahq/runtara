@@ -244,7 +244,7 @@ function CardGroup({
 } & FieldEditingProps) {
   const columns = clampColumns(group.columns ?? 2);
   return (
-    <section className="rounded-lg border bg-background">
+    <section className="rounded-lg border bg-card shadow-sm">
       {(group.title || group.description) && (
         <header className="border-b px-4 py-3">
           {group.title && (
