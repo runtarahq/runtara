@@ -66,7 +66,7 @@ use super::{
     DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL,
     DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
     DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
-    node_body_suspends,
+    node_body_suspends, node_has_breakpoint,
 };
 
 /// The waitable-set event code for a settled subtask (mirrors
@@ -110,6 +110,7 @@ struct BranchAgent<'a> {
     agent_component_id: &'a str,
     input_mapping_id: u32,
     durable_checkpoint: bool,
+    breakpoint: bool,
     max_retries: u32,
     retry_delay_ms: u64,
     rate_limit_budget_ms: u64,
@@ -125,6 +126,7 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         agent_component_id,
         input_mapping_id,
         durable_checkpoint,
+        breakpoint,
         max_retries,
         retry_delay_ms,
         rate_limit_budget_ms,
@@ -140,6 +142,7 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
         agent_component_id,
         input_mapping_id: *input_mapping_id,
         durable_checkpoint: *durable_checkpoint,
+        breakpoint: *breakpoint,
         max_retries: *max_retries,
         retry_delay_ms: *retry_delay_ms,
         rate_limit_budget_ms: *rate_limit_budget_ms,
@@ -563,7 +566,11 @@ fn emit_branch_agent(
         // source.steps, so it matches across launch (fan-out source) and assemble
         // (sibling-accumulating source).
         branch.durable_checkpoint,
-        false, // breakpoint (excluded by eligibility)
+        // A breakpointed branch agent is routed to the suspending assemble pass and
+        // its pass-1 async launch is skipped (`emit_concurrent_branches`), so the
+        // slot is empty here and `emit_agent_plan` runs a BLOCKING invoke with the
+        // breakpoint emitted first — pause-before-run semantics, no resume double-fire.
+        branch.breakpoint,
         // Retries run in assemble (memoized attempt 1 + sequential backoff), like
         // the Split window's non-concurrent-backoff path.
         branch.max_retries,
@@ -612,15 +619,21 @@ fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRu
 fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunPlan) -> bool {
     let chain = branch_chain(branch);
     !chain.is_empty()
-        && chain.iter().all(|node| match node {
-            DirectRunPlan::Agent { agent_id, .. } => {
-                !static_data.agent_is_workflow_agent(*agent_id)
-            }
-            DirectRunPlan::Log { .. }
-            | DirectRunPlan::Filter { .. }
-            | DirectRunPlan::SwitchValue { .. }
-            | DirectRunPlan::GroupBy { .. } => true,
-            _ => false,
+        && chain.iter().all(|node| {
+            // A breakpointed node is a suspension point; the scheduler can't suspend
+            // mid-drive-loop, so exclude the branch → it runs through the wavefront
+            // (assemble-last), which handles the inline breakpoint-pause.
+            !node_has_breakpoint(node)
+                && match node {
+                    DirectRunPlan::Agent { agent_id, .. } => {
+                        !static_data.agent_is_workflow_agent(*agent_id)
+                    }
+                    DirectRunPlan::Log { .. }
+                    | DirectRunPlan::Filter { .. }
+                    | DirectRunPlan::SwitchValue { .. }
+                    | DirectRunPlan::GroupBy { .. } => true,
+                    _ => false,
+                }
         })
 }
 
@@ -1255,10 +1268,15 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
 
         // LAUNCH depth d — only Agent steps have an async invoke; sync steps
-        // (Log/Filter/…) run in assemble with no launch.
+        // (Log/Filter/…) run in assemble with no launch. A BREAKPOINTED agent is
+        // NOT launched here: its slot stays empty so assemble runs a blocking invoke
+        // with the breakpoint emitted first (pause-before-run). Launching it would
+        // fire the agent, then the assemble breakpoint would suspend before its
+        // durable checkpoint saved — re-firing the agent on resume.
         for (index, chain) in chains.iter().enumerate() {
             if let Some(node) = chain.get(depth)
                 && matches!(node, DirectRunPlan::Agent { .. })
+                && !node_has_breakpoint(node)
             {
                 emit_branch_launch(
                     body,

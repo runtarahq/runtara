@@ -2012,8 +2012,44 @@ pub(super) fn ai_tool_suspends(tool: &DirectAiToolPlan) -> bool {
     }
 }
 
+/// Whether THIS node carries a breakpoint (a debug-mode pause point). A breakpoint
+/// is only emitted for a durable graph (`step_breakpoint_enabled` gates on
+/// `graph.durable`), so a breakpointed node in the plan implies durability. It is
+/// treated as a conditional SUSPENSION (the pause suspends the instance, once,
+/// checkpoint-guarded) so a breakpointed branch routes to the wavefront's
+/// assemble-last pass and is durability-gated exactly like an in-branch Wait/Delay.
+pub(super) fn node_has_breakpoint(node: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    match node {
+        P::Finish { breakpoint, .. }
+        | P::Filter { breakpoint, .. }
+        | P::SwitchValue { breakpoint, .. }
+        | P::SwitchRoute { breakpoint, .. }
+        | P::GroupBy { breakpoint, .. }
+        | P::Split { breakpoint, .. }
+        | P::While { breakpoint, .. }
+        | P::EmbedWorkflow { breakpoint, .. }
+        | P::Delay { breakpoint, .. }
+        | P::WaitForSignal { breakpoint, .. }
+        | P::Log { breakpoint, .. }
+        | P::Agent { breakpoint, .. }
+        | P::AiAgent { breakpoint, .. }
+        | P::AiAgentLoop { breakpoint, .. }
+        | P::Error { breakpoint, .. }
+        | P::Conditional { breakpoint, .. } => *breakpoint,
+        P::EdgeRoute { .. } | P::ParallelBranches { .. } | P::Join | P::ImplicitFinish => false,
+    }
+}
+
 pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     use DirectRunPlan as P;
+    // A breakpoint is a conditional suspension point (it pauses + suspends the
+    // instance in debug mode). Treat any breakpointed node as suspending so a
+    // breakpointed branch routes to the wavefront's assemble-last pass and is
+    // durability-gated (`plan_branch_diamond`) like any other in-branch suspension.
+    if node_has_breakpoint(plan) {
+        return true;
+    }
     let err = error_route_suspends;
     match plan {
         P::WaitForSignal { .. } | P::Delay { .. } => true,
@@ -2122,6 +2158,12 @@ pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
 /// false and runs blocking in pass-1, exactly as before.
 pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
     use DirectRunPlan as P;
+    // A breakpoint suspends this node on its own account (see
+    // `plan_contains_suspension`) — route it to the wavefront's assemble-last pass
+    // so every sibling checkpoints before the inline breakpoint-pause exits.
+    if node_has_breakpoint(node) {
+        return true;
+    }
     match node {
         P::WaitForSignal { .. } | P::Delay { .. } => true,
         P::Conditional {
@@ -2174,8 +2216,13 @@ pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
 ///   depth-wavefront. Intermediate chain steps carry no `onError` (a recovery
 ///   would break the wavefront's depth structure); the terminal step may (assemble
 ///   handles it, `next == Join`). Durable and retries are allowed throughout
-///   (per-step launch gate; retries in assemble). Breakpoints are excluded. A
-///   workflow-agent target is excluded at emission time, not here.
+///   (per-step launch gate; retries in assemble). A BREAKPOINTED step is accepted:
+///   `node_has_breakpoint` marks it suspending, so it routes to the assemble-last
+///   pass (siblings checkpoint first) and `emit_concurrent_branches` skips its async
+///   launch so the breakpoint fires before a blocking invoke (no resume double-fire);
+///   `plan_branch_diamond`'s durable gate keeps this replay-safe (and breakpoints
+///   only exist on durable graphs). A workflow-agent target is excluded at emission
+///   time, not here.
 /// - 4c.1: the chain may also contain SYNC non-Agent steps (Log, Filter,
 ///   SwitchValue, GroupBy) — those depths run assemble-only in the wavefront (no
 ///   async launch).
@@ -2193,7 +2240,6 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
         let next_plan = match node {
             // Agent: terminal (next==Join) may carry onError; intermediate may not.
             DirectRunPlan::Agent {
-                breakpoint: false,
                 error_plan,
                 next_plan,
                 ..
@@ -2207,26 +2253,10 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                 next_plan
             }
             // Sync non-Agent steps: no async op, no onError to worry about.
-            DirectRunPlan::Log {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::Filter {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::SwitchValue {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::GroupBy {
-                breakpoint: false,
-                next_plan,
-                ..
-            } => {
+            DirectRunPlan::Log { next_plan, .. }
+            | DirectRunPlan::Filter { next_plan, .. }
+            | DirectRunPlan::SwitchValue { next_plan, .. }
+            | DirectRunPlan::GroupBy { next_plan, .. } => {
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
@@ -2238,22 +2268,14 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
             // the whole branch on `graph.durable`, so the inline suspend is
             // replay-safe. Continuation = `merge_plan`; a terminal Conditional ends
             // the branch.
-            DirectRunPlan::Conditional {
-                breakpoint: false,
-                merge_plan,
-                ..
-            } => match merge_plan {
+            DirectRunPlan::Conditional { merge_plan, .. } => match merge_plan {
                 Some(merge) => merge,
                 None => return true,
             },
             // Routing Switch / conditioned-edge fan-out: same composite treatment as
             // Conditional (continuation = merge_plan). Suspending routes are allowed
             // (T2.0: pass-2 + durable gate).
-            DirectRunPlan::SwitchRoute {
-                breakpoint: false,
-                merge_plan,
-                ..
-            }
+            DirectRunPlan::SwitchRoute { merge_plan, .. }
             | DirectRunPlan::EdgeRoute { merge_plan, .. } => match merge_plan {
                 Some(merge) => merge,
                 None => return true,
@@ -2261,21 +2283,9 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
             // next_plan composites — nested loop bodies / child graphs run BLOCKING
             // at this depth; continuation is `next_plan`. A suspension inside the
             // body / error route is allowed (T2.0: pass-2 + durable gate).
-            DirectRunPlan::While {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::Split {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::EmbedWorkflow {
-                breakpoint: false,
-                next_plan,
-                ..
-            } => {
+            DirectRunPlan::While { next_plan, .. }
+            | DirectRunPlan::Split { next_plan, .. }
+            | DirectRunPlan::EmbedWorkflow { next_plan, .. } => {
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
@@ -2285,16 +2295,8 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
             // composite; a suspension on the error route (AiAgent) or via a Wait /
             // suspending-Embed tool (AiAgentLoop) is allowed (T2.0: pass-2 + durable
             // gate).
-            DirectRunPlan::AiAgent {
-                breakpoint: false,
-                next_plan,
-                ..
-            }
-            | DirectRunPlan::AiAgentLoop {
-                breakpoint: false,
-                next_plan,
-                ..
-            } => {
+            DirectRunPlan::AiAgent { next_plan, .. }
+            | DirectRunPlan::AiAgentLoop { next_plan, .. } => {
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
@@ -2307,7 +2309,6 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
             // this on `graph.durable` for replay safety. The wait's own on-wait /
             // timeout routing must be suspension-free. Continuation = next_plan.
             DirectRunPlan::WaitForSignal {
-                breakpoint: false,
                 on_wait_plan,
                 next_plan,
                 error_plan,
@@ -2325,11 +2326,7 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                 }
                 next_plan
             }
-            DirectRunPlan::Delay {
-                breakpoint: false,
-                next_plan,
-                ..
-            } => {
+            DirectRunPlan::Delay { next_plan, .. } => {
                 if matches!(**next_plan, DirectRunPlan::Join) {
                     return true;
                 }
@@ -3579,6 +3576,61 @@ mod tests {
             !non_durable.iter().any(|s| s == "ParallelBranches"),
             "a NON-durable in-branch suspension must decline to linearise (no checkpoints \
              to replay-HIT): {non_durable:?}"
+        );
+    }
+
+    /// A durable diamond with a BREAKPOINT on one branch step still lowers to
+    /// `ParallelBranches`. A breakpoint is a conditional suspension point
+    /// (`node_has_breakpoint` → assemble-last, launch skipped), NOT a reason to
+    /// linearise the whole fan-out — so the sibling branch keeps running
+    /// concurrently while a debug run pauses at the breakpoint. Breakpoints only
+    /// exist on durable graphs (`step_breakpoint_enabled` gates on `graph.durable`),
+    /// which is also exactly what `plan_branch_diamond`'s suspension gate requires.
+    #[test]
+    fn durable_diamond_with_breakpointed_branch_step_stays_parallel() {
+        let mut steps = serde_json::Map::new();
+        steps.insert("a".to_string(), agent_step_json("a"));
+        steps.insert("c".to_string(), agent_step_json("c"));
+        // Branch step `b` carries a breakpoint.
+        steps.insert(
+            "b".to_string(),
+            serde_json::json!({
+                "id": "b", "stepType": "Agent", "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime", "inputMapping": {},
+                "breakpoint": true
+            }),
+        );
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish", "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            "durable": true,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep":"a","toStep":"b"},
+                {"fromStep":"a","toStep":"c"},
+                {"fromStep":"b","toStep":"finish"},
+                {"fromStep":"c","toStep":"finish"}
+            ]
+        }))
+        .expect("graph parses");
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+        assert!(
+            emitted.iter().any(|s| s == "ParallelBranches"),
+            "durable diamond with a breakpointed branch step must still parallelize: {emitted:?}"
+        );
+        assert!(
+            emitted.iter().any(|s| s == "b") && emitted.iter().any(|s| s == "c"),
+            "both branch steps present in the parallel region: {emitted:?}"
         );
     }
 

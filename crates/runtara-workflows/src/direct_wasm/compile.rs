@@ -89,7 +89,7 @@ use super::manifest::{
 };
 use super::plan::{
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectSwitchRoutePlan, direct_run_plan, node_body_suspends,
+    DirectRunPlan, DirectSwitchRoutePlan, direct_run_plan, node_body_suspends, node_has_breakpoint,
 };
 #[cfg(test)]
 use super::static_data::{

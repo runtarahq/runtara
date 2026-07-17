@@ -10441,6 +10441,125 @@ fn direct_wasm_execute_parallel_branches_durable_resume_no_double_fire() {
     assert_eq!(out2["c_status"], 200, "resume branch c: {out2}");
 }
 
+/// A BREAKPOINT on one branch of a durable diamond FIRES (suspends) in debug mode
+/// while the sibling branch still runs in parallel — and resume completes without
+/// re-firing either agent. This is the parallel-branch analogue of the sequential
+/// breakpoint: `node_has_breakpoint` routes the breakpointed branch to the
+/// assemble-last pass and skips its async launch, so the breakpoint pauses BEFORE a
+/// blocking invoke (no resume double-fire); the non-breakpointed sibling runs first
+/// via the scheduler and checkpoints before the suspend.
+#[test]
+fn direct_wasm_execute_breakpoint_in_parallel_branch_fires_and_resumes() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    // start → {b (BREAKPOINT), c} → finish; durable so the suspend is replay-safe.
+    let graph = r#"{
+        "name": "Breakpoint In Parallel Branch",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"get-current-iso-datetime","maxRetries":0,"inputMapping":{}},
+            "b": {"stepType":"Agent","id":"b","agentId":"http","capabilityId":"http-request","maxRetries":0,"breakpoint":true,"inputMapping":{"method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":"http://slow.invalid/slow-item"}}},
+            "c": {"stepType":"Agent","id":"c","agentId":"http","capabilityId":"http-request","maxRetries":0,"inputMapping":{"method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":"http://slow.invalid/slow-item"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b_status":{"valueType":"reference","value":"steps.b.outputs.status_code"},"c_status":{"valueType":"reference","value":"steps.c.outputs.status_code"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"b"},
+            {"fromStep":"start","toStep":"c"},
+            {"fromStep":"b","toStep":"finish"},
+            {"fromStep":"c","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let debug_env = vec![("DEBUG_MODE".to_string(), "true".to_string())];
+
+    // RUN 1 (debug): sibling c runs (fires + checkpoints); branch b's breakpoint
+    // fires and SUSPENDS before b's invoke → no completion output, only c arrived.
+    let run1 = run_direct_workflow_capture_full(
+        &components_dir,
+        "breakpoint-parallel-branch",
+        graph,
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        debug_env.clone(),
+    );
+    let cp_ids: Vec<&String> = run1.checkpoints.iter().map(|c| &c.checkpoint_id).collect();
+    // The breakpoint fired: it SUSPENDED (no completion output) and wrote its
+    // fire-once checkpoint for step `b`.
+    assert!(
+        run1.output_json.is_none(),
+        "the breakpoint must SUSPEND run 1, not complete: output={:?}",
+        run1.output_json
+    );
+    assert!(
+        run1.checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("breakpoint::b")),
+        "run 1 must write the breakpoint checkpoint for `b`: {cp_ids:?}"
+    );
+    // The sibling `c` ran in parallel and checkpointed BEFORE the suspend...
+    assert!(
+        run1.checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("http-request::c") && !c.state.is_empty()),
+        "sibling branch `c` must complete + checkpoint before the breakpoint suspend: {cp_ids:?}"
+    );
+    // ...while `b`'s invoke was SKIPPED (pause-before-run): exactly one HTTP arrival
+    // (c), and no result checkpoint for `b`.
+    assert_eq!(
+        run1.slow_item_arrivals.len(),
+        1,
+        "only the sibling `c` fires on run 1; the breakpoint pauses before `b`'s invoke"
+    );
+    assert!(
+        !run1
+            .checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("http-request::b") && !c.state.is_empty()),
+        "`b`'s invoke must NOT have run before the breakpoint suspend: {cp_ids:?}"
+    );
+
+    let preload: Vec<(String, Vec<u8>)> = run1
+        .checkpoints
+        .iter()
+        .filter(|c| !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+
+    // RUN 2 (debug + resume): the breakpoint checkpoint HITs → skip; b's invoke
+    // fires for the first time (the frontier); c's step checkpoint HITs → no re-fire.
+    let run2 = run_direct_workflow_capture_full(
+        &components_dir,
+        "breakpoint-parallel-branch",
+        graph,
+        br#"{}"#,
+        false,
+        preload,
+        Vec::new(),
+        debug_env,
+    );
+    let out2 = run2.output_json.clone().unwrap_or_else(|| {
+        panic!(
+            "resume must COMPLETE past the breakpoint; stderr={}",
+            run2.stderr
+        )
+    });
+    assert_eq!(out2["b_status"], 200, "resumed branch b: {out2}");
+    assert_eq!(out2["c_status"], 200, "resumed branch c: {out2}");
+    // Exactly ONE new arrival on resume — `b` (the frontier, fired for the first
+    // time after the breakpoint is skipped). `c`'s checkpoint HITs, so it does not
+    // re-fire: no double-fire across the suspend.
+    assert_eq!(
+        run2.slow_item_arrivals.len(),
+        1,
+        "resume fires ONLY `b` (breakpoint skipped → first invoke); `c` replays from checkpoint"
+    );
+}
+
 /// A pause signalled DURING a parallel window is observed at the drain
 /// wakeups, but the suspend fires only at the CHUNK BOUNDARY — after every
 /// subtask resolved and assemble checkpointed the durable items — so the
