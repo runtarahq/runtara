@@ -34,15 +34,16 @@
 //! sequentially — no window, no memo — which is the same instruction stream the
 //! linearised path would have produced.
 //!
-//! **T2.1 (docs §4.3.1):** when every branch is a pure async-Agent chain
-//! (`schedulable_branches`), `emit_branch_scheduler` replaces the depth-wavefront
-//! with a per-branch SEGMENT SCHEDULER — each branch carries its own chain CURSOR +
-//! drive STATE in its slot and advances independently as its subtask settles
+//! **T2.1 (docs §4.3.1):** when every branch is a chain of async Agents and/or SYNC
+//! steps (`schedulable_branches`), `emit_branch_scheduler` replaces the depth-
+//! wavefront with a per-branch SEGMENT SCHEDULER — each branch carries its own chain
+//! CURSOR + drive STATE in its slot and advances independently as its subtask settles
 //! (`waitable-set.wait` for ANY, not drain-all), so a fast branch races ahead of a
-//! slow sibling instead of lock-stepping by depth. Assemble is the same memoized
-//! Agent lowering, so it stays sequential-identical. Shapes with sync steps,
-//! composites, or suspensions still use the wavefront (later T2.1 slices widen the
-//! scheduler to them).
+//! slow sibling instead of lock-stepping by depth. Agent nodes launch async (T2.1a);
+//! sync steps (Log/Filter/SwitchValue/GroupBy) run inline in the drive loop (T2.1b).
+//! Assemble is the same memoized Agent lowering, so it stays sequential-identical.
+//! Composites (which may open a nested window) and suspensions still use the
+//! wavefront (T2.1c/T2.2 widen the scheduler to them).
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
@@ -589,11 +590,12 @@ fn emit_branch_agent(
     );
 }
 
-/// T2.1 gate: every branch is a pure chain of async Agent nodes — the shape the
-/// intra-invocation scheduler drives with yield-granular interleaving. Any sync
-/// step, composite, or suspension (or a non-async ABI / workflow-agent target)
-/// falls back to the depth-wavefront (`emit_concurrent_branches`), which the later
-/// T2.1 slices widen to.
+/// T2.1 gate: every branch is a chain of async Agent nodes (which interleave) and/or
+/// SYNC steps (Log/Filter/SwitchValue/GroupBy, which run inline in the drive loop) —
+/// the shapes the intra-invocation scheduler handles. Composites (which may open a
+/// NESTED parallel window that would clobber the scheduler's live SLOTS/PENDING/WS
+/// locals) and suspending nodes stay on the depth-wavefront; T2.1c/T2.2 widen to
+/// them. Requires the async ABI and non-workflow-agent targets.
 fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRunPlan]) -> bool {
     if !static_data.parallel_enabled {
         return false;
@@ -605,9 +607,21 @@ fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRu
                 DirectRunPlan::Agent { agent_id, .. } => {
                     !static_data.agent_is_workflow_agent(*agent_id)
                 }
+                // Sync steps have no async op and open no nested window → safe inline.
+                DirectRunPlan::Log { .. }
+                | DirectRunPlan::Filter { .. }
+                | DirectRunPlan::SwitchValue { .. }
+                | DirectRunPlan::GroupBy { .. } => true,
                 _ => false,
             })
     })
+}
+
+/// Whether a chain node is an async Agent (launched into a slot) vs a sync step
+/// (run inline in the drive loop). Composites/suspensions never reach the scheduler
+/// (`schedulable_branches`).
+fn is_async_agent_node(node: &DirectRunPlan) -> bool {
+    matches!(node, DirectRunPlan::Agent { .. })
 }
 
 /// T2.1 intra-invocation per-branch segment scheduler (docs §4.3.1). Each branch is
@@ -719,22 +733,57 @@ fn emit_branch_scheduler(
             body.instruction(&Instruction::I32Const(j as i32));
             body.instruction(&Instruction::I32Eq);
             body.instruction(&Instruction::If(BlockType::Empty)); // L3
-            emit_branch_launch(
-                body,
-                indices,
-                static_data,
-                &branch_agent(node),
-                b as i32,
-                members[b][j],
-                waitable_join,
-                source_ptr_local,
-                source_len_local,
-                output_ptr_local,
-                output_len_local,
-                route_ptr_local,
-                route_len_local,
-                Some(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL),
-            );
+            if is_async_agent_node(node) {
+                emit_branch_launch(
+                    body,
+                    indices,
+                    static_data,
+                    &branch_agent(node),
+                    b as i32,
+                    members[b][j],
+                    waitable_join,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    Some(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL),
+                );
+            } else {
+                // Sync step: run it inline (blocking), then fall through the eager
+                // path (TIMERS_FIRED=0 → NEEDS_ASSEMBLE → cursor++). Re-establish the
+                // slot ptr afterwards — the dispatcher reuses scratch locals.
+                let single = with_next_join(node);
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    &single,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+                body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+                body.instruction(&Instruction::I32Const(b as i32 * DIRECT_PSPLIT_SLOT_STRIDE));
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+            }
             body.instruction(&Instruction::End); // L3
         }
         // pending? -> SCHED=PENDING, br $drive_done (Br 3: If pending, If NEEDS_LAUNCH, Loop, Block).
@@ -765,6 +814,11 @@ fn emit_branch_scheduler(
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty)); // L2
         for (j, node) in chain.iter().enumerate() {
+            // Sync nodes already ran inline in NEEDS_LAUNCH; NEEDS_ASSEMBLE only
+            // advances the cursor past them (below), so no dispatch arm is emitted.
+            if !is_async_agent_node(node) {
+                continue;
+            }
             body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
             body.instruction(&Instruction::I32Load(slot_mem(
                 DIRECT_PSPLIT_SLOT_CURSOR_OFFSET,
