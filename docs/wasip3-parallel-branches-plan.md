@@ -452,25 +452,39 @@ increasing cost/risk — build in this order, each its own commit (unit + e2e + 
   Wire initially through the EXISTING depth-wavefront (hard-return-inline) so it is testable
   immediately — a transient intermediate on this dev branch, replaced by T2.1's scheduler
   before completion. This is the substrate every later tier needs.
-- **T2.1 — intra-invocation SEGMENT SCHEDULER (case A; the FuturesUnordered core).** Replace
-  the rigid depth-lockstep in `emit_concurrent_branches` with a per-branch **segment cursor
-  + heterogeneous state block** driven over the shared waitable-set: run each runnable branch
-  to its next async-invoke yield, join the subtask, `ws.wait` for any completion, advance the
-  owning branch, repeat until all branches reach `Join`. Slots become per-branch state blocks
-  (segment ptr + source cursor + step-context position); the `$rounds`/`$classify` loops
-  generalize to a branch-indexed scheduler loop. Composites run blocking-to-completion
-  internally (no re-emission). **No durability change** — nothing suspends differently; this
-  must pass the full 107-test battery unchanged (parity) before becoming the sole path.
-  Benefit: a fast 3-step branch finishes without waiting on a slow 1-step branch's depth
-  drain (measurable arrival-span win over the wavefront).
-- **T2.2 — cross-suspension progress (case B; the actual Tier-2 value).** A branch reaching a
-  TOP-LEVEL Wait/Delay marks BLOCKED (state code) instead of hard-returning; the scheduler
-  keeps driving other branches to completion/their-own-block; only when no branch is runnable
-  does it hard-return with an **aggregated multi-wake set** covering every BLOCKED branch's
-  signal id / timer deadline. Replay re-drives; completed branches HIT; blocked branches
-  re-check their waits. Durability risk lives here — extend the Split double-fire adversarial
-  battery to interleaved multi-branch suspend/resume (drain mid-schedule with 2+ branches
-  blocked; resume reproduces; zero re-fires; merge reads all).
+- **T2.1 — intra-invocation SEGMENT SCHEDULER (case A; the FuturesUnordered core). LANDED
+  (T2.1a `f1b5ba88`, T2.1b `4e2ab69e`).** `emit_branch_scheduler` replaces the depth-wavefront
+  for branches that are chains of async Agents (T2.1a) and/or sync steps (T2.1b). Each branch
+  carries CURSOR(slot+40)/SCHED(slot+44)/SUBTASK(slot+20) and drives independently
+  (NEEDS_LAUNCH→PENDING→NEEDS_ASSEMBLE→DONE); the driver `ws.wait`s for ANY settle and advances
+  only that branch. Per-branch cursor dispatch = if-chains on cursor (not br_table — chains are
+  short). `emit_branch_launch` got `sched_pending_flag: Option<u32>`. Composites still use the
+  wavefront (nested-window would clobber the scheduler's live SLOTS/PENDING/WS). Verified:
+  battery 109/109, live server (unbalanced a=3/b=1 chains → `a=A3,b=B1`). No durability change.
+- **T2.2 — cross-suspension progress (case B; the actual Tier-2 value). IN PROGRESS.** A branch
+  reaching a TOP-LEVEL Wait/Delay marks BLOCKED (a new drive state) instead of hard-returning;
+  the scheduler keeps driving other branches to completion/their-own-block; only when no branch
+  is RUNNABLE or PENDING-on-subtask does it hard-return suspended. Replay re-drives; completed
+  branches HIT; blocked branches re-check their waits.
+  - **FINDING (from wait.rs/abi):** the suspend outcome is
+    `suspended(on-signal{signal-id, deadline})` — **singular**. A true *aggregated* multi-wake
+    set (wake on ANY of N blocked signals in one suspend) needs an ABI/host extension (multi-
+    signal wake list + host waker fan-in). Split into:
+    - **T2.2a (no ABI change): siblings-complete-before-suspend.** The scheduler drives every
+      non-blocked branch to DONE, then hard-returns suspended on the FIRST blocked branch's
+      wake (reusing `emit_entry_suspend_on_signal` / the delay deadline). Multiple blocked
+      branches serialize their suspend/resume cycles — but every non-blocked sibling is already
+      DONE and checkpointed before the first suspend, which is the whole payoff over T2.0
+      (where a suspend at depth d parks siblings' depth>d work). Requires: a "check-satisfied,
+      else register-wake + mark BLOCKED, do-NOT-suspend" variant of the wait/delay lowering,
+      threaded into the drive loop; `schedulable_branches` accepts top-level Wait/Delay chain
+      nodes (durable-gated); the scheduler's terminal suspend picks the first BLOCKED branch.
+    - **T2.2b (ABI multi-wake, optional): true aggregation.** Extend the suspend outcome to a
+      wake *list* so one suspend covers all BLOCKED branches; host waker relaunches on any.
+      Deferred behind T2.2a proving the shape.
+  - Durability risk lives here — extend the Split double-fire adversarial battery to
+    interleaved multi-branch suspend/resume (drain mid-schedule with 2+ branches blocked;
+    resume reproduces; zero re-fires; merge reads all).
 - **T2.3 (C) — resumable composites (deferred, exotic, largest).** Only this re-emits
   While/Split/Embed/AiAgentLoop bodies as segmented resumable state machines so composite
   INTERNAL async interleaves with siblings AND a composite-NESTED suspension participates in
