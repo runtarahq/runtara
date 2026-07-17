@@ -1,7 +1,8 @@
 # Parallel graph branches (heterogeneous fan-out) — detailed plan
 
-Status: **4a LANDED** (4a.1 non-durable + 4a.2 durable single-Agent branches run
-concurrently); **4b/4c pending**. Sibling to `docs/wasip3-parallelism.md`, which
+Status: **4a + 4b LANDED** (4a.1 non-durable + 4a.2 durable single-Agent branches;
+4b linear Agent-chain branches via the depth-wavefront); **4c pending**. Sibling to
+`docs/wasip3-parallelism.md`, which
 delivered in-guest parallelism for the **Split** step (homogeneous data-parallelism,
 Phases 0–3 + concurrent backoff). This document plans **heterogeneous graph
 branches** — a fan-out `A → {B, C, …} → M` where the branches are *different*
