@@ -1759,28 +1759,49 @@ fn plan_branch_diamond(
     }))
 }
 
-/// Collect the step ids along a linear branch chain (Agent + sync non-Agent
-/// nodes), stopping at `Join`.
+/// Collect the step ids along a branch chain (Agent + sync non-Agent nodes, plus
+/// in-branch Conditional composites whose arms are collected recursively),
+/// stopping at `Join`.
 fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
     let mut node = plan;
-    while let DirectRunPlan::Agent {
-        step_id, next_plan, ..
-    }
-    | DirectRunPlan::Log {
-        step_id, next_plan, ..
-    }
-    | DirectRunPlan::Filter {
-        step_id, next_plan, ..
-    }
-    | DirectRunPlan::SwitchValue {
-        step_id, next_plan, ..
-    }
-    | DirectRunPlan::GroupBy {
-        step_id, next_plan, ..
-    } = node
-    {
-        out.push(step_id.clone());
-        node = next_plan;
+    loop {
+        match node {
+            DirectRunPlan::Agent {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Log {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Filter {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::SwitchValue {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::GroupBy {
+                step_id, next_plan, ..
+            } => {
+                out.push(step_id.clone());
+                node = next_plan;
+            }
+            DirectRunPlan::Conditional {
+                step_id,
+                true_plan,
+                false_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                // Arms end in Join at the merge; collect their steps recursively.
+                chain_step_ids(true_plan, out);
+                chain_step_ids(false_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
+            _ => break,
+        }
     }
 }
 
@@ -1817,6 +1838,115 @@ fn branches_independent(
         }
     }
     true
+}
+
+/// Whether a plan subtree contains a SUSPENSION point (`WaitForSignal` or `Delay`).
+/// A composite chain node (Conditional/…) may only run BLOCKING in the wavefront
+/// (§4.0.1) when its arms are suspension-free — otherwise the dispatcher would
+/// suspend the instance mid-assemble, before sibling branches at that depth
+/// checkpoint, risking a replay double-fire.
+fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    let err = |e: &Option<DirectErrorRoutePlan>| {
+        e.as_ref().is_some_and(|route| {
+            route
+                .branches
+                .iter()
+                .any(|b| plan_contains_suspension(&b.plan))
+                || route
+                    .default_plan
+                    .as_ref()
+                    .is_some_and(|d| plan_contains_suspension(d))
+        })
+    };
+    match plan {
+        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
+        P::Agent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::AiAgent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::AiAgentLoop {
+            next_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(next_plan) || err(error_plan),
+        P::Filter { next_plan, .. }
+        | P::SwitchValue { next_plan, .. }
+        | P::GroupBy { next_plan, .. }
+        | P::Log { next_plan, .. } => plan_contains_suspension(next_plan),
+        P::Conditional {
+            true_plan,
+            false_plan,
+            merge_plan,
+            ..
+        } => {
+            plan_contains_suspension(true_plan)
+                || plan_contains_suspension(false_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            merge_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            merge_plan,
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::While {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_suspension(nested_plan)
+                || plan_contains_suspension(next_plan)
+                || err(error_plan)
+        }
+        P::EmbedWorkflow {
+            child_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_suspension(child_plan)
+                || plan_contains_suspension(next_plan)
+                || err(error_plan)
+        }
+        P::ParallelBranches {
+            branches,
+            merge_plan,
+        } => branches.iter().any(plan_contains_suspension) || plan_contains_suspension(merge_plan),
+    }
 }
 
 /// Branch eligibility for the concurrent window:
@@ -1875,6 +2005,25 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                     return true;
                 }
                 next_plan
+            }
+            // 4c.3: an in-branch Conditional runs BLOCKING as a composite node
+            // (§4.0.1) — allowed when its arms are suspension-free (else a suspend
+            // mid-assemble would risk a replay double-fire). Its continuation is
+            // `merge_plan`; a terminal Conditional (no merge) ends the branch.
+            DirectRunPlan::Conditional {
+                breakpoint: false,
+                true_plan,
+                false_plan,
+                merge_plan,
+                ..
+            } => {
+                if plan_contains_suspension(true_plan) || plan_contains_suspension(false_plan) {
+                    return false;
+                }
+                match merge_plan {
+                    Some(merge) => merge,
+                    None => return true,
+                }
             }
             _ => return false,
         };

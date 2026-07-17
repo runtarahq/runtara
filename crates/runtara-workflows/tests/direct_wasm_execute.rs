@@ -9961,6 +9961,61 @@ fn direct_wasm_execute_parallel_branches_with_sync_log_step() {
     assert_eq!(output["c"], "C2", "branch c terminal: {output}");
 }
 
+/// Phase-4c.3: a parallel branch may contain an in-branch CONDITIONAL (a composite
+/// node). Branch b is `bcond(Conditional) → bmerge`; the conditional's arms (bt/bf)
+/// re-join at `bmerge`. It runs BLOCKING at depth 0 (no launch) beside sibling
+/// chain c; the always-true condition takes `bt`, and `bmerge` reads its output —
+/// proving in-branch control flow executes and the merge still reads both branches.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_conditional() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With Conditional",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bcond": {"stepType":"Conditional","id":"bcond","condition":{"type":"operation","op":"EQ","arguments":[{"value":"x","valueType":"immediate"},{"value":"x","valueType":"immediate"}]}},
+            "bt": {"stepType":"Agent","id":"bt","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"TOOK_TRUE"}}},
+            "bf": {"stepType":"Agent","id":"bf","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"TOOK_FALSE"}}},
+            "bmerge": {"stepType":"Agent","id":"bmerge","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.bt.outputs"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bmerge.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bcond"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bcond","toStep":"bt","label":"true"},
+            {"fromStep":"bcond","toStep":"bf","label":"false"},
+            {"fromStep":"bt","toStep":"bmerge"},
+            {"fromStep":"bf","toStep":"bmerge"},
+            {"fromStep":"bmerge","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-conditional",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch conditional run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "TOOK_TRUE",
+        "branch b conditional took the true arm: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run

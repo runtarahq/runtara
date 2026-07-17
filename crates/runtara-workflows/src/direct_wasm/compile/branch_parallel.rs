@@ -129,7 +129,8 @@ fn branch_chain(plan: &DirectRunPlan) -> Vec<&DirectRunPlan> {
     chain
 }
 
-/// The `next_plan` of a linear chain node (Agent or sync non-Agent), else `None`.
+/// The continuation of a chain node — `next_plan` for linear nodes, `merge_plan`
+/// for an in-branch Conditional composite (4c.3) — else `None`.
 fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
     match node {
         DirectRunPlan::Agent { next_plan, .. }
@@ -137,6 +138,7 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         | DirectRunPlan::Filter { next_plan, .. }
         | DirectRunPlan::SwitchValue { next_plan, .. }
         | DirectRunPlan::GroupBy { next_plan, .. } => Some(next_plan),
+        DirectRunPlan::Conditional { merge_plan, .. } => merge_plan.as_deref(),
         _ => None,
     }
 }
@@ -191,6 +193,24 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             group_id: *group_id,
             breakpoint: *breakpoint,
             next_plan,
+        },
+        // Composite: run the whole conditional blocking (its arms end in Join at
+        // the internal merge); its post-merge continuation becomes Join so only
+        // this composite emits — the real continuation runs at the next depth.
+        DirectRunPlan::Conditional {
+            step_id,
+            condition_id,
+            breakpoint,
+            true_plan,
+            false_plan,
+            ..
+        } => DirectRunPlan::Conditional {
+            step_id: step_id.clone(),
+            condition_id: *condition_id,
+            breakpoint: *breakpoint,
+            true_plan: true_plan.clone(),
+            false_plan: false_plan.clone(),
+            merge_plan: Some(next_plan),
         },
         other => other.clone(),
     }
