@@ -141,6 +141,10 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         DirectRunPlan::Conditional { merge_plan, .. }
         | DirectRunPlan::SwitchRoute { merge_plan, .. }
         | DirectRunPlan::EdgeRoute { merge_plan, .. } => merge_plan.as_deref(),
+        DirectRunPlan::While { next_plan, .. }
+        | DirectRunPlan::Split { next_plan, .. }
+        | DirectRunPlan::EmbedWorkflow { next_plan, .. }
+        | DirectRunPlan::AiAgent { next_plan, .. } => Some(next_plan),
         _ => None,
     }
 }
@@ -237,6 +241,96 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             branches: branches.clone(),
             default_plan: default_plan.clone(),
             merge_plan: Some(next_plan),
+        },
+        // next_plan composites — run the loop body / child graph blocking; its
+        // `next_plan` becomes Join so only this composite emits.
+        DirectRunPlan::While {
+            step_id,
+            while_id,
+            breakpoint,
+            nested_plan,
+            error_plan,
+            timeout_ms,
+            ..
+        } => DirectRunPlan::While {
+            step_id: step_id.clone(),
+            while_id: *while_id,
+            breakpoint: *breakpoint,
+            nested_plan: nested_plan.clone(),
+            next_plan,
+            error_plan: error_plan.clone(),
+            timeout_ms: *timeout_ms,
+        },
+        DirectRunPlan::Split {
+            step_id,
+            split_id,
+            durable,
+            breakpoint,
+            max_retries,
+            retry_delay_ms,
+            dont_stop_on_failed,
+            parallel_window,
+            nested_plan,
+            error_plan,
+            timeout_ms,
+            ..
+        } => DirectRunPlan::Split {
+            step_id: step_id.clone(),
+            split_id: *split_id,
+            durable: *durable,
+            breakpoint: *breakpoint,
+            max_retries: *max_retries,
+            retry_delay_ms: *retry_delay_ms,
+            dont_stop_on_failed: *dont_stop_on_failed,
+            parallel_window: *parallel_window,
+            nested_plan: nested_plan.clone(),
+            next_plan,
+            error_plan: error_plan.clone(),
+            timeout_ms: *timeout_ms,
+        },
+        DirectRunPlan::EmbedWorkflow {
+            step_id,
+            input_mapping_id,
+            durable,
+            breakpoint,
+            max_retries,
+            retry_delay_ms,
+            child_plan,
+            error_plan,
+            ..
+        } => DirectRunPlan::EmbedWorkflow {
+            step_id: step_id.clone(),
+            input_mapping_id: *input_mapping_id,
+            durable: *durable,
+            breakpoint: *breakpoint,
+            max_retries: *max_retries,
+            retry_delay_ms: *retry_delay_ms,
+            child_plan: child_plan.clone(),
+            next_plan,
+            error_plan: error_plan.clone(),
+        },
+        DirectRunPlan::AiAgent {
+            step_id,
+            agent_id,
+            agent_component_id,
+            input_mapping_id,
+            durable_checkpoint,
+            breakpoint,
+            max_retries,
+            retry_delay_ms,
+            error_plan,
+            ..
+        } => DirectRunPlan::AiAgent {
+            step_id: step_id.clone(),
+            agent_id: *agent_id,
+            agent_component_id: agent_component_id.clone(),
+            input_mapping_id: *input_mapping_id,
+            durable_checkpoint: *durable_checkpoint,
+            breakpoint: *breakpoint,
+            max_retries: *max_retries,
+            retry_delay_ms: *retry_delay_ms,
+            next_plan,
+            error_plan: error_plan.clone(),
         },
         other => other.clone(),
     }

@@ -10016,6 +10016,60 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_conditional() {
     assert_eq!(output["c"], "C2", "branch c terminal: {output}");
 }
 
+/// Phase-4c.3: a parallel branch may contain a nested WHILE loop (a `next_plan`
+/// composite). Branch b is `bloop(While) → bafter`; the loop runs blocking at depth
+/// 0 beside sibling `c1`, then `bafter` runs at depth 1. The merge reads `bafter`
+/// (after the loop) and `c2` — proving nested loops execute in a parallel branch.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_while() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With While",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bloop": {
+                "stepType":"While","id":"bloop","name":"loop",
+                "condition":{"type":"operation","op":"LT","arguments":[{"valueType":"reference","value":"loop.index"},{"valueType":"immediate","value":2}]},
+                "subgraph":{"name":"iter","entryPoint":"iterfin","steps":{"iterfin":{"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}},"executionPlan":[]},
+                "config":{"maxIterations":10}
+            },
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER_LOOP"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bloop"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bloop","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-while",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch while run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "AFTER_LOOP",
+        "branch b step after the loop ran: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run

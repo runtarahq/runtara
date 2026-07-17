@@ -1831,6 +1831,38 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
                     None => break,
                 }
             }
+            DirectRunPlan::While {
+                step_id,
+                nested_plan,
+                next_plan,
+                ..
+            }
+            | DirectRunPlan::Split {
+                step_id,
+                nested_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                chain_step_ids(nested_plan, out);
+                node = next_plan;
+            }
+            DirectRunPlan::EmbedWorkflow {
+                step_id,
+                child_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                chain_step_ids(child_plan, out);
+                node = next_plan;
+            }
+            DirectRunPlan::AiAgent {
+                step_id, next_plan, ..
+            } => {
+                out.push(step_id.clone());
+                node = next_plan;
+            }
             _ => break,
         }
     }
@@ -1876,20 +1908,22 @@ fn branches_independent(
 /// (§4.0.1) when its arms are suspension-free — otherwise the dispatcher would
 /// suspend the instance mid-assemble, before sibling branches at that depth
 /// checkpoint, risking a replay double-fire.
+fn error_route_suspends(e: &Option<DirectErrorRoutePlan>) -> bool {
+    e.as_ref().is_some_and(|route| {
+        route
+            .branches
+            .iter()
+            .any(|b| plan_contains_suspension(&b.plan))
+            || route
+                .default_plan
+                .as_ref()
+                .is_some_and(|d| plan_contains_suspension(d))
+    })
+}
+
 fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     use DirectRunPlan as P;
-    let err = |e: &Option<DirectErrorRoutePlan>| {
-        e.as_ref().is_some_and(|route| {
-            route
-                .branches
-                .iter()
-                .any(|b| plan_contains_suspension(&b.plan))
-                || route
-                    .default_plan
-                    .as_ref()
-                    .is_some_and(|d| plan_contains_suspension(d))
-        })
-    };
+    let err = error_route_suspends;
     match plan {
         P::WaitForSignal { .. } | P::Delay { .. } => true,
         P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
@@ -2089,6 +2123,60 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                     Some(merge) => merge,
                     None => return true,
                 }
+            }
+            // next_plan composites — nested loop bodies / child graphs run BLOCKING
+            // at this depth; continuation is `next_plan`. Suspension-free body/error
+            // required (same replay-safety guard).
+            DirectRunPlan::While {
+                breakpoint: false,
+                nested_plan,
+                next_plan,
+                error_plan,
+                ..
+            }
+            | DirectRunPlan::Split {
+                breakpoint: false,
+                nested_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if plan_contains_suspension(nested_plan) || error_route_suspends(error_plan) {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::EmbedWorkflow {
+                breakpoint: false,
+                child_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if plan_contains_suspension(child_plan) || error_route_suspends(error_plan) {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::AiAgent {
+                breakpoint: false,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if error_route_suspends(error_plan) {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
             }
             _ => return false,
         };
