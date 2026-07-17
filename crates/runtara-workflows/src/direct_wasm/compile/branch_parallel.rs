@@ -597,24 +597,31 @@ fn emit_branch_agent(
 /// locals) and suspending nodes stay on the depth-wavefront; T2.1c/T2.2 widen to
 /// them. Requires the async ABI and non-workflow-agent targets.
 fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRunPlan]) -> bool {
-    if !static_data.parallel_enabled {
-        return false;
-    }
-    branches.iter().all(|b| {
-        let chain = branch_chain(b);
-        !chain.is_empty()
-            && chain.iter().all(|node| match node {
-                DirectRunPlan::Agent { agent_id, .. } => {
-                    !static_data.agent_is_workflow_agent(*agent_id)
-                }
-                // Sync steps have no async op and open no nested window → safe inline.
-                DirectRunPlan::Log { .. }
-                | DirectRunPlan::Filter { .. }
-                | DirectRunPlan::SwitchValue { .. }
-                | DirectRunPlan::GroupBy { .. } => true,
-                _ => false,
-            })
-    })
+    static_data.parallel_enabled
+        && branches
+            .iter()
+            .all(|b| is_schedulable_branch(static_data, b))
+}
+
+/// Whether a SINGLE branch is a schedulable chain — async Agents (which interleave)
+/// and/or sync steps (Log/Filter/SwitchValue/GroupBy, run inline in the drive loop),
+/// with no composite (which may open a nested window) or suspension. Used to PARTITION
+/// a mixed fan-out (T2.2a): the schedulable branches run through the scheduler to
+/// completion first, then the rest (composites/suspensions) run through the wavefront —
+/// so a schedulable sibling finishes before any suspending branch hard-returns.
+fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunPlan) -> bool {
+    let chain = branch_chain(branch);
+    !chain.is_empty()
+        && chain.iter().all(|node| match node {
+            DirectRunPlan::Agent { agent_id, .. } => {
+                !static_data.agent_is_workflow_agent(*agent_id)
+            }
+            DirectRunPlan::Log { .. }
+            | DirectRunPlan::Filter { .. }
+            | DirectRunPlan::SwitchValue { .. }
+            | DirectRunPlan::GroupBy { .. } => true,
+            _ => false,
+        })
 }
 
 /// Whether a chain node is an async Agent (launched into a slot) vs a sync step
@@ -1013,10 +1020,8 @@ pub(super) fn emit_parallel_branches(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
-    let concurrent = concurrent_branch_pools(static_data, branches).is_some();
-
     if schedulable_branches(static_data, branches) {
-        // T2.1: pure async-Agent-chain fan-out → the yield-granular scheduler.
+        // T2.1: every branch is a schedulable chain → the yield-granular scheduler.
         emit_branch_scheduler(
             body,
             indices,
@@ -1039,41 +1044,28 @@ pub(super) fn emit_parallel_branches(
             failure_target,
             handled_target,
         );
-    } else if concurrent {
-        emit_concurrent_branches(
-            body,
-            indices,
-            static_data,
-            track_events,
-            variables,
-            branches,
-            data_ptr_local,
-            data_len_local,
-            steps_ptr_local,
-            steps_len_local,
-            source_ptr_local,
-            source_len_local,
-            output_ptr_local,
-            output_len_local,
-            route_ptr_local,
-            route_len_local,
-            workflow_log_kind,
-            workflow_error_kind,
-            failure_target,
-            handled_target,
-        );
     } else {
-        // Sequential fallback: the exact linearised instruction stream — each
-        // branch's FULL chain in order (no window, no memo; emit_agent_plan
-        // recurses through the chain to its Join), then the merge.
-        for branch in branches {
-            emit_run_plan_mapping(
+        // T2.2a — cross-suspension progress. PARTITION a mixed fan-out: run the
+        // SCHEDULABLE branches (pure Agent/sync chains) through the scheduler FIRST,
+        // to completion, so they checkpoint before any suspending/composite branch in
+        // `rest` hard-returns at its wait. Independent branches carry no
+        // graph-specified order, so ordering one group before the other is correct;
+        // the payoff over the wavefront (T2.0) is that a schedulable sibling finishes
+        // ALL its steps before the instance suspends, instead of parking its
+        // post-suspend depths. When `sched` is empty this is exactly the prior path.
+        let sched: Vec<DirectRunPlan> = branches
+            .iter()
+            .filter(|b| is_schedulable_branch(static_data, b))
+            .cloned()
+            .collect();
+        if !sched.is_empty() {
+            emit_branch_scheduler(
                 body,
                 indices,
                 static_data,
                 track_events,
                 variables,
-                branch,
+                &sched,
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -1089,6 +1081,62 @@ pub(super) fn emit_parallel_branches(
                 failure_target,
                 handled_target,
             );
+        }
+        let rest: Vec<DirectRunPlan> = branches
+            .iter()
+            .filter(|b| !is_schedulable_branch(static_data, b))
+            .cloned()
+            .collect();
+        if concurrent_branch_pools(static_data, &rest).is_some() {
+            emit_concurrent_branches(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                &rest,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+            );
+        } else {
+            // Sequential fallback: the exact linearised instruction stream — each
+            // branch's FULL chain in order (no window, no memo), then the merge.
+            for branch in &rest {
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    branch,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
         }
     }
 

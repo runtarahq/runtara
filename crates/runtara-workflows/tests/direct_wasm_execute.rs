@@ -10256,6 +10256,67 @@ fn direct_wasm_execute_parallel_branches_scheduler_unbalanced_chains() {
     assert_eq!(output["b"], "B1", "branch b 1-step terminal: {output}");
 }
 
+/// T2.2a — cross-suspension progress: a schedulable sibling completes BEFORE a
+/// suspending branch reaches its wait. Branch c is a durable 3-step pure chain
+/// (c1→c2→c3); branch b is bwait(WaitForSignal, short timeout)→bafter.
+/// `emit_parallel_branches` partitions the fan-out and runs c through the scheduler
+/// TO COMPLETION, then the wavefront runs b — so by the time bwait is reached, ALL of
+/// c (including its DEEPEST step c3) has already checkpointed. The depth-wavefront
+/// (T2.0) would have parked c3 until after the wait resolved (bwait is at depth 0,
+/// c3 at depth 2). One run with no signal + a short timeout returns quickly; we
+/// assert c3's checkpoint is present regardless of the wait's timeout outcome.
+#[test]
+fn direct_wasm_execute_parallel_branches_sibling_completes_before_wait() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "parallel-branches-sibling-before-wait";
+    let graph = r#"{
+        "name": "Sibling Completes Before Wait",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bwait": {"stepType":"WaitForSignal","id":"bwait","name":"Approval","pollIntervalMs":50,"timeoutMs":{"valueType":"immediate","value":250}},
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.c1.outputs"}}},
+            "c3": {"stepType":"Agent","id":"c3","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C3"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c3.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bwait"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bwait","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"c3"},
+            {"fromStep":"c3","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+
+    // No signal: branch c runs fully via the scheduler, THEN the wavefront reaches
+    // bwait (which times out after 250ms). Branch c's deepest step c3 has already
+    // checkpointed by then — the T2.2a payoff.
+    let run = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        Vec::new(),
+    );
+    let checkpoint_ids: Vec<&String> = run.checkpoints.iter().map(|c| &c.checkpoint_id).collect();
+    let has_c3 = run
+        .checkpoints
+        .iter()
+        .any(|c| c.checkpoint_id.contains("c3") && !c.state.is_empty());
+    assert!(
+        has_c3,
+        "T2.2a: branch c's DEEPEST step c3 must checkpoint before the wavefront reaches \
+         bwait; checkpoints={checkpoint_ids:?}"
+    );
+}
+
 /// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
 /// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
 /// arrival span is about ONE think-time, not the ~three a fully serialized run
