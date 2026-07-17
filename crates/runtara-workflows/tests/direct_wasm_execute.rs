@@ -9720,6 +9720,59 @@ fn parallel_http_branches_graph(url: &str, durable: bool) -> String {
     )
 }
 
+/// A non-durable diamond of two-Agent CHAINS `start → {b1→b2, c1→c2} → finish`
+/// (docs/wasip3-parallel-branches-plan.md §4.0, the depth-wavefront). Every branch
+/// step hits `/slow-item`, so a correct wavefront issues the requests in TWO waves
+/// of two ({b1,c1} then {b2,c2}); a serialized run issues four back-to-back.
+fn parallel_http_chain_branches_graph(url: &str) -> String {
+    let http_step = |id: &str| {
+        format!(
+            r#""{id}": {{
+                "stepType": "Agent", "id": "{id}", "agentId": "http",
+                "capabilityId": "http-request", "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }}"#
+        )
+    };
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Chain Branches",
+        "durable": false,
+        "steps": {{
+            "start": {{
+                "stepType": "Agent", "id": "start", "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {{}}
+            }},
+            {b1}, {b2}, {c1}, {c2},
+            "finish": {{
+                "stepType": "Finish", "id": "finish",
+                "inputMapping": {{
+                    "b_status": {{"valueType": "reference", "value": "steps.b2.outputs.status_code"}},
+                    "c_status": {{"valueType": "reference", "value": "steps.c2.outputs.status_code"}}
+                }}
+            }}
+        }},
+        "entryPoint": "start",
+        "executionPlan": [
+            {{"fromStep": "start", "toStep": "b1"}},
+            {{"fromStep": "start", "toStep": "c1"}},
+            {{"fromStep": "b1", "toStep": "b2"}},
+            {{"fromStep": "c1", "toStep": "c2"}},
+            {{"fromStep": "b2", "toStep": "finish"}},
+            {{"fromStep": "c2", "toStep": "finish"}}
+        ],
+        "variables": {{}}
+    }}"#,
+        b1 = http_step("b1"),
+        b2 = http_step("b2"),
+        c1 = http_step("c1"),
+        c2 = http_step("c2"),
+    )
+}
+
 /// Serializes the wall-clock-sensitive parallel-split tests against each
 /// other AND absorbs poisoning: they assert timing ratios and request
 /// interleavings that melt when they share cores with each other. The rest
@@ -9853,6 +9906,59 @@ fn direct_wasm_execute_parallel_branches_http_overlap() {
     assert!(
         span < DELAY,
         "parallel branches failed to overlap agent I/O: arrivals span {span:?}"
+    );
+}
+
+/// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
+/// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
+/// arrival span is about ONE think-time, not the ~three a fully serialized run
+/// would take. The merge reads both chains' terminal outputs.
+#[test]
+fn direct_wasm_execute_parallel_chain_branches_wavefront_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_chain_branches_graph("http://slow.invalid");
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-chain-branches",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "chain branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["b_status"], 200, "chain b terminal: {output}");
+    assert_eq!(output["c_status"], 200, "chain c terminal: {output}");
+
+    // Four arrivals in two waves. Wavefront span ≈ one think-time (wave gap);
+    // serialized would span ≈ three. Assert < 2 think-times to distinguish.
+    let arrivals = &captured.slow_item_arrivals;
+    assert_eq!(
+        arrivals.len(),
+        4,
+        "all four chain steps must reach upstream"
+    );
+    let span = arrivals
+        .iter()
+        .max()
+        .zip(arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("arrival span");
+    eprintln!(
+        "[parallel-chain-branches-timing] arrival-span={}ms",
+        span.as_millis()
+    );
+    assert!(
+        span < DELAY * 2,
+        "chain branches failed to overlap per depth (span {span:?} implies serialized)"
     );
 }
 

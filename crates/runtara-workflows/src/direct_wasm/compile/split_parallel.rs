@@ -372,31 +372,17 @@ fn collect_parallel_agent_components(
             branches,
             merge_plan,
         } => {
-            // The window runs concurrently only when EVERY branch is eligible
-            // (async ABI + no workflow-agent branch) — matching the emitter's
-            // gate. Then each branch's Agent needs an `[async-lower]invoke` import;
-            // a component shared by N branches gets an N-way instance pool (clamped
-            // to PARALLEL_POOL_MAX), since a sync-lifted instance serializes
-            // concurrent entries on its lock. A single workflow-agent branch tips
-            // the whole node to the sequential fallback — no async imports.
-            let concurrent = static_data.parallel_enabled
-                && branches.iter().all(|branch| {
-                    matches!(branch, P::Agent { agent_id, .. } if !static_data.agent_is_workflow_agent(*agent_id))
-                });
-            if concurrent {
-                let mut per_component: BTreeMap<String, u32> = BTreeMap::new();
-                for branch in branches {
-                    if let P::Agent {
-                        agent_component_id, ..
-                    } = branch
-                    {
-                        *per_component.entry(agent_component_id.clone()).or_insert(0) += 1;
-                    }
-                }
-                for (component_id, count) in per_component {
-                    let pool = pool_size_for_window(count);
+            // When the whole fan-out runs concurrently, every chain step needs an
+            // `[async-lower]invoke` import; `concurrent_branch_pools` returns the
+            // per-component pool sizes (max same-depth concurrency, clamped), the
+            // SAME sizes the emitter's member assignment uses. A workflow-agent
+            // step tips the node to the sequential fallback — no async imports.
+            if let Some(pool_sizes) =
+                super::branch_parallel::concurrent_branch_pools(static_data, branches)
+            {
+                for (component_id, size) in pool_sizes {
                     let entry = out.entry(component_id).or_insert(1);
-                    *entry = (*entry).max(pool);
+                    *entry = (*entry).max(size);
                 }
             }
             for branch in branches {

@@ -223,9 +223,44 @@ Small–medium. Mostly a generalisation of existing code:
 Conditionals that immediately re-join within the branch) with **no nested While/Split
 inside the branch**. E.g. `A → {B1→B2→B3, C1→C2} → M`.
 
-A branch is now more than one async call, so it must become a **resumable coroutine**:
-run until its next async yield point (agent invoke, delay, wait, embed), suspend,
-resume on completion. This is the hand-emitted callback-ABI / segment scheduler.
+### 4.0 The DEPTH-WAVEFRONT (implemented first — reuses the 4a window)
+
+Rather than a general coroutine scheduler, the first slice runs branches in a
+**wavefront by depth**, which reuses the 4a launch → drain → assemble window almost
+verbatim. First slice restricts a branch to a **linear chain of Agent steps**
+(`Agent → Agent → … → Join`; intermediate steps carry no `onError`, the terminal step
+may — so 4a's single-Agent case is the length-1 special case).
+
+Walk each branch into its agent chain `[s_i0, s_i1, …]`. Then loop `d = 0 .. maxlen`:
+
+```
+for d in 0..max_branch_len:
+  LAUNCH:   for each branch i with d < len_i: build source (shared context),
+            apply s_id's mapping, durable-gate, async-invoke -> slot[i]
+  DRAIN:    ws.wait until all launched depth-d subtasks return
+  ASSEMBLE: for each branch i with d < len_i (in order): emit_agent_plan(s_id,
+            next = Join, memo = slot[i]) — updates the SHARED steps context
+emit merge_plan
+```
+
+Correctness rests on the same invariant 4a uses: independent DAG branches never
+reference a sibling, so a **single shared `steps` context** is sufficient — `s_id`'s
+mapping references only `s_i(d-1)` (assembled in round `d-1`), never another branch's
+step, so the extra sibling entries in the shared context are inert. Slots are reused
+per depth (round `d` fully drains before `d+1`). Pooling is **per depth**: only
+same-component steps invoked in the *same* round contend on an instance lock, so a
+component's pool = max over depths of its per-depth branch count (clamped). Durable and
+retries carry over from 4a unchanged (per-step launch gate; retries in assemble). A
+branch that is length 1 emits exactly the 4a window.
+
+Non-Agent chain steps (Delay/Log/Conditional-in-branch), waits, and ragged async
+shapes are the **general scheduler** below (a later slice).
+
+### 4.1+ General segment scheduler (later slice)
+
+A branch is more than one async call, so in the general case it becomes a **resumable
+coroutine**: run until its next async yield point (agent invoke, delay, wait, embed),
+suspend, resume on completion. This is the hand-emitted callback-ABI / segment scheduler.
 
 ### 4.1 Segmenting a branch
 

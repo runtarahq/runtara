@@ -1683,6 +1683,7 @@ fn try_parallel_branches(
     let built = plan_branch_diamond(
         graph,
         child_workflows,
+        from_step,
         &ordered,
         &merge,
         stack,
@@ -1694,14 +1695,16 @@ fn try_parallel_branches(
     Ok(built.unwrap_or(None))
 }
 
-/// Plan each branch (single Agent → merge) plus the shared continuation, or
-/// `Ok(None)` when a branch isn't a single Agent. Returns `Err` when a branch
-/// cannot be planned at all (cross-linked / non-re-converging), which
-/// `try_parallel_branches` maps to a decline.
+/// Plan each branch (a linear Agent chain → merge) plus the shared continuation,
+/// or `Ok(None)` when a branch isn't a linear Agent chain, or the branches are not
+/// INDEPENDENT (a cross-linked shape where a branch step is fed by a step outside
+/// the fan-out). Returns `Err` when a branch cannot be planned at all
+/// (non-re-converging), which `try_parallel_branches` maps to a decline.
 #[allow(clippy::too_many_arguments)]
 fn plan_branch_diamond(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
+    from_step: &str,
     ordered: &[&DirectEdgeManifest],
     merge: &str,
     stack: &mut Vec<String>,
@@ -1711,6 +1714,8 @@ fn plan_branch_diamond(
 ) -> Result<Option<DirectRunPlan>, DirectCompileError> {
     let branch_stop = Some(merge);
     let mut branches = Vec::with_capacity(ordered.len());
+    let mut branch_id_sets: Vec<std::collections::HashSet<String>> =
+        Vec::with_capacity(ordered.len());
     for edge in ordered {
         let plan = step_run_plan_inner(
             graph,
@@ -1722,10 +1727,21 @@ fn plan_branch_diamond(
             &edge.to_step,
             orders,
         )?;
-        if !is_single_agent_branch(&plan) {
+        if !is_linear_agent_chain_branch(&plan) {
             return Ok(None);
         }
+        let mut ids = Vec::new();
+        chain_step_ids(&plan, &mut ids);
+        branch_id_sets.push(ids.into_iter().collect());
         branches.push(plan);
+    }
+    // Independence: the branches must be disjoint subgraphs whose only external
+    // entry is the fan-out origin. A branch step fed by a step OUTSIDE its branch
+    // (other than `from_step`) means the fan-out is cross-linked (e.g. a step with
+    // predecessors in several would-be branches) — the wavefront would run it
+    // before those external predecessors produced its input. Decline → linearize.
+    if !branches_independent(graph, from_step, &branch_id_sets) {
+        return Ok(None);
     }
     let merge_plan = step_run_plan_inner(
         graph,
@@ -1743,23 +1759,81 @@ fn plan_branch_diamond(
     }))
 }
 
-/// Phase-4a branch eligibility: exactly one Agent step that ends the branch
-/// (`next_plan == Join`), without a breakpoint. Durable and retries are BOTH
-/// allowed (4a.2): retries run in assemble via the memoized attempt 1; durable
-/// branches gate the launch on the step checkpoint (replay-safe — the durable key
-/// is `{workflow_id}::agent::{agent_id}::{capability_id}::{step_id}` and ignores
-/// `source.steps`, so it's invariant to sibling accumulation and the launch-gate
-/// key matches the assemble key). A workflow-agent target is excluded at emission
-/// time, not here.
-fn is_single_agent_branch(plan: &DirectRunPlan) -> bool {
-    matches!(
-        plan,
-        DirectRunPlan::Agent {
+/// Collect the Agent step ids along a linear branch chain (stops at `Join`).
+fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
+    let mut node = plan;
+    while let DirectRunPlan::Agent {
+        step_id, next_plan, ..
+    } = node
+    {
+        out.push(step_id.clone());
+        node = next_plan;
+    }
+}
+
+/// The branches are independent iff (a) their step sets are pairwise disjoint and
+/// (b) every branch step's normal-flow predecessors are the fan-out origin or a
+/// step in the SAME branch. Rejects cross-linked fan-outs where a branch step is
+/// fed by a step outside the fan-out (which the wavefront would run before that
+/// external predecessor produced its input).
+fn branches_independent(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    branch_id_sets: &[std::collections::HashSet<String>],
+) -> bool {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    for set in branch_id_sets {
+        for id in set {
+            if !seen.insert(id.as_str()) {
+                return false; // a step appears in two branches
+            }
+        }
+    }
+    for set in branch_id_sets {
+        for step in set {
+            let external_pred = graph.edges.iter().any(|edge| {
+                edge.to_step == *step
+                    && is_normal_label(edge.label.as_deref())
+                    && edge.from_step != from_step
+                    && !set.contains(&edge.from_step)
+            });
+            if external_pred {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Branch eligibility for the concurrent window:
+/// - 4a: a single Agent step (`Agent → Join`).
+/// - 4b: a linear CHAIN of Agent steps (`Agent → Agent → … → Join`), run as a
+///   depth-wavefront. Intermediate chain steps carry no `onError` (a recovery
+///   would break the wavefront's depth structure); the terminal step may (assemble
+///   handles it, `next == Join`). Durable and retries are allowed throughout
+///   (per-step launch gate; retries in assemble). Breakpoints are excluded. A
+///   workflow-agent target is excluded at emission time, not here.
+fn is_linear_agent_chain_branch(plan: &DirectRunPlan) -> bool {
+    let mut node = plan;
+    loop {
+        let DirectRunPlan::Agent {
             breakpoint: false,
+            error_plan,
             next_plan,
             ..
-        } if matches!(**next_plan, DirectRunPlan::Join)
-    )
+        } = node
+        else {
+            return false;
+        };
+        match next_plan.as_ref() {
+            // Terminal chain step: onError allowed (assemble routes it).
+            DirectRunPlan::Join => return true,
+            // Intermediate chain step: must not recover via onError.
+            next @ DirectRunPlan::Agent { .. } if error_plan.is_none() => node = next,
+            _ => return false,
+        }
+    }
 }
 
 fn on_error_plan(
@@ -2759,6 +2833,65 @@ mod tests {
                 "Finish:finish",
             ],
             "clean single-agent diamond should lower to ParallelBranches: {emitted:?}"
+        );
+    }
+
+    /// 4b: a diamond of two-Agent CHAINS `a → {b1→b2, c1→c2} → m` lowers to
+    /// `ParallelBranches` with multi-step branches (the depth-wavefront).
+    #[test]
+    fn linear_agent_chain_diamond_lowers_to_parallel_branches() {
+        let mut steps = serde_json::Map::new();
+        for id in ["a", "b1", "b2", "c1", "c2", "m"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish",
+                "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            "durable": false,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b1"},
+                {"fromStep": "a", "toStep": "c1"},
+                {"fromStep": "b1", "toStep": "b2"},
+                {"fromStep": "c1", "toStep": "c2"},
+                {"fromStep": "b2", "toStep": "m"},
+                {"fromStep": "c2", "toStep": "m"},
+                {"fromStep": "m", "toStep": "finish"}
+            ]
+        }))
+        .expect("graph parses");
+
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+
+        assert_eq!(
+            emitted,
+            vec![
+                "a",
+                "ParallelBranches",
+                "  branch:",
+                "b1",
+                "b2",
+                "Join",
+                "  branch:",
+                "c1",
+                "c2",
+                "Join",
+                "  merge-of:ParallelBranches",
+                "m",
+                "Finish:finish",
+            ],
+            "chain diamond should lower to ParallelBranches with 2-step branches: {emitted:?}"
         );
     }
 

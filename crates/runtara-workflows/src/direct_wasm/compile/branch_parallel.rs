@@ -1,10 +1,13 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Concurrent parallel-branch lowering (docs/wasip3-parallel-branches-plan.md,
-//! Phase 4a).
+//! Phases 4a + 4b).
 //!
-//! An unconditional single-Agent fan-out `A → {AgentB, AgentC, …} → M` runs the
-//! branch agents CONCURRENTLY instead of linearising them:
+//! An unconditional fan-out `A → {branch, branch, …} → M` runs the branches
+//! CONCURRENTLY instead of linearising them. A branch is a linear Agent chain
+//! (4a: length 1; 4b: length N), run as a DEPTH-WAVEFRONT — at each depth the
+//! depth-d step of every branch launches together, drains, and assembles into the
+//! shared `steps` context that depth d+1 reads (§4.0). Per depth:
 //!
 //!   launch:   per branch, best-effort input preparation + an ASYNC-LOWERED
 //!             `invoke` whose result lands in a per-branch SLOT; the subtask joins
@@ -111,14 +114,97 @@ fn branch_agent(plan: &DirectRunPlan) -> BranchAgent<'_> {
     }
 }
 
-/// A branch may run concurrently unless it targets a workflow-agent (shared
-/// runtime host / checkpoint scope — a Phase-4c question).
-fn branch_concurrent_eligible(static_data: &DirectCoreStaticData, plan: &DirectRunPlan) -> bool {
-    !static_data.agent_is_workflow_agent(branch_agent(plan).agent_id)
+/// Walk a branch plan into its linear Agent chain `[s0, s1, …]` (4b). A 4a
+/// single-Agent branch yields a length-1 chain. `plan.rs::is_linear_agent_chain_branch`
+/// guarantees every node is an `Agent` ending in `Join`.
+fn branch_chain(plan: &DirectRunPlan) -> Vec<BranchAgent<'_>> {
+    let mut chain = Vec::new();
+    let mut node = plan;
+    loop {
+        let agent = branch_agent(node);
+        let next = agent.next_plan;
+        chain.push(agent);
+        match next {
+            DirectRunPlan::Agent { .. } => node = next,
+            _ => break, // Join
+        }
+    }
+    chain
 }
 
-/// Emit one branch's Agent lowering (assemble pass, or the whole thing on the
-/// sequential fallback). `memo_slot` copies the pre-launched result when set.
+/// `Some(pool_sizes)` when the whole fan-out may run concurrently — async ABI
+/// (`parallel_enabled`) and no chain step targets a workflow-agent (shared runtime
+/// host / checkpoint scope, a Phase-4c question) — else `None` (sequential
+/// fallback). Returned pool sizes drive BOTH the emitter's member assignment and
+/// the `[async-lower]invoke` imports the composer emits, so they cannot disagree.
+pub(super) fn concurrent_branch_pools(
+    static_data: &DirectCoreStaticData,
+    branches: &[DirectRunPlan],
+) -> Option<BTreeMap<String, u32>> {
+    if !static_data.parallel_enabled {
+        return None;
+    }
+    let chains: Vec<Vec<BranchAgent<'_>>> = branches.iter().map(branch_chain).collect();
+    if !chains
+        .iter()
+        .flatten()
+        .all(|step| !static_data.agent_is_workflow_agent(step.agent_id))
+    {
+        return None;
+    }
+    let (_, pool_sizes) = plan_branch_pools(&chains);
+    Some(pool_sizes)
+}
+
+/// Per-branch, per-depth pool member indices + the pool size per component. In
+/// the depth-wavefront only steps invoked at the SAME depth run concurrently, so
+/// a component contends only with same-depth peers: its pool = the max number of
+/// branches invoking it at any single depth (clamped to PARALLEL_POOL_MAX). A
+/// component reused across depths (sequential rounds) needs no extra instance.
+#[allow(clippy::needless_range_loop)] // depth indexes chains, raw, and members in parallel
+fn plan_branch_pools(chains: &[Vec<BranchAgent<'_>>]) -> (Vec<Vec<u32>>, BTreeMap<String, u32>) {
+    let max_depth = chains.iter().map(Vec::len).max().unwrap_or(0);
+    let mut raw: Vec<Vec<u32>> = chains.iter().map(|c| vec![0u32; c.len()]).collect();
+    let mut pool_max: BTreeMap<String, u32> = BTreeMap::new();
+    for depth in 0..max_depth {
+        let mut per_depth: BTreeMap<&str, u32> = BTreeMap::new();
+        for (branch, chain) in chains.iter().enumerate() {
+            if let Some(step) = chain.get(depth) {
+                let count = per_depth.entry(step.agent_component_id).or_insert(0);
+                raw[branch][depth] = *count;
+                *count += 1;
+            }
+        }
+        for (component, count) in per_depth {
+            let entry = pool_max.entry(component.to_string()).or_insert(0);
+            *entry = (*entry).max(count);
+        }
+    }
+    let pool_sizes: BTreeMap<String, u32> = pool_max
+        .iter()
+        .map(|(component, count)| (component.clone(), pool_size_for_window(*count)))
+        .collect();
+    let members: Vec<Vec<u32>> = chains
+        .iter()
+        .enumerate()
+        .map(|(branch, chain)| {
+            (0..chain.len())
+                .map(|depth| {
+                    let size = pool_sizes
+                        .get(chain[depth].agent_component_id)
+                        .copied()
+                        .unwrap_or(1);
+                    raw[branch][depth] % size
+                })
+                .collect()
+        })
+        .collect();
+    (members, pool_sizes)
+}
+
+/// Emit one branch STEP's Agent lowering in the assemble pass, with the invoke
+/// memoized from `memo_slot`. `next_plan` is `Join` in the wavefront (the next
+/// chain step is handled at the next depth; the merge runs once at the end).
 #[allow(clippy::too_many_arguments)]
 fn emit_branch_agent(
     body: &mut WasmFunction,
@@ -127,6 +213,7 @@ fn emit_branch_agent(
     track_events: bool,
     variables: DirectVariables<'_>,
     branch: &BranchAgent<'_>,
+    next_plan: &DirectRunPlan,
     memo_slot: Option<u32>,
     data_ptr_local: u32,
     data_len_local: u32,
@@ -164,7 +251,7 @@ fn emit_branch_agent(
         branch.max_retries,
         branch.retry_delay_ms,
         branch.rate_limit_budget_ms,
-        branch.next_plan, // Join — emits nothing; the merge runs once after
+        next_plan,
         branch.error_plan,
         data_ptr_local,
         data_len_local,
@@ -209,10 +296,7 @@ pub(super) fn emit_parallel_branches(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
-    let concurrent = static_data.parallel_enabled
-        && branches
-            .iter()
-            .all(|branch| branch_concurrent_eligible(static_data, branch));
+    let concurrent = concurrent_branch_pools(static_data, branches).is_some();
 
     if concurrent {
         emit_concurrent_branches(
@@ -239,16 +323,16 @@ pub(super) fn emit_parallel_branches(
         );
     } else {
         // Sequential fallback: the exact linearised instruction stream — each
-        // branch agent in order (no window, no memo), then the merge.
+        // branch's FULL chain in order (no window, no memo; emit_agent_plan
+        // recurses through the chain to its Join), then the merge.
         for branch in branches {
-            emit_branch_agent(
+            emit_run_plan_mapping(
                 body,
                 indices,
                 static_data,
                 track_events,
                 variables,
-                &branch_agent(branch),
-                None,
+                branch,
                 data_ptr_local,
                 data_len_local,
                 steps_ptr_local,
@@ -294,6 +378,7 @@ pub(super) fn emit_parallel_branches(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)] // depth indexes chains, members, and slot offsets in parallel
 fn emit_concurrent_branches(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -332,12 +417,18 @@ fn emit_concurrent_branches(
         .subtask_drop
         .expect("parallel-branch compiles import the waitable builtins");
 
+    // Walk each branch into its Agent chain and assign per-depth pool members.
+    let chains: Vec<Vec<BranchAgent<'_>>> = branches.iter().map(branch_chain).collect();
+    let (members, _pool_sizes) = plan_branch_pools(&chains);
+    let max_depth = chains.iter().map(Vec::len).max().unwrap_or(0);
+
     let branch_count = branches.len() as i32;
     let slots_bytes = branch_count * DIRECT_PSPLIT_SLOT_STRIDE;
 
-    // slots = bump(align8(global0), branch_count * STRIDE), zero-filled. The slot
-    // retptrs receive canonical-ABI stores that require natural alignment, so the
-    // base is aligned to 8 off the byte-granular bump pointer.
+    // slots = bump(align8(global0), branch_count * STRIDE), zero-filled — K slots
+    // (one per branch), REUSED each depth of the wavefront. The slot retptrs
+    // receive canonical-ABI stores that require natural alignment, so the base is
+    // aligned to 8 off the byte-granular bump pointer.
     body.instruction(&Instruction::GlobalGet(0));
     body.instruction(&Instruction::I32Const(7));
     body.instruction(&Instruction::I32Add);
@@ -353,94 +444,88 @@ fn emit_concurrent_branches(
     body.instruction(&Instruction::I32Const(slots_bytes));
     body.instruction(&Instruction::MemoryFill(0));
 
-    // ws = waitable-set.new(); pending = 0; signal = 0.
-    body.instruction(&Instruction::Call(ws_new));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    // signal = 0 (accumulated across every depth's drain; the suspend fires once
+    // after the window quiesces).
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
 
-    // Assign each branch a pool member so branches sharing a component get
-    // DISTINCT instances (a sync-lifted instance serializes concurrent entries on
-    // its lock). member = occurrence-among-same-component % pool_size; with
-    // pool_size = min(count, PARALLEL_POOL_MAX), branches ≤ MAX get unique members
-    // and overlap fully; any excess wraps (round-robin) and serializes.
-    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
-    for branch in branches {
-        *counts
-            .entry(branch_agent(branch).agent_component_id)
-            .or_insert(0) += 1;
-    }
-    let mut occurrence: BTreeMap<&str, u32> = BTreeMap::new();
-    let members: Vec<u32> = branches
-        .iter()
-        .map(|branch| {
-            let component = branch_agent(branch).agent_component_id;
-            let slot = occurrence.entry(component).or_insert(0);
-            let member = *slot % pool_size_for_window(counts[component]);
-            *slot += 1;
-            member
-        })
-        .collect();
+    // ── DEPTH-WAVEFRONT ──────────────────────────────────────────────────────
+    // At each depth, launch → drain → assemble the depth-d step of every branch
+    // that still has one. Assemble runs each step with `next = Join` (the next
+    // chain step is handled at the next depth) and MEMOIZES its invoke; its output
+    // lands in the SHARED `steps` context that depth d+1 reads. A length-1 chain
+    // (4a) is exactly one depth. (docs/wasip3-parallel-branches-plan.md §4.0.)
+    let join = DirectRunPlan::Join;
+    for depth in 0..max_depth {
+        // Fresh waitable-set + pending for this depth; slots are reused (assemble
+        // consumes each, resetting its state).
+        body.instruction(&Instruction::Call(ws_new));
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
 
-    // ── LAUNCH pass (unrolled per branch) ───────────────────────────────────
-    for (index, branch) in branches.iter().enumerate() {
-        emit_branch_launch(
-            body,
-            indices,
-            static_data,
-            &branch_agent(branch),
-            index as i32,
-            members[index],
-            waitable_join,
-            source_ptr_local,
-            source_len_local,
-            output_ptr_local,
-            output_len_local,
-            route_ptr_local,
-            route_len_local,
-        );
-    }
+        // LAUNCH depth d.
+        for (index, chain) in chains.iter().enumerate() {
+            if let Some(step) = chain.get(depth) {
+                emit_branch_launch(
+                    body,
+                    indices,
+                    static_data,
+                    step,
+                    index as i32,
+                    members[index][depth],
+                    waitable_join,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                );
+            }
+        }
 
-    // ── DRAIN ────────────────────────────────────────────────────────────────
-    emit_drain_pending(body, indices, ws_wait, subtask_drop);
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::Call(ws_drop));
+        // DRAIN depth d.
+        emit_drain_pending(body, indices, ws_wait, subtask_drop);
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
+        body.instruction(&Instruction::Call(ws_drop));
 
-    // ── ASSEMBLE pass (unrolled per branch, in order) ────────────────────────
-    for (index, branch) in branches.iter().enumerate() {
-        // memo slot for this branch: slots + index * STRIDE -> launch scratch.
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
-        body.instruction(&Instruction::I32Const(
-            index as i32 * DIRECT_PSPLIT_SLOT_STRIDE,
-        ));
-        body.instruction(&Instruction::I32Add);
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+        // ASSEMBLE depth d (branch order).
+        for (index, chain) in chains.iter().enumerate() {
+            if let Some(step) = chain.get(depth) {
+                body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+                body.instruction(&Instruction::I32Const(
+                    index as i32 * DIRECT_PSPLIT_SLOT_STRIDE,
+                ));
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
 
-        emit_branch_agent(
-            body,
-            indices,
-            static_data,
-            track_events,
-            variables,
-            &branch_agent(branch),
-            Some(DIRECT_PSPLIT_LAUNCH_LOCAL),
-            data_ptr_local,
-            data_len_local,
-            steps_ptr_local,
-            steps_len_local,
-            source_ptr_local,
-            source_len_local,
-            output_ptr_local,
-            output_len_local,
-            route_ptr_local,
-            route_len_local,
-            workflow_log_kind,
-            workflow_error_kind,
-            failure_target,
-            handled_target,
-        );
+                emit_branch_agent(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    step,
+                    &join,
+                    Some(DIRECT_PSPLIT_LAUNCH_LOCAL),
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
+        }
     }
 
     // Act on a pause/cancel flagged during the drain. Every subtask has resolved
