@@ -1800,6 +1800,37 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
                     None => break,
                 }
             }
+            DirectRunPlan::SwitchRoute {
+                step_id,
+                branches,
+                default_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                for branch in branches {
+                    chain_step_ids(&branch.plan, out);
+                }
+                chain_step_ids(default_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
+            DirectRunPlan::EdgeRoute {
+                branches,
+                default_plan,
+                merge_plan,
+            } => {
+                for branch in branches {
+                    chain_step_ids(&branch.plan, out);
+                }
+                chain_step_ids(default_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
             _ => break,
         }
     }
@@ -2018,6 +2049,40 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                 ..
             } => {
                 if plan_contains_suspension(true_plan) || plan_contains_suspension(false_plan) {
+                    return false;
+                }
+                match merge_plan {
+                    Some(merge) => merge,
+                    None => return true,
+                }
+            }
+            // Routing Switch / conditioned-edge fan-out: same composite treatment as
+            // Conditional (continuation = merge_plan), suspension-free routes.
+            DirectRunPlan::SwitchRoute {
+                breakpoint: false,
+                branches,
+                default_plan,
+                merge_plan,
+                ..
+            } => {
+                if branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                    || plan_contains_suspension(default_plan)
+                {
+                    return false;
+                }
+                match merge_plan {
+                    Some(merge) => merge,
+                    None => return true,
+                }
+            }
+            DirectRunPlan::EdgeRoute {
+                branches,
+                default_plan,
+                merge_plan,
+            } => {
+                if branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                    || plan_contains_suspension(default_plan)
+                {
                     return false;
                 }
                 match merge_plan {

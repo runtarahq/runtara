@@ -138,7 +138,9 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         | DirectRunPlan::Filter { next_plan, .. }
         | DirectRunPlan::SwitchValue { next_plan, .. }
         | DirectRunPlan::GroupBy { next_plan, .. } => Some(next_plan),
-        DirectRunPlan::Conditional { merge_plan, .. } => merge_plan.as_deref(),
+        DirectRunPlan::Conditional { merge_plan, .. }
+        | DirectRunPlan::SwitchRoute { merge_plan, .. }
+        | DirectRunPlan::EdgeRoute { merge_plan, .. } => merge_plan.as_deref(),
         _ => None,
     }
 }
@@ -210,6 +212,30 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             true_plan: true_plan.clone(),
             false_plan: false_plan.clone(),
+            merge_plan: Some(next_plan),
+        },
+        DirectRunPlan::SwitchRoute {
+            step_id,
+            switch_id,
+            breakpoint,
+            branches,
+            default_plan,
+            ..
+        } => DirectRunPlan::SwitchRoute {
+            step_id: step_id.clone(),
+            switch_id: *switch_id,
+            breakpoint: *breakpoint,
+            branches: branches.clone(),
+            default_plan: default_plan.clone(),
+            merge_plan: Some(next_plan),
+        },
+        DirectRunPlan::EdgeRoute {
+            branches,
+            default_plan,
+            ..
+        } => DirectRunPlan::EdgeRoute {
+            branches: branches.clone(),
+            default_plan: default_plan.clone(),
             merge_plan: Some(next_plan),
         },
         other => other.clone(),
