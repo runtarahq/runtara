@@ -259,14 +259,47 @@ SwitchValue, GroupBy). Those depths run assemble-only (no launch) via the standa
 dispatcher on a clone of the node whose `next_plan` is replaced by `Join` (so exactly
 one step emits; its successor runs at the next depth). Pooling counts Agent nodes only.
 
-Delay-in-branch (async timer), in-branch Conditional/Wait, and nested While/Split are
-the **general scheduler** below (later slices).
+### 4.0.1 COMPOSITE nodes — arbitrary in-branch control flow WITHOUT hand-CPS (4c.3)
 
-### 4.1+ General segment scheduler (later slice)
+Non-linear in-branch steps (Conditional, Switch, While, Split, EmbedWorkflow, AiAgent)
+do **not** need a hand-emitted coroutine scheduler. They ride the SAME wavefront as a
+**composite node**: a chain node whose "next" is its continuation (`merge_plan` for
+Conditional/Switch, `next_plan` for the rest). At its depth it runs **assemble-only,
+blocking**, via `emit_run_plan_mapping` on a clone with that continuation replaced by
+`Join` — so exactly the composite runs (its successor is the next depth). Its taken
+arm / loop body executes with the ordinary sequential lowering (its internal agents use
+the sync invoke — they don't overlap siblings, but the branch's TOP-LEVEL linear steps
+still do). This keeps the "guest single-threaded, host I/O overlaps" model and gives
+**complete DAG coverage** with far less risk than a CPS state machine.
 
-A branch is more than one async call, so in the general case it becomes a **resumable
-coroutine**: run until its next async yield point (agent invoke, delay, wait, embed),
-suspend, resume on completion. This is the hand-emitted callback-ABI / segment scheduler.
+Eligibility guard: a composite may run blocking only if it contains **no suspension
+point** (`WaitForSignal`, durable `Delay`) — otherwise `emit_run_plan_mapping` would
+suspend the instance mid-assemble, before sibling branches at that depth checkpoint,
+risking a replay double-fire. `plan_contains_suspension` walks the composite; a branch
+with a suspending composite linearises transitionally until the quiesce slice lands.
+
+### 4.0.2 In-branch Wait / durable Delay — the deferred-suspend quiesce (4c.3)
+
+A top-level `WaitForSignal` / durable `Delay` node in a chain runs at its depth but is a
+suspension point. Handle it with the §4.4 quiesce: the node registers its wake and sets a
+**suspend-pending** flag rather than suspending immediately; after ALL branches at that
+depth assemble (so their durable results are checkpointed), if any suspend is pending the
+window exits `suspended(list<wake>)` covering every pending wait/timer. On resume,
+replay-from-start re-drives the wavefront; satisfied waits proceed, completed durable
+steps HIT their checkpoints. Multiple same-depth waits → a multi-wake set — reuses the
+existing suspend/wake machinery, no per-branch resume state.
+
+The remaining hard combination — a composite that ITSELF contains a suspension point
+(a Conditional arm with a Wait, a nested loop with a Delay) — is the only case that would
+need the general segment scheduler below; it is deferred (those branches linearise
+transitionally).
+
+### 4.1+ General segment scheduler (only for composites-with-suspensions)
+
+The fully general fallback — a **resumable coroutine** per branch (run to the next async
+yield, spill state, resume) — is only needed for the composite-with-nested-suspension case
+above. Documented for completeness; not required for complete coverage of the common
+shapes, which §4.0.1 + §4.0.2 handle.
 
 ### 4.1 Segmenting a branch
 
