@@ -1639,6 +1639,46 @@ fn direct_find_merge_point(
 /// Try to lower an unconditional fan-out at `from_step` as concurrent
 /// `ParallelBranches` (docs/wasip3-parallel-branches-plan.md). Phase 4a: only a
 /// clean single-Agent diamond qualifies — every branch is exactly one Agent step
+/// Whether the normal-flow region forward-reachable from `from_step` (bounded by
+/// `stop_at`) is SINGLE-ENTRY: every reachable step's normal-flow predecessors are
+/// `from_step` or themselves inside the region. A `false` result means an external
+/// branch joins the region (a nested or cross-linked diamond), so a fan-out here
+/// must NOT be represented as a self-contained `ParallelBranches` (whose merge_plan
+/// would consume a shared merge and drop the outside branch).
+fn region_single_entry(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    stop_at: Option<&str>,
+) -> bool {
+    // Follow FORWARD-FLOW edges (normal + conditional/routing arms — everything
+    // except `onError`, which roots a separate region), so a branch that contains a
+    // conditional sub-diamond has its arms + inner merge counted as in-region.
+    let forward = |edge: &DirectEdgeManifest| edge.label.as_deref() != Some("onError");
+    use std::collections::{HashSet, VecDeque};
+    let mut reach: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    queue.push_back(from_step);
+    while let Some(step) = queue.pop_front() {
+        for edge in &graph.edges {
+            if edge.from_step.as_str() == step
+                && forward(edge)
+                && Some(edge.to_step.as_str()) != stop_at
+                && reach.insert(edge.to_step.as_str())
+            {
+                queue.push_back(edge.to_step.as_str());
+            }
+        }
+    }
+    // Any forward-flow edge INTO the region from a step that is neither `from_step`
+    // nor inside the region is an external entry point → not single-entry.
+    !graph.edges.iter().any(|edge| {
+        forward(edge)
+            && reach.contains(edge.to_step.as_str())
+            && edge.from_step != from_step
+            && !reach.contains(edge.from_step.as_str())
+    })
+}
+
 /// that re-converges at a shared merge, non-durable, no retries, no breakpoint.
 /// Any other shape returns `None` so the caller linearizes it (transitional; the
 /// eligible set widens in 4b/4c). The plan is structural — whether the branches
@@ -1671,6 +1711,18 @@ fn try_parallel_branches(
     else {
         return Ok(None);
     };
+
+    // A `ParallelBranches` node owns its merge continuation (`merge_plan` runs past
+    // the merge). That is safe ONLY when the fan-out's forward-reachable region is
+    // SINGLE-ENTRY — entered only through `from_step`. If an outer diamond's other
+    // branch joins a step in this region (a nested fan-out: `A→{g,h}`, `g→{g1,g2}→gm`,
+    // `gm→f`, `h→f` — where `f` is the OUTER merge, entered from `h`), parallelizing
+    // this fan-out would pull the shared merge into its continuation and orphan the
+    // sibling branch. Decline → the sequential linearizer (authoritative for nested /
+    // cross-linked shapes) handles it correctly.
+    if !region_single_entry(graph, from_step, stop_at) {
+        return Ok(None);
+    }
 
     // Try to plan the branches + merge as an isolated diamond. Any planning
     // FAILURE — a branch that itself fans out and cross-links (a shape the
@@ -3109,6 +3161,56 @@ mod tests {
             "capabilityId": "get-current-iso-datetime",
             "inputMapping": {}
         })
+    }
+
+    /// Regression (smoke PB-11): a NESTED fan-out — `s→{g,h}`, `g→{g1,g2}→gm`,
+    /// `gm→f`, `h→f`. The inner fan-out `{g1,g2}` is a clean diamond, but its region
+    /// is NOT single-entry (its merge continuation reaches `f`, which `h` also feeds).
+    /// A prior bug let the inner `ParallelBranches` merge_plan consume `f` and DROP
+    /// the outer branch `h` entirely (so `f` read `steps.h.outputs` as null). Every
+    /// step — crucially `h` — must appear, `h` before the merge `Finish:f`.
+    #[test]
+    fn nested_fanout_of_fanout_keeps_outer_sibling() {
+        let mut steps = serde_json::Map::new();
+        for id in ["s", "g", "g1", "g2", "gm", "h"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "f".to_string(),
+            serde_json::json!({
+                "id": "f", "stepType": "Finish",
+                "inputMapping": {
+                    "g": {"valueType":"reference","value":"steps.gm.outputs"},
+                    "g2": {"valueType":"reference","value":"steps.g2.outputs"},
+                    "h": {"valueType":"reference","value":"steps.h.outputs"}
+                }
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "s", "durable": false, "steps": steps,
+            "executionPlan": [
+                {"fromStep":"s","toStep":"g"},{"fromStep":"s","toStep":"h"},
+                {"fromStep":"g","toStep":"g1"},{"fromStep":"g","toStep":"g2"},
+                {"fromStep":"g1","toStep":"gm"},{"fromStep":"g2","toStep":"gm"},
+                {"fromStep":"gm","toStep":"f"},{"fromStep":"h","toStep":"f"}
+            ]
+        }))
+        .expect("graph parses");
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("manifest");
+        let plan = direct_run_plan(&manifest).expect("plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+        let h_pos = emitted.iter().position(|s| s == "h");
+        let f_pos = emitted.iter().position(|s| s == "Finish:f");
+        assert!(
+            h_pos.is_some(),
+            "outer branch step `h` was DROPPED from the plan (nested fan-out regression): {emitted:?}"
+        );
+        assert!(
+            h_pos < f_pos,
+            "`h` (idx {h_pos:?}) must be emitted before the merge `Finish:f` (idx {f_pos:?}): {emitted:?}"
+        );
     }
 
     /// Regression for the reported fan-out drop: inside a Conditional branch,
