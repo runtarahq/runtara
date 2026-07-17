@@ -5,8 +5,11 @@ Status: **4a + 4b + 4c LANDED.** Every DAG parallel-branch shape now runs concur
 (sync non-Agent chain steps), 4c.3 in-branch Conditional / Switch / Edge / While / Split /
 Embed / AiAgent (blocking composite nodes), and in-branch Wait / durable-Delay (deferred-
 suspend, §4.0.2). The only transitionally-linearised remnants are an AiAgentLoop whose tool
-set includes a Wait, and a composite that itself nests a suspension — both rare, both need
-the general segment scheduler (§4.1+). Sibling to `docs/wasip3-parallelism.md`, which
+set includes a Wait, and a composite that itself nests a suspension. **Finding (§4.1):
+neither needs the CPS segment scheduler for coverage** — a small "suspending composites"
+extension (Tier 1, §4.2) removes both via the landed hard-return-inline + replay mechanism;
+the general scheduler (Tier 2, §4.3) is a concurrency optimisation, gated behind profiling.
+Sibling to `docs/wasip3-parallelism.md`, which
 delivered in-guest parallelism for the **Split** step (homogeneous data-parallelism,
 Phases 0–3 + concurrent backoff). This document plans **heterogeneous graph
 branches** — a fan-out `A → {B, C, …} → M` where the branches are *different*
@@ -298,12 +301,189 @@ The remaining hard combination — a composite that ITSELF contains a suspension
 need the general segment scheduler below; it is deferred (those branches linearise
 transitionally).
 
-### 4.1+ General segment scheduler (only for composites-with-suspensions)
+### 4.1+ Eliminating the last remnants — TWO tiers, and the finding that reshapes them
 
-The fully general fallback — a **resumable coroutine** per branch (run to the next async
-yield, spill state, resume) — is only needed for the composite-with-nested-suspension case
-above. Documented for completeness; not required for complete coverage of the common
-shapes, which §4.0.1 + §4.0.2 handle.
+Two shapes still linearise transitionally after the landed work:
+
+- **R1 — an AiAgentLoop whose tool set includes a Wait** (durable human-in-the-loop). The
+  loop suspends *inside* the tool-dispatch loop. `is_linear_chain_branch` has **no
+  `AiAgentLoop` arm** (falls to `_ => false`), so the whole branch linearises today — safe,
+  not miscompiled. `plan_contains_suspension`'s `AiAgentLoop` arm (`plan.rs:1962`) walks
+  only `next_plan`/`error_plan`, **not `tools`** — a latent gap that must be closed before
+  AiAgentLoop is ever run as a composite.
+- **R2 — a composite that itself nests a suspension** (a Conditional/Switch/Edge arm
+  containing a Wait/Delay; a While/Split body or an Embed child that suspends). Rejected
+  today by the `plan_contains_suspension` guards in the composite arms of
+  `is_linear_chain_branch` — safe, linearises.
+
+**KEY FINDING (grounds the whole plan): neither remnant needs the general CPS segment
+scheduler for COVERAGE.** The wavefront's real suspend mechanism is NOT the "deferred
+wake-set" §4.0.2 aspires to. Reading `emit_concurrent_branches` (`branch_parallel.rs`
+749–821): a suspending node is simply **assembled LAST at its depth (pass 2) and
+hard-returns the instance inline** — the Wait/Delay lowering calls
+`emit_entry_suspend_return`, which returns from `run`; there is no flag-and-aggregate.
+Replay-from-start re-drives the wavefront; durable per-step checkpoints (skip-launch gate
++ durable-block HIT, `4a.2`) prevent double-fire. A composite that nests a suspension
+resumes correctly under the **exact same** mechanism, because its blocking emission (via
+`emit_run_plan_mapping` on `with_next_join(node)`) **is** the ordinary sequential lowering
+— and a durable While-with-in-body-Delay (or AiAgentLoop-with-Wait-tool) *already* resumes
+correctly sequentially. The only new requirement is: **assemble the suspending composite
+after every non-suspending sibling at its depth** (so they checkpoint first) — which is
+precisely what marking it a "suspending node" (pass 2) does.
+
+Consequence: the linearisation remnants are removed by a **small extension** (Tier 1), and
+the CPS segment scheduler (Tier 2) is a pure **concurrency optimisation**, not a coverage
+requirement. Both remnants become fully parallel (their agent/HTTP work overlaps) under
+Tier 1; Tier 2 only additionally overlaps a branch's *post-suspend-depth* work with a
+*sibling's* suspension.
+
+---
+
+### 4.2 TIER 1 — "suspending composites": remove every linearisation remnant (small, low-risk)
+
+Extend the existing deferred-suspend wavefront so a composite that nests a suspension — and
+an AiAgentLoop — ride it as a **suspending node** (pass 2, hard-return inline, durable-
+gated). No new runtime machinery; reuses the landed window verbatim. Three commits.
+
+**T1a — suspension-free AiAgentLoop as a blocking composite** (cheap win, no suspend path):
+- `plan.rs plan_contains_suspension` **[required correctness fix]**: the `AiAgentLoop` arm
+  must also walk `tools` — `DirectAiToolPlan::Wait ⇒ true`, `Embed { child_plan } ⇒
+  recurse`, `Agent ⇒ false`; `memory` never suspends. Without this an AiAgentLoop-with-
+  Wait-tool would be misclassified suspension-free and run blocking (mid-loop suspend →
+  replay double-fire risk).
+- `plan.rs is_linear_chain_branch`: add an `AiAgentLoop { breakpoint: false, next_plan,
+  error_plan, tools, .. }` arm mirroring the `AiAgent` arm — accept when the loop body is
+  suspension-free (no Wait tool; Embed-tool children suspension-free) and
+  `!error_route_suspends(error_plan)`; continuation = `next_plan`.
+- `branch_parallel.rs chain_next`: add `AiAgentLoop { next_plan, .. } ⇒ Some(next_plan)`
+  (else `branch_chain` truncates at the loop).
+- `branch_parallel.rs with_next_join`: add an `AiAgentLoop` arm cloning with
+  `next_plan = Join` (else it falls to `other => other.clone()` and emits the whole
+  continuation, duplicating the merge).
+- `plan.rs chain_step_ids`: add `AiAgentLoop` (collect `step_id`; recurse Embed-tool child
+  step ids for `branches_independent`).
+- Tests: e2e AiAgentLoop-in-branch (tools, no wait) arrival-overlap; `--lib` battery; live.
+
+**T1b — suspending composites** (Conditional/Switch/Edge arm, While/Split body, Embed child
+that nests a Wait/Delay):
+- `branch_parallel.rs is_suspending_node`: return `true` when the composite's **body**
+  suspends. New helper `composite_body_suspends(node)` = `plan_contains_suspension` applied
+  to the arms/nested/child/tools but **NOT** the continuation (`next_plan`/`merge_plan`) —
+  the continuation is the next depth, classified on its own. (For top-level Wait/Delay this
+  stays `true` as before.)
+- `plan.rs is_linear_chain_branch`: **relax** the composite arms — drop the
+  `plan_contains_suspension(arm) ⇒ return false` guards for Conditional/SwitchRoute/
+  EdgeRoute/While/Split/EmbedWorkflow (keep `breakpoint: false`). The branch-level durable
+  gate at `plan_branch_diamond:1737` (`plan_contains_suspension(&plan) && !graph.durable ⇒
+  decline`) already enforces replay-safety, so accepted suspending composites are always in
+  a durable graph.
+- `with_next_join` already reconstructs all six composites → no change.
+- Tests: e2e durable Conditional-arm-with-Wait and While-with-in-body-Delay in a branch;
+  resume-no-double-fire (drain mid-composite-suspend, resume reproduces, zero re-fires,
+  merge reads all branches); `--lib` battery; live isolated server.
+
+**T1c — AiAgentLoop WITH a Wait tool** (composes T1a plumbing + T1b classification):
+- `composite_body_suspends(AiAgentLoop)` walks `tools` → a Wait tool ⇒ `true` ⇒ pass 2.
+- `is_linear_chain_branch` accepts it (durable-gated); `with_next_join`'s `AiAgentLoop` arm
+  (T1a) reconstructs it with `next_plan = Join`. Per-turn `{step}.turn.{n}` checkpoints +
+  per-call signal id make the mid-loop suspend replay-safe (same as the sequential path).
+- Tests: e2e durable AiAgentLoop with a human-in-the-loop Wait tool in a branch; resume;
+  battery.
+
+**After Tier 1: every DURABLE DAG fan-out compiles to `ParallelBranches`.** The one shape
+still linearised is **non-durable + in-branch suspension** — declined at
+`plan_branch_diamond:1737` for the identical reason non-durable *top-level* waits are (a
+non-durable workflow cannot replay-safely resume: no checkpoints to HIT, so replay-from-
+start re-fires). That is a durability-semantics constraint orthogonal to parallelism — the
+CPS scheduler would not fix it either (it also relies on durable checkpoints for the
+pre-suspend work) — not a DAG-shape gap. Note it; do not treat it as a fallback to remove.
+
+**Residual (what Tier 1 does NOT give):** an in-branch suspension hard-returns the *whole*
+instance, so a sibling branch's work at depths **after** the suspending depth cannot
+overlap the suspension (it resumes only when the wait wakes). All agent/HTTP work up to and
+at the suspending depth already overlapped. This residual is **identical to the landed
+top-level-Wait handling** (which also hard-returns and was accepted as "4c complete"), so
+Tier 1 is exactly as "complete" as the shipped state — just widened to composites.
+
+---
+
+### 4.3 TIER 2 — general per-branch segment scheduler (optional concurrency optimisation)
+
+The fully general design — a **resumable coroutine per branch** (`FuturesUnordered`,
+hand-emitted) — removes the Tier-1 residual: while branch X is suspended on its wait, sibling
+Y keeps running to *its* next yield instead of parking. It is **not** required for coverage
+(Tier 1 already parallelises every durable shape); it is justified only when profiling shows
+real workloads with **long in-branch waits** (human-in-the-loop minutes–days) AND
+**substantial independent sibling work queued after the wait's depth**. Cost is large and
+the highest-risk area in the whole effort (durable replay across nested-loop resumption
+interleaved with siblings), so it is gated behind demonstrated need.
+
+The rest of §4.1–4.5 below specifies this scheduler (segmentation, per-branch state spill,
+`br_table` resume dispatch, multi-wait wake-set). Two clarifications vs. the sketch:
+1. It **replaces** the hard-return-inline suspend with a driver loop that yields control
+   back to the scheduler, so it must re-emit each composite type in **resumable** form
+   (spill live locals across the yield, `br_table` over resumption points incl. loop
+   back-edges) rather than reusing `emit_run_plan_mapping`'s blocking lowering — this is the
+   bulk of the cost and why Tier 1 (which *reuses* that lowering) is so much cheaper.
+2. §4.4's "wake-set quiesce" is the design target; today's landed mechanism is the simpler
+   hard-return-inline (§4.2). The scheduler must build the multi-wake set the sequential
+   suspend path does not yet expose to more than one pending wait.
+
+#### 4.3.1 Grounded build plan (the runtime substrate confirms it)
+
+Two runtime facts (verified 2026-07-17) fix the design:
+- **`emit_entry_suspend_return` (abi.rs:304) hard-`Return`s from `run`.** No stack survives a
+  suspend; resume is **replay-from-start** + durable-checkpoint HIT. So the "coroutine
+  scheduler" is NOT stackful — "resumable across a suspend" means replay re-drives the
+  scheduler and completed steps fast-forward via their checkpoints.
+- **The Split window is already a hand-emitted slot state-machine** (`split_parallel.rs`):
+  per-item slots with state codes (`SLOT_EMPTY/AGENT_READY/TIMER_PENDING/SETTLED/
+  REINVOKE_NOW`), driver loops (`$launch/$drain/$classify/$reinvoke/$rounds`), one shared
+  waitable-set, a `pending` counter. **This is the template** for a per-branch scheduler.
+
+Under replay-from-start the scheduler decomposes into three separable problems of
+increasing cost/risk — build in this order, each its own commit (unit + e2e + live):
+
+- **T2.0 — planner acceptance + AiAgentLoop plumbing (shared substrate, low risk).** Make
+  the two remnant shapes produce `ParallelBranches` instead of linearising: extend
+  `plan_contains_suspension`'s `AiAgentLoop` arm to walk `tools` (the required correctness
+  fix); add `AiAgentLoop` arms to `is_linear_chain_branch` / `chain_next` / `with_next_join`
+  / `chain_step_ids`; relax the composite-arm suspension guards in `is_linear_chain_branch`.
+  Wire initially through the EXISTING depth-wavefront (hard-return-inline) so it is testable
+  immediately — a transient intermediate on this dev branch, replaced by T2.1's scheduler
+  before completion. This is the substrate every later tier needs.
+- **T2.1 — intra-invocation SEGMENT SCHEDULER (case A; the FuturesUnordered core).** Replace
+  the rigid depth-lockstep in `emit_concurrent_branches` with a per-branch **segment cursor
+  + heterogeneous state block** driven over the shared waitable-set: run each runnable branch
+  to its next async-invoke yield, join the subtask, `ws.wait` for any completion, advance the
+  owning branch, repeat until all branches reach `Join`. Slots become per-branch state blocks
+  (segment ptr + source cursor + step-context position); the `$rounds`/`$classify` loops
+  generalize to a branch-indexed scheduler loop. Composites run blocking-to-completion
+  internally (no re-emission). **No durability change** — nothing suspends differently; this
+  must pass the full 107-test battery unchanged (parity) before becoming the sole path.
+  Benefit: a fast 3-step branch finishes without waiting on a slow 1-step branch's depth
+  drain (measurable arrival-span win over the wavefront).
+- **T2.2 — cross-suspension progress (case B; the actual Tier-2 value).** A branch reaching a
+  TOP-LEVEL Wait/Delay marks BLOCKED (state code) instead of hard-returning; the scheduler
+  keeps driving other branches to completion/their-own-block; only when no branch is runnable
+  does it hard-return with an **aggregated multi-wake set** covering every BLOCKED branch's
+  signal id / timer deadline. Replay re-drives; completed branches HIT; blocked branches
+  re-check their waits. Durability risk lives here — extend the Split double-fire adversarial
+  battery to interleaved multi-branch suspend/resume (drain mid-schedule with 2+ branches
+  blocked; resume reproduces; zero re-fires; merge reads all).
+- **T2.3 (C) — resumable composites (deferred, exotic, largest).** Only this re-emits
+  While/Split/Embed/AiAgentLoop bodies as segmented resumable state machines so composite
+  INTERNAL async interleaves with siblings AND a composite-NESTED suspension participates in
+  the scheduler (instead of hard-returning inline as in T2.0–T2.2). Full CPS transform: spill
+  every live local across a yield, `br_table` over resumption points incl. loop back-edges,
+  nested-parallel-window budget review (`PARALLEL_POOL_MAX`). Gate behind a demonstrated
+  workload T2.0–T2.2 don't cover; composite-nested suspension stays hard-return-inline
+  (Tier-1-equivalent, correct) until then.
+
+Honest coverage line: **T2.0 alone** already removes every linearisation remnant for durable
+DAGs (via hard-return-inline, = Tier 1). **T2.1+T2.2** add yield-granular interleaving and
+post-suspend sibling overlap for top-level waits — the practical, buildable Tier 2. **T2.3**
+is the only piece that touches composite internals and is deferred behind proven need.
 
 ### 4.1 Segmenting a branch
 
@@ -379,30 +559,28 @@ to *multiple* pending waits at once (today a sequential wait is singular).
 
 ---
 
-## 5. Phase 4c — arbitrary subgraph branches (nested loops / splits / embeds)
+## 5. Phase 4c — LANDED (nested loops / splits / embeds run as blocking composites)
 
-**Scope:** a branch may contain a **nested While/Split/EmbedWorkflow** — a yield point
-*inside a loop*. Now the resumption count is dynamic and loop state (counter,
-accumulator, per-iteration scope) must be spilled and the loop re-entered at the right
-iteration on resume. This is the **full CPS transform**: every live local across a yield
-spilled to the branch state block, and the branch body restructured into a top-level
-`br_table` dispatch over resumption points, including loop back-edges.
+**Superseded outcome.** 4c did **not** need the CPS transform this section originally
+proposed. A branch containing a nested While/Split/EmbedWorkflow/Conditional/Switch/AiAgent
+runs as a **blocking composite node** in the wavefront (§4.0.1): at its depth it emits via
+`emit_run_plan_mapping(with_next_join(node))` — the ordinary sequential lowering, its
+internal agents on the sync invoke — so exactly the composite runs and the branch's
+top-level linear steps still overlap. In-branch Wait/durable-Delay ride the deferred-suspend
+two-pass (§4.0.2/§4.2). Nested Split-in-branch reuses the Split window's own pooling; it is
+not a *nested* parallel window (the composite's Split runs blocking, its items pooled
+internally), so the `PARALLEL_POOL_MAX` budget is not multiplied.
 
-Nested Split inside a parallel branch also means **nested parallel windows** (a window
-whose items are themselves launched from within a suspended branch), which multiplies
-the in-flight subtask budget and the pool sizing (`PARALLEL_POOL_MAX`, currently 4).
+The only shapes that would need the full CPS transform (a *dynamic* resumption count from a
+yield *inside* a loop) are the two remnants in §4.1 — and even those are covered for
+correctness by Tier 1 (§4.2) via hard-return-inline + replay; the CPS transform (§4.3 /
+Tier 2) is a concurrency optimisation over them, not a coverage requirement.
 
-**Recommendation:** defer 4c until 4a/4b demand proves it out. Most real graphs express
-"parallel work with a loop inside" as a **Split with `parallelism > 1`** (already
-shipped) rather than a hand-drawn fan-out of loop-containing branches. Ship 4a, measure,
-then decide 4b/4c.
+### 5.1 Effort — actual
 
-### 5.1 Effort
-
-Large. This is the general in-guest async scheduler with full state spilling. Highest
-risk area is durability correctness across nested loop resumption interleaved with
-sibling branches — needs the adversarial replay/double-fire test battery that Split's
-backoff work established, extended to nested scopes.
+Tier 1 (§4.2): small, three commits, reuses the landed window. Tier 2 (§4.3): large,
+gated behind profiling need; the adversarial replay/double-fire battery (per Split backoff)
+must be extended to nested-loop resumption interleaved with siblings before shipping it.
 
 ---
 
