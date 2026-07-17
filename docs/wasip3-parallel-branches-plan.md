@@ -1,8 +1,10 @@
 # Parallel graph branches (heterogeneous fan-out) — detailed plan
 
-Status: **4a + 4b LANDED** (4a.1 non-durable + 4a.2 durable single-Agent branches;
-4b linear Agent-chain branches via the depth-wavefront); **4c pending**. Sibling to
-`docs/wasip3-parallelism.md`, which
+Status: **4a + 4b + most of 4c LANDED.** 4a.1/4a.2 (single-Agent, durable + non-durable),
+4b (linear Agent-chain wavefront), 4c.1 (sync non-Agent chain steps), 4c.3 in-branch
+Conditional + Switch/Edge (composite nodes). **Remaining:** next_plan composites
+(While/Split/Embed/AiAgent), and the in-branch Wait/durable-Delay quiesce (§4.0.2).
+Sibling to `docs/wasip3-parallelism.md`, which
 delivered in-guest parallelism for the **Split** step (homogeneous data-parallelism,
 Phases 0–3 + concurrent backoff). This document plans **heterogeneous graph
 branches** — a fan-out `A → {B, C, …} → M` where the branches are *different*
