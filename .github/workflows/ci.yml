@@ -552,11 +552,17 @@ jobs:
       - name: Run direct WASM workflow execution smoke tests
         env:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # Unlike the db-integration suites above (which serialize on a shared
+        # Postgres/Valkey), this suite owns no shared external resource: each
+        # test binds an ephemeral port for its own mock, executes the workflow
+        # in-process on a fresh wasmtime Store, and passes env per-run — so it is
+        # safe at the default thread count. The compile happens off the executor
+        # lock, so N tests compile concurrently. The few wall-clock-sensitive
+        # parallel-split tests self-serialize via PARALLEL_TIMING_LOCK.
         run: |
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
-            --test direct_wasm_execute \
-            -- --test-threads=1
+            --test direct_wasm_execute
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

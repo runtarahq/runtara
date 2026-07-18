@@ -5011,239 +5011,118 @@ enum ExpectedOutcome {
     Sleeps,
 }
 
-struct SmokeCase {
-    fixture: &'static str,
-    input: &'static [u8],
-    expect: ExpectedOutcome,
+/// Run one execution-smoke fixture end-to-end: read it, compile → compose →
+/// execute the composed artifact, and assert it reaches the expected terminal
+/// state. Extracted from the former `fixture_execution_smoke_battery` loop body
+/// so each fixture becomes its own `#[test]` (see `execution_smoke_cases!`) and
+/// rides the suite's test-level parallelism instead of running as one ~15-minute
+/// serial monolith; a failure now names the exact fixture that regressed.
+fn run_smoke_case(fixture: &str, input: &[u8], expect: ExpectedOutcome) {
+    let components_dir = direct_e2e_components_dir();
+    let json = smoke_fixture_json(fixture);
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        &format!("smoke-{fixture}"),
+        &json,
+        input,
+        false,
+    );
+    let verdict = match expect {
+        ExpectedOutcome::Completes => captured.status_success && captured.output_json.is_some(),
+        ExpectedOutcome::Fails => !captured.status_success && captured.error_json.is_some(),
+        ExpectedOutcome::Sleeps => captured.status_success && !captured.sleeps.is_empty(),
+    };
+    assert!(
+        verdict,
+        "execution smoke {fixture} [{expect:?}] did not reach the expected terminal state: \
+         status_success={}, completed={}, failed={}, sleeps={}\n      stderr: {}",
+        captured.status_success,
+        captured.output_json.is_some(),
+        captured.error_json.is_some(),
+        captured.sleeps.len(),
+        stderr_tail(&captured.stderr),
+    );
 }
 
-const EXECUTION_SMOKE_CASES: &[SmokeCase] = &[
+/// Expands each `fixture => input, Outcome` entry into its own
+/// `#[test] fn <fixture>()`. Splitting the cases into individual tests (rather
+/// than one `#[test]` looping a `const [SmokeCase]`) lets them run in parallel
+/// under `cargo test` and CI's default `--test-threads`; as a single serial
+/// test the battery was a ~15-minute pole that capped the job's wall-clock no
+/// matter how many cores were available.
+macro_rules! execution_smoke_cases {
+    ($( $fixture:ident => $input:literal, $expect:ident ),* $(,)?) => {
+        $(
+            #[test]
+            fn $fixture() {
+                run_smoke_case(stringify!($fixture), $input, ExpectedOutcome::$expect);
+            }
+        )*
+    };
+}
+
+execution_smoke_cases! {
     // --- Completes: pure control flow -------------------------------------
-    SmokeCase {
-        fixture: "simple_passthrough",
-        input: br#"{"input":"x"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_workflow",
-        input: br#"{"flag":true}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_nested",
-        input: br#"{"flag":true,"kind":"a"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_diamond",
-        input: br#"{"flag":true}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_diamond_asymmetric",
-        input: br#"{"flag":true,"urgent":false}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_length_comparison",
-        input: br#"{"description":"hello world this is a long description"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "edge_condition_priority",
-        input: br#"{"status":"active","tier":"gold"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "edge_condition_diamond",
-        input: br#"{"tier":"gold"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_simple",
-        input: br#"{"items":[1,2,3,4,5]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_complex_condition",
-        input: br#"{"users":[{"age":25,"active":true},{"age":17,"active":false}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_with_not",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "switch_value_simple",
-        input: br#"{"status":"active"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "switch_routing_simple",
-        input: br#"{"status":"active"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_simple",
-        input:
-            br#"{"items":[{"category":"a","v":1},{"category":"b","v":2},{"category":"a","v":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_expected_keys",
-        input: br#"{"items":[{"category":"a"},{"category":"b"}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_nested_key",
-        input: br#"{"users":[{"profile":{"role":"admin"}},{"profile":{"role":"user"}}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_no_context",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_all_levels",
-        input: br#"{"message":"hi"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_direct_index_only",
-        input: br#"{"count":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    simple_passthrough => br#"{"input":"x"}"#, Completes,
+    conditional_workflow => br#"{"flag":true}"#, Completes,
+    conditional_nested => br#"{"flag":true,"kind":"a"}"#, Completes,
+    conditional_diamond => br#"{"flag":true}"#, Completes,
+    conditional_diamond_asymmetric => br#"{"flag":true,"urgent":false}"#, Completes,
+    conditional_length_comparison => br#"{"description":"hello world this is a long description"}"#, Completes,
+    edge_condition_priority => br#"{"status":"active","tier":"gold"}"#, Completes,
+    edge_condition_diamond => br#"{"tier":"gold"}"#, Completes,
+    filter_simple => br#"{"items":[1,2,3,4,5]}"#, Completes,
+    filter_complex_condition => br#"{"users":[{"age":25,"active":true},{"age":17,"active":false}]}"#, Completes,
+    filter_with_not => br#"{}"#, Completes,
+    switch_value_simple => br#"{"status":"active"}"#, Completes,
+    switch_routing_simple => br#"{"status":"active"}"#, Completes,
+    group_by_simple => br#"{"items":[{"category":"a","v":1},{"category":"b","v":2},{"category":"a","v":3}]}"#, Completes,
+    group_by_expected_keys => br#"{"items":[{"category":"a"},{"category":"b"}]}"#, Completes,
+    group_by_nested_key => br#"{"users":[{"profile":{"role":"admin"}},{"profile":{"role":"user"}}]}"#, Completes,
+    log_no_context => br#"{}"#, Completes,
+    log_all_levels => br#"{"message":"hi"}"#, Completes,
+    while_direct_index_only => br#"{"count":3}"#, Completes,
     // Transform-agent fixtures (split_*, while_*, log_*, transform_workflow)
     // now execute too — their map-fields input mappings were corrected to the
     // current `source_data` + `mappings` schema. See the section below.
     // --- Fails: explicit error / timeout ----------------------------------
-    SmokeCase {
-        fixture: "error_direct_simple",
-        input: br#"{"requestId":"r1"}"#,
-        expect: ExpectedOutcome::Fails,
-    },
+    error_direct_simple => br#"{"requestId":"r1"}"#, Fails,
     // Conditional-routed Error fixtures; inputs steer each to its Error branch
     // (these also exercise the passthrough->return-input composite fix).
-    SmokeCase {
-        fixture: "error_permanent",
-        input: br#"{"resourceId":"res-1","found":false}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_transient",
-        input: br#"{"success":false}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_with_context",
-        input: br#"{"orderId":"o-1","amount":5000}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_all_categories",
-        input: br#"{"errorType":"transient"}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "while_timeout",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "split_timeout",
-        input: br#"{"items":[1,2,3],"item":1}"#,
-        expect: ExpectedOutcome::Fails,
-    },
+    error_permanent => br#"{"resourceId":"res-1","found":false}"#, Fails,
+    error_transient => br#"{"success":false}"#, Fails,
+    error_with_context => br#"{"orderId":"o-1","amount":5000}"#, Fails,
+    error_all_categories => br#"{"errorType":"transient"}"#, Fails,
+    while_timeout => br#"{}"#, Fails,
+    split_timeout => br#"{"items":[1,2,3],"item":1}"#, Fails,
     // --- Sleeps: durable delay --------------------------------------------
-    SmokeCase {
-        fixture: "delay_simple",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Sleeps,
-    },
-    SmokeCase {
-        fixture: "delay_dynamic",
-        input: br#"{"waitTime":5}"#,
-        expect: ExpectedOutcome::Sleeps,
-    },
+    delay_simple => br#"{}"#, Sleeps,
+    delay_dynamic => br#"{"waitTime":5}"#, Sleeps,
     // --- transform-agent fixtures (map-fields), now on the corrected schema --
     // These drive their subgraphs/loops through `transform/map-fields`; with
     // the input mappings fixed to `source_data` + `mappings` they execute.
-    SmokeCase {
-        fixture: "transform_workflow",
-        input: br#"{"input_field":"hello"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "split_workflow",
-        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "split_parallel_workflow",
-        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    transform_workflow => br#"{"input_field":"hello"}"#, Completes,
+    split_workflow => br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#, Completes,
+    split_parallel_workflow => br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#, Completes,
     // NOTE: split_with_schemas / split_with_schemas_failing are Tier-A only.
     // Their per-item input/output schemas make the terminal outcome
     // input-specific (a generic item either traps or passes regardless of the
     // "_failing" intent), so they aren't meaningful as input-agnostic smoke.
     // While loops that terminate via `loop.index` against a bound from input.
-    SmokeCase {
-        fixture: "while_with_loop_index",
-        input: br#"{"maxIterations":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_with_previous_outputs",
-        input: br#"{"items":[1,2],"count":2}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_max_iterations",
-        input: br#"{"value":0}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    while_with_loop_index => br#"{"maxIterations":3}"#, Completes,
+    while_with_previous_outputs => br#"{"items":[1,2],"count":2}"#, Completes,
+    while_max_iterations => br#"{"value":0}"#, Completes,
     // While loops whose condition reads a constant `steps.init.outputs.*`;
     // seeded so the guard is already false (zero iterations) — exercises
     // condition eval + clean exit without risking a non-terminating loop.
-    SmokeCase {
-        fixture: "while_simple",
-        input: br#"{"counter":5,"target":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_workflow",
-        input: br#"{"counter":5,"target":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_break_on_first",
-        input: br#"{"counter":0,"target":10}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_with_context",
-        input: br#"{"value":"v","timestamp":"t"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_workflow",
-        input: br#"{"value":"v"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_error_handling",
-        input: br#"{"value":"v"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_in_loop",
-        input: br#"{"count":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-];
+    while_simple => br#"{"counter":5,"target":3}"#, Completes,
+    while_workflow => br#"{"counter":5,"target":3}"#, Completes,
+    while_break_on_first => br#"{"counter":0,"target":10}"#, Completes,
+    log_with_context => br#"{"value":"v","timestamp":"t"}"#, Completes,
+    log_workflow => br#"{"value":"v"}"#, Completes,
+    log_error_handling => br#"{"value":"v"}"#, Completes,
+    log_in_loop => br#"{"count":3}"#, Completes,
+}
 
 fn smoke_fixture_json(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5257,48 +5136,6 @@ fn stderr_tail(stderr: &str) -> String {
     let trimmed = stderr.trim();
     let start = trimmed.len().saturating_sub(400);
     trimmed[start..].replace('\n', " | ")
-}
-
-#[test]
-fn fixture_execution_smoke_battery() {
-    let components_dir = direct_e2e_components_dir();
-
-    let mut failures: Vec<String> = Vec::new();
-    for case in EXECUTION_SMOKE_CASES {
-        let json = smoke_fixture_json(case.fixture);
-        let captured = run_direct_workflow_capture(
-            &components_dir,
-            &format!("smoke-{}", case.fixture),
-            &json,
-            case.input,
-            false,
-        );
-        let verdict = match case.expect {
-            ExpectedOutcome::Completes => captured.status_success && captured.output_json.is_some(),
-            ExpectedOutcome::Fails => !captured.status_success && captured.error_json.is_some(),
-            ExpectedOutcome::Sleeps => captured.status_success && !captured.sleeps.is_empty(),
-        };
-        if !verdict {
-            failures.push(format!(
-                "  {} [{:?}]: status_success={}, completed={}, failed={}, sleeps={}\n      stderr: {}",
-                case.fixture,
-                case.expect,
-                captured.status_success,
-                captured.output_json.is_some(),
-                captured.error_json.is_some(),
-                captured.sleeps.len(),
-                stderr_tail(&captured.stderr),
-            ));
-        }
-    }
-
-    eprintln!("execution smoke: {} cases run", EXECUTION_SMOKE_CASES.len());
-    assert!(
-        failures.is_empty(),
-        "{} execution smoke case(s) did not reach the expected terminal state:\n{}",
-        failures.len(),
-        failures.join("\n"),
-    );
 }
 
 // ===========================================================================
