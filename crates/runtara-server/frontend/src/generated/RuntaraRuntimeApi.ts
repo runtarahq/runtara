@@ -4917,12 +4917,22 @@ export interface StepSummaryResponse {
   error?: any;
   /** Step input data */
   inputs?: any;
+  /**
+   * Real launch wall-clock (epoch ms) of a parallel branch's async work. Present only for steps that ran concurrently; with settledAtMs it gives the true overlapping interval, versus startedAt/durationMs (derived from the sequential assemble-order event rows). Consumers prefer [launchedAtMs, settledAtMs] when both are present.
+   * @format int64
+   */
+  launchedAtMs?: number | null;
   /** Step output data (if completed) */
   outputs?: any;
   /** Parent scope ID for nesting */
   parentScopeId?: string | null;
   /** Step's scope ID for hierarchy */
   scopeId?: string | null;
+  /**
+   * Real settle wall-clock (epoch ms) of a parallel branch's async work. See launchedAtMs.
+   * @format int64
+   */
+  settledAtMs?: number | null;
   /**
    * When the step started
    * @format date-time

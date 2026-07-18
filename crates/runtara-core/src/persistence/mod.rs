@@ -208,6 +208,15 @@ pub struct StepSummaryRecord {
     pub completed_at: Option<DateTime<Utc>>,
     /// Duration in milliseconds (None if still running).
     pub duration_ms: Option<i64>,
+    /// Optional real launch wall-clock (epoch ms) of a parallel branch's async
+    /// work, from the `step_debug_end` payload. Present only for steps that ran
+    /// concurrently; pairs with [`Self::settled_at_ms`] to describe the true
+    /// overlapping interval, versus `started_at`/`duration_ms` (which the summary
+    /// derives from the sequential assemble-order event rows).
+    pub launched_at_ms: Option<i64>,
+    /// Optional real settle wall-clock (epoch ms) of a parallel branch's async
+    /// work, from the `step_debug_end` payload. See [`Self::launched_at_ms`].
+    pub settled_at_ms: Option<i64>,
     /// Step inputs from step_debug_start payload.
     pub inputs: Option<serde_json::Value>,
     /// Step outputs from step_debug_end payload.

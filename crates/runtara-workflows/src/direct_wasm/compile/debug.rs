@@ -17,9 +17,21 @@ use super::abi::{
     load_retptr_tag, push_retptr_arg, push_retptr_u8_load, push_segment_args,
 };
 use super::{
-    DIRECT_CHECKPOINT_FOUND_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
+    DIRECT_CHECKPOINT_FOUND_OFFSET, DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
+    DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectFailureTarget,
 };
+
+/// Push the i64 at `slot_ptr_local + offset` (8-byte aligned) — a launch/settle
+/// timestamp field within a parallel-window slot.
+fn push_slot_i64(body: &mut WasmFunction, slot_ptr_local: u32, offset: i32) {
+    body.instruction(&Instruction::LocalGet(slot_ptr_local));
+    body.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+        offset: offset as u64,
+        align: 3,
+        memory_index: 0,
+    }));
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_step_debug_event(
@@ -37,7 +49,78 @@ pub(super) fn emit_step_debug_event(
     if !track_events {
         return;
     }
+    if start {
+        emit_step_debug_start(
+            body,
+            indices,
+            static_data,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+    } else {
+        emit_step_debug_end(
+            body,
+            indices,
+            static_data,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            None,
+        );
+    }
+}
 
+/// A `step_debug_end` event that carries the real `[launched, settled]` interval
+/// stamped in `interval_slot_ptr_local` (a parallel-window slot). Used only by the
+/// memoized Agent assemble path so the timeline/replay render true sibling overlap
+/// instead of the sequential assemble cascade. Every other step emits
+/// [`emit_step_debug_event`] (`start = false`), which records 0/0 (absent) and
+/// falls back to assemble timing.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_step_debug_end_timed(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    track_events: bool,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    interval_slot_ptr_local: u32,
+) {
+    if !track_events {
+        return;
+    }
+    emit_step_debug_end(
+        body,
+        indices,
+        static_data,
+        step_id,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        Some(interval_slot_ptr_local),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_step_debug_start(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
     let step_id = static_data
         .step_id(step_id)
         .expect("run plan step ids are present in static data");
@@ -45,24 +128,75 @@ pub(super) fn emit_step_debug_event(
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(if start {
-        indices.stdlib_step_debug_start
-    } else {
-        indices.stdlib_step_debug_end
-    }));
+    body.instruction(&Instruction::Call(indices.stdlib_step_debug_start));
     emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
 
-    push_segment_args(
+    emit_custom_event(
         body,
-        if start {
-            &static_data.step_debug_start_kind
-        } else {
-            &static_data.step_debug_end_kind
-        },
+        indices,
+        &static_data.step_debug_start_kind,
+        output_ptr_local,
+        output_len_local,
     );
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::LocalGet(output_len_local));
+}
+
+/// `interval_slot` supplies the `launched-at-ms` / `settled-at-ms` args — loaded
+/// from the slot when present (the parallel memoized path), else 0/0 (absent).
+#[allow(clippy::too_many_arguments)]
+fn emit_step_debug_end(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    step_id: &str,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    interval_slot: Option<u32>,
+) {
+    let step_id = static_data
+        .step_id(step_id)
+        .expect("run plan step ids are present in static data");
+    push_segment_args(body, step_id);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
+    match interval_slot {
+        Some(slot) => {
+            push_slot_i64(body, slot, DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET);
+            push_slot_i64(body, slot, DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET);
+        }
+        None => {
+            body.instruction(&Instruction::I64Const(0));
+            body.instruction(&Instruction::I64Const(0));
+        }
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_step_debug_end));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+
+    emit_custom_event(
+        body,
+        indices,
+        &static_data.step_debug_end_kind,
+        output_ptr_local,
+        output_len_local,
+    );
+}
+
+/// Record a pre-built debug payload (`payload_ptr/len`) as a `custom-event` under
+/// `kind` (`step_debug_start` / `step_debug_end`).
+fn emit_custom_event(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    kind: &super::DirectDataSegment,
+    payload_ptr_local: u32,
+    payload_len_local: u32,
+) {
+    push_segment_args(body, kind);
+    body.instruction(&Instruction::LocalGet(payload_ptr_local));
+    body.instruction(&Instruction::LocalGet(payload_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
     emit_fail_if_retptr_error_inplace(body, indices);

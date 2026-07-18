@@ -9909,6 +9909,122 @@ fn direct_wasm_execute_parallel_branches_http_overlap() {
     );
 }
 
+/// Observational-timing payoff: the concurrent branch scheduler stamps each
+/// branch's REAL launch/settle wall clock into its slot and carries the pair on the
+/// assemble-pass `step_debug_end` event. For the slow diamond `start → {b,c} →
+/// finish` (each branch a ~400ms `/slow-item` GET), the recorded
+/// `[launched_at_ms, settled_at_ms]` intervals of b and c must OVERLAP — which is
+/// exactly what lets the timeline/replay render true concurrency instead of the
+/// sequential assemble cascade the per-step assemble timestamps otherwise imply.
+#[test]
+fn direct_wasm_execute_parallel_branches_launch_settle_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_branches_graph("http://slow.invalid", false);
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-launch-settle",
+        &graph,
+        br#"{}"#,
+        true, // track events — we assert on the recorded step_debug_end payloads
+    );
+    assert!(
+        captured.status_success,
+        "parallel branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+
+    // The launch/settle interval each branch recorded on its debug-end event.
+    let interval = |step: &str| -> (u64, u64) {
+        let end = captured
+            .events
+            .iter()
+            .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == step)
+            .unwrap_or_else(|| panic!("no step_debug_end for branch '{step}'"));
+        let launched = end.payload_json["launched_at_ms"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "branch '{step}' end missing launched_at_ms: {}",
+                    end.payload_json
+                )
+            });
+        let settled = end.payload_json["settled_at_ms"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "branch '{step}' end missing settled_at_ms: {}",
+                    end.payload_json
+                )
+            });
+        assert!(
+            launched > 0 && settled >= launched,
+            "branch '{step}' recorded an invalid interval [{launched},{settled}]"
+        );
+        (launched, settled)
+    };
+    let (lb, sb) = interval("b");
+    let (lc, sc) = interval("c");
+    eprintln!(
+        "[launch-settle] b=[{lb},{sb}] ({}ms)  c=[{lc},{sc}] ({}ms)",
+        sb - lb,
+        sc - lc
+    );
+
+    // Each interval reflects the real ~400ms async HTTP wait (settle is a true
+    // wall clock later than launch), not an instant assemble record.
+    assert!(
+        sb - lb >= 200,
+        "branch b interval too short to be the real HTTP wait: {}ms",
+        sb - lb
+    );
+    assert!(
+        sc - lc >= 200,
+        "branch c interval too short to be the real HTTP wait: {}ms",
+        sc - lc
+    );
+
+    // THE overlap: the two intervals intersect. A serialized cascade would give
+    // launch_c >= settle_b (c launches only after b settles), so no intersection —
+    // this is precisely what distinguishes concurrent from cascade.
+    let overlap_start = lb.max(lc);
+    let overlap_end = sb.min(sc);
+    assert!(
+        overlap_start < overlap_end,
+        "branch intervals do not overlap (serialized cascade): b=[{lb},{sb}] c=[{lc},{sc}]"
+    );
+
+    // The combined span is one think-time, not two: the diamond ran in ~400ms of
+    // wall clock, not ~800ms as a serialized pair would.
+    let combined_span = sb.max(sc) - lb.min(lc);
+    assert!(
+        (combined_span as u128) < 2 * DELAY.as_millis(),
+        "combined launch→settle span {combined_span}ms implies serialization (>= 2x think time)"
+    );
+
+    // Additive + backward-compatible: sequential steps (the pre-fan-out `start`,
+    // the `finish` merge) carry no launch/settle pair and fall back to assemble
+    // timing — the fields appear only for the concurrently scheduled branches.
+    for seq in ["start", "finish"] {
+        if let Some(end) = captured
+            .events
+            .iter()
+            .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == seq)
+        {
+            assert!(
+                end.payload_json.get("launched_at_ms").is_none()
+                    && end.payload_json.get("settled_at_ms").is_none(),
+                "sequential step '{seq}' must not carry a launch/settle pair: {}",
+                end.payload_json
+            );
+        }
+    }
+}
+
 /// Phase-4c.1: a parallel branch chain may contain SYNC non-Agent steps. Branch b
 /// is `b1(agent) → blog(Log) → b2(agent)`; branch c is `c1 → c2`. The Log runs at
 /// depth 1 (assemble-only, no launch) alongside sibling agent `c2`, and the merge

@@ -31,7 +31,9 @@ use super::agent_retry::{
     emit_agent_retry_error_info, emit_agent_retry_sleep,
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
-use super::debug::{emit_agent_debug_error, emit_step_breakpoint, emit_step_debug_event};
+use super::debug::{
+    emit_agent_debug_error, emit_step_breakpoint, emit_step_debug_end_timed, emit_step_debug_event,
+};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::{emit_apply_mapping_start_step_error, emit_build_source};
 use super::{
@@ -282,9 +284,7 @@ pub(super) fn emit_agent_plan(
                     super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
                 ));
                 body.instruction(&Instruction::I32Add);
-                body.instruction(&Instruction::I32Const(
-                    super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
-                ));
+                body.instruction(&Instruction::I32Const(super::DIRECT_PSPLIT_SLOT_RESULT_LEN));
                 body.instruction(&Instruction::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
@@ -385,9 +385,7 @@ pub(super) fn emit_agent_plan(
                     super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
                 ));
                 body.instruction(&Instruction::I32Add);
-                body.instruction(&Instruction::I32Const(
-                    super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
-                ));
+                body.instruction(&Instruction::I32Const(super::DIRECT_PSPLIT_SLOT_RESULT_LEN));
                 body.instruction(&Instruction::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
@@ -549,9 +547,7 @@ pub(super) fn emit_agent_plan(
                 super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
             ));
             body.instruction(&Instruction::I32Add);
-            body.instruction(&Instruction::I32Const(
-                super::DIRECT_PSPLIT_SLOT_STRIDE - super::DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
-            ));
+            body.instruction(&Instruction::I32Const(super::DIRECT_PSPLIT_SLOT_RESULT_LEN));
             body.instruction(&Instruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
@@ -661,18 +657,38 @@ pub(super) fn emit_agent_plan(
         failure_target,
     );
 
-    emit_step_debug_event(
-        body,
-        indices,
-        static_data,
-        track_events,
-        false,
-        step_id,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-    );
+    // When this Agent ran through a parallel-window slot (the memoized assemble
+    // path), carry the slot's real launch/settle wall-clock interval on the
+    // debug-end event so the timeline/replay show true sibling overlap. A slot
+    // with no stamp (0/0 — sequential, durable HIT, or a non-scheduler path)
+    // records absent and falls back to assemble timing. Every non-parallel Agent
+    // takes the plain end event.
+    match memo_slot_ptr_local {
+        Some(slot) => emit_step_debug_end_timed(
+            body,
+            indices,
+            static_data,
+            track_events,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            slot,
+        ),
+        None => emit_step_debug_event(
+            body,
+            indices,
+            static_data,
+            track_events,
+            false,
+            step_id,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+        ),
+    }
 
     emit_run_plan_mapping(
         body,

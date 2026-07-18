@@ -60,6 +60,33 @@ function getChildrenScopeId(step: StepSummaryResponse): string | null {
 }
 
 /**
+ * Whether a step carries a real parallel-branch launch/settle interval (both
+ * epoch-ms bounds present and positive). These OVERLAP across sibling branches,
+ * so preferring them makes the timeline show true concurrency instead of the
+ * sequential assemble cascade recorded in `startedAt`/`durationMs`.
+ */
+function hasRealInterval(step: StepSummaryResponse): boolean {
+  return (
+    step.launchedAtMs != null &&
+    step.settledAtMs != null &&
+    step.launchedAtMs > 0 &&
+    step.settledAtMs > 0
+  );
+}
+
+/** Absolute start wall-clock (epoch ms): real launch when present, else `startedAt`. */
+export function stepStartMs(step: StepSummaryResponse): number {
+  if (hasRealInterval(step)) return step.launchedAtMs!;
+  return new Date(step.startedAt).getTime();
+}
+
+/** Absolute end wall-clock (epoch ms): real settle when present, else start + duration. */
+export function stepEndMs(step: StepSummaryResponse): number {
+  if (hasRealInterval(step)) return Math.max(step.settledAtMs!, step.launchedAtMs!);
+  return new Date(step.startedAt).getTime() + (step.durationMs || 0);
+}
+
+/**
  * Transform API response to HierarchicalStep
  */
 export function toHierarchicalStep(
@@ -67,11 +94,18 @@ export function toHierarchicalStep(
   depth: number,
   minTimestamp: number
 ): HierarchicalStep {
-  const absoluteStartMs = new Date(step.startedAt).getTime();
+  const absoluteStartMs = stepStartMs(step);
   const childrenScopeId = getChildrenScopeId(step);
+  // When a real launch/settle interval is present, the bar's span is settle −
+  // launch (the true overlapping window); otherwise keep the recorded duration
+  // (which may be null while the step is still running).
+  const durationMs = hasRealInterval(step)
+    ? stepEndMs(step) - absoluteStartMs
+    : step.durationMs;
 
   return {
     ...step,
+    durationMs,
     hasChildren: isStepTypeWithChildren(step.stepType),
     childrenScopeId,
     isExpanded: false,
@@ -88,7 +122,7 @@ export function toHierarchicalStep(
 export function calculateMinTimestamp(steps: StepSummaryResponse[]): number {
   if (steps.length === 0) return 0;
 
-  return Math.min(...steps.map((step) => new Date(step.startedAt).getTime()));
+  return Math.min(...steps.map(stepStartMs));
 }
 
 /**
@@ -97,10 +131,5 @@ export function calculateMinTimestamp(steps: StepSummaryResponse[]): number {
 export function calculateMaxTimestamp(steps: StepSummaryResponse[]): number {
   if (steps.length === 0) return 0;
 
-  return Math.max(
-    ...steps.map((step) => {
-      const startMs = new Date(step.startedAt).getTime();
-      return startMs + (step.durationMs || 0);
-    })
-  );
+  return Math.max(...steps.map(stepEndMs));
 }

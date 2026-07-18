@@ -4585,11 +4585,16 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "runtara:workflow-stdlib/json",
             "cm32p2|runtara:workflow-stdlib/json@0.1",
             "step-debug-end",
+            // step-id (ptr,len), source (ptr,len), launched-at-ms (i64),
+            // settled-at-ms (i64), retptr — the two u64 timestamps carry the real
+            // parallel-branch launch/settle interval (0 == absent).
             vec![
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
                 WasmType::Length,
+                WasmType::I64,
+                WasmType::I64,
                 WasmType::Pointer,
             ],
         ),

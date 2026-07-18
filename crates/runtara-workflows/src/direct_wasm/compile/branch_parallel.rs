@@ -49,7 +49,8 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_entry_suspend_return, emit_get_checkpoint_has_value, emit_retptr_error_or_return,
-    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_u8_load, push_segment_args,
+    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
+    push_segment_args,
 };
 use std::collections::BTreeMap;
 
@@ -61,12 +62,14 @@ use super::split_parallel::{
 use super::{
     DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET, DIRECT_PSPLIT_LAUNCH_LOCAL,
     DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
-    DIRECT_PSPLIT_SLOT_CURSOR_OFFSET, DIRECT_PSPLIT_SLOT_RESULT_OFFSET,
-    DIRECT_PSPLIT_SLOT_SCHED_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET,
-    DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL,
-    DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
-    DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
-    node_body_suspends, node_has_breakpoint,
+    DIRECT_PSPLIT_SLOT_CURSOR_OFFSET, DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
+    DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
+    DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE,
+    DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET, DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL,
+    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan,
+    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends,
+    node_has_breakpoint,
 };
 
 /// The waitable-set event code for a settled subtask (mirrors
@@ -100,6 +103,36 @@ fn slot_mem(offset: i32) -> wasm_encoder::MemArg {
         align: 2,
         memory_index: 0,
     }
+}
+
+/// Like [`slot_mem`] but 8-byte aligned, for the i64 launch/settle timestamps.
+fn slot_mem64(offset: i32) -> wasm_encoder::MemArg {
+    wasm_encoder::MemArg {
+        offset: offset as u64,
+        align: 3,
+        memory_index: 0,
+    }
+}
+
+/// Observational: stamp `slot + offset` (i64) with the current `runtime.now-ms`
+/// wall clock. No-op under `omit_runtime` (the import is poisoned in that build),
+/// leaving the field 0 (== absent) so the recorded interval falls back to the
+/// assemble timestamp. `now-ms` returns via the retptr, so the value is loaded
+/// and stored before any following host call can clobber the retptr.
+fn emit_stamp_slot_ts(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    slot_ptr_local: u32,
+    offset: i32,
+) {
+    if indices.omit_runtime {
+        return;
+    }
+    body.instruction(&Instruction::LocalGet(slot_ptr_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::I64Store(slot_mem64(offset)));
 }
 
 /// Borrowed fields of an Agent chain node. The wavefront supplies `next_plan`
@@ -822,6 +855,16 @@ fn emit_branch_scheduler(
         body.instruction(&Instruction::I32Store(slot_mem(
             DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
         )));
+        // Observational: an eager return (or a skipped launch) settles here, with
+        // no `waitable-set.wait`. Stamp settle so an eager Agent carries a valid —
+        // if tiny — interval; a skipped launch left LAUNCH_TS 0, so it still falls
+        // back to assemble timing regardless.
+        emit_stamp_slot_ts(
+            body,
+            indices,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET,
+        );
         body.instruction(&Instruction::Br(1)); // -> $drive (continue)
         body.instruction(&Instruction::End); // L2 (if NEEDS_LAUNCH)
 
@@ -979,6 +1022,15 @@ fn emit_branch_scheduler(
         body.instruction(&Instruction::I32Store(slot_mem(
             DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
         )));
+        // Observational: this is the real settle moment for the matched branch —
+        // its subtask just returned from `waitable-set.wait`. Pair with the launch
+        // stamp for the true overlapping interval (retptr is free scratch here).
+        emit_stamp_slot_ts(
+            body,
+            indices,
+            DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+            DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET,
+        );
         body.instruction(&Instruction::End);
     }
     body.instruction(&Instruction::End); // if SUBTASK_RETURNED
@@ -1507,6 +1559,20 @@ fn emit_branch_launch(
         skip_on_error(body);
         load_retptr_list(body, output_ptr_local, output_len_local);
     }
+
+    // Observational: record the wall clock at the moment this branch's async
+    // invoke is launched. Paired with the settle stamp (`emit_branch_scheduler`),
+    // the assemble-pass `step-debug-end` carries the true `[launched, settled]`
+    // interval — which overlaps across siblings — so the timeline/replay glow
+    // concurrently instead of showing the sequential assemble cascade. Stamped
+    // only on the non-skip path (a durable HIT or input error leaves it 0, and
+    // that branch correctly falls back to assemble timing).
+    emit_stamp_slot_ts(
+        body,
+        indices,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+        DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
+    );
 
     // slot.state = AGENT_READY, then async-invoke into slot+RESULT_OFFSET.
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));

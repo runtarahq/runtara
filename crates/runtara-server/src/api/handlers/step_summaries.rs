@@ -83,6 +83,17 @@ pub struct StepSummaryResponse {
     /// Execution duration in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
+    /// Real launch wall-clock (epoch ms) of a parallel branch's async work.
+    /// Present only for steps that ran concurrently; with `settled_at_ms` it
+    /// gives the true overlapping interval, versus `started_at`/`duration_ms`
+    /// (derived from the sequential assemble-order event rows). Consumers prefer
+    /// `[launched_at_ms, settled_at_ms]` when both are present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_at_ms: Option<i64>,
+    /// Real settle wall-clock (epoch ms) of a parallel branch's async work. See
+    /// `launched_at_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<i64>,
     /// Step input data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inputs: Option<Value>,
@@ -301,6 +312,8 @@ pub async fn get_step_summaries(
                         started_at: step.started_at,
                         completed_at: step.completed_at,
                         duration_ms: step.duration_ms,
+                        launched_at_ms: step.launched_at_ms,
+                        settled_at_ms: step.settled_at_ms,
                         inputs: step.inputs,
                         outputs: step.outputs,
                         error,

@@ -29,6 +29,14 @@ export interface StepSummaryLike {
   /** ISO 8601 completion timestamp (null while running). */
   completedAt?: string | null;
   durationMs?: number | null;
+  /**
+   * Real launch/settle wall-clock (epoch ms) of a parallel branch's async work.
+   * Present only for concurrent steps; when both are set they OVERLAP across
+   * siblings, so we prefer `[launchedAtMs, settledAtMs]` as the interval over the
+   * sequential assemble-order `startedAt`/`durationMs`. See `intervalOf`.
+   */
+  launchedAtMs?: number | null;
+  settledAtMs?: number | null;
   status: string;
   error?: unknown;
   inputs?: unknown;
@@ -70,6 +78,31 @@ function parseMs(iso: string | null | undefined): number | null {
   if (!iso) return null;
   const t = Date.parse(iso);
   return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Absolute `[startAbs, endAbs]` wall-clock (epoch ms) for a recorded step.
+ *
+ * Prefers the real parallel-branch launch/settle pair when BOTH are present:
+ * those describe when the branch's async work actually ran, and OVERLAP across
+ * sibling branches, so overlapping intervals become concurrent glow. Otherwise
+ * falls back to the sequential assemble-order `startedAt` (+ `completedAt` /
+ * `durationMs`) — which is when the step was recorded, not when it ran, and
+ * cascades for parallel branches. Returns null when there is no usable start.
+ */
+function intervalOf(s: StepSummaryLike): { startAbs: number; endAbs: number } | null {
+  if (
+    s.launchedAtMs != null &&
+    s.settledAtMs != null &&
+    s.launchedAtMs > 0 &&
+    s.settledAtMs > 0
+  ) {
+    return { startAbs: s.launchedAtMs, endAbs: Math.max(s.settledAtMs, s.launchedAtMs) };
+  }
+  const startAbs = parseMs(s.startedAt);
+  if (startAbs == null) return null;
+  const endAbs = parseMs(s.completedAt) ?? startAbs + Math.max(0, s.durationMs ?? 0);
+  return { startAbs, endAbs: Math.max(endAbs, startAbs) };
 }
 
 /**
@@ -147,14 +180,13 @@ export function buildReplayModel(
     isBackEdge: backEdgeIds.has(e.id),
   }));
 
-  // Absolute-time pass: gather starts/ends, find t0.
+  // Absolute-time pass: gather starts/ends (real launch/settle when present,
+  // else assemble timing), find t0.
   const raw = summaries
     .map((s) => {
-      const startAbs = parseMs(s.startedAt);
-      if (startAbs == null) return null;
-      const endAbs =
-        parseMs(s.completedAt) ?? startAbs + Math.max(0, s.durationMs ?? 0);
-      return { s, startAbs, endAbs: Math.max(endAbs, startAbs) };
+      const iv = intervalOf(s);
+      if (iv == null) return null;
+      return { s, startAbs: iv.startAbs, endAbs: iv.endAbs };
     })
     .filter((x): x is NonNullable<typeof x> => x != null);
 

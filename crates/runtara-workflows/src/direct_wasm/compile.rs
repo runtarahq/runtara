@@ -402,7 +402,7 @@ const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
 
 /// Per-item slot for the parallel window's concurrent-retry state machine
 /// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,
-///    wait_total:u64, _pad2:[u8;8], result:[u8;112] }`.
+///    wait_total:u64, _pad2:[u8;8], result:[u8;112], launch_ts:u64, settle_ts:u64 }`.
 /// States (see `split_parallel::SLOT_*`): 0 EMPTY (launch skipped — assemble
 /// runs the item fully sequentially), 1 AGENT-READY (a result is present,
 /// awaiting classification), 3 TIMER-PENDING (a backoff timer was fired),
@@ -411,8 +411,23 @@ const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
 /// canonical `result<list<u8>, error-info>` lands at the result offset (~68
 /// bytes worst case; payload pointers live in the bump heap, which is not
 /// rewound during a chunk).
-const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 160;
+const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 176;
 const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
+/// Bytes of the result region copied by the memoized-invoke slot→retptr copy.
+/// Pinned independently of `STRIDE` so the observational timestamp fields
+/// appended past the result (below) never widen — or shrink — that copy.
+const DIRECT_PSPLIT_SLOT_RESULT_LEN: i32 = 112;
+/// Observational only (parallel-branch concurrency visibility): the wall-clock
+/// `runtime.now-ms` read at the moment a branch's async invoke is LAUNCHED
+/// (`emit_branch_launch`) and again when its subtask SETTLES out of
+/// `waitable-set.wait` (`emit_branch_scheduler`). Zero-filled slots leave both
+/// 0 (== absent); the assemble-pass `step-debug-end` carries them so the
+/// timeline/replay render the true `[launched, settled]` interval — which
+/// overlaps across siblings — instead of the sequential assemble cascade. Never
+/// read by execution; purely a recorded pair. Placed past the result region so
+/// the memoized-invoke copy (`RESULT_LEN`) never touches them.
+const DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET: i32 = 160;
+const DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET: i32 = 168;
 /// T2.1 branch scheduler only (never overlaps the split-retry fields above): the
 /// in-flight subtask handle stored at launch so a `waitable-set.wait` settle can be
 /// matched back to its branch (offset 20, in the split's `_pad:u64` gap); the

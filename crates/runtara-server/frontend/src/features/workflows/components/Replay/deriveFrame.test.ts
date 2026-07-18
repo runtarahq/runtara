@@ -29,6 +29,8 @@ function sum(
         ? opts.completedAt
         : iso(startRel + durationMs),
     durationMs,
+    launchedAtMs: opts.launchedAtMs,
+    settledAtMs: opts.settledAtMs,
     scopeId: opts.scopeId ?? null,
     parentScopeId: opts.parentScopeId ?? null,
   };
@@ -159,6 +161,59 @@ describe('deriveFrame — parallel overlap IS concurrency', () => {
     expect(f.nodeStates.get('a')).toBe('done');
     expect(f.nodeStates.get('b')).toBe('running');
     expect(f.runningCount).toBe(1);
+  });
+});
+
+describe('deriveFrame — real launch/settle overrides the assemble cascade', () => {
+  // The recorded assemble ORDER is sequential — by startedAt/durationMs the two
+  // branches read a:[0,300], b:[300,600], never overlapping (exactly the cascade
+  // the parallel-visibility bug produced). But the branches truly ran CONCURRENTLY,
+  // stamped as launch/settle: a launched at +100 settled at +600, b launched at
+  // +110 settled at +590. The model must prefer the launch/settle interval.
+  const overlapModel = buildReplayModel(
+    [
+      sum('start', 0, 10, { stepType: 'Start' }),
+      sum('a', 0, 300, { launchedAtMs: BASE + 100, settledAtMs: BASE + 600 }),
+      sum('b', 300, 300, { launchedAtMs: BASE + 110, settledAtMs: BASE + 590 }),
+    ],
+    graph(
+      [['start', 'Start'], ['a', 'Agent'], ['b', 'Agent']],
+      [['start', 'a'], ['start', 'b']]
+    )
+  );
+
+  it('uses [launchedAtMs, settledAtMs] as the interval, not startedAt/durationMs', () => {
+    // t0 = start's startedAt (BASE). Relative: a [100,600], b [110,590].
+    const a = overlapModel.instancesByStep.get('a')![0];
+    const b = overlapModel.instancesByStep.get('b')![0];
+    expect(a.startT).toBe(100);
+    expect(a.endT).toBe(600);
+    expect(b.startT).toBe(110);
+    expect(b.endT).toBe(590);
+
+    const f = deriveFrame(overlapModel, 200);
+    expect(f.nodeStates.get('a')).toBe('running');
+    expect(f.nodeStates.get('b')).toBe('running');
+    expect(f.runningCount).toBe(2);
+  });
+
+  it('the SAME rows without launch/settle read as a sequential cascade', () => {
+    const cascadeModel = buildReplayModel(
+      [
+        sum('start', 0, 10, { stepType: 'Start' }),
+        sum('a', 0, 300), // [0,300]
+        sum('b', 300, 300), // [300,600]
+      ],
+      graph(
+        [['start', 'Start'], ['a', 'Agent'], ['b', 'Agent']],
+        [['start', 'a'], ['start', 'b']]
+      )
+    );
+    // a ends exactly as b begins — they never overlap (only one Agent at a time).
+    expect(deriveFrame(cascadeModel, 200).nodeStates.get('a')).toBe('running');
+    expect(deriveFrame(cascadeModel, 200).nodeStates.get('b')).toBe('idle');
+    expect(deriveFrame(cascadeModel, 450).nodeStates.get('a')).toBe('done');
+    expect(deriveFrame(cascadeModel, 450).nodeStates.get('b')).toBe('running');
   });
 });
 
