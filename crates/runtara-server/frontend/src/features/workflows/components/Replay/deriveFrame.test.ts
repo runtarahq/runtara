@@ -134,6 +134,32 @@ describe('deriveFrame — sequential', () => {
   });
 });
 
+describe('deriveFrame — edges do not stay animated after the run ends', () => {
+  // Diamond that re-converges on a SHORT terminal node `f`, so the flow window
+  // (vStart + EDGE_FLOW_MS) extends past f's end. No edge may animate at tEnd.
+  const model = buildReplayModel(
+    [
+      sum('s', 0, 100),
+      sum('c', 120, 200), // [120,320]
+      sum('b', 120, 220), // [120,340]
+      sum('f', 360, 20), // short terminal [360,380]
+    ],
+    graph(
+      [['s', 'Agent'], ['c', 'Agent'], ['b', 'Agent'], ['f', 'Finish']],
+      [['s', 'c'], ['s', 'b'], ['c', 'f'], ['b', 'f']]
+    )
+  );
+
+  it('no edges are active once the target (f) is done / at tEnd', () => {
+    // f ends at 380 == tEnd. Before the fix, c->f and b->f stayed active here.
+    expect(deriveFrame(model, model.tEnd).activeEdges.size).toBe(0);
+    expect(deriveFrame(model, model.tEnd + 5).activeEdges.size).toBe(0);
+    // c->f still flows while f runs.
+    const cf = model.edges.find((e) => e.source === 'c' && e.target === 'f')!;
+    expect(deriveFrame(model, 365).activeEdges.has(cf.id)).toBe(true);
+  });
+});
+
 describe('deriveFrame — parallel overlap IS concurrency', () => {
   // Start fans out to A and B whose intervals overlap.
   const model = buildReplayModel(

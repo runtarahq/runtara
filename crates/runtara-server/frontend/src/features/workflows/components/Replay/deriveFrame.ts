@@ -147,9 +147,13 @@ export function deriveFrame(model: ReplayModel, t: number): ReplayFrame {
     if (!vWin) continue; // target never ran → no flow
     const uWin = windowOf(model.instancesByStep.get(edge.source));
     if (!uWin) continue; // source never ran → no flow
+    // Flow is a token in transit: it starts when the source completes (or the
+    // target begins, whichever is first) and stops once the target is done —
+    // never after. Without the `t < vWin.end` guard, a short terminal target's
+    // incoming edges keep animating past the end of the run.
     const lo = Math.min(uWin.end, vWin.start);
     const hi = vWin.start + EDGE_FLOW_MS;
-    if (t >= lo && t <= hi) activeEdges.add(edge.id);
+    if (t >= lo && t <= hi && t < vWin.end) activeEdges.add(edge.id);
   }
 
   return { t, nodeStates, nodeIterations, activeEdges, runningCount };
