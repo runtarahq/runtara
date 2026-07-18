@@ -1,0 +1,50 @@
+{
+  "name": "Parallel Branches Sync Diamond",
+  "description": "Entry fans out unconditionally to two SYNC (Delay) branches that re-converge on a single Finish (diamond). No branch carries an async agent, so there is nothing to overlap: the fan-out must linearise sequentially rather than reach for the concurrent depth-wavefront (which needs CM-async waitable builtins that a zero-agent compile never imports).",
+  "steps": {
+    "entry": {
+      "stepType": "Delay",
+      "id": "entry",
+      "name": "Entry no-op",
+      "durationMs": {
+        "valueType": "immediate",
+        "value": 10
+      }
+    },
+    "branch_a": {
+      "stepType": "Delay",
+      "id": "branch_a",
+      "name": "Branch A work",
+      "durationMs": {
+        "valueType": "immediate",
+        "value": 300
+      }
+    },
+    "branch_b": {
+      "stepType": "Delay",
+      "id": "branch_b",
+      "name": "Branch B work",
+      "durationMs": {
+        "valueType": "immediate",
+        "value": 300
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "merged": { "valueType": "immediate", "value": true }
+      }
+    }
+  },
+  "entryPoint": "entry",
+  "executionPlan": [
+    { "fromStep": "entry", "toStep": "branch_a" },
+    { "fromStep": "entry", "toStep": "branch_b" },
+    { "fromStep": "branch_a", "toStep": "finish" },
+    { "fromStep": "branch_b", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

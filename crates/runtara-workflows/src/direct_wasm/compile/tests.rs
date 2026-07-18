@@ -188,6 +188,9 @@ fn fixture(name: &str) -> ExecutionGraph {
             )
         }
         "fanout_diamond" => include_str!("../../../tests/fixtures/fanout_diamond.json"),
+        "parallel_branches_sync_diamond" => {
+            include_str!("../../../tests/fixtures/parallel_branches_sync_diamond.json")
+        }
         "transform" => include_str!("../../../tests/fixtures/transform_workflow.json"),
         other => panic!("unknown fixture {other}"),
     };
@@ -3589,6 +3592,51 @@ fn direct_compile_supports_fanout_diamond_graph() {
     assert!(
         matches!(merge_plan.as_ref(), DirectRunPlan::Finish { step_id, .. } if step_id == "join"),
         "merge is the join Finish, got {merge_plan:?}"
+    );
+}
+
+/// Regression: a diamond fan-out whose branches are all SYNC steps (Delay) carries
+/// no async agent to overlap, so it must linearise sequentially. The concurrent
+/// depth-wavefront needs the CM-async waitable builtins, which are imported only
+/// when a concurrent branch pool has ≥1 agent (`parallel_agent_pools`). Before the
+/// fix the emitter chose the wavefront for this zero-agent fan-out and panicked
+/// asking for builtins the compile never imported ("parallel-branch compiles
+/// import the waitable builtins").
+#[test]
+fn direct_compile_supports_sync_parallel_branches_diamond() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parallel-branches-sync-diamond".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("parallel_branches_sync_diamond"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect("sync parallel-branches diamond compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("sync parallel-branches diamond artifact should validate");
+    assert!(
+        result.support_report.supported,
+        "{:?}",
+        result.support_report.unsupported
+    );
+
+    // Zero agents → no concurrent machinery → no CM-async waitable builtins. This
+    // keeps the import gate and the emit path in lockstep (the mismatch was the bug).
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(
+        !has("[waitable-set-new]"),
+        "a zero-agent fan-out must not import the waitable builtins"
     );
 }
 

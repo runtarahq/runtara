@@ -499,6 +499,22 @@ pub(super) fn concurrent_branch_pools(
     Some(pool_sizes)
 }
 
+/// Whether a branch GROUP runs on the concurrent machinery (the T2.1 scheduler or
+/// the depth-wavefront) rather than linearising. True iff the group is async-eligible
+/// AND carries at least one agent to overlap — i.e. `concurrent_branch_pools` yields a
+/// NON-EMPTY pool map. That is exactly the condition under which `parallel_agent_pools`
+/// imports the CM-async waitable builtins, so gating the emit paths on it keeps the two
+/// in lockstep. A pure-SYNC group (Log/Filter/Delay/…, no agent), a workflow-agent
+/// branch, or a sync-ABI build has nothing to overlap and imports no builtins → it
+/// linearises. Without this a zero-agent fan-out reached the concurrent path and
+/// panicked asking for builtins the compile never imported.
+pub(super) fn branch_group_runs_concurrently(
+    static_data: &DirectCoreStaticData,
+    branches: &[DirectRunPlan],
+) -> bool {
+    concurrent_branch_pools(static_data, branches).is_some_and(|pools| !pools.is_empty())
+}
+
 /// Per-branch, per-depth pool member indices + the pool size per component. In
 /// the depth-wavefront only steps invoked at the SAME depth run concurrently, so
 /// a component contends only with same-depth peers: its pool = the max number of
@@ -1085,7 +1101,17 @@ pub(super) fn emit_parallel_branches(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
-    if schedulable_branches(static_data, branches) {
+    // The concurrent machinery (the T2.1 scheduler and the depth-wavefront) launches
+    // async agent invokes and needs the CM-async waitable builtins, imported ONLY when
+    // a concurrent branch pool has ≥1 agent (`parallel_agent_pools`). A group whose
+    // branches carry no agent to overlap — pure sync (Log/Filter/Delay/…), a
+    // workflow-agent branch, or a sync-ABI build — linearises instead: the exact
+    // instruction stream, no window, no builtins. Gating every concurrent emit on
+    // `branch_group_runs_concurrently` keeps the emit path in lockstep with the import
+    // gate (a mismatch made a pure-sync diamond ask for builtins never imported).
+    if branch_group_runs_concurrently(static_data, branches)
+        && schedulable_branches(static_data, branches)
+    {
         // T2.1: every branch is a schedulable chain → the yield-granular scheduler.
         emit_branch_scheduler(
             body,
@@ -1123,7 +1149,10 @@ pub(super) fn emit_parallel_branches(
             .filter(|b| is_schedulable_branch(static_data, b))
             .cloned()
             .collect();
-        if !sched.is_empty() {
+        // Only a `sched` group that actually carries an agent goes through the
+        // scheduler (which imports the waitable builtins); a schedulable-but-agentless
+        // group (e.g. Log/Filter-only branches) linearises like the `rest` fallback.
+        if branch_group_runs_concurrently(static_data, &sched) {
             emit_branch_scheduler(
                 body,
                 indices,
@@ -1146,13 +1175,38 @@ pub(super) fn emit_parallel_branches(
                 failure_target,
                 handled_target,
             );
+        } else {
+            for branch in &sched {
+                emit_run_plan_mapping(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    variables,
+                    branch,
+                    data_ptr_local,
+                    data_len_local,
+                    steps_ptr_local,
+                    steps_len_local,
+                    source_ptr_local,
+                    source_len_local,
+                    output_ptr_local,
+                    output_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                    workflow_log_kind,
+                    workflow_error_kind,
+                    failure_target,
+                    handled_target,
+                );
+            }
         }
         let rest: Vec<DirectRunPlan> = branches
             .iter()
             .filter(|b| !is_schedulable_branch(static_data, b))
             .cloned()
             .collect();
-        if concurrent_branch_pools(static_data, &rest).is_some() {
+        if branch_group_runs_concurrently(static_data, &rest) {
             emit_concurrent_branches(
                 body,
                 indices,

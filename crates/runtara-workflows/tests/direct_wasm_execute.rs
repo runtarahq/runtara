@@ -4379,6 +4379,51 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
     assert!(result.checkpoints.is_empty());
 }
 
+/// A diamond fan-out whose two branches are pure SYNC (Delay) steps used to PANIC
+/// at compile ("parallel-branch compiles import the waitable builtins"): the
+/// emitter chose the concurrent depth-wavefront (which needs the CM-async waitable
+/// builtins) for a fan-out with no agent to overlap, but those builtins are imported
+/// only when a concurrent branch pool has ≥1 agent. It now linearises. This proves
+/// the fix at runtime AND the diamond's stated invariant — BOTH branches execute:
+/// all three durable Delays (entry + branch_a + branch_b) fire, then it completes.
+#[test]
+fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
+    let components_dir = direct_e2e_components_dir();
+    let graph_json = smoke_fixture_json("parallel_branches_sync_diamond");
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        "direct-wasm-execute-sync-parallel-diamond",
+        &graph_json,
+        br#"{}"#,
+    );
+
+    // Completed (Finish ran), so the fan-out reconverged.
+    assert_eq!(result.output_json, serde_json::json!({ "merged": true }));
+
+    // Every branch's durable Delay checkpointed — both branches executed, not just one.
+    let mut sleep_ids: Vec<&str> = result
+        .sleeps
+        .iter()
+        .map(|sleep| sleep.checkpoint_id.as_str())
+        .collect();
+    sleep_ids.sort_unstable();
+    assert_eq!(
+        sleep_ids,
+        vec!["branch_a", "branch_b", "entry"],
+        "both branch Delays plus the entry Delay must fire; got {:?}",
+        result.sleeps
+    );
+    let branch_durations: std::collections::BTreeMap<&str, u64> = result
+        .sleeps
+        .iter()
+        .map(|sleep| (sleep.checkpoint_id.as_str(), sleep.duration_ms))
+        .collect();
+    assert_eq!(branch_durations.get("branch_a"), Some(&300));
+    assert_eq!(branch_durations.get("branch_b"), Some(&300));
+    assert_eq!(branch_durations.get("entry"), Some(&10));
+}
+
 #[test]
 fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
     let components_dir = direct_e2e_components_dir();
@@ -5098,6 +5143,11 @@ execution_smoke_cases! {
     // --- Sleeps: durable delay --------------------------------------------
     delay_simple => br#"{}"#, Sleeps,
     delay_dynamic => br#"{"waitTime":5}"#, Sleeps,
+    // Diamond fan-out whose branches are all SYNC (Delay) steps — zero agents to
+    // overlap, so it linearises instead of reaching for the concurrent wavefront.
+    // Regression guard: this used to PANIC at compile ("parallel-branch compiles
+    // import the waitable builtins"); now it compiles and runs end-to-end.
+    parallel_branches_sync_diamond => br#"{}"#, Sleeps,
     // --- transform-agent fixtures (map-fields), now on the corrected schema --
     // These drive their subgraphs/loops through `transform/map-fields`; with
     // the input mappings fixed to `source_data` + `mappings` they execute.
