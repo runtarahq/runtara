@@ -23,8 +23,7 @@ env:
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
-  CARGO_COMPONENT_VERSION: "0.21.1"
-  WASMTIME_VERSION: "43.0.0"
+  WASMTIME_VERSION: "46.0.1"
 
 jobs:
   notify-start:
@@ -489,25 +488,6 @@ jobs:
           cache: true
           cache-workspaces: ". -> target"
 
-      # `cargo install cargo-component` is a ~5 min cold build. Cache the
-      # installed binary keyed on the pinned version so subsequent CI runs
-      # are sub-second. Version bumps invalidate the cache automatically.
-      - name: Cache cargo-component binary
-        id: cache-cargo-component
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-component
-          key: cargo-component-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_COMPONENT_VERSION }}
-
-      # Intentionally NOT using --locked. cargo-component v0.21.1's own
-      # Cargo.lock pins wit-parser v0.219.1, which has since been yanked
-      # from crates.io. Letting cargo resolve from the Cargo.toml ranges
-      # picks a non-yanked wit-parser. cargo-component itself stays
-      # pinned via --version.
-      - name: Install cargo-component
-        if: steps.cache-cargo-component.outputs.cache-hit != 'true'
-        run: cargo install cargo-component --version "$CARGO_COMPONENT_VERSION"
-
       # direct_wasm_execute runs the composed artifacts
       # through the same CLI used by bundled environments. Keep the version
       # aligned with scripts/build-bundle.sh.
@@ -572,11 +552,17 @@ jobs:
       - name: Run direct WASM workflow execution smoke tests
         env:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # Unlike the db-integration suites above (which serialize on a shared
+        # Postgres/Valkey), this suite owns no shared external resource: each
+        # test binds an ephemeral port for its own mock, executes the workflow
+        # in-process on a fresh wasmtime Store, and passes env per-run — so it is
+        # safe at the default thread count. The compile happens off the executor
+        # lock, so N tests compile concurrently. The few wall-clock-sensitive
+        # parallel-split tests self-serialize via PARALLEL_TIMING_LOCK.
         run: |
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
-            --test direct_wasm_execute \
-            -- --test-threads=1
+            --test direct_wasm_execute
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

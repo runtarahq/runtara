@@ -6226,13 +6226,12 @@ fn between_condition(field: &str, value: &Value) -> Option<Condition> {
                 .cloned()
                 .unwrap_or(Value::Null),
         )
-    } else if let Some(array) = value.as_array() {
+    } else {
+        let array = value.as_array()?;
         (
             array.first().cloned().unwrap_or(Value::Null),
             array.get(1).cloned().unwrap_or(Value::Null),
         )
-    } else {
-        return None;
     };
 
     let mut conditions = Vec::new();

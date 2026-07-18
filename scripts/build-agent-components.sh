@@ -13,12 +13,11 @@
 #   target/wasm32-wasip2/release/runtara_workflow_runtime.wasm
 #   target/wasm32-wasip2/release/runtara_workflow_runtime.meta.json
 #
-# cargo-component's `--target wasm32-wasip2` writes the finalized component
-# under `wasm32-wasip2/`. It also leaves an intermediate file under
-# `wasm32-wasip1/` (rustc's core wasm output, before component encoding); on
-# darwin that intermediate is coincidentally usable, but on linux it's a
-# malformed Frankenstein that traps at runtime inside the preview1 adapter's
-# `cabi_import_realloc`. Always read from `wasm32-wasip2/`.
+# Components are built with plain `cargo build --target wasm32-wasip2`:
+# bindings come from each crate's in-source `wit_bindgen::generate!` macro and
+# rustc's bundled wasm-component-ld emits the finalized component directly —
+# no cargo-component, no committed bindings.rs, no separate `wasm-tools
+# component new` step.
 #
 # Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip2/release in
 # the server env to load agents at boot and to let direct composition find the
@@ -52,10 +51,6 @@ ensure_tool() {
         cargo install "$crate" --locked
     fi
 }
-
-# cargo-component compiles each agent crate's cdylib into a Component-Model
-# .wasm. Pinned to match the version this codebase was built against.
-ensure_tool cargo-component cargo-component 0.21.1
 
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace"
@@ -138,13 +133,13 @@ meta_count=0
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     for agent in $agents; do
         echo "==> $agent"
-        cargo component build --release --target wasm32-wasip2 -p "$agent"
+        cargo build --release --target wasm32-wasip2 -p "$agent"
         count=$((count + 1))
     done
 fi
 
 echo "==> runtara-workflow-stdlib"
-cargo component build --release --target wasm32-wasip2 -p runtara-workflow-stdlib --no-default-features --features direct-component
+cargo build --release --target wasm32-wasip2 -p runtara-workflow-stdlib --no-default-features --features direct-component
 emit_workflow_component_meta \
     "runtara-workflow-stdlib" \
     "runtara:workflow-stdlib" \
@@ -154,7 +149,7 @@ emit_workflow_component_meta \
     "$out_dir/runtara_workflow_stdlib.meta.json"
 
 echo "==> runtara-workflow-runtime"
-cargo component build --release --target wasm32-wasip2 -p runtara-workflow-runtime --no-default-features --features wasi
+cargo build --release --target wasm32-wasip2 -p runtara-workflow-runtime --no-default-features --features wasi
 emit_workflow_component_meta \
     "runtara-workflow-runtime" \
     "runtara:workflow-runtime" \

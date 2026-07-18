@@ -27,7 +27,7 @@ use super::abi::{
     push_segment_args, zero_return_function,
 };
 use super::core_imports::{
-    DirectCoreFunctionIndices, DirectCoreImportIndices, import_core_function,
+    DirectCoreFunctionIndices, DirectCoreImportIndices, agent_id_for_import, import_core_function,
     is_wasi_cli_run_export,
 };
 use super::dispatcher::emit_run_plan_mapping;
@@ -86,6 +86,11 @@ impl DirectCoreConfig {
     /// Override the export shape.
     pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowAbi) -> Self {
         self.abi = abi;
+        // Parallel Split windows require an async-TYPED root task (the invoke
+        // shapes); the legacy sync-typed `wasi:cli/run` root always compiles
+        // sequentially.
+        self.static_data.parallel_enabled =
+            !matches!(abi, crate::direct_wasm::component::WorkflowAbi::CliRunHttp);
         self
     }
 
@@ -182,6 +187,165 @@ pub(super) fn emit_direct_core_module(
                 }
             }
             WorldItem::Type { .. } => {}
+        }
+    }
+
+    // Parallel-Split extra CORE imports (docs/wasip3-parallelism.md Phase 3):
+    // the CM-async waitable builtins from the legacy `$root` module, plus an
+    // `[async-lower]invoke` per agent referenced by an eligible parallel
+    // window. Emitted only when such a window exists, so sequential-only
+    // workflows keep a byte-identical import section. wit-component's legacy
+    // name mangling turns these into `canon lower ... async` / the waitable
+    // canon builtins at encode time.
+    let parallel_pools =
+        super::split_parallel::parallel_agent_pools(&config.static_data, &config.run_plan);
+    if !parallel_pools.is_empty() {
+        let builtin = |field: &str,
+                       params: &[ValType],
+                       results: &[ValType],
+                       types: &mut TypeSection,
+                       type_count: &mut u32,
+                       imports: &mut ImportSection,
+                       count: &mut u32|
+         -> u32 {
+            let type_index = {
+                let index = *type_count;
+                types
+                    .ty()
+                    .function(params.iter().copied(), results.iter().copied());
+                *type_count += 1;
+                index
+            };
+            imports.import(
+                "$root",
+                field,
+                wasm_encoder::EntityType::Function(type_index),
+            );
+            let function_index = *count;
+            *count += 1;
+            function_index
+        };
+        import_indices.waitable_set_new = Some(builtin(
+            "[waitable-set-new]",
+            &[],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
+        import_indices.waitable_set_wait = Some(builtin(
+            "[waitable-set-wait]",
+            &[ValType::I32, ValType::I32],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
+        import_indices.waitable_set_drop = Some(builtin(
+            "[waitable-set-drop]",
+            &[ValType::I32],
+            &[],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
+        import_indices.waitable_join = Some(builtin(
+            "[waitable-join]",
+            &[ValType::I32, ValType::I32],
+            &[],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
+        import_indices.subtask_drop = Some(builtin(
+            "[subtask-drop]",
+            &[ValType::I32],
+            &[],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
+
+        // Concurrent backoff timer (§3.4): async-lowered `sleep` from the
+        // host-io timers interface. Params ≤4 flats, empty result → no retptr;
+        // returns the packed subtask status.
+        {
+            let type_index = {
+                let index = type_count;
+                types.ty().function([ValType::I64], [ValType::I32]);
+                type_count += 1;
+                index
+            };
+            imports.import(
+                "runtara:host-io/timers@0.1.0",
+                "[async-lower]sleep",
+                wasm_encoder::EntityType::Function(type_index),
+            );
+            import_indices.timer_sleep_async = Some(imported_function_count);
+            imported_function_count += 1;
+        }
+
+        let is_pool_member = |agent_id: &str| -> bool {
+            if parallel_pools.contains_key(agent_id) {
+                return true;
+            }
+            // "<base>-par<n>" phantom member of a pooled base?
+            agent_id.rfind("-par").is_some_and(|split_at| {
+                let (base, suffix) = agent_id.split_at(split_at);
+                suffix[4..].parse::<u32>().ok().is_some_and(|member| {
+                    parallel_pools.get(base).is_some_and(|pool| member < *pool)
+                })
+            })
+        };
+        for (name, import) in &world.imports {
+            let WorldItem::Interface { id, .. } = import else {
+                continue;
+            };
+            let Some(agent_id) = agent_id_for_import(resolve, Some(name)) else {
+                continue;
+            };
+            if !is_pool_member(&agent_id) {
+                continue;
+            }
+            for function in resolve.interfaces[*id].functions.values() {
+                if function.name != "invoke" {
+                    continue;
+                }
+                let async_mangling =
+                    ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback);
+                let signature = resolve.wasm_signature(async_mangling.import_variant(), function);
+                let type_index = push_core_type(
+                    &mut types,
+                    &mut type_count,
+                    &signature.params,
+                    &signature.results,
+                );
+                let (module, field) = resolve.wasm_import_name(
+                    async_mangling,
+                    wit_parser::WasmImport::Func {
+                        interface: Some(name),
+                        func: function,
+                    },
+                );
+                imports.import(
+                    &module,
+                    &field,
+                    wasm_encoder::EntityType::Function(type_index),
+                );
+                import_indices.agent_invokes_async.insert(
+                    agent_id.clone(),
+                    super::DirectAgentInvokeImport {
+                        function_index: imported_function_count,
+                        params: signature.params.clone(),
+                    },
+                );
+                imported_function_count += 1;
+            }
         }
     }
 
@@ -476,7 +640,10 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
-    (12, ValType::I32),
+    // 116 = parallel-Split suspend flag, 117 spare; 118-123 are the
+    // parallel-Split scratch (DIRECT_PSPLIT_*, docs/wasip3-parallelism.md);
+    // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
+    (22, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

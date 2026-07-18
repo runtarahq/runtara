@@ -25,7 +25,15 @@
 
 #[cfg(all(target_arch = "wasm32", feature = "direct-component"))]
 #[allow(warnings)]
-mod bindings;
+mod bindings {
+    // Generated at compile time by the wit-bindgen macro (no committed
+    // bindings.rs, no cargo-component).
+    wit_bindgen::generate!({
+        path: "../runtara-workflow-wit/wit/stdlib",
+        world: "workflow-stdlib",
+        generate_all,
+    });
+}
 
 // Runtime module (wraps runtara-sdk)
 #[cfg(feature = "sdk-runtime")]
@@ -1296,13 +1304,18 @@ mod component {
             })
         }
 
-        fn step_debug_end(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn step_debug_end(
+            step_id: String,
+            source: Vec<u8>,
+            launched_at_ms: u64,
+            settled_at_ms: u64,
+        ) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
                 let manifest = slot
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
-                manifest.step_debug_end(&step_id, &source)
+                manifest.step_debug_end(&step_id, &source, launched_at_ms, settled_at_ms)
             })
         }
 

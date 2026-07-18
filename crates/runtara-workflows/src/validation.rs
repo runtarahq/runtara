@@ -1327,7 +1327,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={}, but Split executes iterations strictly sequentially in the WASM runtime — the value has no effect.",
+                    "[W073] Split step '{}' sets parallelism={} — concurrent windows apply only to non-durable-compatible single-Agent bodies (no breakpoints, no split retries/timeout, not a workflow-agent child); other shapes run sequentially. See docs/wasip3-parallelism.md.",
                     step_id, parallelism
                 )
             }

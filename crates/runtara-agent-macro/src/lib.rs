@@ -73,15 +73,14 @@ impl FromMeta for KnownErrorSpec {
                                 }
                             }
                         }
-                        proc_macro2::TokenTree::Group(group) => {
-                            if group.delimiter() == proc_macro2::Delimiter::Bracket {
-                                for inner in group.stream() {
-                                    if let proc_macro2::TokenTree::Literal(lit) = inner {
-                                        let lit_str = lit.to_string();
-                                        if lit_str.starts_with('"') && lit_str.ends_with('"') {
-                                            attributes
-                                                .push(lit_str[1..lit_str.len() - 1].to_string());
-                                        }
+                        proc_macro2::TokenTree::Group(group)
+                            if group.delimiter() == proc_macro2::Delimiter::Bracket =>
+                        {
+                            for inner in group.stream() {
+                                if let proc_macro2::TokenTree::Literal(lit) = inner {
+                                    let lit_str = lit.to_string();
+                                    if lit_str.starts_with('"') && lit_str.ends_with('"') {
+                                        attributes.push(lit_str[1..lit_str.len() - 1].to_string());
                                     }
                                 }
                             }

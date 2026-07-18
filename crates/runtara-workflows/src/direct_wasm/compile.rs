@@ -29,6 +29,7 @@ mod agent_io;
 mod agent_retry;
 mod ai_agent_loop;
 mod artifact_metadata;
+mod branch_parallel;
 mod checkpoint;
 mod core_imports;
 mod core_module;
@@ -42,6 +43,7 @@ mod error_step;
 mod log;
 mod mapping;
 mod split;
+mod split_parallel;
 mod split_retry;
 mod step_context;
 mod step_error;
@@ -87,7 +89,7 @@ use super::manifest::{
 };
 use super::plan::{
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectSwitchRoutePlan, direct_run_plan,
+    DirectRunPlan, DirectSwitchRoutePlan, direct_run_plan, node_body_suspends, node_has_breakpoint,
 };
 #[cfg(test)]
 use super::static_data::{
@@ -130,6 +132,19 @@ world command {
 }
 "#;
 const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
+/// Host-satisfied concurrent timer for in-window retry backoff
+/// (docs/wasip3-parallelism.md §3.4). Imported by the workflow world only
+/// when a parallel Split window exists; the wac trailing `...` bubbles it to
+/// the composed component where the executor binds it func_wrap_concurrent.
+const HOST_IO_TIMERS_WIT: &str = "\
+package runtara:host-io@0.1.0;
+
+interface timers {
+    /// Async-TYPED so the emitter may async-lower it into a waitable; the
+    /// world-level sync lowering is never called.
+    sleep: async func(ms: u64);
+}
+";
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
@@ -362,6 +377,83 @@ const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
 const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
 const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 
+// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ─────────────────────
+// Scratch for the chunked launch/drain/assemble item pipeline. Only one
+// parallel split is ever ACTIVE at a time (eligible bodies are single Agent
+// steps, so parallel splits cannot nest), so these are plain fixed locals with
+// no save/restore frame.
+/// Sticky suspend/cancel flag observed by the drain loop's per-wakeup polls;
+/// acted on only at the chunk boundary (after assemble), never with live
+/// subtasks. Lives in the spare slot below the PSPLIT block.
+const DIRECT_PSPLIT_SIGNAL_LOCAL: u32 = 116;
+const DIRECT_PSPLIT_WS_LOCAL: u32 = 118;
+const DIRECT_PSPLIT_PENDING_LOCAL: u32 = 119;
+const DIRECT_PSPLIT_SLOTS_LOCAL: u32 = 120;
+const DIRECT_PSPLIT_CHUNK_START_LOCAL: u32 = 121;
+const DIRECT_PSPLIT_CHUNK_END_LOCAL: u32 = 122;
+/// Launch-pass item cursor; reused during assemble as the CURRENT item's slot
+/// pointer (the memoized-invoke operand).
+const DIRECT_PSPLIT_LAUNCH_LOCAL: u32 = 123;
+/// Retry-round item cursor (§3.4 concurrent backoff).
+const DIRECT_PSPLIT_ROUND_CURSOR_LOCAL: u32 = 124;
+/// Set when a retry round fired at least one backoff timer — drives the
+/// round-loop exit (0 => every item settled, stop).
+const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
+
+/// Per-item slot for the parallel window's concurrent-retry state machine
+/// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,
+///    wait_total:u64, _pad2:[u8;8], result:[u8;112], launch_ts:u64, settle_ts:u64 }`.
+/// States (see `split_parallel::SLOT_*`): 0 EMPTY (launch skipped — assemble
+/// runs the item fully sequentially), 1 AGENT-READY (a result is present,
+/// awaiting classification), 3 TIMER-PENDING (a backoff timer was fired),
+/// 5 SETTLED (final result memoized for assemble). `attempts` counts invokes
+/// fired; `wait_total` is the per-item rate-limit budget accumulator. The
+/// canonical `result<list<u8>, error-info>` lands at the result offset (~68
+/// bytes worst case; payload pointers live in the bump heap, which is not
+/// rewound during a chunk).
+const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 176;
+const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
+/// Bytes of the result region copied by the memoized-invoke slot→retptr copy.
+/// Pinned independently of `STRIDE` so the observational timestamp fields
+/// appended past the result (below) never widen — or shrink — that copy.
+const DIRECT_PSPLIT_SLOT_RESULT_LEN: i32 = 112;
+/// Observational only (parallel-branch concurrency visibility): the wall-clock
+/// `runtime.now-ms` read at the moment a branch's async invoke is LAUNCHED
+/// (`emit_branch_launch`) and again when its subtask SETTLES out of
+/// `waitable-set.wait` (`emit_branch_scheduler`). Zero-filled slots leave both
+/// 0 (== absent); the assemble-pass `step-debug-end` carries them so the
+/// timeline/replay render the true `[launched, settled]` interval — which
+/// overlaps across siblings — instead of the sequential assemble cascade. Never
+/// read by execution; purely a recorded pair. Placed past the result region so
+/// the memoized-invoke copy (`RESULT_LEN`) never touches them.
+const DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET: i32 = 160;
+const DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET: i32 = 168;
+/// T2.1 branch scheduler only (never overlaps the split-retry fields above): the
+/// in-flight subtask handle stored at launch so a `waitable-set.wait` settle can be
+/// matched back to its branch (offset 20, in the split's `_pad:u64` gap); the
+/// branch's chain CURSOR (offset 40) and drive STATE (offset 44) — both in the gap
+/// between the durable key and the result, zero-filled to the initial
+/// NEEDS_LAUNCH/cursor-0 state.
+const DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET: i32 = 20;
+const DIRECT_PSPLIT_SLOT_CURSOR_OFFSET: i32 = 40;
+const DIRECT_PSPLIT_SLOT_SCHED_OFFSET: i32 = 44;
+const DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET: i32 = 4;
+const DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET: i32 = 8;
+const DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET: i32 = 12;
+/// Durable replay only: set when this attempt's `::attempt::N` checkpoint was
+/// a HIT (the attempt already ran on a prior life), so classify decodes it
+/// instead of the fresh slot result, and skips the already-elapsed backoff.
+const DIRECT_PSPLIT_SLOT_HIT_OFFSET: i32 = 16;
+const DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET: i32 = 24;
+/// Durable per-item step cache key (offsets 32/36) — the base for each
+/// attempt's `{cache_key}::attempt::N` checkpoint. Computed once at launch.
+const DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET: i32 = 32;
+const DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET: i32 = 36;
+/// Event scratch for `waitable-set.wait` `{handle: u32, state: u32}` — lives
+/// in the reserved low-memory region above the wait-deadline scratch (208..216)
+/// and below the static data base (256).
+const DIRECT_PSPLIT_EVENT_OFFSET: i32 = 216;
+
 /// Input for the opt-in direct compiler.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationInput {
@@ -448,6 +540,10 @@ pub struct DirectCompilationResult {
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
     pub omit_runtime: bool,
+    /// Parallel-Split instance pools the emitted module was compiled against
+    /// (docs/wasip3-parallelism.md §3.5). Re-emit paths must thread this so
+    /// the world/wac keep the phantom pool imports the module actually calls.
+    pub parallel_pools: std::collections::BTreeMap<String, u32>,
 }
 
 /// Compose a direct workflow logic component with prebuilt shared components.
@@ -725,12 +821,13 @@ pub fn compile_direct_workflow_composed_configured(
     // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
     // the import even when omit was requested), so the on-disk world/wac match
     // the module that was actually emitted.
-    result.component_artifacts = super::component::emit_direct_component_artifacts_configured(
+    result.component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
         &agent_ids,
         binding,
         abi,
         result.omit_runtime,
         export_agent_id.as_deref(),
+        &result.parallel_pools,
     );
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
@@ -817,7 +914,18 @@ fn workflow_abi_from_env() -> super::component::WorkflowAbi {
 fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
     match raw {
         Some("cli-run") => super::component::WorkflowAbi::CliRunHttp,
-        _ => super::component::WorkflowAbi::default(),
+        Some("invoke") | None => super::component::WorkflowAbi::default(),
+        // Unknown values are LOUD, not a silent default: a typo'd lever on an
+        // older binary silently compiling the wrong ABI shape is exactly the
+        // failure mode docs/wasip3-parallelism.md §3.1 warns about.
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown RUNTARA_DIRECT_WORKFLOW_ABI value; using the default invoke ABI \
+                 (known values: unset|invoke, cli-run)"
+            );
+            super::component::WorkflowAbi::default()
+        }
     }
 }
 
@@ -941,7 +1049,7 @@ fn compile_direct_workflow_inner(
 
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
-    let wasm = emit_direct_artifact(
+    let (wasm, parallel_pools) = emit_direct_artifact(
         &manifest,
         &manifest_json,
         &support_json,
@@ -954,12 +1062,13 @@ fn compile_direct_workflow_inner(
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
-    let component_artifacts = super::component::emit_direct_component_artifacts_configured(
+    let component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
         &manifest.feature_summary.agent_ids,
         runtime_binding_from_env(),
         abi,
         omit_runtime,
         export_agent_id.as_deref(),
+        &parallel_pools,
     );
 
     let build_dir = input.output_dir.join(format!(
@@ -1016,6 +1125,7 @@ fn compile_direct_workflow_inner(
         component_artifacts,
         artifact_metadata,
         omit_runtime,
+        parallel_pools,
     })
 }
 
@@ -1030,7 +1140,7 @@ fn emit_direct_artifact(
     store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
-) -> Result<Vec<u8>, DirectCompileError> {
+) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let abi_json = match abi {
         super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
             "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
@@ -1074,7 +1184,7 @@ fn emit_direct_artifact(
         }
     };
 
-    let mut component = emit_direct_component(
+    let (mut component, parallel_pools) = emit_direct_component(
         manifest,
         manifest_json,
         track_events,
@@ -1096,7 +1206,7 @@ fn emit_direct_artifact(
         support_json,
     );
 
-    Ok(component)
+    Ok((component, parallel_pools))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1109,28 +1219,35 @@ fn emit_direct_component(
     store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
-) -> Result<Vec<u8>, DirectCompileError> {
-    let (resolve, world) = build_direct_component_resolve_configured(
-        &manifest.feature_summary.agent_ids,
-        abi,
-        omit_runtime,
-        export_agent_id,
-    )?;
+) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
             .with_store_freeing_sleep(store_freeing_sleep)
             .with_omit_runtime(omit_runtime);
+    // Parallel-split instance pools (docs/wasip3-parallelism.md §3.5): each
+    // pooled agent contributes phantom world imports (`…-par<n>`) that the wac
+    // composition satisfies with extra instantiations of the SAME package.
+    let parallel_pools =
+        split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
+    let (resolve, world) = build_direct_component_resolve_configured(
+        &manifest.feature_summary.agent_ids,
+        abi,
+        omit_runtime,
+        export_agent_id,
+        &parallel_pools,
+    )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
-    ComponentEncoder::default()
+    let component = ComponentEncoder::default()
         .module(&core_module)
         .map_err(component_error)?
         .validate(true)
         .encode()
-        .map_err(component_error)
+        .map_err(component_error)?;
+    Ok((component, parallel_pools))
 }
 
 #[cfg(test)]
@@ -1142,6 +1259,7 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
         super::component::WorkflowAbi::CliRunHttp,
         false,
         None,
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -1155,6 +1273,7 @@ fn build_direct_component_resolve_with_agents(
         super::component::WorkflowAbi::CliRunHttp,
         false,
         None,
+        &std::collections::BTreeMap::new(),
     )
 }
 
@@ -1163,6 +1282,7 @@ fn build_direct_component_resolve_configured(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
+    parallel_pools: &std::collections::BTreeMap<String, u32>,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -1201,6 +1321,11 @@ fn build_direct_component_resolve_configured(
                 .map_err(component_error)?;
         }
     }
+    if !parallel_pools.is_empty() {
+        resolve
+            .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
+            .map_err(component_error)?;
+    }
     if !agents.is_empty() {
         // Under AgentCapabilities the types package was already pushed above;
         // pushing the same content twice is a wit-parser error.
@@ -1216,6 +1341,19 @@ fn build_direct_component_resolve_configured(
                     &agent_wit_package(agent),
                 )
                 .map_err(component_error)?;
+            // Phantom pool-member packages (structurally identical interface
+            // under a distinct package id).
+            if let Some(pool) = parallel_pools.get(agent) {
+                for member in 1..*pool {
+                    let phantom = split_parallel::pool_member_component_id(agent, member);
+                    resolve
+                        .push_str(
+                            format!("runtara-agent-{phantom}.wit"),
+                            &agent_wit_package(&phantom),
+                        )
+                        .map_err(component_error)?;
+                }
+            }
         }
     }
 
@@ -1230,10 +1368,21 @@ fn build_direct_component_resolve_configured(
             "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
         ));
     }
+    if !parallel_pools.is_empty() {
+        workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
+    }
     for agent in agents {
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION};\n",
         ));
+        if let Some(pool) = parallel_pools.get(agent) {
+            for member in 1..*pool {
+                let phantom = split_parallel::pool_member_component_id(agent, member);
+                workflow_wit.push_str(&format!(
+                    "    import runtara:agent-{phantom}/capabilities@{AGENT_WIT_VERSION};\n",
+                ));
+            }
+        }
     }
     match abi {
         super::component::WorkflowAbi::CliRunHttp => {
@@ -1266,7 +1415,7 @@ fn agent_wit_package(agent: &str) -> String {
          \n\
          interface capabilities {{\n\
              use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
-             invoke: func(\n\
+             invoke: async func(\n\
                  capability-id: string,\n\
                  input: list<u8>,\n\
              ) -> result<list<u8>, error-info>;\n\
@@ -1336,7 +1485,10 @@ fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8])
 }
 
 fn component_error(error: impl fmt::Display) -> DirectCompileError {
-    DirectCompileError::Component(error.to_string())
+    // `{:#}` on anyhow-style errors keeps the CAUSE chain — a bare
+    // `to_string` flattens "failed to validate component output" into an
+    // undebuggable one-liner.
+    DirectCompileError::Component(format!("{error:#}"))
 }
 
 fn sanitize_path_segment(value: &str) -> String {

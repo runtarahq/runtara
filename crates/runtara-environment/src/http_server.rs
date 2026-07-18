@@ -358,6 +358,13 @@ struct StepSummaryJson {
     completed_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<i64>,
+    /// Real launch/settle wall-clock (epoch ms) of a parallel branch's async
+    /// work — present only for concurrent steps, so the timeline/replay render
+    /// the true overlapping interval instead of the sequential assemble cascade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launched_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settled_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inputs: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1720,6 +1727,8 @@ async fn handle_list_step_summaries(
                 started_at_ms: step.started_at.timestamp_millis(),
                 completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
                 duration_ms: step.duration_ms,
+                launched_at_ms: step.launched_at_ms,
+                settled_at_ms: step.settled_at_ms,
                 inputs: step.inputs,
                 outputs: step.outputs,
                 error: step.error,

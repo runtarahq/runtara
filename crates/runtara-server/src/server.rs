@@ -1120,11 +1120,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             if stats.pools == 0 {
                 continue;
             }
-            let usage_pct = if stats.capacity > 0 {
-                (stats.active * 100) / stats.capacity
-            } else {
-                0
-            };
+            let usage_pct = (stats.active * 100)
+                .checked_div(stats.capacity)
+                .unwrap_or(0);
             if usage_pct >= 75 {
                 tracing::warn!(
                     pools = stats.pools,

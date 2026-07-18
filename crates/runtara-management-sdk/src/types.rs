@@ -1256,6 +1256,16 @@ pub struct StepSummary {
     pub completed_at: Option<DateTime<Utc>>,
     /// Duration in milliseconds (None if still running).
     pub duration_ms: Option<i64>,
+    /// Real launch wall-clock (epoch ms) of a parallel branch's async work.
+    /// Present only for concurrent steps; with `settled_at_ms` gives the true
+    /// overlapping interval (versus `started_at`/`duration_ms`, derived from the
+    /// sequential assemble-order rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_at_ms: Option<i64>,
+    /// Real settle wall-clock (epoch ms) of a parallel branch's async work. See
+    /// `launched_at_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<i64>,
     /// Step inputs (JSON).
     pub inputs: Option<serde_json::Value>,
     /// Step outputs (JSON, None if not completed).
@@ -2271,6 +2281,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             duration_ms: Some(150),
+            launched_at_ms: None,
+            settled_at_ms: None,
             inputs: Some(json!({"url": "/api/orders"})),
             outputs: Some(json!({"count": 42})),
             error: None,
@@ -2298,6 +2310,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: None,
             duration_ms: None,
+            launched_at_ms: None,
+            settled_at_ms: None,
             inputs: Some(json!({"data": [1, 2, 3]})),
             outputs: None,
             error: None,
@@ -2321,6 +2335,8 @@ mod tests {
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             duration_ms: Some(5000),
+            launched_at_ms: None,
+            settled_at_ms: None,
             inputs: Some(json!({"url": "/api/external"})),
             outputs: None,
             error: Some(json!({"message": "Connection timeout", "code": "ETIMEDOUT"})),
@@ -2351,6 +2367,8 @@ mod tests {
                 started_at: Utc::now(),
                 completed_at: Some(Utc::now()),
                 duration_ms: Some(10),
+                launched_at_ms: None,
+                settled_at_ms: None,
                 inputs: None,
                 outputs: None,
                 error: None,

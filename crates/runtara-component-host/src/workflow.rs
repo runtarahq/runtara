@@ -247,6 +247,9 @@ impl WorkflowExecutor {
         // WASI surface above works the same way), so legacy composed artifacts
         // are unaffected by this registration.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
+        // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
+        // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
+        crate::host_io::add_host_io_to_linker(&mut linker)?;
         Ok(Self {
             engine,
             linker,
@@ -542,12 +545,22 @@ impl WorkflowExecutor {
         let run_ended = {
             let run = async {
                 let instance = pre.instantiate_async(&mut store).await?;
+                // v2 (0.2.0, async-typed invoke) is the current compile shape;
+                // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
                 let iface_idx = instance
                     .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
+                    .or_else(|| {
+                        instance.get_export_index(
+                            &mut store,
+                            None,
+                            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1,
+                        )
+                    })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "workflow component does not export {} — not an invoke-shaped \
-                             artifact (use execute() for wasi:cli/run artifacts)",
+                            "workflow component does not export {} (or the 0.1.0 variant) — \
+                             not an invoke-shaped artifact (use execute() for wasi:cli/run \
+                             artifacts)",
                             crate::lifecycle::LIFECYCLE_INTERFACE_NAME
                         )
                     })?;

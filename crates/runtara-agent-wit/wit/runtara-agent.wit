@@ -1,6 +1,15 @@
 // Canonical WIT contract for runtara agent components.
 //
-// 0.3.0 (this revision): the contract is now execution-only. `invoke` takes
+// 0.4.0 (this revision): `invoke` is async-TYPED. Under the ratified
+// component-model-async rules (wasm-tools >= 1.249 / wasmtime 46) blocking
+// legality and async lowering are keyed to the function TYPE — an async-typed
+// export may still be implemented synchronously (wit-bindgen `async: false`;
+// the callee blocks holding its own instance lock), and callers choose per
+// call site whether to lower it sync (today's sequential emitter) or async
+// (parallel regions, docs/wasip3-parallelism.md). ABI shape is otherwise
+// identical to 0.3.0.
+//
+// 0.3.0: the contract is execution-only. `invoke` takes
 // and returns opaque byte buffers (`list<u8>`) — the structured shape inside
 // is JSON, but WIT no longer cares. Capability and module metadata moved out
 // of the WIT entirely; each agent ships a sidecar `<agent>.meta.json` next to
@@ -10,7 +19,7 @@
 // call; keeps the contract format-agnostic (we can swap JSON for CBOR later
 // by changing one line of serde on each side, with no WIT change).
 
-package runtara:agent@0.3.0;
+package runtara:agent@0.4.0;
 
 interface types {
     record error-info {
@@ -31,7 +40,7 @@ interface capabilities {
     // there is no out-of-band connection argument. A connection is an opaque
     // id — the host proxy resolves credentials by (id, tenant), so nothing
     // secret crosses this boundary.
-    invoke: func(
+    invoke: async func(
         capability-id: string,
         input: list<u8>,                     // JSON-encoded value
     ) -> result<list<u8>, error-info>;       // JSON-encoded value on success

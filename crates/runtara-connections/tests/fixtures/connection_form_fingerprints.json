@@ -26,14 +26,14 @@
   {
     "integrationId": "http_oauth2_authorization_code",
     "fieldCount": 10,
-    "serializedBytes": 3269,
-    "fnv1a64": "309da2c38b830b7b"
+    "serializedBytes": 3414,
+    "fnv1a64": "e488e63016549eb3"
   },
   {
     "integrationId": "http_oauth2_client_credentials",
     "fieldCount": 8,
-    "serializedBytes": 2475,
-    "fnv1a64": "d41e1ce52cc609ba"
+    "serializedBytes": 2620,
+    "fnv1a64": "8c19596118de8e00"
   },
   {
     "integrationId": "hubspot_access_token",

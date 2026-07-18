@@ -94,6 +94,8 @@ macro_rules! impl_step_summary_ops {
                         started_at: row.get("started_at"),
                         completed_at: row.get("completed_at"),
                         duration_ms: row.get("duration_ms"),
+                        launched_at_ms: row.get("launched_at_ms"),
+                        settled_at_ms: row.get("settled_at_ms"),
                         inputs: decode_json_text(row.get("inputs")),
                         outputs,
                         error,

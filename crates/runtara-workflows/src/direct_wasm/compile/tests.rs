@@ -51,6 +51,9 @@ fn fixture(name: &str) -> ExecutionGraph {
         "split_timeout" => include_str!("../../../tests/fixtures/split_timeout.json"),
         "split_with_error" => include_str!("../../../tests/fixtures/split_with_error.json"),
         "split_with_schemas" => include_str!("../../../tests/fixtures/split_with_schemas.json"),
+        "split_parallel" => {
+            include_str!("../../../tests/fixtures/split_parallel_workflow.json")
+        }
         "split_with_schemas_failing" => {
             include_str!("../../../tests/fixtures/split_with_schemas_failing.json")
         }
@@ -548,6 +551,15 @@ fn collect_run_plan_ids(
                 collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
             }
         }
+        DirectRunPlan::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            for branch in branches {
+                collect_run_plan_ids(branch, condition_ids, mapping_ids);
+            }
+            collect_run_plan_ids(merge_plan, condition_ids, mapping_ids);
+        }
         DirectRunPlan::Join => {}
         DirectRunPlan::ImplicitFinish => {}
     }
@@ -745,9 +757,10 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::AiAgentLoop { breakpoint, .. }
         | DirectRunPlan::Error { breakpoint, .. }
         | DirectRunPlan::Conditional { breakpoint, .. } => Some(*breakpoint),
-        DirectRunPlan::EdgeRoute { .. } | DirectRunPlan::Join | DirectRunPlan::ImplicitFinish => {
-            None
-        }
+        DirectRunPlan::EdgeRoute { .. }
+        | DirectRunPlan::ParallelBranches { .. }
+        | DirectRunPlan::Join
+        | DirectRunPlan::ImplicitFinish => None,
     }
 }
 
@@ -839,7 +852,7 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     .expect("direct compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct artifact should validate as a Wasm component");
 
@@ -939,7 +952,7 @@ fn direct_compile_emits_handler_step_with_inert_on_error_edge() {
     .expect("emit should succeed for a handler step that carries an onError edge");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("emitted artifact should validate as a Wasm component");
 }
@@ -993,7 +1006,7 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
     .expect("emit should succeed for fan-out inside a Conditional branch");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("emitted artifact should validate as a Wasm component");
 }
@@ -1079,7 +1092,7 @@ fn direct_compile_long_chain_compiles_from_small_stack_caller() {
         .expect("long chain should compile");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("emitted artifact should validate as a Wasm component");
 }
@@ -1124,7 +1137,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
                 assert_eq!(abi["artifactKind"], "direct-invoke-component");
                 assert_eq!(
                     abi["componentRunExport"],
-                    "runtara:workflow-lifecycle/lifecycle@0.1.0"
+                    "runtara:workflow-lifecycle/lifecycle@0.2.0"
                 );
                 assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
@@ -1201,7 +1214,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.expect("component export");
-                    if export.name.0 == "runtara:workflow-lifecycle/lifecycle@0.1.0" {
+                    if export.name.0 == "runtara:workflow-lifecycle/lifecycle@0.2.0" {
                         assert_eq!(export.kind, ComponentExternalKind::Instance);
                         saw_run_export = true;
                     }
@@ -1236,7 +1249,7 @@ fn direct_compile_supports_conditional_finish_graph() {
     .expect("direct conditional compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct conditional artifact should validate");
     assert!(result.support_report.supported);
@@ -1266,7 +1279,7 @@ fn direct_compile_supports_nested_conditional_tree() {
     .expect("direct nested conditional compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested conditional artifact should validate");
     assert!(result.support_report.supported);
@@ -1302,7 +1315,7 @@ fn direct_compile_supports_static_embed_workflow_with_finish_child() {
     .expect("direct EmbedWorkflow compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow artifact should validate");
     assert!(result.support_report.supported);
@@ -1395,7 +1408,7 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("EmbedWorkflow breakpoint core module validates");
 
@@ -1557,7 +1570,7 @@ fn direct_compile_supports_static_embed_workflow_retry_overrides() {
     .expect("direct EmbedWorkflow retry override compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow retry override artifact should validate");
     assert!(result.support_report.supported);
@@ -1616,7 +1629,7 @@ fn direct_compile_supports_nested_static_embed_workflow_retry_frame_isolation() 
     .expect("direct nested EmbedWorkflow retry compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested EmbedWorkflow retry artifact should validate");
     assert!(result.support_report.supported);
@@ -1682,7 +1695,7 @@ fn direct_compile_supports_static_embed_workflow_with_terminal_error_child() {
     .expect("direct EmbedWorkflow terminal Error child compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow terminal Error child artifact should validate");
     assert!(result.support_report.supported);
@@ -1730,7 +1743,7 @@ fn direct_compile_supports_static_embed_workflow_with_conditional_error_child() 
     .expect("direct EmbedWorkflow conditional Error child compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow conditional Error child artifact should validate");
     assert!(result.support_report.supported);
@@ -1782,7 +1795,7 @@ fn direct_compile_supports_static_embed_workflow_parent_on_error() {
     .expect("direct EmbedWorkflow parent onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow parent onError artifact should validate");
     assert!(result.support_report.supported);
@@ -1837,7 +1850,7 @@ fn direct_compile_supports_static_embed_workflow_child_local_on_error() {
     .expect("direct EmbedWorkflow child-local onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct EmbedWorkflow child-local onError artifact should validate");
     assert!(result.support_report.supported);
@@ -1902,7 +1915,7 @@ fn direct_compile_supports_nested_static_embed_workflow_child_closure() {
     .expect("direct nested EmbedWorkflow compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested EmbedWorkflow artifact should validate");
     assert!(result.support_report.supported);
@@ -1992,7 +2005,7 @@ fn direct_compile_supports_nested_static_embed_workflow_failure_closure() {
     .expect("direct nested EmbedWorkflow failure compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested EmbedWorkflow failure artifact should validate");
     assert!(result.support_report.supported);
@@ -2024,7 +2037,7 @@ fn direct_compile_supports_group_by_finish_graph() {
     .expect("direct GroupBy compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct GroupBy artifact should validate");
     assert!(result.support_report.supported);
@@ -2056,7 +2069,7 @@ fn direct_compile_supports_sequential_split_graph() {
     .expect("direct Split compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Split artifact should validate");
     assert!(result.support_report.supported);
@@ -2178,7 +2191,7 @@ fn direct_core_emits_arena_reset_memory_copy_for_ai_loop() {
             build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
                 .expect("agent resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-        Validator::new()
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&core)
             .expect("AiAgent loop core module validates");
         Parser::new(0).parse_all(&core).any(|payload| {
@@ -2218,7 +2231,7 @@ fn direct_compile_supports_nested_split_graph() {
     .expect("direct nested Split compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested Split artifact should validate");
     assert!(result.support_report.supported);
@@ -2258,7 +2271,7 @@ fn direct_compile_supports_dont_stop_split_with_nested_split_graph() {
     .expect("direct dontStop nested Split compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct dontStop nested Split artifact should validate");
     assert!(result.support_report.supported);
@@ -2304,7 +2317,7 @@ fn direct_compile_supports_dont_stop_split_with_deep_nested_while_split_graph() 
     .expect("direct dontStop deep nested Split/While compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct dontStop deep nested Split/While artifact should validate");
     assert!(result.support_report.supported);
@@ -2360,7 +2373,7 @@ fn direct_compile_supports_simple_while_graph() {
     .expect("direct While compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct While artifact should validate");
     assert!(result.support_report.supported);
@@ -2390,7 +2403,7 @@ fn direct_compile_supports_split_on_error_graph() {
     .expect("direct Split onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Split onError artifact should validate");
     assert!(
@@ -2436,7 +2449,7 @@ fn direct_compile_supports_ai_agent_single_shot_graph() {
     .expect("direct single-shot AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent artifact should validate");
     assert!(
@@ -2503,7 +2516,7 @@ fn direct_compile_supports_ai_agent_structured_output_graph() {
     .expect("direct structured-output AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent artifact should validate");
     assert!(
@@ -2553,7 +2566,7 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
     .expect("direct tool-loop AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent tool-loop artifact should validate");
     assert!(
@@ -2625,7 +2638,7 @@ fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
     .expect("direct embed-tool AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent embed-tool artifact should validate");
     assert!(
@@ -2687,7 +2700,7 @@ fn direct_compile_supports_ai_agent_wait_for_signal_tool_graph() {
     .expect("direct wait-tool AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent wait-tool artifact should validate");
     assert!(
@@ -2742,7 +2755,7 @@ fn direct_compile_supports_ai_agent_wait_tool_with_on_wait_subgraph() {
     .expect("direct wait-tool-with-onWait AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent wait-tool-with-onWait artifact should validate");
     assert!(
@@ -2774,7 +2787,7 @@ fn direct_compile_supports_wait_for_signal_with_nested_on_wait() {
     .expect("direct nested-onWait wait compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested-onWait wait artifact should validate");
     assert!(
@@ -2809,7 +2822,7 @@ fn direct_compile_supports_embed_workflow_child_with_agent_step() {
     .expect("direct embed-with-agent-child compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct embed-with-agent-child artifact should validate");
     assert!(
@@ -2857,7 +2870,7 @@ fn direct_compile_supports_embed_workflow_child_with_split_step() {
     .expect("direct embed-with-split-child compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct embed-with-split-child artifact should validate");
     assert!(
@@ -2886,7 +2899,7 @@ fn direct_compile_supports_conditional_diamond_graph() {
     .expect("direct conditional-diamond compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct conditional-diamond artifact should validate");
     assert!(
@@ -2935,7 +2948,7 @@ fn direct_compile_supports_nested_conditional_diamond_graph() {
     .expect("direct nested conditional-diamond compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct nested conditional-diamond artifact should validate");
     assert!(
@@ -2964,7 +2977,7 @@ fn direct_compile_supports_edge_condition_diamond_graph() {
     .expect("direct edge-condition-diamond compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct edge-condition-diamond artifact should validate");
     assert!(
@@ -2994,7 +3007,7 @@ fn direct_compile_supports_ai_agent_with_inert_on_error_edge() {
     .expect("direct AiAgent-with-onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent-with-onError artifact should validate");
     assert!(
@@ -3021,7 +3034,7 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
     .expect("direct multi-tool AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent multi-tool artifact should validate");
     assert!(
@@ -3196,7 +3209,7 @@ fn direct_compile_supports_ai_agent_memory_graph() {
     .expect("direct memory AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent memory artifact should validate");
     assert!(
@@ -3271,7 +3284,7 @@ fn direct_compile_supports_ai_agent_memory_compaction_graph() {
     .expect("direct memory-compaction AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent memory-compaction artifact should validate");
     assert!(
@@ -3321,7 +3334,7 @@ fn direct_compile_supports_ai_agent_memory_summarize_graph() {
     .expect("direct memory-summarize AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent memory-summarize artifact should validate");
     assert!(
@@ -3378,7 +3391,7 @@ fn direct_compile_supports_ai_agent_mcp_graph() {
     .expect("direct MCP AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent MCP artifact should validate");
     assert!(
@@ -3489,7 +3502,7 @@ fn direct_compile_supports_ai_agent_tool_error_graph() {
     .expect("direct tool-error AiAgent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct AiAgent tool-error artifact should validate");
     assert!(
@@ -3516,7 +3529,7 @@ fn direct_compile_supports_fanout_diamond_graph() {
     .expect("direct fan-out diamond compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct fan-out diamond artifact should validate");
     assert!(
@@ -3525,9 +3538,10 @@ fn direct_compile_supports_fanout_diamond_graph() {
         result.support_report.unsupported
     );
 
-    // The diamond linearizes topologically into a single chain that runs each
-    // step once: start -> left -> right -> join. The plan is a linear chain of
-    // Agent plans terminating in the join Finish.
+    // The diamond runs its two branches CONCURRENTLY: `start`, then a
+    // `ParallelBranches` window over the single-Agent branches {left, right}, then
+    // the `join` Finish as the shared merge continuation
+    // (docs/wasip3-parallel-branches-plan.md Phase 4a).
     let manifest: DirectWorkflowManifest =
         serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
             .expect("manifest json");
@@ -3538,27 +3552,43 @@ fn direct_compile_supports_fanout_diamond_graph() {
     )
     .expect("core config");
 
-    let mut plan = &core_config.run_plan;
-    let mut chain = Vec::new();
-    loop {
-        match plan {
+    let DirectRunPlan::Agent {
+        step_id, next_plan, ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected entry Agent, got {:?}", core_config.run_plan);
+    };
+    assert_eq!(step_id, "start", "entry agent");
+    let DirectRunPlan::ParallelBranches {
+        branches,
+        merge_plan,
+    } = next_plan.as_ref()
+    else {
+        panic!("expected ParallelBranches after start, got {next_plan:?}");
+    };
+    let branch_ids: Vec<&str> = branches
+        .iter()
+        .map(|branch| match branch {
             DirectRunPlan::Agent {
                 step_id, next_plan, ..
             } => {
-                chain.push(step_id.clone());
-                plan = next_plan;
+                assert!(
+                    matches!(**next_plan, DirectRunPlan::Join),
+                    "each branch ends in Join"
+                );
+                step_id.as_str()
             }
-            DirectRunPlan::Finish { step_id, .. } => {
-                chain.push(step_id.clone());
-                break;
-            }
-            other => panic!("unexpected plan node in fan-out chain: {other:?}"),
-        }
-    }
+            other => panic!("branch must be a single Agent, got {other:?}"),
+        })
+        .collect();
     assert_eq!(
-        chain,
-        vec!["start", "left", "right", "join"],
-        "fan-out diamond should linearize to start -> left -> right -> join"
+        branch_ids,
+        vec!["left", "right"],
+        "both branches run in the concurrent window"
+    );
+    assert!(
+        matches!(merge_plan.as_ref(), DirectRunPlan::Finish { step_id, .. } if step_id == "join"),
+        "merge is the join Finish, got {merge_plan:?}"
     );
 }
 
@@ -3579,7 +3609,7 @@ fn direct_compile_supports_split_timeout_graph() {
     .expect("direct Split timeout compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Split timeout artifact should validate");
     assert!(
@@ -3613,7 +3643,7 @@ fn direct_compile_supports_while_timeout_graph() {
     .expect("direct While timeout compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct While timeout artifact should validate");
     assert!(
@@ -3647,7 +3677,7 @@ fn direct_compile_supports_while_on_error_graph() {
     .expect("direct While onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct While onError artifact should validate");
     assert!(
@@ -3693,7 +3723,7 @@ fn direct_compile_supports_while_with_nested_split_graph() {
     .expect("direct While with nested Split compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct While with nested Split artifact should validate");
     assert!(result.support_report.supported);
@@ -3735,7 +3765,7 @@ fn direct_compile_supports_split_schema_validation_graph() {
     .expect("direct Split schema compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Split schema artifact should validate");
     assert!(result.support_report.supported);
@@ -3773,7 +3803,7 @@ fn direct_compile_supports_split_dont_stop_on_failed_graph() {
     .expect("direct Split dontStopOnFailed compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Split dontStopOnFailed artifact should validate");
     assert!(result.support_report.supported);
@@ -3802,7 +3832,7 @@ fn direct_compile_supports_durable_delay_finish_graph() {
     .expect("direct Delay compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Delay artifact should validate");
     assert!(result.support_report.supported);
@@ -3835,7 +3865,7 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
     .expect("direct dynamic Delay compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct dynamic Delay artifact should validate");
     assert!(result.support_report.supported);
@@ -3871,7 +3901,7 @@ fn direct_compile_supports_non_durable_delay() {
     .expect("non-durable Delay should compile");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct non-durable Delay artifact should validate");
     assert!(result.support_report.supported);
@@ -3901,7 +3931,7 @@ fn direct_compile_supports_filter_finish_graph() {
     .expect("direct Filter compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Filter artifact should validate");
     assert!(result.support_report.supported);
@@ -3931,7 +3961,7 @@ fn direct_compile_supports_value_switch_finish_graph() {
     .expect("direct value Switch compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct value Switch artifact should validate");
     assert!(result.support_report.supported);
@@ -3961,7 +3991,7 @@ fn direct_compile_supports_routing_switch_finish_graph() {
     .expect("direct routing Switch compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct routing Switch artifact should validate");
     assert!(result.support_report.supported);
@@ -3991,7 +4021,7 @@ fn direct_compile_supports_log_finish_graph() {
     .expect("direct Log compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Log artifact should validate");
     assert!(result.support_report.supported);
@@ -4021,7 +4051,7 @@ fn direct_compile_supports_error_entry_graph() {
     .expect("direct Error compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Error artifact should validate");
     assert!(result.support_report.supported);
@@ -4051,7 +4081,7 @@ fn direct_compile_supports_edge_condition_graph() {
     .expect("direct edge-condition compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct edge-condition artifact should validate");
     assert!(result.support_report.supported);
@@ -4082,7 +4112,7 @@ fn direct_compile_supports_non_durable_agent_finish_graph() {
     .expect("direct Agent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Agent artifact should validate");
     assert!(result.support_report.supported);
@@ -4116,7 +4146,7 @@ fn direct_compile_supports_non_durable_agent_default_retry() {
     .expect("non-durable Agent default retry compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct non-durable Agent default retry artifact should validate");
     assert!(result.support_report.supported);
@@ -4148,7 +4178,7 @@ fn direct_compile_supports_durable_agent_finish_graph() {
     .expect("direct durable Agent compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct durable Agent artifact should validate");
     assert!(result.support_report.supported);
@@ -4182,7 +4212,7 @@ fn direct_compile_supports_durable_agent_retry_overrides() {
     .expect("direct durable Agent retry compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct durable Agent retry artifact should validate");
     assert!(result.support_report.supported);
@@ -4215,7 +4245,7 @@ fn direct_compile_supports_non_durable_agent_connection_finish_graph() {
     .expect("direct Agent connection compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Agent connection artifact should validate");
     assert!(result.support_report.supported);
@@ -4247,7 +4277,7 @@ fn direct_compile_supports_non_durable_agent_default_on_error_graph() {
     .expect("direct Agent onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Agent onError artifact should validate");
     assert!(result.support_report.supported);
@@ -4283,7 +4313,7 @@ fn direct_compile_supports_non_durable_agent_conditional_on_error_graph() {
     .expect("direct Agent conditional onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct Agent conditional onError artifact should validate");
     assert!(result.support_report.supported);
@@ -4318,7 +4348,7 @@ fn direct_compile_supports_durable_agent_conditional_on_error_graph() {
     .expect("direct durable Agent conditional onError compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct durable Agent conditional onError artifact should validate");
     assert!(result.support_report.supported);
@@ -4356,7 +4386,7 @@ fn direct_compile_supports_next_label_edge_condition_graph() {
     .expect("direct next edge-condition compile should succeed");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("direct next edge-condition artifact should validate");
     assert!(result.support_report.supported);
@@ -4555,11 +4585,16 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "runtara:workflow-stdlib/json",
             "cm32p2|runtara:workflow-stdlib/json@0.1",
             "step-debug-end",
+            // step-id (ptr,len), source (ptr,len), launched-at-ms (i64),
+            // settled-at-ms (i64), retptr — the two u64 timestamps carry the real
+            // parallel-branch launch/settle interval (0 == absent).
             vec![
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
                 WasmType::Length,
+                WasmType::I64,
+                WasmType::I64,
                 WasmType::Pointer,
             ],
         ),
@@ -4637,7 +4672,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     }
 
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("core module validates");
 
@@ -4836,7 +4871,7 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Finish breakpoint core module validates");
 
@@ -4969,7 +5004,7 @@ fn direct_core_run_lowers_conditional_breakpoint_before_condition_eval() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Conditional breakpoint core module validates");
 
@@ -5004,7 +5039,7 @@ fn direct_core_run_lowers_step_context_breakpoints_before_step_helpers() {
 
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-        Validator::new()
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&core)
             .unwrap_or_else(|_| panic!("{fixture_name} breakpoint core module validates"));
 
@@ -5038,7 +5073,7 @@ fn direct_core_run_lowers_log_and_error_breakpoints_before_side_effects() {
 
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-        Validator::new()
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&core)
             .unwrap_or_else(|_| panic!("{fixture_name} breakpoint core module validates"));
 
@@ -5073,7 +5108,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Agent breakpoint core module validates");
 
@@ -5235,7 +5270,7 @@ fn direct_core_metadata_can_import_agent_capabilities() {
     assert_eq!(actual_name, "invoke");
 
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("agent-importing core module validates");
 
@@ -5315,7 +5350,7 @@ fn direct_core_lowers_non_durable_agent_call() {
     assert_eq!(signature.params.last(), Some(&WasmType::Pointer));
 
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Agent core module validates");
 
@@ -5469,7 +5504,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("non-durable Agent retry core module validates");
 
@@ -5790,7 +5825,7 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("durable Agent core module validates");
 
@@ -6045,7 +6080,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("durable Agent replay core module validates");
 
@@ -6191,7 +6226,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("durable Agent retry core module validates");
 
@@ -6595,7 +6630,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
         },
     );
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Agent connection core module validates");
 
@@ -6680,7 +6715,7 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Agent onError core module validates");
 
@@ -6778,7 +6813,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("tracked core module validates");
 
@@ -6946,7 +6981,7 @@ fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("conditional core module validates");
 
@@ -7054,7 +7089,7 @@ fn direct_core_run_lowers_nested_conditional_tree_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("nested conditional core module validates");
 
@@ -7162,7 +7197,7 @@ fn direct_core_run_lowers_group_by_finish_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("GroupBy core module validates");
 
@@ -7279,7 +7314,7 @@ fn direct_core_run_lowers_split_loop_through_stdlib() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Split core module validates");
 
@@ -7430,7 +7465,7 @@ fn direct_core_run_lowers_split_breakpoint_before_split_execution() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Split breakpoint core module validates");
 
@@ -7473,7 +7508,7 @@ fn direct_core_run_lowers_split_retry_helpers() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Split retry core module validates");
 
@@ -7602,7 +7637,7 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("durable Split core module validates");
 
@@ -7802,7 +7837,7 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("While core module validates");
 
@@ -7996,7 +8031,7 @@ fn direct_core_run_lowers_while_breakpoint_before_loop_execution() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("While breakpoint core module validates");
 
@@ -8028,7 +8063,7 @@ fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() 
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Split dontStop core module validates");
 
@@ -8159,7 +8194,7 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
         build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
             .expect("agent resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Split Error dontStop core module validates");
 
@@ -8200,11 +8235,10 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
                                 saw_error_call = true;
                             }
                             Operator::Call { function_index }
-                                if Some(function_index) == split_append_error_index =>
+                                if Some(function_index) == split_append_error_index
+                                    && saw_error_call =>
                             {
-                                if saw_error_call {
-                                    saw_split_append_error_after_error = true;
-                                }
+                                saw_split_append_error_after_error = true;
                             }
                             _ => {}
                         }
@@ -8244,7 +8278,7 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Delay core module validates");
 
@@ -8386,7 +8420,7 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Delay breakpoint core module validates");
 
@@ -8527,7 +8561,7 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("non-durable Delay core module validates");
 
@@ -8672,7 +8706,7 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("WaitForSignal core module validates");
 
@@ -8834,7 +8868,7 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("tracked WaitForSignal core module validates");
 
@@ -8972,7 +9006,7 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("WaitForSignal breakpoint core module validates");
 
@@ -9107,7 +9141,7 @@ fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("WaitForSignal onWait core module validates");
 
@@ -9228,7 +9262,7 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("WaitForSignal failing onWait core module validates");
 
@@ -9326,7 +9360,7 @@ fn direct_core_run_lowers_filter_finish_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Filter core module validates");
 
@@ -9438,7 +9472,7 @@ fn direct_core_run_lowers_value_switch_finish_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("value Switch core module validates");
 
@@ -9570,7 +9604,7 @@ fn direct_core_run_lowers_routing_switch_finish_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("routing Switch core module validates");
 
@@ -9715,7 +9749,7 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Log core module validates");
 
@@ -9864,7 +9898,7 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("Error core module validates");
 
@@ -10060,7 +10094,7 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
 
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
         .expect("edge-condition core module validates");
 
@@ -10101,10 +10135,10 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
                             Operator::Call { function_index } => {
                                 run_calls.push(function_index);
                             }
-                            Operator::I32Const { value } => {
-                                if mapping_ids.contains(&(value as u32)) {
-                                    seen_mapping_ids.push(value as u32);
-                                }
+                            Operator::I32Const { value }
+                                if mapping_ids.contains(&(value as u32)) =>
+                            {
+                                seen_mapping_ids.push(value as u32);
                             }
                             _ => {}
                         }
@@ -10172,7 +10206,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
     assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
-    assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.1.0;"));
+    assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
     // spread — its interface bubbles to the composed artifact's imports.
@@ -10249,7 +10283,7 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
         serde_json::from_slice(&fs::read(&result.artifact_metadata_path).expect("metadata"))
             .expect("artifact metadata json");
     assert_eq!(metadata, result.artifact_metadata);
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("composed direct workflow should validate");
 }
@@ -10380,7 +10414,7 @@ fn direct_compile_composed_returns_final_workflow_wasm_when_available() {
             .iter()
             .all(|component| component.wasm.is_some())
     );
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("composed direct workflow should validate");
 }
@@ -10483,7 +10517,7 @@ fn direct_compile_supports_single_agent_without_finish() {
     .expect("single-agent-no-finish should compile direct (implicit finish)");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("implicit-finish artifact should validate");
     assert!(
@@ -10547,7 +10581,7 @@ fn direct_compile_supports_agent_chain_without_finish() {
     .expect("agent-chain-no-finish should compile direct (implicit finish)");
 
     let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new()
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&wasm)
         .expect("implicit-finish artifact should validate");
     assert!(
@@ -10621,4 +10655,82 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
             .push_str(format!("runtara-agent-{slug}.wit"), &wit)
             .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
     }
+}
+
+// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ──────────────────────
+
+/// `parallelism > 1` over an eligible single-Agent body lowers to the
+/// launch/drain/assemble windows: the logic component must carry the
+/// CM-async waitable builtins and the `[async-lower]invoke` import.
+#[test]
+fn direct_compile_parallel_split_emits_async_lowered_invoke() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-parallel".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("split_parallel"),
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect("parallel split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("parallel split artifact should validate");
+
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(has("[waitable-set-new]"), "waitable-set.new import missing");
+    assert!(
+        has("[waitable-set-wait]"),
+        "waitable-set.wait import missing"
+    );
+    assert!(has("[waitable-join]"), "waitable.join import missing");
+    assert!(has("[subtask-drop]"), "subtask.drop import missing");
+    assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
+}
+
+/// The SAME graph without `parallelism` stays on the sequential lowering:
+/// no CM-async imports appear (byte-preservation of the sequential path).
+#[test]
+fn direct_compile_sequential_split_has_no_async_imports() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("split_parallel");
+    let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
+        panic!("split step missing");
+    };
+    split.config.as_mut().expect("split config").parallelism = None;
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-sequential".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect("sequential split compile should succeed");
+
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(
+        !has("[waitable-set-new]"),
+        "sequential compile grew async imports"
+    );
+    assert!(
+        !has("[async-lower]invoke"),
+        "sequential compile grew async lowers"
+    );
 }

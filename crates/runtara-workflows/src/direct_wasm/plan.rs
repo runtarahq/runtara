@@ -82,6 +82,12 @@ pub(super) enum DirectRunPlan {
         max_retries: u32,
         retry_delay_ms: u64,
         dont_stop_on_failed: bool,
+        /// Requested concurrency window from the Split's `parallelism` config
+        /// (None / Some(0|1) = sequential). Whether the window actually runs
+        /// concurrently is decided at emission time by the eligibility rules
+        /// in `split.rs` (docs/wasip3-parallelism.md Phase 3); ineligible
+        /// bodies degrade to the sequential lowering.
+        parallel_window: Option<u32>,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
@@ -201,6 +207,19 @@ pub(super) enum DirectRunPlan {
         /// merge is not duplicated in each branch (which would be exponential).
         /// `None` when the branches are terminal (no merge).
         merge_plan: Option<Box<DirectRunPlan>>,
+    },
+    /// An unconditional fan-out whose branches run CONCURRENTLY, then re-converge
+    /// (docs/wasip3-parallel-branches-plan.md). Unlike the linearised default,
+    /// every branch's agent invoke is launched into the same waitable-set and the
+    /// window drains them together before assembling each branch's result into the
+    /// `steps` context in order — sequential-identical by construction (assemble IS
+    /// the per-branch lowering, with the invoke memoized), because independent DAG
+    /// branches never reference one another. Phase 4a: each branch is a single
+    /// Agent (`Agent { next_plan: Join, .. }`); the shared continuation runs once
+    /// as `merge_plan`, mirroring `Conditional`/`SwitchRoute`.
+    ParallelBranches {
+        branches: Vec<DirectRunPlan>,
+        merge_plan: Box<DirectRunPlan>,
     },
     /// A branch that has reached its enclosing branching step's merge point. The
     /// merge (and everything after it) is emitted once by the parent as the shared
@@ -653,6 +672,7 @@ fn step_run_plan_inner(
                 max_retries: split_effective_max_retries(split),
                 retry_delay_ms: split_effective_retry_delay_ms(split),
                 dont_stop_on_failed,
+                parallel_window: split_parallel_window(graph, step_id)?,
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -1379,6 +1399,23 @@ fn normal_flow_plan(
         // duplicating the shared continuation into earlier branches and
         // running steps before their inputs exist).
         if default_edges.len() > 1 {
+            // Concurrent fan-out (docs/wasip3-parallel-branches-plan.md): when the
+            // branches form a clean single-Agent diamond, emit them as a
+            // ParallelBranches window so the branch agents run concurrently.
+            // Anything else falls through to the sequential topological
+            // linearization below (widened in later phases).
+            if let Some(plan) = try_parallel_branches(
+                graph,
+                child_workflows,
+                from_step,
+                &default_edges,
+                stack,
+                include_on_error,
+                stop_at,
+                orders,
+            )? {
+                return Ok(plan);
+            }
             // E073 guard: an unconditional fan-out must re-converge inside its
             // region (or exit to the enclosing merge). A region with two
             // terminals is an ambiguous multi-exit graph; validation rejects
@@ -1597,6 +1634,708 @@ fn direct_find_merge_point(
         .iter()
         .find(|step_id| reachable_sets[1..].iter().all(|set| set.contains(step_id)))
         .cloned()
+}
+
+/// Try to lower an unconditional fan-out at `from_step` as concurrent
+/// `ParallelBranches` (docs/wasip3-parallel-branches-plan.md). Phase 4a: only a
+/// clean single-Agent diamond qualifies — every branch is exactly one Agent step
+/// Whether the normal-flow region forward-reachable from `from_step` (bounded by
+/// `stop_at`) is SINGLE-ENTRY: every reachable step's normal-flow predecessors are
+/// `from_step` or themselves inside the region. A `false` result means an external
+/// branch joins the region (a nested or cross-linked diamond), so a fan-out here
+/// must NOT be represented as a self-contained `ParallelBranches` (whose merge_plan
+/// would consume a shared merge and drop the outside branch).
+fn region_single_entry(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    stop_at: Option<&str>,
+) -> bool {
+    // Follow FORWARD-FLOW edges (normal + conditional/routing arms — everything
+    // except `onError`, which roots a separate region), so a branch that contains a
+    // conditional sub-diamond has its arms + inner merge counted as in-region.
+    let forward = |edge: &DirectEdgeManifest| edge.label.as_deref() != Some("onError");
+    use std::collections::{HashSet, VecDeque};
+    let mut reach: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    queue.push_back(from_step);
+    while let Some(step) = queue.pop_front() {
+        for edge in &graph.edges {
+            if edge.from_step.as_str() == step
+                && forward(edge)
+                && Some(edge.to_step.as_str()) != stop_at
+                && reach.insert(edge.to_step.as_str())
+            {
+                queue.push_back(edge.to_step.as_str());
+            }
+        }
+    }
+    // Any forward-flow edge INTO the region from a step that is neither `from_step`
+    // nor inside the region is an external entry point → not single-entry.
+    !graph.edges.iter().any(|edge| {
+        forward(edge)
+            && reach.contains(edge.to_step.as_str())
+            && edge.from_step != from_step
+            && !reach.contains(edge.from_step.as_str())
+    })
+}
+
+/// that re-converges at a shared merge, non-durable, no retries, no breakpoint.
+/// Any other shape returns `None` so the caller linearizes it (transitional; the
+/// eligible set widens in 4b/4c). The plan is structural — whether the branches
+/// actually run concurrently (vs. a sequential fallback) is decided at emission
+/// time by `static_data.parallel_enabled` and the workflow-agent exclusion.
+#[allow(clippy::too_many_arguments)]
+fn try_parallel_branches(
+    graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
+    from_step: &str,
+    default_edges: &[&DirectEdgeManifest],
+    stack: &mut Vec<String>,
+    include_on_error: bool,
+    stop_at: Option<&str>,
+    orders: &mut DirectRegionOrderCache,
+) -> Result<Option<DirectRunPlan>, DirectCompileError> {
+    // Deterministic branch order (declaration order): (ordinal, to_step).
+    let mut ordered: Vec<&DirectEdgeManifest> = default_edges.to_vec();
+    ordered.sort_by(|left, right| {
+        (left.ordinal, left.to_step.as_str()).cmp(&(right.ordinal, right.to_step.as_str()))
+    });
+
+    // Clean diamond: all branches re-converge at a single merge inside the region.
+    let branch_starts: Vec<Option<String>> = ordered
+        .iter()
+        .map(|edge| Some(edge.to_step.clone()))
+        .collect();
+    let Some(merge) =
+        direct_find_merge_point(graph, &branch_starts).filter(|m| Some(m.as_str()) != stop_at)
+    else {
+        return Ok(None);
+    };
+
+    // A `ParallelBranches` node owns its merge continuation (`merge_plan` runs past
+    // the merge). That is safe ONLY when the fan-out's forward-reachable region is
+    // SINGLE-ENTRY — entered only through `from_step`. If an outer diamond's other
+    // branch joins a step in this region (a nested fan-out: `A→{g,h}`, `g→{g1,g2}→gm`,
+    // `gm→f`, `h→f` — where `f` is the OUTER merge, entered from `h`), parallelizing
+    // this fan-out would pull the shared merge into its continuation and orphan the
+    // sibling branch. Decline → the sequential linearizer (authoritative for nested /
+    // cross-linked shapes) handles it correctly.
+    if !region_single_entry(graph, from_step, stop_at) {
+        return Ok(None);
+    }
+
+    // Try to plan the branches + merge as an isolated diamond. Any planning
+    // FAILURE — a branch that itself fans out and cross-links (a shape the
+    // per-branch recursion cannot represent), or a nested non-re-converging
+    // region — means "not a clean diamond": restore the stack and decline, so the
+    // caller's sequential linearization (which is authoritative and handles
+    // cross-links) runs instead. A non-single-Agent branch declines the same way.
+    let stack_depth = stack.len();
+    stack.push(from_step.to_string());
+    let built = plan_branch_diamond(
+        graph,
+        child_workflows,
+        from_step,
+        &ordered,
+        &merge,
+        stack,
+        include_on_error,
+        stop_at,
+        orders,
+    );
+    stack.truncate(stack_depth);
+    Ok(built.unwrap_or(None))
+}
+
+/// Plan each branch (a linear Agent chain → merge) plus the shared continuation,
+/// or `Ok(None)` when a branch isn't a linear Agent chain, or the branches are not
+/// INDEPENDENT (a cross-linked shape where a branch step is fed by a step outside
+/// the fan-out). Returns `Err` when a branch cannot be planned at all
+/// (non-re-converging), which `try_parallel_branches` maps to a decline.
+#[allow(clippy::too_many_arguments)]
+fn plan_branch_diamond(
+    graph: &DirectGraphManifest,
+    child_workflows: &[DirectChildWorkflowGraphManifest],
+    from_step: &str,
+    ordered: &[&DirectEdgeManifest],
+    merge: &str,
+    stack: &mut Vec<String>,
+    include_on_error: bool,
+    stop_at: Option<&str>,
+    orders: &mut DirectRegionOrderCache,
+) -> Result<Option<DirectRunPlan>, DirectCompileError> {
+    let branch_stop = Some(merge);
+    let mut branches = Vec::with_capacity(ordered.len());
+    let mut branch_id_sets: Vec<std::collections::HashSet<String>> =
+        Vec::with_capacity(ordered.len());
+    for edge in ordered {
+        let plan = step_run_plan_inner(
+            graph,
+            child_workflows,
+            &edge.to_step,
+            stack,
+            include_on_error,
+            branch_stop,
+            &edge.to_step,
+            orders,
+        )?;
+        if !is_linear_chain_branch(&plan) {
+            return Ok(None);
+        }
+        // A branch that suspends (in-branch Wait / durable Delay) is replay-safe
+        // only when the workflow is durable — its agents must HIT checkpoints on
+        // the resume replay instead of re-firing. A non-durable wait-branch
+        // linearizes (a wait already implies durability, so this is rare/degenerate).
+        if plan_contains_suspension(&plan) && !graph.durable {
+            return Ok(None);
+        }
+        let mut ids = Vec::new();
+        chain_step_ids(&plan, &mut ids);
+        branch_id_sets.push(ids.into_iter().collect());
+        branches.push(plan);
+    }
+    // Independence: the branches must be disjoint subgraphs whose only external
+    // entry is the fan-out origin. A branch step fed by a step OUTSIDE its branch
+    // (other than `from_step`) means the fan-out is cross-linked (e.g. a step with
+    // predecessors in several would-be branches) — the wavefront would run it
+    // before those external predecessors produced its input. Decline → linearize.
+    if !branches_independent(graph, from_step, &branch_id_sets) {
+        return Ok(None);
+    }
+    let merge_plan = step_run_plan_inner(
+        graph,
+        child_workflows,
+        merge,
+        stack,
+        include_on_error,
+        stop_at,
+        merge,
+        orders,
+    )?;
+    Ok(Some(DirectRunPlan::ParallelBranches {
+        branches,
+        merge_plan: Box::new(merge_plan),
+    }))
+}
+
+/// Collect the step ids along a branch chain (Agent + sync non-Agent nodes, plus
+/// in-branch Conditional composites whose arms are collected recursively),
+/// stopping at `Join`.
+fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
+    let mut node = plan;
+    loop {
+        match node {
+            DirectRunPlan::Agent {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Log {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Filter {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::SwitchValue {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::GroupBy {
+                step_id, next_plan, ..
+            } => {
+                out.push(step_id.clone());
+                node = next_plan;
+            }
+            DirectRunPlan::Conditional {
+                step_id,
+                true_plan,
+                false_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                // Arms end in Join at the merge; collect their steps recursively.
+                chain_step_ids(true_plan, out);
+                chain_step_ids(false_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
+            DirectRunPlan::SwitchRoute {
+                step_id,
+                branches,
+                default_plan,
+                merge_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                for branch in branches {
+                    chain_step_ids(&branch.plan, out);
+                }
+                chain_step_ids(default_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
+            DirectRunPlan::EdgeRoute {
+                branches,
+                default_plan,
+                merge_plan,
+            } => {
+                for branch in branches {
+                    chain_step_ids(&branch.plan, out);
+                }
+                chain_step_ids(default_plan, out);
+                match merge_plan {
+                    Some(merge) => node = merge,
+                    None => break,
+                }
+            }
+            DirectRunPlan::While {
+                step_id,
+                nested_plan,
+                next_plan,
+                ..
+            }
+            | DirectRunPlan::Split {
+                step_id,
+                nested_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                chain_step_ids(nested_plan, out);
+                node = next_plan;
+            }
+            DirectRunPlan::EmbedWorkflow {
+                step_id,
+                child_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                chain_step_ids(child_plan, out);
+                node = next_plan;
+            }
+            DirectRunPlan::AiAgent {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::AiAgentLoop {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::Delay {
+                step_id, next_plan, ..
+            } => {
+                // Collect only the loop's OWN step_id; its tool-target steps (Wait /
+                // Embed) are reached via tool edges, off the normal-flow graph
+                // `branches_independent` inspects.
+                out.push(step_id.clone());
+                node = next_plan;
+            }
+            DirectRunPlan::WaitForSignal {
+                step_id,
+                on_wait_plan,
+                next_plan,
+                ..
+            } => {
+                out.push(step_id.clone());
+                if let Some(on_wait) = on_wait_plan {
+                    chain_step_ids(on_wait, out);
+                }
+                node = next_plan;
+            }
+            _ => break,
+        }
+    }
+}
+
+/// The branches are independent iff (a) their step sets are pairwise disjoint and
+/// (b) every branch step's normal-flow predecessors are the fan-out origin or a
+/// step in the SAME branch. Rejects cross-linked fan-outs where a branch step is
+/// fed by a step outside the fan-out (which the wavefront would run before that
+/// external predecessor produced its input).
+fn branches_independent(
+    graph: &DirectGraphManifest,
+    from_step: &str,
+    branch_id_sets: &[std::collections::HashSet<String>],
+) -> bool {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    for set in branch_id_sets {
+        for id in set {
+            if !seen.insert(id.as_str()) {
+                return false; // a step appears in two branches
+            }
+        }
+    }
+    for set in branch_id_sets {
+        for step in set {
+            let external_pred = graph.edges.iter().any(|edge| {
+                edge.to_step == *step
+                    && is_normal_label(edge.label.as_deref())
+                    && edge.from_step != from_step
+                    && !set.contains(&edge.from_step)
+            });
+            if external_pred {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Whether a plan subtree contains a SUSPENSION point (`WaitForSignal` or `Delay`).
+/// A composite chain node (Conditional/…) may only run BLOCKING in the wavefront
+/// (§4.0.1) when its arms are suspension-free — otherwise the dispatcher would
+/// suspend the instance mid-assemble, before sibling branches at that depth
+/// checkpoint, risking a replay double-fire.
+fn error_route_suspends(e: &Option<DirectErrorRoutePlan>) -> bool {
+    e.as_ref().is_some_and(|route| {
+        route
+            .branches
+            .iter()
+            .any(|b| plan_contains_suspension(&b.plan))
+            || route
+                .default_plan
+                .as_ref()
+                .is_some_and(|d| plan_contains_suspension(d))
+    })
+}
+
+/// Whether an AiAgent-loop tool suspends the instance when the LLM dispatches it:
+/// a `Wait` tool is a durable human-in-the-loop suspend; an `Embed` tool suspends
+/// if its composed child workflow does. Agent / MCP tools never suspend.
+pub(super) fn ai_tool_suspends(tool: &DirectAiToolPlan) -> bool {
+    match tool {
+        DirectAiToolPlan::Wait { .. } => true,
+        DirectAiToolPlan::Embed { child_plan, .. } => plan_contains_suspension(child_plan),
+        DirectAiToolPlan::Agent { .. } => false,
+    }
+}
+
+/// Whether THIS node carries a breakpoint (a debug-mode pause point). A breakpoint
+/// is only emitted for a durable graph (`step_breakpoint_enabled` gates on
+/// `graph.durable`), so a breakpointed node in the plan implies durability. It is
+/// treated as a conditional SUSPENSION (the pause suspends the instance, once,
+/// checkpoint-guarded) so a breakpointed branch routes to the wavefront's
+/// assemble-last pass and is durability-gated exactly like an in-branch Wait/Delay.
+pub(super) fn node_has_breakpoint(node: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    match node {
+        P::Finish { breakpoint, .. }
+        | P::Filter { breakpoint, .. }
+        | P::SwitchValue { breakpoint, .. }
+        | P::SwitchRoute { breakpoint, .. }
+        | P::GroupBy { breakpoint, .. }
+        | P::Split { breakpoint, .. }
+        | P::While { breakpoint, .. }
+        | P::EmbedWorkflow { breakpoint, .. }
+        | P::Delay { breakpoint, .. }
+        | P::WaitForSignal { breakpoint, .. }
+        | P::Log { breakpoint, .. }
+        | P::Agent { breakpoint, .. }
+        | P::AiAgent { breakpoint, .. }
+        | P::AiAgentLoop { breakpoint, .. }
+        | P::Error { breakpoint, .. }
+        | P::Conditional { breakpoint, .. } => *breakpoint,
+        P::EdgeRoute { .. } | P::ParallelBranches { .. } | P::Join | P::ImplicitFinish => false,
+    }
+}
+
+pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    // A breakpoint is a conditional suspension point (it pauses + suspends the
+    // instance in debug mode). Treat any breakpointed node as suspending so a
+    // breakpointed branch routes to the wavefront's assemble-last pass and is
+    // durability-gated (`plan_branch_diamond`) like any other in-branch suspension.
+    if node_has_breakpoint(plan) {
+        return true;
+    }
+    let err = error_route_suspends;
+    match plan {
+        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
+        P::Agent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::AiAgent {
+            next_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(next_plan) || err(error_plan),
+        // An AiAgent LOOP additionally suspends if any dispatchable tool does (a
+        // Wait tool, or an Embed tool whose child suspends) — the loop yields to
+        // the tool mid-turn.
+        P::AiAgentLoop {
+            next_plan,
+            error_plan,
+            tools,
+            ..
+        } => {
+            plan_contains_suspension(next_plan)
+                || err(error_plan)
+                || tools.iter().any(ai_tool_suspends)
+        }
+        P::Filter { next_plan, .. }
+        | P::SwitchValue { next_plan, .. }
+        | P::GroupBy { next_plan, .. }
+        | P::Log { next_plan, .. } => plan_contains_suspension(next_plan),
+        P::Conditional {
+            true_plan,
+            false_plan,
+            merge_plan,
+            ..
+        } => {
+            plan_contains_suspension(true_plan)
+                || plan_contains_suspension(false_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            merge_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            merge_plan,
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+                || merge_plan
+                    .as_ref()
+                    .is_some_and(|m| plan_contains_suspension(m))
+        }
+        P::While {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_suspension(nested_plan)
+                || plan_contains_suspension(next_plan)
+                || err(error_plan)
+        }
+        P::EmbedWorkflow {
+            child_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_suspension(child_plan)
+                || plan_contains_suspension(next_plan)
+                || err(error_plan)
+        }
+        P::ParallelBranches {
+            branches,
+            merge_plan,
+        } => branches.iter().any(plan_contains_suspension) || plan_contains_suspension(merge_plan),
+    }
+}
+
+/// Whether THIS node suspends on its OWN account, IGNORING its continuation
+/// (`next_plan` / `merge_plan` — that is the next wavefront depth, classified on
+/// its own). Routes a suspending composite / AiAgentLoop-with-Wait-tool / top-level
+/// Wait|Delay into the wavefront's pass-2 (assemble-last, `branch_parallel::
+/// is_suspending_node`) so every sibling at the depth checkpoints before this
+/// node's inline suspend exits the instance. A non-suspending composite returns
+/// false and runs blocking in pass-1, exactly as before.
+pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    // A breakpoint suspends this node on its own account (see
+    // `plan_contains_suspension`) — route it to the wavefront's assemble-last pass
+    // so every sibling checkpoints before the inline breakpoint-pause exits.
+    if node_has_breakpoint(node) {
+        return true;
+    }
+    match node {
+        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::Conditional {
+            true_plan,
+            false_plan,
+            ..
+        } => plan_contains_suspension(true_plan) || plan_contains_suspension(false_plan),
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            ..
+        } => {
+            branches.iter().any(|b| plan_contains_suspension(&b.plan))
+                || plan_contains_suspension(default_plan)
+        }
+        P::While {
+            nested_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(nested_plan) || error_route_suspends(error_plan),
+        P::EmbedWorkflow {
+            child_plan,
+            error_plan,
+            ..
+        } => plan_contains_suspension(child_plan) || error_route_suspends(error_plan),
+        P::AiAgent { error_plan, .. } => error_route_suspends(error_plan),
+        P::AiAgentLoop {
+            tools, error_plan, ..
+        } => tools.iter().any(ai_tool_suspends) || error_route_suspends(error_plan),
+        _ => false,
+    }
+}
+
+/// Branch eligibility for the concurrent window:
+/// - 4a: a single Agent step (`Agent → Join`).
+/// - 4b: a linear CHAIN of Agent steps (`Agent → Agent → … → Join`), run as a
+///   depth-wavefront. Intermediate chain steps carry no `onError` (a recovery
+///   would break the wavefront's depth structure); the terminal step may (assemble
+///   handles it, `next == Join`). Durable and retries are allowed throughout
+///   (per-step launch gate; retries in assemble). A BREAKPOINTED step is accepted:
+///   `node_has_breakpoint` marks it suspending, so it routes to the assemble-last
+///   pass (siblings checkpoint first) and `emit_concurrent_branches` skips its async
+///   launch so the breakpoint fires before a blocking invoke (no resume double-fire);
+///   `plan_branch_diamond`'s durable gate keeps this replay-safe (and breakpoints
+///   only exist on durable graphs). A workflow-agent target is excluded at emission
+///   time, not here.
+/// - 4c.1: the chain may also contain SYNC non-Agent steps (Log, Filter,
+///   SwitchValue, GroupBy) — those depths run assemble-only in the wavefront (no
+///   async launch).
+/// - 4c.3 / T2.0: the chain may also contain COMPOSITE nodes (Conditional, Switch,
+///   Edge, While, Split, Embed, AiAgent, AiAgentLoop) that run BLOCKING at their
+///   depth via `emit_run_plan_mapping(with_next_join(node))`. A composite whose body
+///   nests a suspension (a Wait in a Conditional arm / loop body, an AiAgentLoop
+///   Wait tool) is allowed: `node_body_suspends` routes it to pass-2 and
+///   `plan_branch_diamond` gates the branch on `graph.durable` for replay-safety.
+///   A top-level Wait/Delay chain node is likewise pass-2. Breakpoints excluded; a
+///   workflow-agent Agent target is excluded at emission time, not here.
+fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
+    let mut node = plan;
+    loop {
+        let next_plan = match node {
+            // Agent: terminal (next==Join) may carry onError; intermediate may not.
+            DirectRunPlan::Agent {
+                error_plan,
+                next_plan,
+                ..
+            } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                if error_plan.is_some() {
+                    return false; // intermediate agent must not recover via onError
+                }
+                next_plan
+            }
+            // Sync non-Agent steps: no async op, no onError to worry about.
+            DirectRunPlan::Log { next_plan, .. }
+            | DirectRunPlan::Filter { next_plan, .. }
+            | DirectRunPlan::SwitchValue { next_plan, .. }
+            | DirectRunPlan::GroupBy { next_plan, .. } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            // In-branch Conditional runs BLOCKING as a composite node (§4.0.1). A
+            // suspension inside an arm is allowed (T2.0): `node_body_suspends` routes
+            // the composite to pass-2 (assemble-last) and `plan_branch_diamond` gates
+            // the whole branch on `graph.durable`, so the inline suspend is
+            // replay-safe. Continuation = `merge_plan`; a terminal Conditional ends
+            // the branch.
+            DirectRunPlan::Conditional { merge_plan, .. } => match merge_plan {
+                Some(merge) => merge,
+                None => return true,
+            },
+            // Routing Switch / conditioned-edge fan-out: same composite treatment as
+            // Conditional (continuation = merge_plan). Suspending routes are allowed
+            // (T2.0: pass-2 + durable gate).
+            DirectRunPlan::SwitchRoute { merge_plan, .. }
+            | DirectRunPlan::EdgeRoute { merge_plan, .. } => match merge_plan {
+                Some(merge) => merge,
+                None => return true,
+            },
+            // next_plan composites — nested loop bodies / child graphs run BLOCKING
+            // at this depth; continuation is `next_plan`. A suspension inside the
+            // body / error route is allowed (T2.0: pass-2 + durable gate).
+            DirectRunPlan::While { next_plan, .. }
+            | DirectRunPlan::Split { next_plan, .. }
+            | DirectRunPlan::EmbedWorkflow { next_plan, .. } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            // Single-shot AiAgent and the AiAgent tool LOOP both run BLOCKING as a
+            // composite; a suspension on the error route (AiAgent) or via a Wait /
+            // suspending-Embed tool (AiAgentLoop) is allowed (T2.0: pass-2 + durable
+            // gate).
+            DirectRunPlan::AiAgent { next_plan, .. }
+            | DirectRunPlan::AiAgentLoop { next_plan, .. } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            // 4c.2 + in-branch Wait: a top-level suspending node (WaitForSignal /
+            // Delay). It runs LAST at its depth (branch_parallel orders it after
+            // siblings so they checkpoint before the inline suspend); on resume the
+            // wavefront replays and durable steps HIT. `plan_branch_diamond` gates
+            // this on `graph.durable` for replay safety. The wait's own on-wait /
+            // timeout routing must be suspension-free. Continuation = next_plan.
+            DirectRunPlan::WaitForSignal {
+                on_wait_plan,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if on_wait_plan
+                    .as_ref()
+                    .is_some_and(|p| plan_contains_suspension(p))
+                    || error_route_suspends(error_plan)
+                {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::Delay { next_plan, .. } => {
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            _ => return false,
+        };
+        node = next_plan;
+    }
 }
 
 fn on_error_plan(
@@ -1863,6 +2602,26 @@ fn split_config<'a>(
         .ok_or_else(|| {
             DirectCompileError::Component(format!("missing Split config for step '{step_id}'"))
         })
+}
+
+/// The Split's requested `parallelism` window. 0 means "unlimited" per the
+/// DSL contract — normalized here to u32::MAX and clamped at emission time to
+/// the item count; absent/1 = sequential.
+fn split_parallel_window(
+    graph: &DirectGraphManifest,
+    step_id: &str,
+) -> Result<Option<u32>, DirectCompileError> {
+    Ok(split_config(graph, step_id)?
+        .get("parallelism")
+        .and_then(serde_json::Value::as_u64)
+        .map(|window| {
+            if window == 0 {
+                u32::MAX
+            } else {
+                u32::try_from(window).unwrap_or(u32::MAX)
+            }
+        })
+        .filter(|window| *window > 1))
 }
 
 fn split_dont_stop_on_failed(
@@ -2363,6 +3122,18 @@ mod tests {
                     collect_plan_steps(merge, out);
                 }
             }
+            DirectRunPlan::ParallelBranches {
+                branches,
+                merge_plan,
+            } => {
+                out.push("ParallelBranches".to_string());
+                for branch in branches {
+                    out.push("  branch:".to_string());
+                    collect_plan_steps(branch, out);
+                }
+                out.push("  merge-of:ParallelBranches".to_string());
+                collect_plan_steps(merge_plan, out);
+            }
             DirectRunPlan::Join => out.push("Join".to_string()),
             DirectRunPlan::ImplicitFinish => out.push("ImplicitFinish".to_string()),
         }
@@ -2387,6 +3158,56 @@ mod tests {
             "capabilityId": "get-current-iso-datetime",
             "inputMapping": {}
         })
+    }
+
+    /// Regression (smoke PB-11): a NESTED fan-out — `s→{g,h}`, `g→{g1,g2}→gm`,
+    /// `gm→f`, `h→f`. The inner fan-out `{g1,g2}` is a clean diamond, but its region
+    /// is NOT single-entry (its merge continuation reaches `f`, which `h` also feeds).
+    /// A prior bug let the inner `ParallelBranches` merge_plan consume `f` and DROP
+    /// the outer branch `h` entirely (so `f` read `steps.h.outputs` as null). Every
+    /// step — crucially `h` — must appear, `h` before the merge `Finish:f`.
+    #[test]
+    fn nested_fanout_of_fanout_keeps_outer_sibling() {
+        let mut steps = serde_json::Map::new();
+        for id in ["s", "g", "g1", "g2", "gm", "h"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "f".to_string(),
+            serde_json::json!({
+                "id": "f", "stepType": "Finish",
+                "inputMapping": {
+                    "g": {"valueType":"reference","value":"steps.gm.outputs"},
+                    "g2": {"valueType":"reference","value":"steps.g2.outputs"},
+                    "h": {"valueType":"reference","value":"steps.h.outputs"}
+                }
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "s", "durable": false, "steps": steps,
+            "executionPlan": [
+                {"fromStep":"s","toStep":"g"},{"fromStep":"s","toStep":"h"},
+                {"fromStep":"g","toStep":"g1"},{"fromStep":"g","toStep":"g2"},
+                {"fromStep":"g1","toStep":"gm"},{"fromStep":"g2","toStep":"gm"},
+                {"fromStep":"gm","toStep":"f"},{"fromStep":"h","toStep":"f"}
+            ]
+        }))
+        .expect("graph parses");
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("manifest");
+        let plan = direct_run_plan(&manifest).expect("plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+        let h_pos = emitted.iter().position(|s| s == "h");
+        let f_pos = emitted.iter().position(|s| s == "Finish:f");
+        assert!(
+            h_pos.is_some(),
+            "outer branch step `h` was DROPPED from the plan (nested fan-out regression): {emitted:?}"
+        );
+        assert!(
+            h_pos < f_pos,
+            "`h` (idx {h_pos:?}) must be emitted before the merge `Finish:f` (idx {f_pos:?}): {emitted:?}"
+        );
     }
 
     /// Regression for the reported fan-out drop: inside a Conditional branch,
@@ -2507,6 +3328,309 @@ mod tests {
             deduped.len(),
             step_ids.len(),
             "every step should be emitted exactly once: {emitted:?}"
+        );
+    }
+
+    /// A clean single-Agent diamond `a → {b, c} → m → finish` lowers to
+    /// concurrent `ParallelBranches` (docs/wasip3-parallel-branches-plan.md 4a):
+    /// the two branch agents form the window and the merge `m` runs once after.
+    #[test]
+    fn single_agent_diamond_lowers_to_parallel_branches() {
+        let mut steps = serde_json::Map::new();
+        for id in ["a", "b", "c", "m"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish",
+                "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            // 4a.1 parallelizes non-durable branches; durable is 4a.2.
+            "durable": false,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b"},
+                {"fromStep": "a", "toStep": "c"},
+                {"fromStep": "b", "toStep": "m"},
+                {"fromStep": "c", "toStep": "m"},
+                {"fromStep": "m", "toStep": "finish"}
+            ]
+        }))
+        .expect("graph parses");
+
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+
+        assert_eq!(
+            emitted,
+            vec![
+                "a",
+                "ParallelBranches",
+                "  branch:",
+                "b",
+                "Join",
+                "  branch:",
+                "c",
+                "Join",
+                "  merge-of:ParallelBranches",
+                "m",
+                "Finish:finish",
+            ],
+            "clean single-agent diamond should lower to ParallelBranches: {emitted:?}"
+        );
+    }
+
+    /// 4b: a diamond of two-Agent CHAINS `a → {b1→b2, c1→c2} → m` lowers to
+    /// `ParallelBranches` with multi-step branches (the depth-wavefront).
+    #[test]
+    fn linear_agent_chain_diamond_lowers_to_parallel_branches() {
+        let mut steps = serde_json::Map::new();
+        for id in ["a", "b1", "b2", "c1", "c2", "m"] {
+            steps.insert(id.to_string(), agent_step_json(id));
+        }
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish",
+                "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            "durable": false,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b1"},
+                {"fromStep": "a", "toStep": "c1"},
+                {"fromStep": "b1", "toStep": "b2"},
+                {"fromStep": "c1", "toStep": "c2"},
+                {"fromStep": "b2", "toStep": "m"},
+                {"fromStep": "c2", "toStep": "m"},
+                {"fromStep": "m", "toStep": "finish"}
+            ]
+        }))
+        .expect("graph parses");
+
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+
+        assert_eq!(
+            emitted,
+            vec![
+                "a",
+                "ParallelBranches",
+                "  branch:",
+                "b1",
+                "b2",
+                "Join",
+                "  branch:",
+                "c1",
+                "c2",
+                "Join",
+                "  merge-of:ParallelBranches",
+                "m",
+                "Finish:finish",
+            ],
+            "chain diamond should lower to ParallelBranches with 2-step branches: {emitted:?}"
+        );
+    }
+
+    /// T2.0: an AiAgent tool LOOP suspends when the LLM can dispatch a Wait tool
+    /// (durable human-in-the-loop) or an Embed tool whose child suspends. Regression
+    /// for the latent gap where `plan_contains_suspension` walked only `next_plan` /
+    /// `error_plan` and NOT the loop's `tools` — misclassifying such a loop as
+    /// suspension-free, which would run it blocking and risk a replay double-fire.
+    #[test]
+    fn ai_agent_loop_wait_tool_is_detected_as_suspension() {
+        use DirectRunPlan as P;
+        let wait_tool = DirectAiToolPlan::Wait {
+            step_id: "w".into(),
+            label: "ask-human".into(),
+        };
+        let agent_tool = DirectAiToolPlan::Agent {
+            agent_id: 1,
+            agent_component_id: "utils".into(),
+            label: "lookup".into(),
+            timeout_ms: None,
+        };
+        assert!(ai_tool_suspends(&wait_tool), "a Wait tool suspends");
+        assert!(!ai_tool_suspends(&agent_tool), "an Agent tool does not");
+
+        let make_loop = |tools: Vec<DirectAiToolPlan>| P::AiAgentLoop {
+            step_id: "ai".into(),
+            agent_id: 0,
+            agent_component_id: "ai-tools".into(),
+            input_mapping_id: 0,
+            durable_checkpoint: true,
+            breakpoint: false,
+            max_iterations: 10,
+            tools,
+            memory: None,
+            next_plan: Box::new(P::Join),
+            error_plan: None,
+        };
+
+        let with_wait = make_loop(vec![agent_tool.clone(), wait_tool]);
+        assert!(
+            plan_contains_suspension(&with_wait),
+            "an AiAgentLoop whose tools include a Wait suspends"
+        );
+        assert!(
+            node_body_suspends(&with_wait),
+            "…and is routed to the wavefront's pass-2 (assemble-last)"
+        );
+
+        let no_wait = make_loop(vec![agent_tool]);
+        assert!(
+            !plan_contains_suspension(&no_wait),
+            "an AiAgentLoop with only Agent tools does not suspend"
+        );
+        assert!(!node_body_suspends(&no_wait));
+    }
+
+    /// T2.0: a DURABLE diamond whose branch nests a suspension INSIDE a composite (a
+    /// durable Delay in a While loop body) lowers to `ParallelBranches` — the While is
+    /// a suspending composite (pass-2), gated on `durable`. The SAME graph when
+    /// non-durable declines (linearises), because the replay would re-fire the
+    /// pre-suspend siblings with no checkpoints to HIT. (The suspension is nested one
+    /// level down; the While is a single OUTER node, so the fan-out re-converges and
+    /// passes the E073 reconvergence validator.)
+    #[test]
+    fn durable_diamond_with_inbranch_while_delay_lowers_to_parallel_branches() {
+        let build = |durable: bool| {
+            let mut steps = serde_json::Map::new();
+            for id in ["a", "bafter", "c1", "c2"] {
+                steps.insert(id.to_string(), agent_step_json(id));
+            }
+            steps.insert(
+                "bloop".to_string(),
+                serde_json::json!({
+                    "id": "bloop", "stepType": "While", "name": "loop",
+                    "condition": {"type":"operation","op":"LT","arguments":[
+                        {"valueType":"reference","value":"loop.index"},
+                        {"valueType":"immediate","value":2}]},
+                    "subgraph": {
+                        "name":"iter", "entryPoint":"idelay",
+                        "steps": {
+                            "idelay": {"stepType":"Delay","id":"idelay","durationMs":{"valueType":"immediate","value":0}},
+                            "iterfin": {"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}
+                        },
+                        "executionPlan": [{"fromStep":"idelay","toStep":"iterfin"}]
+                    },
+                    "config": {"maxIterations": 10}
+                }),
+            );
+            steps.insert(
+                "finish".to_string(),
+                serde_json::json!({
+                    "id": "finish", "stepType": "Finish",
+                    "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+                }),
+            );
+            let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "entryPoint": "a",
+                "durable": durable,
+                "steps": steps,
+                "executionPlan": [
+                    {"fromStep":"a","toStep":"bloop"},
+                    {"fromStep":"a","toStep":"c1"},
+                    {"fromStep":"bloop","toStep":"bafter"},
+                    {"fromStep":"bafter","toStep":"finish"},
+                    {"fromStep":"c1","toStep":"c2"},
+                    {"fromStep":"c2","toStep":"finish"}
+                ]
+            }))
+            .expect("graph parses");
+            let manifest = super::super::manifest::build_direct_workflow_manifest(&graph)
+                .expect("build manifest");
+            let plan = direct_run_plan(&manifest).expect("build plan");
+            let mut emitted = Vec::new();
+            collect_plan_steps(&plan, &mut emitted);
+            emitted
+        };
+
+        let durable = build(true);
+        assert!(
+            durable.iter().any(|s| s == "ParallelBranches"),
+            "durable while-with-in-body-delay diamond must parallelize: {durable:?}"
+        );
+        assert!(
+            durable.iter().any(|s| s == "While:bloop") && durable.iter().any(|s| s == "idelay"),
+            "the suspending While composite (with its nested Delay) is in a branch: {durable:?}"
+        );
+
+        let non_durable = build(false);
+        assert!(
+            !non_durable.iter().any(|s| s == "ParallelBranches"),
+            "a NON-durable in-branch suspension must decline to linearise (no checkpoints \
+             to replay-HIT): {non_durable:?}"
+        );
+    }
+
+    /// A durable diamond with a BREAKPOINT on one branch step still lowers to
+    /// `ParallelBranches`. A breakpoint is a conditional suspension point
+    /// (`node_has_breakpoint` → assemble-last, launch skipped), NOT a reason to
+    /// linearise the whole fan-out — so the sibling branch keeps running
+    /// concurrently while a debug run pauses at the breakpoint. Breakpoints only
+    /// exist on durable graphs (`step_breakpoint_enabled` gates on `graph.durable`),
+    /// which is also exactly what `plan_branch_diamond`'s suspension gate requires.
+    #[test]
+    fn durable_diamond_with_breakpointed_branch_step_stays_parallel() {
+        let mut steps = serde_json::Map::new();
+        steps.insert("a".to_string(), agent_step_json("a"));
+        steps.insert("c".to_string(), agent_step_json("c"));
+        // Branch step `b` carries a breakpoint.
+        steps.insert(
+            "b".to_string(),
+            serde_json::json!({
+                "id": "b", "stepType": "Agent", "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime", "inputMapping": {},
+                "breakpoint": true
+            }),
+        );
+        steps.insert(
+            "finish".to_string(),
+            serde_json::json!({
+                "id": "finish", "stepType": "Finish",
+                "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}
+            }),
+        );
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "a",
+            "durable": true,
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep":"a","toStep":"b"},
+                {"fromStep":"a","toStep":"c"},
+                {"fromStep":"b","toStep":"finish"},
+                {"fromStep":"c","toStep":"finish"}
+            ]
+        }))
+        .expect("graph parses");
+        let manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("build manifest");
+        let plan = direct_run_plan(&manifest).expect("build plan");
+        let mut emitted = Vec::new();
+        collect_plan_steps(&plan, &mut emitted);
+        assert!(
+            emitted.iter().any(|s| s == "ParallelBranches"),
+            "durable diamond with a breakpointed branch step must still parallelize: {emitted:?}"
+        );
+        assert!(
+            emitted.iter().any(|s| s == "b") && emitted.iter().any(|s| s == "c"),
+            "both branch steps present in the parallel region: {emitted:?}"
         );
     }
 

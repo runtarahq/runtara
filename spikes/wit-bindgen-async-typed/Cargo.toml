@@ -1,0 +1,16 @@
+# Spike S3 (docs/wasip3-parallelism.md Phase 1): can wit-bindgen 0.58
+# SYNC-implement an export whose WIT type is `async func`? (sync lift of an
+# async-typed function — the ABI v2 agent migration recipe.)
+[package]
+name = "wit-bindgen-async-typed-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"

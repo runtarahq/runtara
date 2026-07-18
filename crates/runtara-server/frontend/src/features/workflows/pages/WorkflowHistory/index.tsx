@@ -30,6 +30,7 @@ import {
   BarChart3,
   ChevronsLeft,
   ChevronsRight,
+  Network,
 } from 'lucide-react';
 import {
   getWorkflowInstance,
@@ -63,6 +64,7 @@ import {
   isActiveStatus,
 } from '@/shared/utils/status-display';
 import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
+import { ReplayView } from '@/features/workflows/components/Replay';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import {
   hasElidedPayload,
@@ -77,9 +79,9 @@ export function WorkflowHistory() {
   const isInitialLoadRef = useRef(true);
 
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
-  const [eventsViewMode, setEventsViewMode] = useState<'list' | 'timeline'>(
-    'timeline'
-  );
+  const [eventsViewMode, setEventsViewMode] = useState<
+    'list' | 'timeline' | 'graph'
+  >('timeline');
   const [listPageIndex, setListPageIndex] = useState(0);
 
   const token = useToken();
@@ -212,12 +214,15 @@ export function WorkflowHistory() {
   const totalPages = Math.ceil(totalCount / LIST_PAGE_SIZE);
 
   // Reset page when switching to list view
-  const handleViewModeChange = useCallback((mode: 'list' | 'timeline') => {
-    setEventsViewMode(mode);
-    if (mode === 'list') {
-      setListPageIndex(0);
-    }
-  }, []);
+  const handleViewModeChange = useCallback(
+    (mode: 'list' | 'timeline' | 'graph') => {
+      setEventsViewMode(mode);
+      if (mode === 'list') {
+        setListPageIndex(0);
+      }
+    },
+    []
+  );
 
   const toggleStepExpanded = (index: number) => {
     setExpandedSteps((prev) => {
@@ -831,16 +836,24 @@ export function WorkflowHistory() {
               <Tabs
                 value={eventsViewMode}
                 onValueChange={(v) =>
-                  handleViewModeChange(v as 'list' | 'timeline')
+                  handleViewModeChange(v as 'list' | 'timeline' | 'graph')
                 }
               >
-                <TabsList className="grid w-[200px] grid-cols-2">
+                <TabsList className="grid w-[300px] grid-cols-3">
                   <TabsTrigger
                     value="timeline"
                     className="flex items-center gap-1"
                   >
                     <BarChart3 className="h-4 w-4" />
                     Timeline
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="graph"
+                    className="flex items-center gap-1"
+                    data-testid="events-view-graph"
+                  >
+                    <Network className="h-4 w-4" />
+                    Graph
                   </TabsTrigger>
                   <TabsTrigger value="list" className="flex items-center gap-1">
                     <List className="h-4 w-4" />
@@ -855,7 +868,9 @@ export function WorkflowHistory() {
             </p>
           </CardHeader>
           <CardContent className="p-6">
-            {eventsViewMode === 'timeline' ? (
+            {eventsViewMode === 'graph' ? (
+              <ReplayView workflowId={workflowId!} instanceId={instanceId!} />
+            ) : eventsViewMode === 'timeline' ? (
               <ExecutionTimeline
                 workflowId={workflowId!}
                 instanceId={instanceId!}

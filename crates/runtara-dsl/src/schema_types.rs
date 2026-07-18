@@ -2135,10 +2135,16 @@ pub struct SplitConfig {
     /// The array to iterate over
     pub value: MappingValue,
 
-    /// Maximum concurrent iterations (0 = unlimited).
+    /// Maximum concurrent iterations (0 = unlimited, capped by the runtime's
+    /// per-agent instance pool).
     ///
-    /// **Ignored** — Split iterations execute strictly sequentially in the
-    /// WASM runtime; any value other than 1 triggers validation warning W073.
+    /// When > 1 and the Split body is an eligible single-Agent subgraph (no
+    /// breakpoints, no split-level retries/timeout, not a workflow-agent
+    /// child), iterations run as CONCURRENT windows: agent calls are launched
+    /// as component-model-async subtasks and their I/O overlaps. Ineligible
+    /// shapes keep the strictly sequential execution (advisory W073).
+    /// Results, error routing, and `dontStopOnFailed` semantics are identical
+    /// to sequential execution. See docs/wasip3-parallelism.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 

@@ -1711,6 +1711,75 @@ mod tests {
         assert_eq!(steps[0].status, StepStatus::Completed);
         assert!(steps[0].completed_at.is_some());
         assert!(steps[0].duration_ms.is_some());
+        // A sequential step's end event carries no launch/settle pair.
+        assert_eq!(steps[0].launched_at_ms, None);
+        assert_eq!(steps[0].settled_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_surfaces_launch_settle_when_present() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "branch-b",
+            Some("Branch B"),
+            "Agent",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // A step_debug_end payload carrying the real parallel-branch launch/settle
+        // pair (as the concurrent scheduler emits). The summary must surface them as
+        // epoch-ms columns so the timeline/replay can prefer the overlapping interval.
+        let payload = serde_json::json!({
+            "step_id": "branch-b",
+            "outputs": {"status_code": 200},
+            "duration_ms": 3,
+            "launched_at_ms": 1_700_000_000_100_i64,
+            "settled_at_ms": 1_700_000_000_500_i64,
+        });
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: instance_id.clone(),
+                event_type: "custom".to_string(),
+                checkpoint_id: None,
+                payload: Some(serde_json::to_vec(&payload).unwrap()),
+                created_at: Utc::now(),
+                subtype: Some("step_debug_end".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+            step_ids: None,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].launched_at_ms, Some(1_700_000_000_100));
+        assert_eq!(steps[0].settled_at_ms, Some(1_700_000_000_500));
     }
 
     #[tokio::test]

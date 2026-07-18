@@ -292,7 +292,9 @@ impl Dialect for SqliteDialect {
                 json_extract(CAST(e.payload AS TEXT), '$.outputs') as outputs, \
                 p.error, \
                 p.status, \
-                p.duration_ms \
+                p.duration_ms, \
+                json_extract(CAST(e.payload AS TEXT), '$.launched_at_ms') as launched_at_ms, \
+                json_extract(CAST(e.payload AS TEXT), '$.settled_at_ms') as settled_at_ms \
             FROM page p \
             JOIN instance_events s ON s.id = p.id \
             LEFT JOIN instance_events e ON e.id = p.end_id \

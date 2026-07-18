@@ -15,11 +15,16 @@ pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.1.0";
 pub const ABI_PACKAGE: &str = "runtara:abi@0.1.0";
 
 /// WIT package name for the workflow invoke-export contract.
-pub const LIFECYCLE_PACKAGE: &str = "runtara:workflow-lifecycle@0.1.0";
+pub const LIFECYCLE_PACKAGE: &str = "runtara:workflow-lifecycle@0.2.0";
 
 /// Fully-qualified component export name of the lifecycle interface — what a
 /// workflow compiled with the invoke ABI exports instead of `wasi:cli/run`.
-pub const LIFECYCLE_INTERFACE_NAME: &str = "runtara:workflow-lifecycle/lifecycle@0.1.0";
+pub const LIFECYCLE_INTERFACE_NAME: &str = "runtara:workflow-lifecycle/lifecycle@0.2.0";
+
+/// The 0.1.0 (sync-typed invoke) interface name — exported by artifacts
+/// compiled before ABI v2. The executor accepts both; new compiles always
+/// export 0.2.0.
+pub const LIFECYCLE_INTERFACE_NAME_V1: &str = "runtara:workflow-lifecycle/lifecycle@0.1.0";
 
 /// WIT text for `runtara:workflow-stdlib@0.1.0`.
 pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib.wit");
@@ -30,7 +35,7 @@ pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runt
 /// WIT text for `runtara:abi@0.1.0` (the neutral shared vocabulary).
 pub const ABI_WIT: &str = include_str!("../wit/lifecycle/deps/abi/runtara-abi.wit");
 
-/// WIT text for `runtara:workflow-lifecycle@0.1.0`.
+/// WIT text for `runtara:workflow-lifecycle@0.2.0`.
 pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-lifecycle.wit");
 
 #[cfg(test)]

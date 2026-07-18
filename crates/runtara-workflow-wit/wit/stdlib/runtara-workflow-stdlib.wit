@@ -673,9 +673,18 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // `launched-at-ms` / `settled-at-ms` are the OPTIONAL wall-clock bounds of a
+    // parallel branch's real async work — when the branch launched its invoke and
+    // when its subtask settled. They OVERLAP across sibling branches, so the
+    // timeline/replay render true concurrency instead of the sequential assemble
+    // cascade that `timestamp-ms`/`duration-ms` describe. 0 == absent (the caller
+    // is a sequential/linearised step): the payload then carries neither field and
+    // consumers fall back to the assemble timestamp. Purely observational.
     step-debug-end: func(
         step-id: string,
         source: list<u8>,
+        launched-at-ms: u64,
+        settled-at-ms: u64,
     ) -> result<list<u8>, string>;
 
     // Build a step-debug-end payload carrying an input-resolution error for any

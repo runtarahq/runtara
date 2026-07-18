@@ -18,7 +18,20 @@ use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
-mod bindings;
+mod bindings {
+    // Bindings are generated at compile time by the wit-bindgen macro (no
+    // committed bindings.rs, no cargo-component). `path` lists the shared
+    // `runtara:agent` package first (dependency), then this crate's
+    // build.rs-generated `wit/agent.wit`.
+    wit_bindgen::generate!({
+        path: ["../../runtara-agent-wit/wit", "wit"],
+        world: "runtara:agent-utils/agent",
+        // Sync impls of the async-TYPED invoke (sync lift; see
+        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        async: false,
+        generate_all,
+    });
+}
 
 // -----------------------------------------------------------------------------
 // Inputs (with capability macros so meta.json can be derived)

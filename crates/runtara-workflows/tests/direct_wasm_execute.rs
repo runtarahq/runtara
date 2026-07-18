@@ -373,6 +373,7 @@ struct CapturedRun {
     /// Number of custom-signal polls the mock answered with a signal — a
     /// replayed wait re-polls, so this is > the number of waits after a resume.
     custom_signal_polls: u32,
+    slow_item_arrivals: Vec<Instant>,
     status_success: bool,
     stderr: String,
     /// Peak guest linear memory observed by the embedded executor's limiter, when
@@ -392,6 +393,10 @@ enum CapturedMessage {
 #[derive(Debug, Default)]
 struct ServerState {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Arrival instants of /slow-item proxied requests (the parallel-split
+    /// overlap harness) — the load-robust concurrency signal: overlapping
+    /// requests arrive within one think-time regardless of machine load.
+    slow_item_arrivals: Mutex<Vec<Instant>>,
     /// Scripted LLM-proxy responses, served front-to-back to POST /llm-proxy.
     /// Each entry is the proxy envelope `{status, headers, body}` the
     /// workflow's `call_agent()` will deserialize into an HttpResponse.
@@ -613,6 +618,29 @@ fn route(
     // so the workflow fails loudly instead of hanging on `{success: true}`.
     if method == "POST" && path == "/llm-proxy" {
         let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        // Parallel-split overlap harness: a proxied request whose TARGET url
+        // ends in /slow-item answers 200 after a fixed think time. Concurrent
+        // requests overlap (thread-per-connection), so the workflow-side wall
+        // clock reveals whether the guest truly parallelized the calls.
+        if envelope["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/slow-item"))
+        {
+            server_state
+                .slow_item_arrivals
+                .lock()
+                .expect("slow_item_arrivals lock")
+                .push(Instant::now());
+            thread::sleep(Duration::from_millis(400));
+            return (
+                200,
+                serde_json::json!({
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": {"ok": true}
+                }),
+            );
+        }
         server_state
             .llm_requests
             .lock()
@@ -1218,6 +1246,7 @@ fn run_direct_workflow_capture_attempt(
         sql_requests: Mutex::new(Vec::new()),
         custom_signals: Mutex::new(custom_signals),
         custom_signal_polls: Mutex::new(0),
+        slow_item_arrivals: Mutex::new(Vec::new()),
     });
     let server_state_for_assertions = server_state.clone();
     let capture_tx_for_host = capture_tx.clone();
@@ -1308,6 +1337,11 @@ fn run_direct_workflow_capture_attempt(
         .custom_signal_polls
         .lock()
         .expect("custom_signal_polls lock");
+    let slow_item_arrivals = server_state_for_assertions
+        .slow_item_arrivals
+        .lock()
+        .expect("slow_item_arrivals lock")
+        .clone();
     CapturedRun {
         output_json,
         error_json,
@@ -1317,6 +1351,7 @@ fn run_direct_workflow_capture_attempt(
         llm_requests,
         sql_requests,
         custom_signal_polls,
+        slow_item_arrivals,
         status_success,
         stderr,
         memory_peak_bytes,
@@ -4976,239 +5011,118 @@ enum ExpectedOutcome {
     Sleeps,
 }
 
-struct SmokeCase {
-    fixture: &'static str,
-    input: &'static [u8],
-    expect: ExpectedOutcome,
+/// Run one execution-smoke fixture end-to-end: read it, compile → compose →
+/// execute the composed artifact, and assert it reaches the expected terminal
+/// state. Extracted from the former `fixture_execution_smoke_battery` loop body
+/// so each fixture becomes its own `#[test]` (see `execution_smoke_cases!`) and
+/// rides the suite's test-level parallelism instead of running as one ~15-minute
+/// serial monolith; a failure now names the exact fixture that regressed.
+fn run_smoke_case(fixture: &str, input: &[u8], expect: ExpectedOutcome) {
+    let components_dir = direct_e2e_components_dir();
+    let json = smoke_fixture_json(fixture);
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        &format!("smoke-{fixture}"),
+        &json,
+        input,
+        false,
+    );
+    let verdict = match expect {
+        ExpectedOutcome::Completes => captured.status_success && captured.output_json.is_some(),
+        ExpectedOutcome::Fails => !captured.status_success && captured.error_json.is_some(),
+        ExpectedOutcome::Sleeps => captured.status_success && !captured.sleeps.is_empty(),
+    };
+    assert!(
+        verdict,
+        "execution smoke {fixture} [{expect:?}] did not reach the expected terminal state: \
+         status_success={}, completed={}, failed={}, sleeps={}\n      stderr: {}",
+        captured.status_success,
+        captured.output_json.is_some(),
+        captured.error_json.is_some(),
+        captured.sleeps.len(),
+        stderr_tail(&captured.stderr),
+    );
 }
 
-const EXECUTION_SMOKE_CASES: &[SmokeCase] = &[
+/// Expands each `fixture => input, Outcome` entry into its own
+/// `#[test] fn <fixture>()`. Splitting the cases into individual tests (rather
+/// than one `#[test]` looping a `const [SmokeCase]`) lets them run in parallel
+/// under `cargo test` and CI's default `--test-threads`; as a single serial
+/// test the battery was a ~15-minute pole that capped the job's wall-clock no
+/// matter how many cores were available.
+macro_rules! execution_smoke_cases {
+    ($( $fixture:ident => $input:literal, $expect:ident ),* $(,)?) => {
+        $(
+            #[test]
+            fn $fixture() {
+                run_smoke_case(stringify!($fixture), $input, ExpectedOutcome::$expect);
+            }
+        )*
+    };
+}
+
+execution_smoke_cases! {
     // --- Completes: pure control flow -------------------------------------
-    SmokeCase {
-        fixture: "simple_passthrough",
-        input: br#"{"input":"x"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_workflow",
-        input: br#"{"flag":true}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_nested",
-        input: br#"{"flag":true,"kind":"a"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_diamond",
-        input: br#"{"flag":true}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_diamond_asymmetric",
-        input: br#"{"flag":true,"urgent":false}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "conditional_length_comparison",
-        input: br#"{"description":"hello world this is a long description"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "edge_condition_priority",
-        input: br#"{"status":"active","tier":"gold"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "edge_condition_diamond",
-        input: br#"{"tier":"gold"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_simple",
-        input: br#"{"items":[1,2,3,4,5]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_complex_condition",
-        input: br#"{"users":[{"age":25,"active":true},{"age":17,"active":false}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "filter_with_not",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "switch_value_simple",
-        input: br#"{"status":"active"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "switch_routing_simple",
-        input: br#"{"status":"active"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_simple",
-        input:
-            br#"{"items":[{"category":"a","v":1},{"category":"b","v":2},{"category":"a","v":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_expected_keys",
-        input: br#"{"items":[{"category":"a"},{"category":"b"}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "group_by_nested_key",
-        input: br#"{"users":[{"profile":{"role":"admin"}},{"profile":{"role":"user"}}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_no_context",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_all_levels",
-        input: br#"{"message":"hi"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_direct_index_only",
-        input: br#"{"count":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    simple_passthrough => br#"{"input":"x"}"#, Completes,
+    conditional_workflow => br#"{"flag":true}"#, Completes,
+    conditional_nested => br#"{"flag":true,"kind":"a"}"#, Completes,
+    conditional_diamond => br#"{"flag":true}"#, Completes,
+    conditional_diamond_asymmetric => br#"{"flag":true,"urgent":false}"#, Completes,
+    conditional_length_comparison => br#"{"description":"hello world this is a long description"}"#, Completes,
+    edge_condition_priority => br#"{"status":"active","tier":"gold"}"#, Completes,
+    edge_condition_diamond => br#"{"tier":"gold"}"#, Completes,
+    filter_simple => br#"{"items":[1,2,3,4,5]}"#, Completes,
+    filter_complex_condition => br#"{"users":[{"age":25,"active":true},{"age":17,"active":false}]}"#, Completes,
+    filter_with_not => br#"{}"#, Completes,
+    switch_value_simple => br#"{"status":"active"}"#, Completes,
+    switch_routing_simple => br#"{"status":"active"}"#, Completes,
+    group_by_simple => br#"{"items":[{"category":"a","v":1},{"category":"b","v":2},{"category":"a","v":3}]}"#, Completes,
+    group_by_expected_keys => br#"{"items":[{"category":"a"},{"category":"b"}]}"#, Completes,
+    group_by_nested_key => br#"{"users":[{"profile":{"role":"admin"}},{"profile":{"role":"user"}}]}"#, Completes,
+    log_no_context => br#"{}"#, Completes,
+    log_all_levels => br#"{"message":"hi"}"#, Completes,
+    while_direct_index_only => br#"{"count":3}"#, Completes,
     // Transform-agent fixtures (split_*, while_*, log_*, transform_workflow)
     // now execute too — their map-fields input mappings were corrected to the
     // current `source_data` + `mappings` schema. See the section below.
     // --- Fails: explicit error / timeout ----------------------------------
-    SmokeCase {
-        fixture: "error_direct_simple",
-        input: br#"{"requestId":"r1"}"#,
-        expect: ExpectedOutcome::Fails,
-    },
+    error_direct_simple => br#"{"requestId":"r1"}"#, Fails,
     // Conditional-routed Error fixtures; inputs steer each to its Error branch
     // (these also exercise the passthrough->return-input composite fix).
-    SmokeCase {
-        fixture: "error_permanent",
-        input: br#"{"resourceId":"res-1","found":false}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_transient",
-        input: br#"{"success":false}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_with_context",
-        input: br#"{"orderId":"o-1","amount":5000}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "error_all_categories",
-        input: br#"{"errorType":"transient"}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "while_timeout",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Fails,
-    },
-    SmokeCase {
-        fixture: "split_timeout",
-        input: br#"{"items":[1,2,3],"item":1}"#,
-        expect: ExpectedOutcome::Fails,
-    },
+    error_permanent => br#"{"resourceId":"res-1","found":false}"#, Fails,
+    error_transient => br#"{"success":false}"#, Fails,
+    error_with_context => br#"{"orderId":"o-1","amount":5000}"#, Fails,
+    error_all_categories => br#"{"errorType":"transient"}"#, Fails,
+    while_timeout => br#"{}"#, Fails,
+    split_timeout => br#"{"items":[1,2,3],"item":1}"#, Fails,
     // --- Sleeps: durable delay --------------------------------------------
-    SmokeCase {
-        fixture: "delay_simple",
-        input: br#"{}"#,
-        expect: ExpectedOutcome::Sleeps,
-    },
-    SmokeCase {
-        fixture: "delay_dynamic",
-        input: br#"{"waitTime":5}"#,
-        expect: ExpectedOutcome::Sleeps,
-    },
+    delay_simple => br#"{}"#, Sleeps,
+    delay_dynamic => br#"{"waitTime":5}"#, Sleeps,
     // --- transform-agent fixtures (map-fields), now on the corrected schema --
     // These drive their subgraphs/loops through `transform/map-fields`; with
     // the input mappings fixed to `source_data` + `mappings` they execute.
-    SmokeCase {
-        fixture: "transform_workflow",
-        input: br#"{"input_field":"hello"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "split_workflow",
-        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "split_parallel_workflow",
-        input: br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    transform_workflow => br#"{"input_field":"hello"}"#, Completes,
+    split_workflow => br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#, Completes,
+    split_parallel_workflow => br#"{"items":[{"value":1},{"value":2},{"value":3}]}"#, Completes,
     // NOTE: split_with_schemas / split_with_schemas_failing are Tier-A only.
     // Their per-item input/output schemas make the terminal outcome
     // input-specific (a generic item either traps or passes regardless of the
     // "_failing" intent), so they aren't meaningful as input-agnostic smoke.
     // While loops that terminate via `loop.index` against a bound from input.
-    SmokeCase {
-        fixture: "while_with_loop_index",
-        input: br#"{"maxIterations":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_with_previous_outputs",
-        input: br#"{"items":[1,2],"count":2}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_max_iterations",
-        input: br#"{"value":0}"#,
-        expect: ExpectedOutcome::Completes,
-    },
+    while_with_loop_index => br#"{"maxIterations":3}"#, Completes,
+    while_with_previous_outputs => br#"{"items":[1,2],"count":2}"#, Completes,
+    while_max_iterations => br#"{"value":0}"#, Completes,
     // While loops whose condition reads a constant `steps.init.outputs.*`;
     // seeded so the guard is already false (zero iterations) — exercises
     // condition eval + clean exit without risking a non-terminating loop.
-    SmokeCase {
-        fixture: "while_simple",
-        input: br#"{"counter":5,"target":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_workflow",
-        input: br#"{"counter":5,"target":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "while_break_on_first",
-        input: br#"{"counter":0,"target":10}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_with_context",
-        input: br#"{"value":"v","timestamp":"t"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_workflow",
-        input: br#"{"value":"v"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_error_handling",
-        input: br#"{"value":"v"}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-    SmokeCase {
-        fixture: "log_in_loop",
-        input: br#"{"count":3}"#,
-        expect: ExpectedOutcome::Completes,
-    },
-];
+    while_simple => br#"{"counter":5,"target":3}"#, Completes,
+    while_workflow => br#"{"counter":5,"target":3}"#, Completes,
+    while_break_on_first => br#"{"counter":0,"target":10}"#, Completes,
+    log_with_context => br#"{"value":"v","timestamp":"t"}"#, Completes,
+    log_workflow => br#"{"value":"v"}"#, Completes,
+    log_error_handling => br#"{"value":"v"}"#, Completes,
+    log_in_loop => br#"{"count":3}"#, Completes,
+}
 
 fn smoke_fixture_json(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5222,48 +5136,6 @@ fn stderr_tail(stderr: &str) -> String {
     let trimmed = stderr.trim();
     let start = trimmed.len().saturating_sub(400);
     trimmed[start..].replace('\n', " | ")
-}
-
-#[test]
-fn fixture_execution_smoke_battery() {
-    let components_dir = direct_e2e_components_dir();
-
-    let mut failures: Vec<String> = Vec::new();
-    for case in EXECUTION_SMOKE_CASES {
-        let json = smoke_fixture_json(case.fixture);
-        let captured = run_direct_workflow_capture(
-            &components_dir,
-            &format!("smoke-{}", case.fixture),
-            &json,
-            case.input,
-            false,
-        );
-        let verdict = match case.expect {
-            ExpectedOutcome::Completes => captured.status_success && captured.output_json.is_some(),
-            ExpectedOutcome::Fails => !captured.status_success && captured.error_json.is_some(),
-            ExpectedOutcome::Sleeps => captured.status_success && !captured.sleeps.is_empty(),
-        };
-        if !verdict {
-            failures.push(format!(
-                "  {} [{:?}]: status_success={}, completed={}, failed={}, sleeps={}\n      stderr: {}",
-                case.fixture,
-                case.expect,
-                captured.status_success,
-                captured.output_json.is_some(),
-                captured.error_json.is_some(),
-                captured.sleeps.len(),
-                stderr_tail(&captured.stderr),
-            ));
-        }
-    }
-
-    eprintln!("execution smoke: {} cases run", EXECUTION_SMOKE_CASES.len());
-    assert!(
-        failures.is_empty(),
-        "{} execution smoke case(s) did not reach the expected terminal state:\n{}",
-        failures.len(),
-        failures.join("\n"),
-    );
 }
 
 // ===========================================================================
@@ -5395,6 +5267,11 @@ fn run_direct_workflow_embedded(
         .custom_signal_polls
         .lock()
         .expect("custom_signal_polls lock");
+    let slow_item_arrivals = server_state_for_assertions
+        .slow_item_arrivals
+        .lock()
+        .expect("slow_item_arrivals lock")
+        .clone();
     let stderr = match &result.exit {
         runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
         _ => String::new(),
@@ -5408,6 +5285,7 @@ fn run_direct_workflow_embedded(
         llm_requests,
         sql_requests,
         custom_signal_polls,
+        slow_item_arrivals,
         status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
         stderr,
         memory_peak_bytes: Some(result.memory_peak_bytes),
@@ -6399,7 +6277,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
     );
     let world = &compiled.component_artifacts.world_wit;
     assert!(
-        world.contains("export runtara:agent-pure-passthrough/capabilities@0.3.0"),
+        world.contains("export runtara:agent-pure-passthrough/capabilities@0.4.0"),
         "world must export the capabilities interface under the derived slug:\n{world}"
     );
     assert!(
@@ -6418,7 +6296,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         executor
             .invoke_capability(
                 &pre,
-                "runtara:agent-pure-passthrough/capabilities@0.3.0",
+                "runtara:agent-pure-passthrough/capabilities@0.4.0",
                 "run",
                 br#"{"input":"as-agent"}"#.to_vec(),
             )
@@ -6476,7 +6354,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-delay-agent/capabilities@0.3.0;")
+            .contains("export runtara:agent-delay-agent/capabilities@0.4.0;")
     );
 
     // 4a off-switch: durability is the ONLY runtime need of a plain transform
@@ -7283,7 +7161,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         child
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-shout-echo/capabilities@0.3.0;"),
+            .contains("export runtara:agent-shout-echo/capabilities@0.4.0;"),
         "child must export under its slug:\n{}",
         child.component_artifacts.world_wit
     );
@@ -9559,4 +9437,1697 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         "each tool call must own a per-call child checkpoint scope"
     );
     std::mem::forget(temp);
+}
+
+// ── Parallel Split overlap (docs/wasip3-parallelism.md Phase 3) ──────────────
+
+fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Split",
+        "steps": {{
+            "split": {{
+                "stepType": "Split",
+                "id": "split",
+                "config": {{
+                    "value": {{"valueType": "reference", "value": "data.items"}},
+                    "parallelism": {parallelism}
+                }},
+                "subgraph": {{
+                    "name": "Fetch",
+                    "steps": {{
+                        "fetch": {{
+                            "stepType": "Agent",
+                            "id": "fetch",
+                            "agentId": "http",
+                            "capabilityId": "http-request",
+                            "maxRetries": 0,
+                            "inputMapping": {{
+                                "method": {{"valueType": "immediate", "value": "GET"}},
+                                "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                            }}
+                        }},
+                        "finish": {{
+                            "stepType": "Finish",
+                            "id": "finish",
+                            "inputMapping": {{
+                                "status": {{"valueType": "reference", "value": "steps.fetch.outputs.status_code"}}
+                            }}
+                        }}
+                    }},
+                    "entryPoint": "fetch",
+                    "executionPlan": [{{"fromStep": "fetch", "toStep": "finish"}}]
+                }}
+            }},
+            "finish": {{
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {{
+                    "results": {{"valueType": "reference", "value": "steps.split.outputs"}}
+                }}
+            }}
+        }},
+        "entryPoint": "split",
+        "executionPlan": [{{"fromStep": "split", "toStep": "finish"}}],
+        "variables": {{}}
+    }}"#
+    )
+}
+
+/// A single-Agent diamond `start → {b, c} → finish` whose two branches each hit
+/// the mock `/slow-item` endpoint (docs/wasip3-parallel-branches-plan.md Phase
+/// 4a). The branches run concurrently in one waitable-set window; the merge
+/// `finish` reads BOTH branch outputs. `durable` toggles per-step checkpoints
+/// (4a.2): durable branches gate the launch on the step checkpoint so a replay
+/// never re-fires them.
+fn parallel_http_branches_graph(url: &str, durable: bool) -> String {
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Branches",
+        "durable": {durable},
+        "steps": {{
+            "start": {{
+                "stepType": "Agent",
+                "id": "start",
+                "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime",
+                "maxRetries": 0,
+                "inputMapping": {{}}
+            }},
+            "b": {{
+                "stepType": "Agent",
+                "id": "b",
+                "agentId": "http",
+                "capabilityId": "http-request",
+                "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }},
+            "c": {{
+                "stepType": "Agent",
+                "id": "c",
+                "agentId": "http",
+                "capabilityId": "http-request",
+                "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }},
+            "finish": {{
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {{
+                    "b_status": {{"valueType": "reference", "value": "steps.b.outputs.status_code"}},
+                    "c_status": {{"valueType": "reference", "value": "steps.c.outputs.status_code"}}
+                }}
+            }}
+        }},
+        "entryPoint": "start",
+        "executionPlan": [
+            {{"fromStep": "start", "toStep": "b"}},
+            {{"fromStep": "start", "toStep": "c"}},
+            {{"fromStep": "b", "toStep": "finish"}},
+            {{"fromStep": "c", "toStep": "finish"}}
+        ],
+        "variables": {{}}
+    }}"#
+    )
+}
+
+/// A non-durable diamond of two-Agent CHAINS `start → {b1→b2, c1→c2} → finish`
+/// (docs/wasip3-parallel-branches-plan.md §4.0, the depth-wavefront). Every branch
+/// step hits `/slow-item`, so a correct wavefront issues the requests in TWO waves
+/// of two ({b1,c1} then {b2,c2}); a serialized run issues four back-to-back.
+fn parallel_http_chain_branches_graph(url: &str) -> String {
+    let http_step = |id: &str| {
+        format!(
+            r#""{id}": {{
+                "stepType": "Agent", "id": "{id}", "agentId": "http",
+                "capabilityId": "http-request", "maxRetries": 0,
+                "inputMapping": {{
+                    "method": {{"valueType": "immediate", "value": "GET"}},
+                    "url": {{"valueType": "immediate", "value": "{url}/slow-item"}}
+                }}
+            }}"#
+        )
+    };
+    format!(
+        r#"{{
+        "name": "Parallel HTTP Chain Branches",
+        "durable": false,
+        "steps": {{
+            "start": {{
+                "stepType": "Agent", "id": "start", "agentId": "utils",
+                "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {{}}
+            }},
+            {b1}, {b2}, {c1}, {c2},
+            "finish": {{
+                "stepType": "Finish", "id": "finish",
+                "inputMapping": {{
+                    "b_status": {{"valueType": "reference", "value": "steps.b2.outputs.status_code"}},
+                    "c_status": {{"valueType": "reference", "value": "steps.c2.outputs.status_code"}}
+                }}
+            }}
+        }},
+        "entryPoint": "start",
+        "executionPlan": [
+            {{"fromStep": "start", "toStep": "b1"}},
+            {{"fromStep": "start", "toStep": "c1"}},
+            {{"fromStep": "b1", "toStep": "b2"}},
+            {{"fromStep": "c1", "toStep": "c2"}},
+            {{"fromStep": "b2", "toStep": "finish"}},
+            {{"fromStep": "c2", "toStep": "finish"}}
+        ],
+        "variables": {{}}
+    }}"#,
+        b1 = http_step("b1"),
+        b2 = http_step("b2"),
+        c1 = http_step("c1"),
+        c2 = http_step("c2"),
+    )
+}
+
+/// Serializes the wall-clock-sensitive parallel-split tests against each
+/// other AND absorbs poisoning: they assert timing ratios and request
+/// interleavings that melt when they share cores with each other. The rest
+/// of the battery may still run alongside — CI runs single-threaded anyway;
+/// this only removes the local `cargo test` flake class.
+static PARALLEL_TIMING_LOCK: Mutex<()> = Mutex::new(());
+
+/// The Phase-3 payoff test: a Split with `parallelism` over http-agent calls
+/// completes with correct per-item results, and the run is TIMED under both
+/// parallelism=1 and parallelism=N so the log shows whether the window
+/// genuinely overlaps agent I/O on this host (p2 wasi:http binding permitting).
+#[test]
+fn direct_wasm_execute_parallel_split_http_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+    const ITEMS: usize = 4;
+
+    for parallelism in [1u32, ITEMS as u32] {
+        // The http agent forwards through RUNTARA_HTTP_PROXY_URL (the harness
+        // mock); the target URL is carried in the proxy envelope and answered
+        // by the mock's /slow-item branch — no real dial happens.
+        let graph = parallel_http_split_graph("http://slow.invalid", parallelism);
+        let captured = run_direct_workflow_capture(
+            &components_dir,
+            &format!("parallel-http-{parallelism}"),
+            &graph,
+            br#"{"items":[1,2,3,4]}"#,
+            false,
+        );
+        assert!(
+            captured.status_success,
+            "parallel http split run failed: stderr={} error={:?}",
+            captured.stderr, captured.error_json
+        );
+        let output = captured.output_json.expect("completed output");
+
+        let results = output["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("split results missing: {output}"));
+        assert_eq!(results.len(), ITEMS, "all items must complete");
+        for result in results {
+            assert_eq!(result["status"], 200, "item result: {result}");
+        }
+
+        // Load-robust concurrency signal: the SPAN over which the mock
+        // observed the ITEMS requests arrive. Wall-clock ratios melt when the
+        // battery runs multi-threaded; request INTERLEAVING (timestamped at
+        // the mock) does not.
+        let arrivals = &captured.slow_item_arrivals;
+        assert_eq!(arrivals.len(), ITEMS, "every item must reach the upstream");
+        let span = arrivals
+            .iter()
+            .max()
+            .zip(arrivals.iter().min())
+            .map(|(max, min)| max.duration_since(*min))
+            .expect("arrival span");
+        eprintln!(
+            "[parallel-split-timing] parallelism={parallelism} arrival-span={}ms",
+            span.as_millis()
+        );
+        if parallelism == 1 {
+            // Request i+1 leaves only after response i, so arrivals span at
+            // least (ITEMS-1) think-times.
+            assert!(
+                span >= DELAY * (ITEMS as u32 - 1),
+                "sequential arrivals implausibly close: {span:?}"
+            );
+        } else {
+            // All launches fire before any response lands: every request
+            // arrives within one think-time.
+            assert!(
+                span < DELAY,
+                "parallel window failed to overlap agent I/O: arrivals span {span:?}"
+            );
+        }
+    }
+}
+
+/// Phase-4a payoff: a non-durable single-Agent diamond runs its two branches
+/// CONCURRENTLY. The merge sees both branch outputs, and the two `/slow-item`
+/// calls arrive at the mock within one think-time (they overlap) rather than
+/// serialized across two.
+#[test]
+fn direct_wasm_execute_parallel_branches_http_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_branches_graph("http://slow.invalid", false);
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-http",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "parallel branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["b_status"], 200, "branch b result: {output}");
+    assert_eq!(output["c_status"], 200, "branch c result: {output}");
+
+    // The mock timestamps each `/slow-item` arrival. Concurrent branches launch
+    // both requests before either response lands, so the two arrivals fall
+    // within one think-time; serialized branches would span at least one full
+    // think-time (request 2 leaves only after response 1).
+    let arrivals = &captured.slow_item_arrivals;
+    assert_eq!(
+        arrivals.len(),
+        2,
+        "both branch agents must reach the upstream"
+    );
+    let span = arrivals
+        .iter()
+        .max()
+        .zip(arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("arrival span");
+    eprintln!(
+        "[parallel-branches-timing] arrival-span={}ms",
+        span.as_millis()
+    );
+    assert!(
+        span < DELAY,
+        "parallel branches failed to overlap agent I/O: arrivals span {span:?}"
+    );
+}
+
+/// Observational-timing payoff: the concurrent branch scheduler stamps each
+/// branch's REAL launch/settle wall clock into its slot and carries the pair on the
+/// assemble-pass `step_debug_end` event. For the slow diamond `start → {b,c} →
+/// finish` (each branch a ~400ms `/slow-item` GET), the recorded
+/// `[launched_at_ms, settled_at_ms]` intervals of b and c must OVERLAP — which is
+/// exactly what lets the timeline/replay render true concurrency instead of the
+/// sequential assemble cascade the per-step assemble timestamps otherwise imply.
+#[test]
+fn direct_wasm_execute_parallel_branches_launch_settle_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_branches_graph("http://slow.invalid", false);
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-launch-settle",
+        &graph,
+        br#"{}"#,
+        true, // track events — we assert on the recorded step_debug_end payloads
+    );
+    assert!(
+        captured.status_success,
+        "parallel branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+
+    // The launch/settle interval each branch recorded on its debug-end event.
+    let interval = |step: &str| -> (u64, u64) {
+        let end = captured
+            .events
+            .iter()
+            .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == step)
+            .unwrap_or_else(|| panic!("no step_debug_end for branch '{step}'"));
+        let launched = end.payload_json["launched_at_ms"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "branch '{step}' end missing launched_at_ms: {}",
+                    end.payload_json
+                )
+            });
+        let settled = end.payload_json["settled_at_ms"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "branch '{step}' end missing settled_at_ms: {}",
+                    end.payload_json
+                )
+            });
+        assert!(
+            launched > 0 && settled >= launched,
+            "branch '{step}' recorded an invalid interval [{launched},{settled}]"
+        );
+        (launched, settled)
+    };
+    let (lb, sb) = interval("b");
+    let (lc, sc) = interval("c");
+    eprintln!(
+        "[launch-settle] b=[{lb},{sb}] ({}ms)  c=[{lc},{sc}] ({}ms)",
+        sb - lb,
+        sc - lc
+    );
+
+    // Each interval reflects the real ~400ms async HTTP wait (settle is a true
+    // wall clock later than launch), not an instant assemble record.
+    assert!(
+        sb - lb >= 200,
+        "branch b interval too short to be the real HTTP wait: {}ms",
+        sb - lb
+    );
+    assert!(
+        sc - lc >= 200,
+        "branch c interval too short to be the real HTTP wait: {}ms",
+        sc - lc
+    );
+
+    // THE overlap: the two intervals intersect. A serialized cascade would give
+    // launch_c >= settle_b (c launches only after b settles), so no intersection —
+    // this is precisely what distinguishes concurrent from cascade.
+    let overlap_start = lb.max(lc);
+    let overlap_end = sb.min(sc);
+    assert!(
+        overlap_start < overlap_end,
+        "branch intervals do not overlap (serialized cascade): b=[{lb},{sb}] c=[{lc},{sc}]"
+    );
+
+    // The combined span is one think-time, not two: the diamond ran in ~400ms of
+    // wall clock, not ~800ms as a serialized pair would.
+    let combined_span = sb.max(sc) - lb.min(lc);
+    assert!(
+        (combined_span as u128) < 2 * DELAY.as_millis(),
+        "combined launch→settle span {combined_span}ms implies serialization (>= 2x think time)"
+    );
+
+    // Additive + backward-compatible: sequential steps (the pre-fan-out `start`,
+    // the `finish` merge) carry no launch/settle pair and fall back to assemble
+    // timing — the fields appear only for the concurrently scheduled branches.
+    for seq in ["start", "finish"] {
+        if let Some(end) = captured
+            .events
+            .iter()
+            .find(|e| e.subtype == "step_debug_end" && e.payload_json["step_id"] == seq)
+        {
+            assert!(
+                end.payload_json.get("launched_at_ms").is_none()
+                    && end.payload_json.get("settled_at_ms").is_none(),
+                "sequential step '{seq}' must not carry a launch/settle pair: {}",
+                end.payload_json
+            );
+        }
+    }
+}
+
+/// Phase-4c.1: a parallel branch chain may contain SYNC non-Agent steps. Branch b
+/// is `b1(agent) → blog(Log) → b2(agent)`; branch c is `c1 → c2`. The Log runs at
+/// depth 1 (assemble-only, no launch) alongside sibling agent `c2`, and the merge
+/// still reads both chains' terminal agent outputs — proving sync steps interleave
+/// correctly in the wavefront.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_sync_log_step() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With Sync Step",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "b1": {"stepType":"Agent","id":"b1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B1"}}},
+            "blog": {"stepType":"Log","id":"blog","name":"branch log","level":"info","message":"in branch b"},
+            "b2": {"stepType":"Agent","id":"b2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B2"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.b2.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"b1"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"b1","toStep":"blog"},
+            {"fromStep":"blog","toStep":"b2"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"b2","toStep":"finish"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-sync-step",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "sync-step branch run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "B2",
+        "branch b (through a Log step) terminal: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
+/// Phase-4c.3: a parallel branch may contain an in-branch CONDITIONAL (a composite
+/// node). Branch b is `bcond(Conditional) → bmerge`; the conditional's arms (bt/bf)
+/// re-join at `bmerge`. It runs BLOCKING at depth 0 (no launch) beside sibling
+/// chain c; the always-true condition takes `bt`, and `bmerge` reads its output —
+/// proving in-branch control flow executes and the merge still reads both branches.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_conditional() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With Conditional",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bcond": {"stepType":"Conditional","id":"bcond","condition":{"type":"operation","op":"EQ","arguments":[{"value":"x","valueType":"immediate"},{"value":"x","valueType":"immediate"}]}},
+            "bt": {"stepType":"Agent","id":"bt","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"TOOK_TRUE"}}},
+            "bf": {"stepType":"Agent","id":"bf","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"TOOK_FALSE"}}},
+            "bmerge": {"stepType":"Agent","id":"bmerge","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.bt.outputs"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bmerge.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bcond"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bcond","toStep":"bt","label":"true"},
+            {"fromStep":"bcond","toStep":"bf","label":"false"},
+            {"fromStep":"bt","toStep":"bmerge"},
+            {"fromStep":"bf","toStep":"bmerge"},
+            {"fromStep":"bmerge","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-conditional",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch conditional run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "TOOK_TRUE",
+        "branch b conditional took the true arm: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
+/// Phase-4c.3: a parallel branch may contain a nested WHILE loop (a `next_plan`
+/// composite). Branch b is `bloop(While) → bafter`; the loop runs blocking at depth
+/// 0 beside sibling `c1`, then `bafter` runs at depth 1. The merge reads `bafter`
+/// (after the loop) and `c2` — proving nested loops execute in a parallel branch.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_while() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With While",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bloop": {
+                "stepType":"While","id":"bloop","name":"loop",
+                "condition":{"type":"operation","op":"LT","arguments":[{"valueType":"reference","value":"loop.index"},{"valueType":"immediate","value":2}]},
+                "subgraph":{"name":"iter","entryPoint":"iterfin","steps":{"iterfin":{"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}},"executionPlan":[]},
+                "config":{"maxIterations":10}
+            },
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER_LOOP"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bloop"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bloop","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-while",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch while run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "AFTER_LOOP",
+        "branch b step after the loop ran: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
+/// Phase-4c (final shape): a DURABLE parallel branch may contain an in-branch
+/// WaitForSignal. Branch b is `bwait(WaitForSignal) → bafter`; the wait runs LAST
+/// at depth 0 (after sibling `c1` checkpoints), reads the delivered signal, and the
+/// merge reads `bafter` (after the wait) and `c2`. A second run (resume with the
+/// signal retained) reproduces the result without hanging or re-firing — proving
+/// the wavefront's deferred-suspend ordering + replay are correct.
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "parallel-branches-wait";
+    let signal = serde_json::json!({ "approved": true });
+    let graph = r#"{
+        "name": "Parallel Branches With Wait",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bwait": {"stepType":"WaitForSignal","id":"bwait","name":"Approval","pollIntervalMs":0,"responseSchema":{"approved":{"type":"boolean","required":true}}},
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.bwait.outputs.approved"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bwait"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bwait","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+
+    let first = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        vec![signal.clone()],
+    );
+    assert!(
+        first.status_success,
+        "in-branch wait run failed: stderr={} error={:?}",
+        first.stderr, first.error_json
+    );
+    let out1 = first.output_json.clone().expect("completed output");
+    assert_eq!(
+        out1["b"], true,
+        "branch b read the delivered signal: {out1}"
+    );
+    assert_eq!(out1["c"], "C2", "branch c terminal: {out1}");
+
+    // Resume (replay with the signal retained): completes identically, no hang.
+    let second = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        vec![signal],
+    );
+    assert!(
+        second.status_success,
+        "in-branch wait resume failed: stderr={}",
+        second.stderr
+    );
+    assert_eq!(
+        second.output_json,
+        Some(serde_json::json!({ "b": true, "c": "C2" })),
+        "resume reproduces the delivered-signal result"
+    );
+}
+
+/// T2.0: a DURABLE parallel branch may contain a suspending COMPOSITE — here a While
+/// loop whose body runs a durable Delay (a suspension NESTED one level down, the R2
+/// remnant that previously linearised). Branch b is `bloop(While) → bafter`;
+/// `node_body_suspends(While)` (its body contains a Delay) routes it to pass-2 so
+/// sibling `c1` checkpoints before the composite may suspend, and
+/// `plan_branch_diamond` gates the branch on `durable`. The merge reads `bafter`
+/// (after the loop) and `c2` — proving a suspending composite compiles and executes
+/// in a parallel branch. (A Wait/Delay nested inside a *Conditional* arm instead
+/// would trip the separate E073 reconvergence validator, which sees the arm as a
+/// second fan-out; the loop body keeps the composite a single re-converging node.)
+#[test]
+fn direct_wasm_execute_parallel_branches_with_inbranch_while_delay() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches With While+Delay",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bloop": {
+                "stepType":"While","id":"bloop","name":"loop",
+                "condition":{"type":"operation","op":"LT","arguments":[{"valueType":"reference","value":"loop.index"},{"valueType":"immediate","value":2}]},
+                "subgraph":{"name":"iter","entryPoint":"idelay","steps":{
+                    "idelay":{"stepType":"Delay","id":"idelay","durationMs":{"valueType":"immediate","value":0}},
+                    "iterfin":{"stepType":"Finish","id":"iterfin","inputMapping":{"n":{"valueType":"immediate","value":5}}}
+                },"executionPlan":[{"fromStep":"idelay","toStep":"iterfin"}]},
+                "config":{"maxIterations":10}
+            },
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER_LOOP"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C2"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c2.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bloop"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bloop","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-while-delay",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "in-branch while+delay run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(
+        output["b"], "AFTER_LOOP",
+        "branch b step after the suspending loop ran: {output}"
+    );
+    assert_eq!(output["c"], "C2", "branch c terminal: {output}");
+}
+
+/// T2.1: the per-branch SEGMENT SCHEDULER drives UNBALANCED pure-Agent chains —
+/// branch a is 3 steps (a1→a2→a3), branch b is 1 step (b1). The scheduler advances
+/// each branch by its own cursor as its subtask settles (branch b reaches DONE while
+/// branch a is still driving a2/a3), rather than lock-stepping by depth. The merge
+/// must read a's terminal (A3) and b's terminal (B1) regardless of interleaving —
+/// proving the cursor/drive state machine is correct for asymmetric chain lengths.
+#[test]
+fn direct_wasm_execute_parallel_branches_scheduler_unbalanced_chains() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = r#"{
+        "name": "Parallel Branches Scheduler Unbalanced",
+        "durable": false,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "a1": {"stepType":"Agent","id":"a1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"A1"}}},
+            "a2": {"stepType":"Agent","id":"a2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.a1.outputs"}}},
+            "a3": {"stepType":"Agent","id":"a3","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"A3"}}},
+            "b1": {"stepType":"Agent","id":"b1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"B1"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"a":{"valueType":"reference","value":"steps.a3.outputs"},"b":{"valueType":"reference","value":"steps.b1.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"a1"},
+            {"fromStep":"start","toStep":"b1"},
+            {"fromStep":"a1","toStep":"a2"},
+            {"fromStep":"a2","toStep":"a3"},
+            {"fromStep":"a3","toStep":"finish"},
+            {"fromStep":"b1","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-scheduler-unbalanced",
+        graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "scheduler unbalanced-chains run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["a"], "A3", "branch a 3-step terminal: {output}");
+    assert_eq!(output["b"], "B1", "branch b 1-step terminal: {output}");
+}
+
+/// T2.2a — cross-suspension progress: a schedulable sibling completes BEFORE a
+/// suspending branch reaches its wait. Branch c is a durable 3-step pure chain
+/// (c1→c2→c3); branch b is bwait(WaitForSignal, short timeout)→bafter.
+/// `emit_parallel_branches` partitions the fan-out and runs c through the scheduler
+/// TO COMPLETION, then the wavefront runs b — so by the time bwait is reached, ALL of
+/// c (including its DEEPEST step c3) has already checkpointed. The depth-wavefront
+/// (T2.0) would have parked c3 until after the wait resolved (bwait is at depth 0,
+/// c3 at depth 2). One run with no signal + a short timeout returns quickly; we
+/// assert c3's checkpoint is present regardless of the wait's timeout outcome.
+#[test]
+fn direct_wasm_execute_parallel_branches_sibling_completes_before_wait() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "parallel-branches-sibling-before-wait";
+    let graph = r#"{
+        "name": "Sibling Completes Before Wait",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"go"}}},
+            "bwait": {"stepType":"WaitForSignal","id":"bwait","name":"Approval","pollIntervalMs":50,"timeoutMs":{"valueType":"immediate","value":250}},
+            "bafter": {"stepType":"Agent","id":"bafter","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"AFTER"}}},
+            "c1": {"stepType":"Agent","id":"c1","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C1"}}},
+            "c2": {"stepType":"Agent","id":"c2","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"steps.c1.outputs"}}},
+            "c3": {"stepType":"Agent","id":"c3","agentId":"utils","capabilityId":"return-input","maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":"C3"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b":{"valueType":"reference","value":"steps.bafter.outputs"},"c":{"valueType":"reference","value":"steps.c3.outputs"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"bwait"},
+            {"fromStep":"start","toStep":"c1"},
+            {"fromStep":"bwait","toStep":"bafter"},
+            {"fromStep":"bafter","toStep":"finish"},
+            {"fromStep":"c1","toStep":"c2"},
+            {"fromStep":"c2","toStep":"c3"},
+            {"fromStep":"c3","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+
+    // No signal: branch c runs fully via the scheduler, THEN the wavefront reaches
+    // bwait (which times out after 250ms). Branch c's deepest step c3 has already
+    // checkpointed by then — the T2.2a payoff.
+    let run = run_wait_workflow(
+        &components_dir,
+        workflow_id,
+        graph,
+        b"{}",
+        Vec::new(),
+        Vec::new(),
+    );
+    let checkpoint_ids: Vec<&String> = run.checkpoints.iter().map(|c| &c.checkpoint_id).collect();
+    let has_c3 = run
+        .checkpoints
+        .iter()
+        .any(|c| c.checkpoint_id.contains("c3") && !c.state.is_empty());
+    assert!(
+        has_c3,
+        "T2.2a: branch c's DEEPEST step c3 must checkpoint before the wavefront reaches \
+         bwait; checkpoints={checkpoint_ids:?}"
+    );
+}
+
+/// Phase-4b: a diamond of two-Agent CHAINS runs as a depth-wavefront. The four
+/// `/slow-item` calls arrive in TWO waves of two ({b1,c1} then {b2,c2}) — so the
+/// arrival span is about ONE think-time, not the ~three a fully serialized run
+/// would take. The merge reads both chains' terminal outputs.
+#[test]
+fn direct_wasm_execute_parallel_chain_branches_wavefront_overlap() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    const DELAY: Duration = Duration::from_millis(400);
+
+    let graph = parallel_http_chain_branches_graph("http://slow.invalid");
+    let captured = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-chain-branches",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        captured.status_success,
+        "chain branches run failed: stderr={} error={:?}",
+        captured.stderr, captured.error_json
+    );
+    let output = captured.output_json.expect("completed output");
+    assert_eq!(output["b_status"], 200, "chain b terminal: {output}");
+    assert_eq!(output["c_status"], 200, "chain c terminal: {output}");
+
+    // Four arrivals in two waves. Wavefront span ≈ one think-time (wave gap);
+    // serialized would span ≈ three. Assert < 2 think-times to distinguish.
+    let arrivals = &captured.slow_item_arrivals;
+    assert_eq!(
+        arrivals.len(),
+        4,
+        "all four chain steps must reach upstream"
+    );
+    let span = arrivals
+        .iter()
+        .max()
+        .zip(arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("arrival span");
+    eprintln!(
+        "[parallel-chain-branches-timing] arrival-span={}ms",
+        span.as_millis()
+    );
+    assert!(
+        span < DELAY * 2,
+        "chain branches failed to overlap per depth (span {span:?} implies serialized)"
+    );
+}
+
+/// Phase-4a.2: a DURABLE branch diamond is replay-safe. A fresh run fires both
+/// branch agents (2 upstream arrivals) and checkpoints each. A resume that
+/// preloads those checkpoints must NOT re-fire either agent — the launch gate
+/// sees each step checkpoint HIT and skips the invoke; assemble replays the
+/// stored result. Zero new arrivals, identical merge output.
+#[test]
+fn direct_wasm_execute_parallel_branches_durable_resume_no_double_fire() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    let graph = parallel_http_branches_graph("http://slow.invalid", true);
+
+    // Fresh run: both branches fire and checkpoint.
+    let first = run_direct_workflow_capture(
+        &components_dir,
+        "parallel-branches-durable",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(
+        first.status_success,
+        "durable branches fresh run failed: stderr={} error={:?}",
+        first.stderr, first.error_json
+    );
+    assert_eq!(
+        first.slow_item_arrivals.len(),
+        2,
+        "both branch agents fire on the fresh run"
+    );
+    let out1 = first.output_json.clone().expect("fresh output");
+    assert_eq!(out1["b_status"], 200, "fresh branch b: {out1}");
+    assert_eq!(out1["c_status"], 200, "fresh branch c: {out1}");
+
+    // Resume: preload the fresh run's durable writes; each branch's step
+    // checkpoint HITs, so the launch gate skips both invokes.
+    let preload: Vec<(String, Vec<u8>)> = first
+        .checkpoints
+        .iter()
+        .filter(|c| !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+    assert!(
+        !preload.is_empty(),
+        "durable fresh run must have written step checkpoints"
+    );
+    let second = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "parallel-branches-durable",
+        &graph,
+        br#"{}"#,
+        false,
+        preload,
+        Vec::new(),
+    );
+    assert!(
+        second.status_success,
+        "durable branches resume failed: stderr={} error={:?}",
+        second.stderr, second.error_json
+    );
+    assert_eq!(
+        second.slow_item_arrivals.len(),
+        0,
+        "durable replay must NOT re-fire the branch agents (double-fire)"
+    );
+    let out2 = second.output_json.expect("resume output");
+    assert_eq!(out2["b_status"], 200, "resume branch b: {out2}");
+    assert_eq!(out2["c_status"], 200, "resume branch c: {out2}");
+}
+
+/// A BREAKPOINT on one branch of a durable diamond FIRES (suspends) in debug mode
+/// while the sibling branch still runs in parallel — and resume completes without
+/// re-firing either agent. This is the parallel-branch analogue of the sequential
+/// breakpoint: `node_has_breakpoint` routes the breakpointed branch to the
+/// assemble-last pass and skips its async launch, so the breakpoint pauses BEFORE a
+/// blocking invoke (no resume double-fire); the non-breakpointed sibling runs first
+/// via the scheduler and checkpoints before the suspend.
+#[test]
+fn direct_wasm_execute_breakpoint_in_parallel_branch_fires_and_resumes() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+    // start → {b (BREAKPOINT), c} → finish; durable so the suspend is replay-safe.
+    let graph = r#"{
+        "name": "Breakpoint In Parallel Branch",
+        "durable": true,
+        "steps": {
+            "start": {"stepType":"Agent","id":"start","agentId":"utils","capabilityId":"get-current-iso-datetime","maxRetries":0,"inputMapping":{}},
+            "b": {"stepType":"Agent","id":"b","agentId":"http","capabilityId":"http-request","maxRetries":0,"breakpoint":true,"inputMapping":{"method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":"http://slow.invalid/slow-item"}}},
+            "c": {"stepType":"Agent","id":"c","agentId":"http","capabilityId":"http-request","maxRetries":0,"inputMapping":{"method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":"http://slow.invalid/slow-item"}}},
+            "finish": {"stepType":"Finish","id":"finish","inputMapping":{"b_status":{"valueType":"reference","value":"steps.b.outputs.status_code"},"c_status":{"valueType":"reference","value":"steps.c.outputs.status_code"}}}
+        },
+        "entryPoint": "start",
+        "executionPlan": [
+            {"fromStep":"start","toStep":"b"},
+            {"fromStep":"start","toStep":"c"},
+            {"fromStep":"b","toStep":"finish"},
+            {"fromStep":"c","toStep":"finish"}
+        ],
+        "variables": {}
+    }"#;
+    let debug_env = vec![("DEBUG_MODE".to_string(), "true".to_string())];
+
+    // RUN 1 (debug): sibling c runs (fires + checkpoints); branch b's breakpoint
+    // fires and SUSPENDS before b's invoke → no completion output, only c arrived.
+    let run1 = run_direct_workflow_capture_full(
+        &components_dir,
+        "breakpoint-parallel-branch",
+        graph,
+        br#"{}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        debug_env.clone(),
+    );
+    let cp_ids: Vec<&String> = run1.checkpoints.iter().map(|c| &c.checkpoint_id).collect();
+    // The breakpoint fired: it SUSPENDED (no completion output) and wrote its
+    // fire-once checkpoint for step `b`.
+    assert!(
+        run1.output_json.is_none(),
+        "the breakpoint must SUSPEND run 1, not complete: output={:?}",
+        run1.output_json
+    );
+    assert!(
+        run1.checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("breakpoint::b")),
+        "run 1 must write the breakpoint checkpoint for `b`: {cp_ids:?}"
+    );
+    // The sibling `c` ran in parallel and checkpointed BEFORE the suspend...
+    assert!(
+        run1.checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("http-request::c") && !c.state.is_empty()),
+        "sibling branch `c` must complete + checkpoint before the breakpoint suspend: {cp_ids:?}"
+    );
+    // ...while `b`'s invoke was SKIPPED (pause-before-run): exactly one HTTP arrival
+    // (c), and no result checkpoint for `b`.
+    assert_eq!(
+        run1.slow_item_arrivals.len(),
+        1,
+        "only the sibling `c` fires on run 1; the breakpoint pauses before `b`'s invoke"
+    );
+    assert!(
+        !run1
+            .checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.contains("http-request::b") && !c.state.is_empty()),
+        "`b`'s invoke must NOT have run before the breakpoint suspend: {cp_ids:?}"
+    );
+
+    let preload: Vec<(String, Vec<u8>)> = run1
+        .checkpoints
+        .iter()
+        .filter(|c| !c.state.is_empty())
+        .map(|c| (c.checkpoint_id.clone(), c.state.clone()))
+        .collect();
+
+    // RUN 2 (debug + resume): the breakpoint checkpoint HITs → skip; b's invoke
+    // fires for the first time (the frontier); c's step checkpoint HITs → no re-fire.
+    let run2 = run_direct_workflow_capture_full(
+        &components_dir,
+        "breakpoint-parallel-branch",
+        graph,
+        br#"{}"#,
+        false,
+        preload,
+        Vec::new(),
+        debug_env,
+    );
+    let out2 = run2.output_json.clone().unwrap_or_else(|| {
+        panic!(
+            "resume must COMPLETE past the breakpoint; stderr={}",
+            run2.stderr
+        )
+    });
+    assert_eq!(out2["b_status"], 200, "resumed branch b: {out2}");
+    assert_eq!(out2["c_status"], 200, "resumed branch c: {out2}");
+    // Exactly ONE new arrival on resume — `b` (the frontier, fired for the first
+    // time after the breakpoint is skipped). `c`'s checkpoint HITs, so it does not
+    // re-fire: no double-fire across the suspend.
+    assert_eq!(
+        run2.slow_item_arrivals.len(),
+        1,
+        "resume fires ONLY `b` (breakpoint skipped → first invoke); `c` replays from checkpoint"
+    );
+}
+
+/// A pause signalled DURING a parallel window is observed at the drain
+/// wakeups, but the suspend fires only at the CHUNK BOUNDARY — after every
+/// subtask resolved and assemble checkpointed the durable items — so the
+/// resumed run replays from checkpoints and never re-fires the agents.
+#[test]
+fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+
+    // Slow proxy stub: the host-io hyper client POSTs the proxy envelope
+    // here; each response takes 300ms so the drain loop genuinely waits
+    // (and polls) while subtasks are in flight. Thread-per-connection.
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind slow proxy stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(300));
+                        let body = br#"{"status":200,"headers":{},"body":{"ok":true}}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // Durable workflow (graph default) so assemble checkpoints each item.
+    let graph = parallel_http_split_graph(&stub_url, 4);
+    let graph: ExecutionGraph = serde_json::from_str(&graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-pause-resume".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("parallel split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(br#"{"items":[1,2,3,4]}"#));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let run_once = |host: Arc<PersistingRuntimeHost>| {
+        let env = env.clone();
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&compiled.wasm_path)
+                .await
+                .expect("load parallel artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env,
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+                )
+                .await
+        })
+    };
+
+    // PAUSE requested before the run: the drain-wakeup polls see it while the
+    // four subtasks are in flight; the suspend fires at the chunk boundary.
+    host.suspend_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let first = run_once(host.clone());
+    match first.exit {
+        runtara_component_host::InvokeExit::Suspended(_) => {}
+        other => panic!("pause during the window must SUSPEND, got {other:?}"),
+    }
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "a lifecycle pause must not surface as a failure"
+    );
+    let first_run_hits = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        first_run_hits, 4,
+        "all four launched calls must resolve before the suspend"
+    );
+
+    // RESUME: replay-from-start. Every item checkpointed during assemble HITs
+    // (launch gate + durable block), so the agents never re-fire.
+    host.suspend_requested
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let second = run_once(host.clone());
+    let output = match second.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed run must complete, got {other:?}"),
+    };
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), 4);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        first_run_hits,
+        "the resumed run must replay from checkpoints — zero new agent calls"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// Rate-limited upstreams inside a parallel window: every item's FIRST call
+/// (the four speculative launches) answers 429 + retry-after; assemble then
+/// classifies each memoized failure as rate-limited, takes the keyed backoff
+/// sleep, re-invokes, and succeeds. Proves the memo slots preserve the full
+/// error-info (retry_after_ms included), the per-item retry machinery engages
+/// per item, and nothing fails or double-fires.
+#[test]
+fn direct_wasm_execute_parallel_split_durable_rate_limited_items_retry_and_succeed() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+
+    // Proxy stub: the first `ITEMS` requests are 429 (rate limited, with a
+    // retry-after-ms header the http agent folds into error-info); later
+    // requests answer 200. The parallel window launches all four attempt-1
+    // calls before any retry can arrive, so count-based scripting is exact.
+    const ITEMS: u32 = 4;
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind rate-limit stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Keep attempt-1 calls in flight briefly so the four
+                        // launches genuinely overlap before any 429 lands.
+                        thread::sleep(Duration::from_millis(100));
+                        let body = if n < ITEMS {
+                            // Proxy envelope for an upstream 429. The agent
+                            // reads retry-after-ms from the RESPONSE headers.
+                            br#"{"status":429,"headers":{"retry-after-ms":"50"},"body":{"error":"rate limited"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // Default agent retry policy (maxRetries absent => effective default) on
+    // a durable graph: the memoized 429 is consumed by the DURABLE per-attempt
+    // retry branch — the most intricate memo path.
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-rate-limited".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("parallel rate-limited split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load parallel artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match result.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("rate-limited items must retry and complete, got {other:?}"),
+    };
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "429s within the retry budget must never fail the workflow"
+    );
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), ITEMS as usize);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2 * ITEMS,
+        "each item must call exactly twice: the launched 429 + one retry"
+    );
+    // DURABLE concurrent backoff (§3.4): each item's failed attempt-1 is
+    // persisted under its `::attempt::1` checkpoint (so a resume never
+    // re-fires it), and the backoff is a concurrent TIMER subtask — NOT the
+    // blocking `durable-sleep-checkpoint` the sequential path used. So: one
+    // attempt-1 checkpoint per item, and zero durable sleeps.
+    let attempt_writes = host
+        .checkpoint_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| id.contains("::attempt::1"))
+        .count();
+    assert_eq!(
+        attempt_writes, ITEMS as usize,
+        "one per-attempt checkpoint per rate-limited item (durable replay guard)"
+    );
+    assert!(
+        host.sleep_ids.lock().unwrap().is_empty(),
+        "durable in-window backoff is a timer subtask, not a durable sleep: {:?}",
+        host.sleep_ids.lock().unwrap()
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// NON-DURABLE rate-limited items: the retry BACKOFFS overlap. Every item's
+/// first call answers 429 + retry-after; the window classifies each failure,
+/// fires the backoff as a CONCURRENT timer subtask, drains the timers
+/// together, and re-invokes concurrently — so all four backoffs run in one
+/// window instead of serializing. Asserts correctness (2 calls/item, correct
+/// output) AND overlap (the four retry requests arrive within one backoff
+/// span, not four sequential think+backoff cycles).
+#[test]
+fn direct_wasm_execute_parallel_split_concurrent_backoff_overlaps() {
+    let _timing_guard = PARALLEL_TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let components_dir = direct_e2e_components_dir();
+
+    const ITEMS: u32 = 4;
+    const THINK: Duration = Duration::from_millis(120);
+    // Records (hit_index, arrival_instant) so the test can isolate the retry
+    // (attempt-2) requests and measure how tightly they cluster.
+    let arrivals: Arc<Mutex<Vec<(u32, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub_arrivals = arrivals.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    let arrivals = stub_arrivals.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        arrivals.lock().unwrap().push((n, Instant::now()));
+                        thread::sleep(THINK);
+                        let body = if n < ITEMS {
+                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rate limited"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // NON-durable graph => the agent is non-durable => the window owns the
+    // retry backoff (concurrent timer subtasks).
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["durable"] = Value::Bool(false);
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "parallel-concurrent-backoff".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("non-durable concurrent-backoff split compiles");
+
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&compiled.wasm_path)
+            .await
+            .expect("load parallel artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env,
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+            )
+            .await
+    });
+
+    let output = match result.exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("concurrent-backoff items must retry and complete, got {other:?}"),
+    };
+    assert!(host.failed.lock().unwrap().is_none());
+    let output: Value = serde_json::from_slice(&output).expect("output json");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), ITEMS as usize);
+    for result in results {
+        assert_eq!(result["status"], 200, "item result: {result}");
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2 * ITEMS,
+        "each item calls exactly twice: the 429 + one retry"
+    );
+
+    // Overlap proof: the ITEMS retry requests (hit indices >= ITEMS) must all
+    // arrive within a SINGLE backoff+think span, not four sequential cycles.
+    let arrivals = arrivals.lock().unwrap();
+    let retry_arrivals: Vec<Instant> = arrivals
+        .iter()
+        .filter(|(n, _)| *n >= ITEMS)
+        .map(|(_, t)| *t)
+        .collect();
+    assert_eq!(
+        retry_arrivals.len(),
+        ITEMS as usize,
+        "every item must retry"
+    );
+    let span = retry_arrivals
+        .iter()
+        .max()
+        .zip(retry_arrivals.iter().min())
+        .map(|(max, min)| max.duration_since(*min))
+        .expect("retry arrival span");
+    eprintln!(
+        "[concurrent-backoff] retry-arrival-span={}ms (sequential would be ~{}ms)",
+        span.as_millis(),
+        (THINK.as_millis() + 40) * (ITEMS as u128 - 1)
+    );
+    // Concurrent: all retries fire within one backoff round. Sequential would
+    // span (ITEMS-1) * (think + backoff) ≈ 480ms. One think-time is a
+    // load-robust ceiling for the concurrent case.
+    assert!(
+        span < THINK,
+        "retry backoffs failed to overlap: span {span:?} (>= one think-time)"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
+}
+
+/// DURABLE concurrent backoff — replay never double-fires. A first run of a
+/// durable rate-limited split (429→retry→200) settles every item and
+/// checkpoints the step results. A second run with the SAME checkpoint store
+/// (a resume) HITs every item's step checkpoint at launch and completes with
+/// the same outputs and ZERO new upstream calls — the per-attempt + step
+/// checkpoints prevent re-firing any agent call.
+#[test]
+fn direct_wasm_execute_parallel_split_durable_backoff_replay_no_double_fire() {
+    let components_dir = direct_e2e_components_dir();
+    const ITEMS: u32 = 4;
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let stub_hits = hits.clone();
+    let stub = thread::spawn(move || {
+        loop {
+            if stub_stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let hits = stub_hits.clone();
+                    thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(60));
+                        let body = if n < ITEMS {
+                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rl"}}"#.to_vec()
+                        } else {
+                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // DURABLE (graph default) rate-limited parallel split.
+    let graph = parallel_http_split_graph(&stub_url, ITEMS);
+    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+    graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
+        .as_object_mut()
+        .expect("fetch step")
+        .remove("maxRetries");
+    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed(
+        DirectCompilationInput {
+            workflow_id: "durable-backoff-replay".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+    )
+    .expect("durable concurrent-backoff split compiles");
+
+    // The SAME host across both runs — its checkpoint store persists, exactly
+    // as the real persistence layer does across a resume.
+    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let run = |host: Arc<PersistingRuntimeHost>| {
+        let env = env.clone();
+        runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&compiled.wasm_path)
+                .await
+                .expect("load parallel artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env,
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host),
+                    },
+                    br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
+                )
+                .await
+        })
+    };
+
+    // Run 1: 429→retry→200 for every item; 2 calls/item.
+    let first = run(host.clone());
+    let out1 = match first.exit {
+        runtara_component_host::InvokeExit::Completed(o) => {
+            serde_json::from_slice::<Value>(&o).expect("json")
+        }
+        other => panic!("first run must complete, got {other:?}"),
+    };
+    for r in out1["results"].as_array().expect("results") {
+        assert_eq!(r["status"], 200);
+    }
+    let hits_after_first = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(hits_after_first, 2 * ITEMS, "run 1: 2 calls per item");
+
+    // Run 2 (resume): every item's step checkpoint HITs at launch — the agent
+    // is never re-invoked, and the output is identical.
+    let second = run(host.clone());
+    let out2 = match second.exit {
+        runtara_component_host::InvokeExit::Completed(o) => {
+            serde_json::from_slice::<Value>(&o).expect("json")
+        }
+        other => panic!("resumed run must complete, got {other:?}"),
+    };
+    assert_eq!(out2, out1, "resume must reproduce the exact output");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        hits_after_first,
+        "resume must re-fire ZERO agent calls (step checkpoints replay)"
+    );
+
+    let _ = stub_stop_tx.send(());
+    let _ = stub.join();
 }

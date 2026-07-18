@@ -342,6 +342,7 @@ pub(super) fn emit_run_plan_mapping(
             max_retries,
             retry_delay_ms,
             dont_stop_on_failed,
+            parallel_window,
             nested_plan,
             next_plan,
             error_plan,
@@ -360,6 +361,7 @@ pub(super) fn emit_run_plan_mapping(
                 *max_retries,
                 *retry_delay_ms,
                 *dont_stop_on_failed,
+                *parallel_window,
                 nested_plan,
                 next_plan,
                 error_plan.as_ref(),
@@ -605,6 +607,7 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
                 indices.stdlib_agent_output,
+                None,
             );
         }
         DirectRunPlan::AiAgent {
@@ -657,6 +660,7 @@ pub(super) fn emit_run_plan_mapping(
                 failure_target,
                 handled_target,
                 indices.stdlib_ai_agent_output,
+                None,
             );
         }
         DirectRunPlan::AiAgentLoop {
@@ -879,6 +883,34 @@ pub(super) fn emit_run_plan_mapping(
                     handled_target,
                 );
             }
+        }
+        DirectRunPlan::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            super::branch_parallel::emit_parallel_branches(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                branches,
+                merge_plan,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+            );
         }
         DirectRunPlan::Join => {
             // A branch that reached its enclosing branching step's merge point;

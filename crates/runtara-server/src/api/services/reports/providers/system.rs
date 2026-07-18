@@ -337,7 +337,7 @@ async fn connection_rate_limit_event_rows(
         }
     }
 
-    events.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
     events.truncate(limit as usize);
     Ok(events.into_iter().map(rate_limit_event_row).collect())
 }
@@ -1197,10 +1197,8 @@ fn collect_time_bounds(
                 *lower = Some(bound);
             }
         }
-        "LT" | "LTE" => {
-            if upper.is_none_or(|current| bound < current) {
-                *upper = Some(bound);
-            }
+        "LT" | "LTE" if upper.is_none_or(|current| bound < current) => {
+            *upper = Some(bound);
         }
         _ => {}
     }

@@ -2928,7 +2928,20 @@ impl DirectJsonManifest {
     }
 
     /// Build a generated-code-compatible `step_debug_end` payload.
-    pub fn step_debug_end(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+    ///
+    /// `launched_at_ms` / `settled_at_ms` are the OPTIONAL real wall-clock bounds
+    /// of a parallel branch's async work (see the WIT). When both are non-zero the
+    /// payload carries them so the timeline/replay render the true overlapping
+    /// interval; 0 (a sequential/linearised step) omits them and consumers fall
+    /// back to `timestamp_ms`/`duration_ms`. Purely observational — the assemble
+    /// `timestamp_ms`/`duration_ms` are unchanged either way.
+    pub fn step_debug_end(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        launched_at_ms: u64,
+        settled_at_ms: u64,
+    ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse step-debug-end source: {err}"))?;
         let step = self
@@ -2952,6 +2965,18 @@ impl DirectJsonManifest {
             "duration_ms".to_string(),
             Value::Number(serde_json::Number::from(duration_ms)),
         );
+        // Additive + backward-compatible: only present when the guest recorded a
+        // real launch/settle pair for this (parallel) step.
+        if launched_at_ms != 0 && settled_at_ms != 0 {
+            payload.insert(
+                "launched_at_ms".to_string(),
+                Value::Number(serde_json::Number::from(launched_at_ms)),
+            );
+            payload.insert(
+                "settled_at_ms".to_string(),
+                Value::Number(serde_json::Number::from(settled_at_ms)),
+            );
+        }
 
         serde_json::to_vec(&Value::Object(payload))
             .map_err(|err| format!("failed to serialize step-debug-end payload: {err}"))
@@ -9601,7 +9626,7 @@ mod tests {
             .expect("debug start");
         let start: Value = serde_json::from_slice(&start).expect("start json");
         let end = manifest
-            .step_debug_end("delay", &source)
+            .step_debug_end("delay", &source, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
 
@@ -10348,7 +10373,7 @@ mod tests {
         let source_after_wait =
             build_source(br#"{"case_id":"case-42"}"#, b"{}", &steps).expect("source after wait");
         let end = manifest
-            .step_debug_end("wait", &source_after_wait)
+            .step_debug_end("wait", &source_after_wait, 0, 0)
             .expect("wait debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
 
@@ -11185,7 +11210,7 @@ mod tests {
         let source = build_source(br#"{"value":"in"}"#, b"{}", &steps).expect("source");
 
         let end = manifest
-            .step_debug_end("agent", &source)
+            .step_debug_end("agent", &source, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepId"], json!("agent"));
@@ -11248,7 +11273,7 @@ mod tests {
         let source = build_source(br#"{"value":"in"}"#, b"{}", &steps).expect("source");
 
         let end = manifest
-            .step_debug_end("agent", &source)
+            .step_debug_end("agent", &source, 0, 0)
             .expect("AiAgent debug end should be supported");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("AiAgent"));
@@ -11546,7 +11571,7 @@ mod tests {
         let source = build_source(b"{}", b"{}", &steps).expect("source");
 
         let end = manifest
-            .step_debug_end("split", &source)
+            .step_debug_end("split", &source, 0, 0)
             .expect("Split debug end should be supported");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("Split"));
@@ -11834,7 +11859,7 @@ mod tests {
         .unwrap();
         let src_bytes = build_source(b"{}", b"{}", &steps).unwrap();
         let end = manifest
-            .step_debug_end("find", &src_bytes)
+            .step_debug_end("find", &src_bytes, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(
@@ -11888,7 +11913,7 @@ mod tests {
             apply_filter(&cfg, &src).unwrap();
             let df = t.elapsed();
             let t = Instant::now();
-            manifest.step_debug_end("find", &src_bytes).unwrap();
+            manifest.step_debug_end("find", &src_bytes, 0, 0).unwrap();
             let de = t.elapsed();
             let tot = ds + df + de;
             eprintln!(
@@ -11927,7 +11952,7 @@ mod tests {
         let source = build_source(b"{}", b"{}", &steps).expect("source");
 
         let end = manifest
-            .step_debug_end("loop", &source)
+            .step_debug_end("loop", &source, 0, 0)
             .expect("While debug end should be supported");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["outputs"]["stepType"], json!("While"));
@@ -12279,7 +12304,7 @@ mod tests {
         );
 
         let end = manifest
-            .step_debug_end("finish", &source)
+            .step_debug_end("finish", &source, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(end["step_id"], json!("finish"));
@@ -12329,7 +12354,7 @@ mod tests {
         assert_eq!(start["input_mapping"]["op"], json!("EQ"));
 
         let end = manifest
-            .step_debug_end("check", &source)
+            .step_debug_end("check", &source, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(
@@ -12382,7 +12407,7 @@ mod tests {
         assert_eq!(start["input_mapping"]["cases"][0]["match"], json!("active"));
 
         let end = manifest
-            .step_debug_end("switch", &source)
+            .step_debug_end("switch", &source, 0, 0)
             .expect("debug end");
         let end: Value = serde_json::from_slice(&end).expect("end json");
         assert_eq!(

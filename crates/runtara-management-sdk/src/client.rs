@@ -226,6 +226,10 @@ struct StepSummaryJson {
     #[serde(default)]
     duration_ms: Option<i64>,
     #[serde(default)]
+    launched_at_ms: Option<i64>,
+    #[serde(default)]
+    settled_at_ms: Option<i64>,
+    #[serde(default)]
     inputs: Option<serde_json::Value>,
     #[serde(default)]
     outputs: Option<serde_json::Value>,
@@ -1464,6 +1468,8 @@ impl ManagementSdk {
                 started_at: ms_to_datetime(step.started_at_ms),
                 completed_at: opt_ms_to_datetime(step.completed_at_ms),
                 duration_ms: step.duration_ms,
+                launched_at_ms: step.launched_at_ms,
+                settled_at_ms: step.settled_at_ms,
                 inputs: step.inputs,
                 outputs: step.outputs,
                 error: step.error,

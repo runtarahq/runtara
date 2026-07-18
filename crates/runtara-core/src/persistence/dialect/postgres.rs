@@ -294,7 +294,9 @@ impl Dialect for PostgresDialect {
                 (convert_from(e.payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
                 p.error, \
                 p.status, \
-                p.duration_ms \
+                p.duration_ms, \
+                (convert_from(e.payload, 'UTF8')::jsonb->>'launched_at_ms')::bigint as launched_at_ms, \
+                (convert_from(e.payload, 'UTF8')::jsonb->>'settled_at_ms')::bigint as settled_at_ms \
             FROM page p \
             JOIN instance_events s ON s.id = p.id \
             LEFT JOIN instance_events e ON e.id = p.end_id \

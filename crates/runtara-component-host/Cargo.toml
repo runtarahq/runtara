@@ -45,11 +45,15 @@ runtara-workflow-wit = { path = "../runtara-workflow-wit" }
 # wasmtime crate version is independent of the wasmtime CLI version pinned in
 # scripts/build-bundle.sh — the CLI is a separate process used by WasmRunner
 # and goes away in Phase 6.
-wasmtime = { version = "44", default-features = false, features = [
+wasmtime = { version = "46", default-features = false, features = [
     "std",
     "anyhow",
     "runtime",
     "component-model",
+    # CM-async (WASIp3): concurrent host imports (func_wrap_concurrent), the
+    # in-store event loop, and the async-typed agent/lifecycle ABI v2. See
+    # docs/wasip3-parallelism.md.
+    "component-model-async",
     "async",
     "cranelift",
     "parallel-compilation",
@@ -60,11 +64,18 @@ wasmtime = { version = "44", default-features = false, features = [
     # Cranelift compile for every deployed image (see build_engine).
     "cache",
 ] }
-wasmtime-wasi = "44"
-wasmtime-wasi-http = "44"
+wasmtime-wasi = "46"
+wasmtime-wasi-http = "46"
 
 # Plumbing
 anyhow = "1"
+# host-io concurrent HTTP hop (docs/wasip3-parallelism.md route (b)). Same
+# hyper family wasmtime-wasi-http already pulls in.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+base64 = { workspace = true }
 # Dyn-compatible async for the RuntimeHost trait (implemented in
 # runtara-environment; this crate stays persistence-agnostic).
 async-trait = "0.1"
@@ -81,7 +92,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 # Tests author minimal components in WAT; the `wat` feature lets
 # `Component::from_file` parse text-format components.
-wasmtime = { version = "44", default-features = false, features = ["wat"] }
+wasmtime = { version = "46", default-features = false, features = ["wat"] }
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.

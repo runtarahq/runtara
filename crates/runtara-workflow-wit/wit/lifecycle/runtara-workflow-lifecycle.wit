@@ -10,7 +10,7 @@
 // `error-info` comes from the neutral `runtara:abi` package (the shared home
 // for the agent + workflow-lifecycle vocabulary); the per-agent WIT still
 // carries its own structurally-identical copy pending a coordinated migration.
-package runtara:workflow-lifecycle@0.1.0;
+package runtara:workflow-lifecycle@0.2.0;
 
 interface lifecycle {
     use runtara:abi/types@0.1.0.{error-info};
@@ -41,7 +41,14 @@ interface lifecycle {
         suspended(list<wake>),
     }
 
-    invoke: func(input: list<u8>) -> result<outcome, error-info>;
+    /// Async-TYPED since 0.2.0 (docs/wasip3-parallelism.md ABI v2): blocking
+    /// legality is keyed to the function type under the ratified
+    /// component-model-async rules, and a workflow's task must be allowed to
+    /// block — it transitively enters async-typed agent exports and, in
+    /// parallel regions, waits on waitable-sets. The lift stays the plain
+    /// sync ABI (the emitted core signature is unchanged); wasmtime drives
+    /// the export as an async task via call_async.
+    invoke: async func(input: list<u8>) -> result<outcome, error-info>;
 }
 
 world workflow-lifecycle {

@@ -17,6 +17,29 @@ import {
 } from '@/features/workflows/stores/executionStore';
 import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { parseStructuredError } from '@/shared/utils/structured-error';
+import type {
+  ReplayIterationCounts,
+  ReplayNodeState,
+} from '@/features/workflows/components/Replay/types';
+
+/** Border/ring/glow treatment per replay state — mirrors the tutorial palette. */
+function getReplayNodeClass(state: ReplayNodeState): string {
+  switch (state) {
+    case 'running':
+      return 'border-blue-500 ring-2 ring-blue-500/40 animate-glow-pulse border-2';
+    case 'done':
+      return 'border-green-500 ring-1 ring-green-500/30';
+    case 'failed':
+      return 'border-red-500 ring-2 ring-red-500/30 border-2';
+    case 'suspended':
+      return 'border-amber-500 ring-2 ring-amber-500/40 animate-parked-pulse border-2';
+    case 'skipped':
+      return 'border-dashed border-muted-foreground/40 opacity-50';
+    case 'idle':
+    default:
+      return 'border-border opacity-40';
+  }
+}
 
 export const BaseNode = forwardRef<
   HTMLDivElement,
@@ -47,6 +70,10 @@ export const BaseNode = forwardRef<
     rightReservedWidth?: number;
     breakpoint?: boolean;
     onToggleBreakpoint?: () => void;
+    /** Graph Replay: per-frame visual state (drives the ring/glow + corner badge). */
+    replayState?: ReplayNodeState;
+    /** Graph Replay: iteration counts for composite (Split/While) nodes. */
+    replayIteration?: ReplayIterationCounts;
   }
 >(
   (
@@ -73,6 +100,8 @@ export const BaseNode = forwardRef<
       rightReservedWidth,
       breakpoint,
       onToggleBreakpoint,
+      replayState,
+      replayIteration,
       onClick,
       ...props
     },
@@ -197,6 +226,34 @@ export const BaseNode = forwardRef<
     const subtitleContent = getSubtitleContent();
     const showStatusPill = !!executionStatus;
 
+    // Graph Replay corner badge (top-right) for terminal/active replay states.
+    const replayBadge = (() => {
+      switch (replayState) {
+        case 'running':
+          return {
+            icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />,
+            cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+          };
+        case 'done':
+          return {
+            icon: <CheckCircle2 className="h-2.5 w-2.5" />,
+            cls: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
+          };
+        case 'failed':
+          return {
+            icon: <XCircle className="h-2.5 w-2.5" />,
+            cls: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
+          };
+        case 'suspended':
+          return {
+            icon: <Pause className="h-2.5 w-2.5" />,
+            cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+          };
+        default:
+          return null;
+      }
+    })();
+
     const handleClick = (e: MouseEvent<HTMLDivElement>) => {
       // Check if Ctrl (Windows) or Command (Mac) key is pressed
       if ((e.ctrlKey || e.metaKey) && stepType === 'EmbedWorkflow') {
@@ -229,8 +286,12 @@ export const BaseNode = forwardRef<
           'group relative w-full h-full',
           'bg-card rounded-md text-muted-foreground',
           'border shadow-sm hover:shadow-md transition-all duration-200',
-          // Priority: validation error > validation warning > execution > selected > unsaved > default
-          hasValidationError
+          // Replay mode owns the visual entirely (it is a distinct 'scrub a past
+          // run' surface, never shown alongside live execution). Priority
+          // otherwise: validation error > warning > execution > selected > unsaved.
+          replayState
+            ? getReplayNodeClass(replayState)
+            : hasValidationError
             ? 'border-red-500 ring-2 ring-red-500/30 border-2'
             : hasValidationWarning
               ? 'border-amber-500 ring-2 ring-amber-500/30 border-2'
@@ -257,6 +318,7 @@ export const BaseNode = forwardRef<
         data-testid="workflow-canvas-node"
         data-step-name={name}
         data-step-type={stepType}
+        data-replay-state={replayState}
         {...props}
       >
         {/* Breakpoint indicator - red dot on left edge */}
@@ -287,6 +349,32 @@ export const BaseNode = forwardRef<
           >
             <Circle className="w-1.5 h-1.5 fill-red-200 text-red-200" />
           </button>
+        )}
+
+        {/* Graph Replay state badge + iteration counter (top-right) */}
+        {replayBadge && (
+          <div
+            className="absolute -top-1.5 -right-1.5 z-10 flex items-center gap-0.5"
+            data-testid="replay-node-badge"
+          >
+            {replayIteration && replayIteration.total > 0 && (
+              <span
+                className="rounded-full border bg-background px-1 text-[8px] font-medium leading-none text-muted-foreground shadow-sm"
+                title={`${replayIteration.active} running · ${replayIteration.completed} done · ${replayIteration.total} iterations`}
+              >
+                {replayIteration.completed + replayIteration.active}/
+                {replayIteration.total}
+              </span>
+            )}
+            <span
+              className={cn(
+                'flex items-center justify-center w-3.5 h-3.5 rounded-full shadow-sm',
+                replayBadge.cls
+              )}
+            >
+              {replayBadge.icon}
+            </span>
+          </div>
         )}
 
         {/* Unsaved changes corner dot */}
