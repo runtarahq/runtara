@@ -12,7 +12,8 @@ use tracing::{error, info, instrument, warn};
 
 use crate::api::repositories::workflows::{WorkflowRepository, workflow_definition_checksum};
 use crate::api::services::compilation::{
-    CompilationService, direct_compilation_settings_from_config,
+    CompilationService, ServiceError as CompilationServiceError,
+    direct_compilation_settings_from_config,
 };
 use crate::observability::metrics;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
@@ -235,14 +236,28 @@ pub async fn run(
                             );
                         }
                         Err(e) => {
-                            error!(
-                                tenant_id = %request.tenant_id,
-                                workflow_id = %request.workflow_id,
-                                version = request.version,
-                                error = %e,
-                                duration_secs = duration,
-                                "Compilation failed"
-                            );
+                            // A graph that cannot compile as authored is the
+                            // author's problem, not a fault to alert on, so it
+                            // is recorded at a lower level than a real failure.
+                            if matches!(e, CompilationServiceError::WorkflowAuthoringError(_)) {
+                                warn!(
+                                    tenant_id = %request.tenant_id,
+                                    workflow_id = %request.workflow_id,
+                                    version = request.version,
+                                    error = %e,
+                                    duration_secs = duration,
+                                    "Workflow cannot be compiled as authored"
+                                );
+                            } else {
+                                error!(
+                                    tenant_id = %request.tenant_id,
+                                    workflow_id = %request.workflow_id,
+                                    version = request.version,
+                                    error = %e,
+                                    duration_secs = duration,
+                                    "Compilation failed"
+                                );
+                            }
                             // Record the failure in database
                             if let Err(db_err) = record_compilation_failure(
                                 &pool,

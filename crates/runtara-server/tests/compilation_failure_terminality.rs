@@ -127,10 +127,18 @@ async fn failure_for_the_current_definition_is_terminal_and_kept() {
         .expect("readiness check must succeed");
 
     match status {
-        CompilationStatus::Failed { error, terminal } => {
+        CompilationStatus::Failed {
+            error,
+            terminal,
+            authoring,
+        } => {
             assert!(
                 terminal,
                 "a failure for the stored definition must be terminal"
+            );
+            assert!(
+                authoring,
+                "an [E004] failure describes the graph, not the system"
             );
             assert!(
                 error.contains("[E004]"),

@@ -79,6 +79,14 @@ pub enum ExecutionError {
         version: i32,
         compilation_queued: bool,
     },
+    /// The workflow cannot run as authored — no steps, an unreachable entry
+    /// point, and so on. Permanent until the graph is edited, and reported to
+    /// the author rather than alerted on.
+    WorkflowNotRunnable {
+        workflow_id: String,
+        version: i32,
+        error: String,
+    },
     BundlePreparationFailed(String),
     RuntimeError(String),
     DatabaseError(String),
@@ -113,6 +121,17 @@ impl std::fmt::Display for ExecutionError {
                     workflow_id, version, compilation_queued
                 )
             }
+            ExecutionError::WorkflowNotRunnable {
+                workflow_id,
+                version,
+                error,
+            } => {
+                write!(
+                    f,
+                    "Workflow '{}' version {} cannot run: {}",
+                    workflow_id, version, error
+                )
+            }
             ExecutionError::BundlePreparationFailed(msg) => {
                 write!(f, "Bundle preparation failed: {}", msg)
             }
@@ -142,6 +161,7 @@ impl ExecutionError {
             ExecutionError::CompilationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::CompilationTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             ExecutionError::NotCompiled { .. } => StatusCode::CONFLICT,
+            ExecutionError::WorkflowNotRunnable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             ExecutionError::BundlePreparationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1899,12 +1919,21 @@ impl ExecutionEngine {
         if let CompilationStatus::Failed {
             error,
             terminal: true,
+            authoring,
         } = &status
         {
-            return Err(ExecutionError::CompilationFailed(format!(
-                "Workflow '{}' version {} failed to compile: {}",
-                workflow_id, version, error
-            )));
+            return Err(if *authoring {
+                ExecutionError::WorkflowNotRunnable {
+                    workflow_id: workflow_id.to_string(),
+                    version,
+                    error: error.clone(),
+                }
+            } else {
+                ExecutionError::CompilationFailed(format!(
+                    "Workflow '{}' version {} failed to compile: {}",
+                    workflow_id, version, error
+                ))
+            });
         }
 
         // Not compiled - queue compilation if not already pending
@@ -2010,12 +2039,21 @@ impl ExecutionEngine {
         if let CompilationStatus::Failed {
             error,
             terminal: true,
+            authoring,
         } = &status
         {
-            return Err(ExecutionError::CompilationFailed(format!(
-                "Workflow '{}' version {} failed to compile: {}",
-                workflow_id, version, error
-            )));
+            return Err(if *authoring {
+                ExecutionError::WorkflowNotRunnable {
+                    workflow_id: workflow_id.to_string(),
+                    version,
+                    error: error.clone(),
+                }
+            } else {
+                ExecutionError::CompilationFailed(format!(
+                    "Workflow '{}' version {} failed to compile: {}",
+                    workflow_id, version, error
+                ))
+            });
         }
 
         let valkey_config = match crate::valkey::ValkeyConfig::from_env() {

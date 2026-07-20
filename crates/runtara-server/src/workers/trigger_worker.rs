@@ -31,6 +31,10 @@ enum ProcessResult {
     Success,
     /// Event failed permanently - ACK it to prevent infinite retries
     PermanentFailure(String),
+    /// The workflow cannot run as authored. ACKed like a permanent failure,
+    /// but recorded as an author-facing outcome rather than a system fault so
+    /// it does not raise alerts every time someone runs an unfinished workflow.
+    NotRunnable(String),
     /// Event should be retried later - DON'T ACK (stays in PEL)
     RetryLater(String),
 }
@@ -322,6 +326,7 @@ async fn process_event(
         let status = match &process_result {
             ProcessResult::Success => "success",
             ProcessResult::PermanentFailure(_) => "permanent_failure",
+            ProcessResult::NotRunnable(_) => "not_runnable",
             ProcessResult::RetryLater(_) => "retry_later",
         };
         m.trigger_processing_duration.record(
@@ -334,6 +339,10 @@ async fn process_event(
         match &process_result {
             ProcessResult::PermanentFailure(_) => {
                 m.trigger_events_failed.add(1, &attributes);
+            }
+            ProcessResult::NotRunnable(_) => {
+                // Counted under its own status label above, not as a failure -
+                // the workflow needs editing, nothing is wrong with the system.
             }
             ProcessResult::RetryLater(_) => {
                 // Don't count as failed yet - it will be retried
@@ -394,6 +403,22 @@ async fn process_event(
             );
             if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK failed event");
+            }
+        }
+        ProcessResult::NotRunnable(ref reason) => {
+            emit_fired("failed");
+            // ACKed like a permanent failure. Logged at WARN because the graph
+            // needs editing - running an unfinished workflow is a normal thing
+            // for a user to do and must not read as a system fault.
+            warn!(
+                entry_id = %entry_id,
+                instance_id = %trigger_event.instance_id,
+                reason = %reason,
+                duration_ms = (duration * 1000.0) as u64,
+                "Workflow cannot run as authored"
+            );
+            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+                error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK unrunnable event");
             }
         }
         ProcessResult::RetryLater(ref reason) => {
@@ -553,6 +578,15 @@ async fn process_trigger_event(
                 "Workflow '{}' v{} not compiled (queued: {})",
                 workflow_id, version, compilation_queued
             ))
+        }
+        Err(e @ ExecutionError::WorkflowNotRunnable { .. }) => {
+            // Permanent, but the workflow needs editing rather than attention.
+            warn!(
+                instance_id = %event.instance_id,
+                error = %e,
+                "Workflow cannot run as authored"
+            );
+            ProcessResult::NotRunnable(e.to_string())
         }
         Err(e) => {
             // Other errors are permanent failures
