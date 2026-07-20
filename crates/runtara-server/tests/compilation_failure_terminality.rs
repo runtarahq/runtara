@@ -68,13 +68,20 @@ async fn seed_workflow(pool: &PgPool, definition: &Value) -> (String, String) {
     .await
     .expect("seeding a workflow must succeed");
 
+    // `file_size` is NOT NULL with a `>= 0` check, and is derived from the
+    // serialized definition exactly as `create_initial_version` does it.
+    let file_size = serde_json::to_vec(definition)
+        .expect("definition must serialize")
+        .len() as i32;
+
     sqlx::query(
-        "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition)
-         VALUES ($1, $2, 1, $3)",
+        "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size)
+         VALUES ($1, $2, 1, $3, $4)",
     )
     .bind(&tenant)
     .bind(&workflow_id)
     .bind(definition)
+    .bind(file_size)
     .execute(pool)
     .await
     .expect("seeding a workflow definition must succeed");
