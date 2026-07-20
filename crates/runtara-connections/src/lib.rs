@@ -8,6 +8,7 @@ pub mod handler;
 pub mod integration_compatibility;
 pub mod net;
 pub mod repository;
+pub mod resolution;
 pub mod router;
 pub mod service;
 pub mod tenant;
@@ -27,6 +28,10 @@ pub use events::{ConnectionEventSink, ConnectionEvents, ConnectionLifecycleEvent
 pub use facade::ConnectionsFacade;
 pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};
+pub use resolution::{
+    ConnectionDescriptor, ConnectionFeature, ConnectionResourceItem, ConnectionResourcePage,
+    ConnectionResourceRequest, features_for_integration,
+};
 pub use router::{admin_router, connections_router, oauth_callback_router, runtime_router};
 pub use tenant::TenantId;
 pub use types::{

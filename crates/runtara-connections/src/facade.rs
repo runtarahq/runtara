@@ -17,6 +17,7 @@ use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredential
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
+use crate::resolution::{ConnectionDescriptor, features_for_integration};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::{ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitEventType};
 
@@ -128,6 +129,28 @@ impl ConnectionsFacade {
             .get_by_id(id, tenant_id)
             .await
             .map_err(ConnectionsError::Database)
+    }
+
+    /// Resolve an opaque connection id to its authoritative, non-secret
+    /// descriptor. This is the runtime/editor metadata boundary: callers get
+    /// integration routing and discovery features, never credential material.
+    pub async fn describe_connection(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<ConnectionDescriptor>, ConnectionsError> {
+        let Some(connection) = self.get_connection(id, tenant_id).await? else {
+            return Ok(None);
+        };
+        let integration_id = connection.integration_id.unwrap_or_default();
+        Ok(Some(ConnectionDescriptor {
+            connection_id: connection.id,
+            integration_id: integration_id.clone(),
+            connection_subtype: connection.connection_subtype,
+            status: connection.status,
+            features: features_for_integration(&integration_id),
+            metadata: Value::Null,
+        }))
     }
 
     /// List connections for a tenant (no secrets).
