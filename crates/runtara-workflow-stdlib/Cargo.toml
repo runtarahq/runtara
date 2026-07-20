@@ -41,14 +41,14 @@ wit-bindgen = { version = "0.58", optional = true }
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
 # per-agent WIT bindings injected by `wac compose`, not by linking the
 # `runtara-agents` crate into the workflow.
-runtara-sdk = { path = "../runtara-sdk", version = "8.5", default-features = false, features = ["http"], optional = true }
+runtara-sdk = { path = "../runtara-sdk", version = "8.6", default-features = false, features = ["http"], optional = true }
 
 # AI/LLM helpers consumed directly by codegen for AI Agent steps
 # (CompletionModel, ToolDefinition, Message, provider dispatch). Re-exported
 # below as `ai` so generated code can write `runtara_workflow_stdlib::ai::*`.
 # TODO: migrate AI Agent codegen to dispatch through the `ai-tools` WIT agent
 # and drop this dep again (would shrink workflow.wasm).
-runtara-ai = { path = "../runtara-ai", version = "8.5", default-features = false, optional = true }
+runtara-ai = { path = "../runtara-ai", version = "8.6", default-features = false, optional = true }
 
 # Re-exported for workflows
 serde = { workspace = true }

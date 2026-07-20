@@ -27,13 +27,13 @@ tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
 # Core persistence layer (for shared database access)
-runtara-core = { path = "../runtara-core", version = "8.5" }
+runtara-core = { path = "../runtara-core", version = "8.6" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
-runtara-component-host = { path = "../runtara-component-host", version = "8.5" }
+runtara-component-host = { path = "../runtara-component-host", version = "8.6" }
 
 # DSL types for agent metadata (list_agents, get_capability)
-runtara-dsl = { path = "../runtara-dsl", version = "8.5" }
+runtara-dsl = { path = "../runtara-dsl", version = "8.6" }
 
 # Configuration
 dotenvy = "0.15"
@@ -67,7 +67,7 @@ async-trait = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
-runtara-workflows = { path = "../runtara-workflows", version = "8.5" }
+runtara-workflows = { path = "../runtara-workflows", version = "8.6" }
 futures = "0.3"
 # Embedded-runner tests author minimal wasi:cli/run components in WAT.
 wat = "1"
