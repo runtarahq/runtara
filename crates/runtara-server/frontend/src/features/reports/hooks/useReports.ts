@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
+import { ApiError, useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
   createReport,
@@ -72,6 +72,19 @@ export function useReportPreview(
   });
 }
 
+/** True for failures worth retrying: the request never got a response, or the
+ *  server answered with something load- or timing-related. Deterministic
+ *  failures (400/401/403/404) are excluded — retrying them just delays the
+ *  error the user needs to see. */
+export function isTransientBlockError(error: unknown): boolean {
+  const apiError = error as ApiError | undefined;
+  if (apiError?.code === 'ERR_NETWORK') return true;
+  const status = apiError?.response?.status ?? apiError?.status;
+  // No status at all means no response came back — treat as transient.
+  if (status == null) return true;
+  return status === 408 || status === 429 || status >= 500;
+}
+
 export function useReportBlockData(
   reportId: string | undefined,
   blockId: string | undefined,
@@ -91,6 +104,16 @@ export function useReportBlockData(
     ),
     queryFn: (token, context) => getReportBlockData(token, context),
     enabled: Boolean(reportId && blockId && request && enabled),
+    // Every tile fetches independently, so one dropped connection strands one
+    // tile with no other signal that anything went wrong. Retry the transient
+    // shapes past the global `retry: 1` so a blip self-heals; `ReportBlockHost`
+    // surfaces an error card once this budget is spent.
+    retry: (failureCount, error) =>
+      failureCount < 3 && isTransientBlockError(error),
+    // Exponential with jitter: a wide dashboard would otherwise retry all its
+    // tiles in lockstep against a server that is already struggling.
+    retryDelay: (attempt) =>
+      Math.min(1000 * 2 ** attempt, 8000) * (0.5 + Math.random() / 2),
   });
 }
 
