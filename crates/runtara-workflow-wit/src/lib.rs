@@ -11,6 +11,12 @@ pub const STDLIB_PACKAGE: &str = "runtara:workflow-stdlib@0.1.0";
 /// WIT package name for the runtime/SDK lifecycle component.
 pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.1.0";
 
+/// WIT package name for safe runtime connection resolution.
+pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.1.0";
+
+/// Fully-qualified component import name of the connection resolver.
+pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = "runtara:connection-resolver/resolver@0.1.0";
+
 /// WIT package name for the neutral shared ABI vocabulary.
 pub const ABI_PACKAGE: &str = "runtara:abi@0.1.0";
 
@@ -32,6 +38,10 @@ pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib
 /// WIT text for `runtara:workflow-runtime@0.1.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
 
+/// WIT text for `runtara:connection-resolver@0.1.0`.
+pub const CONNECTION_RESOLVER_WIT: &str =
+    include_str!("../wit/connection-resolver/runtara-connection-resolver.wit");
+
 /// WIT text for `runtara:abi@0.1.0` (the neutral shared vocabulary).
 pub const ABI_WIT: &str = include_str!("../wit/lifecycle/deps/abi/runtara-abi.wit");
 
@@ -42,7 +52,7 @@ pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-
 mod tests {
     use std::path::PathBuf;
 
-    use super::{RUNTIME_PACKAGE, STDLIB_PACKAGE};
+    use super::{CONNECTION_RESOLVER_PACKAGE, RUNTIME_PACKAGE, STDLIB_PACKAGE};
     use wit_parser::{Resolve, WorldItem};
 
     fn crate_dir() -> PathBuf {
@@ -146,6 +156,30 @@ mod tests {
                 .values()
                 .any(|item| matches!(item, WorldItem::Interface { id, .. } if *id == interface_id))
         );
+    }
+
+    #[test]
+    fn connection_resolver_wit_parses_and_exports_universal_operations() {
+        let mut resolve = Resolve::default();
+        let package_id = resolve
+            .push_file(crate_dir().join("wit/connection-resolver/runtara-connection-resolver.wit"))
+            .expect("connection resolver WIT parses");
+        let package = &resolve.packages[package_id];
+
+        assert_eq!(package.name.to_string(), CONNECTION_RESOLVER_PACKAGE);
+        let interface_id = package.interfaces["resolver"];
+        let interface = &resolve.interfaces[interface_id];
+        for function in ["describe", "resolve-resource"] {
+            assert!(
+                interface.functions.contains_key(function),
+                "missing connection resolver function {function}"
+            );
+        }
+
+        let world_id = package.worlds["connection-resolver"];
+        let world = &resolve.worlds[world_id];
+        assert!(world.imports.is_empty());
+        assert_eq!(world.exports.len(), 1);
     }
 
     #[test]

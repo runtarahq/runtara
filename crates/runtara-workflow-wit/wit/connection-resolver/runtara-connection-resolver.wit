@@ -1,0 +1,22 @@
+// Canonical host contract for resolving safe connection metadata and
+// connection-backed resources at workflow runtime.
+
+package runtara:connection-resolver@0.1.0;
+
+interface resolver {
+    // Return the safe, authoritative connection descriptor as JSON bytes.
+    // Credentials and raw connection parameters are never included.
+    describe: func(connection-id: string) -> result<list<u8>, string>;
+
+    // Resolve a typed, read-only resource request against the connection.
+    // Both the request and the paginated response use the universal JSON
+    // contracts from runtara-connections.
+    resolve-resource: func(
+        connection-id: string,
+        request: list<u8>,
+    ) -> result<list<u8>, string>;
+}
+
+world connection-resolver {
+    export resolver;
+}

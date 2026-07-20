@@ -4644,6 +4644,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "reqwest 0.12.28",
  "runtara-agent-crypto",
  "runtara-agent-wit",
  "runtara-dsl",

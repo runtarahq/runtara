@@ -189,12 +189,24 @@ pub struct WorkflowState {
     /// Present when the artifact imports the runtime interface (HostImport
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
+    connection_resolver:
+        Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
 }
 
 impl WorkflowState {
     /// The run's native runtime host, when configured.
     pub(crate) fn runtime_host(&self) -> Option<&Arc<dyn crate::runtime_host::RuntimeHost>> {
         self.runtime.as_ref()
+    }
+
+    pub(crate) fn connection_resolver_host(
+        &self,
+    ) -> Option<&Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>> {
+        self.connection_resolver.as_ref().ok()
+    }
+
+    pub(crate) fn connection_resolver_error(&self) -> Option<&str> {
+        self.connection_resolver.as_ref().err().map(String::as_str)
     }
 }
 
@@ -247,6 +259,7 @@ impl WorkflowExecutor {
         // WASI surface above works the same way), so legacy composed artifacts
         // are unaffected by this registration.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
+        crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
         // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
         // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
@@ -389,6 +402,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: spec.runtime.clone(),
+            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -518,6 +532,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: spec.runtime.clone(),
+            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -670,6 +685,9 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: None,
+            connection_resolver: Err(
+                "connection resolution is unavailable for direct capability invocation".to_string(),
+            ),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limiter);
