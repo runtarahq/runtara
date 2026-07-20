@@ -17,5 +17,5 @@ native = ["runtara-sdk/native"]
 wasi = ["runtara-sdk/wasi"]
 
 [dependencies]
-runtara-sdk = { path = "../runtara-sdk", version = "8.4", default-features = false, features = ["http"] }
+runtara-sdk = { path = "../runtara-sdk", version = "8.5", default-features = false, features = ["http"] }
 wit-bindgen = "0.58"
