@@ -168,6 +168,7 @@ export function ReportBlockHost({
   const {
     data: fetchedResult,
     isFetching,
+    error: fetchError,
     refetch,
   } = useReportBlockData(reportId, block.id, request, needsBlockFetch);
   const explorePath = useMemo(
@@ -182,6 +183,14 @@ export function ReportBlockHost({
   const result = needsBlockFetch
     ? (fetchedResult ?? initialResult)
     : initialResult;
+  // A failed block fetch leaves `result` undefined. Without this the block
+  // renders its loading skeleton forever: the query is settled so nothing
+  // refetches, and `refetchOnWindowFocus` is off, so only a remount recovers
+  // it. Lazy blocks are the common casualty — the report-level render omits
+  // them, so they have no `initialResult` to fall back on. Guarded on
+  // `!result` so a block that already has data keeps showing it when a
+  // refetch fails, rather than blanking out.
+  const showFetchError = Boolean(fetchError) && !result;
   const refreshAfterActionSubmit = () => {
     void refetch();
     void onReportRefresh?.();
@@ -324,10 +333,12 @@ export function ReportBlockHost({
       )}
       {!isVisible || (!result && isFetching) ? (
         <BlockSkeleton block={block} />
+      ) : showFetchError ? (
+        <BlockError message={fetchError?.message} onRetry={() => refetch()} />
       ) : !result ? (
         <BlockSkeleton block={block} />
       ) : result.status === 'error' ? (
-        <BlockError result={result} onRetry={() => refetch()} />
+        <BlockError message={result.error?.message} onRetry={() => refetch()} />
       ) : (
         <RenderedBlock
           reportId={reportId}
@@ -621,16 +632,16 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
 }
 
 function BlockError({
-  result,
+  message,
   onRetry,
 }: {
-  result: ReportBlockResult;
+  message?: string;
   onRetry: () => void;
 }) {
   return (
     <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4">
       <p className="text-sm font-semibold text-destructive">
-        {result.error?.message ?? 'This report block could not be rendered.'}
+        {message ?? 'This report block could not be rendered.'}
       </p>
       <Button
         className="report-print-hidden mt-3"
