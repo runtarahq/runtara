@@ -2976,14 +2976,34 @@ fn single_shot_ai_agent_graph_json(retry_config: &str) -> String {
         "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
           "systemPrompt":{{"valueType":"immediate","value":"You are a test stub caller"}},
           "userPrompt":{{"valueType":"immediate","value":"Say hello"}},
-          "provider":"openai",
-          "model":"gpt-4o"{retry_config}}}}},
+          "provider":{{"valueType":"immediate","value":"openai"}},
+          "model":{{"valueType":"immediate","value":"gpt-4o"}}{retry_config}}}}},
         "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
           "answer": {{"valueType":"reference","value":"steps.ai.outputs.response"}}
         }}}}
       }}
     }}"##
     )
+}
+
+fn dynamic_single_shot_ai_agent_graph_json() -> &'static str {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [{"fromStep":"ai","toStep":"finish","label":"next"}],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You are a test stub caller"},
+          "userPrompt":{"valueType":"reference","value":"data.prompt"},
+          "provider":{"valueType":"reference","value":"data.provider","type":"string"},
+          "model":{"valueType":"reference","value":"data.model","type":"string"},
+          "temperature":{"valueType":"reference","value":"data.temperature","type":"number"},
+          "maxTokens":{"valueType":"reference","value":"data.maxTokens","type":"integer"}
+        }},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer":{"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
 }
 
 fn llm_ok(content: &str) -> Value {
@@ -3038,6 +3058,34 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
         request.get("ai_provider").and_then(Value::as_str),
         Some("openai"),
         "{request}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_resolves_runtime_model_parameters() {
+    let components_dir = direct_e2e_components_dir();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-dynamic-runtime-parameters",
+        dynamic_single_shot_ai_agent_graph_json(),
+        br#"{"prompt":"Say hello","provider":"openai","model":"gpt-4.1-mini","temperature":0.25,"maxTokens":321}"#,
+        vec![llm_ok("dynamic hello")],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    assert_eq!(result.llm_requests.len(), 1, "exactly one model call");
+    let request = &result.llm_requests[0];
+    assert_eq!(request["ai_provider"], "openai", "{request}");
+    assert_eq!(request["body"]["model"], "gpt-4.1-mini", "{request}");
+    assert_eq!(request["body"]["temperature"], 0.25, "{request}");
+    assert_eq!(request["body"]["max_tokens"], 321, "{request}");
+    assert_eq!(
+        result
+            .output_json
+            .as_ref()
+            .and_then(|output| output.get("answer"))
+            .and_then(Value::as_str),
+        Some("dynamic hello")
     );
 }
 
@@ -3267,7 +3315,8 @@ fn split_durable_agent_graph_json() -> String {
                         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
                             "systemPrompt":{"valueType":"immediate","value":"You are a test stub caller"},
                             "userPrompt":{"valueType":"immediate","value":"Say hello"},
-                            "provider":"openai","model":"gpt-4o",
+                            "provider":{"valueType":"immediate","value":"openai"},
+                            "model":{"valueType":"immediate","value":"gpt-4o"},
                             "maxRetries":2,"retryDelay":10
                         }},
                         "itemfinish": {"id":"itemfinish","stepType":"Finish","inputMapping":{
@@ -3431,8 +3480,8 @@ fn ai_agent_tool_loop_graph_json() -> String {
         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","breakpoint":true,"config":{
           "systemPrompt":{"valueType":"immediate","value":"You call tools"},
           "userPrompt":{"valueType":"immediate","value":"Use the echo tool"},
-          "provider":"openai",
-          "model":"gpt-4o"}},
+          "provider":{"valueType":"immediate","value":"openai"},
+          "model":{"valueType":"immediate","value":"gpt-4o"}}},
         "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
           "agentId":"utils","capabilityId":"return-input","inputMapping":{}},
         "finish": {"id":"finish","stepType":"Finish","inputMapping":{
@@ -3553,8 +3602,8 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
 /// past the default 10-turn safety bound.
 fn ai_agent_tool_loop_graph_with_max(max_iterations: u32) -> String {
     ai_agent_tool_loop_graph_json().replace(
-        r#""model":"gpt-4o"}}"#,
-        &format!(r#""model":"gpt-4o","maxIterations":{max_iterations}}}}}"#),
+        r#""model":{"valueType":"immediate","value":"gpt-4o"}}}"#,
+        &format!(r#""model":{{"valueType":"immediate","value":"gpt-4o"}},"maxIterations":{max_iterations}}}}}"#),
     )
 }
 
@@ -3631,8 +3680,8 @@ fn ai_agent_tool_only_no_next_graph_json() -> String {
         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
           "systemPrompt":{"valueType":"immediate","value":"You call tools"},
           "userPrompt":{"valueType":"immediate","value":"List all tools you have"},
-          "provider":"openai",
-          "model":"gpt-4o"}},
+          "provider":{"valueType":"immediate","value":"openai"},
+          "model":{"valueType":"immediate","value":"gpt-4o"}}},
         "echo_tool": {"id":"echo_tool","stepType":"Agent","name":"echo",
           "agentId":"utils","capabilityId":"return-input","inputMapping":{}}
       }
@@ -3809,8 +3858,8 @@ fn ai_agent_memory_graph_json() -> String {
         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
           "systemPrompt":{"valueType":"immediate","value":"You chat"},
           "userPrompt":{"valueType":"immediate","value":"Say hello"},
-          "provider":"openai",
-          "model":"gpt-4o",
+          "provider":{"valueType":"immediate","value":"openai"},
+          "model":{"valueType":"immediate","value":"gpt-4o"},
           "memory":{
             "conversationId":{"valueType":"immediate","value":"conv-42"},
             "compaction":{"maxMessages":1}
@@ -3954,8 +4003,8 @@ fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
         "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","durable":{durable},"config":{{
           "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
           "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
-          "provider":"openai",
-          "model":"gpt-4o"}}}},
+          "provider":{{"valueType":"immediate","value":"openai"}},
+          "model":{{"valueType":"immediate","value":"gpt-4o"}}}}}},
         "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
           "agentId":"utils","capabilityId":"return-input","inputMapping":{{}}}},
         "finish": {{"id":"finish","stepType":"Finish","inputMapping":{{
@@ -4094,8 +4143,8 @@ fn ai_agent_tool_loop_on_error_graph_json(tool_capability: &str) -> String {
         "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
           "systemPrompt":{{"valueType":"immediate","value":"You call tools"}},
           "userPrompt":{{"valueType":"immediate","value":"Use the echo tool"}},
-          "provider":"openai",
-          "model":"gpt-4o"}}}},
+          "provider":{{"valueType":"immediate","value":"openai"}},
+          "model":{{"valueType":"immediate","value":"gpt-4o"}}}}}},
         "echo_tool": {{"id":"echo_tool","stepType":"Agent","name":"echo",
           "agentId":"utils","capabilityId":"{tool_capability}","inputMapping":{{}}}},
         "handler_finish": {{"id":"handler_finish","stepType":"Finish","inputMapping":{{
@@ -4262,7 +4311,7 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
           "systemPrompt":{"valueType":"immediate","value":"sys"},
           "userPrompt":{"valueType":"immediate","value":"go"},
-          "provider":"openai"}},
+          "provider":{"valueType":"immediate","value":"openai"}}},
         "handler_check": {"id":"handler_check","stepType":"Conditional","condition":{
           "type":"operation","op":"EQ","arguments":[
             {"valueType":"immediate","value":1},
@@ -4304,7 +4353,7 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
         "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
           "systemPrompt":{"valueType":"immediate","value":"sys"},
           "userPrompt":{"valueType":"immediate","value":"go"},
-          "provider":"openai"}},
+          "provider":{"valueType":"immediate","value":"openai"}}},
         "handler_finish": {"id":"handler_finish","stepType":"Finish"},
         "finish": {"id":"finish","stepType":"Finish"}
       }
@@ -9358,8 +9407,8 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         "ai": { "id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
           "systemPrompt": { "valueType": "immediate", "value": "You call tools" },
           "userPrompt": { "valueType": "immediate", "value": "Echo twice" },
-          "provider": "openai",
-          "model": "gpt-4o" } },
+          "provider": { "valueType": "immediate", "value": "openai" },
+          "model": { "valueType": "immediate", "value": "gpt-4o" } } },
         "wf_tool": { "id": "wf_tool", "stepType": "Agent", "name": "wf_echo",
           "agentId": "tool-delay-echo", "capabilityId": "run", "inputMapping": {} },
         "finish": { "id": "finish", "stepType": "Finish",

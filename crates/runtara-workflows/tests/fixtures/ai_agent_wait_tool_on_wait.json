@@ -17,8 +17,8 @@
           "valueType": "reference",
           "value": "data.q"
         },
-        "provider": "openai",
-        "model": "gpt-4o",
+        "provider": { "valueType": "immediate", "value": "openai" },
+        "model": { "valueType": "immediate", "value": "gpt-4o" },
         "maxIterations": 5
       }
     },

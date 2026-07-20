@@ -173,6 +173,25 @@ fn require_provider(provider: &str) -> Result<&str, AgentError> {
     Ok(provider)
 }
 
+fn require_provider_for_connection<'a>(
+    provider: &'a str,
+    connection: &RawConnection,
+) -> Result<&'a str, AgentError> {
+    let provider = require_provider(provider)?;
+    if !runtara_ai::provider::provider_supports_integration(provider, &connection.integration_id) {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH",
+            format!(
+                "LLM provider '{}' is not compatible with connection integration '{}'",
+                provider, connection.integration_id
+            ),
+        )
+        .with_attr("provider", provider)
+        .with_attr("integration_id", &connection.integration_id));
+    }
+    Ok(provider)
+}
+
 fn unsupported_provider(provider: &str) -> AgentError {
     AgentError::permanent(
         "AI_TOOLS_UNSUPPORTED_PROVIDER",
@@ -807,7 +826,7 @@ pub struct ChatCompletionOutput {
 )]
 pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider(&input.provider)?;
+    let provider = require_provider_for_connection(&input.provider, connection)?;
 
     let chat_history = serde_json::from_value::<Vec<runtara_ai::Message>>(Value::Array(
         input.chat_history.clone(),
@@ -1027,7 +1046,7 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
     use runtara_ai::message::{AssistantContent, Message, ToolResultContent, UserContent};
 
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider(&input.provider)?;
+    let provider = require_provider_for_connection(&input.provider, connection)?;
 
     let mut history =
         serde_json::from_value::<Vec<Message>>(Value::Array(input.chat_history.clone())).map_err(
@@ -1242,7 +1261,7 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
     use runtara_ai::message::Message;
 
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider(&input.provider)?;
+    let provider = require_provider_for_connection(&input.provider, connection)?;
 
     let mut state = input.state.clone();
     let history = state
@@ -2704,6 +2723,22 @@ mod tests {
         };
         let err = embed_text(input).unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_MISSING_CONNECTION");
+    }
+
+    #[test]
+    fn chat_completion_rejects_provider_connection_mismatch_before_http() {
+        let input = ChatCompletionInput {
+            _connection: Some(fake_connection("aws_credentials")),
+            provider: PROVIDER_OPENAI.into(),
+            system_prompt: "sys".into(),
+            user_prompt: "hello".into(),
+            ..Default::default()
+        };
+
+        let err = chat_completion(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH");
+        assert!(err.message.contains(PROVIDER_OPENAI), "{}", err.message);
+        assert!(err.message.contains("aws_credentials"), "{}", err.message);
     }
 
     #[test]

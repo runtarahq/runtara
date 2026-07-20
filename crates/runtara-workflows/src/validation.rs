@@ -5486,6 +5486,16 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
             if let Some(ref config) = ai_agent_step.config {
                 extract_references_from_mapping_value(&config.system_prompt, &mut refs);
                 extract_references_from_mapping_value(&config.user_prompt, &mut refs);
+                extract_references_from_mapping_value(&config.provider, &mut refs);
+                if let Some(model) = &config.model {
+                    extract_references_from_mapping_value(model, &mut refs);
+                }
+                if let Some(temperature) = &config.temperature {
+                    extract_references_from_mapping_value(temperature, &mut refs);
+                }
+                if let Some(max_tokens) = &config.max_tokens {
+                    extract_references_from_mapping_value(max_tokens, &mut refs);
+                }
                 if let Some(ref memory) = config.memory {
                     extract_references_from_mapping_value(&memory.conversation_id, &mut refs);
                 }
@@ -5607,6 +5617,16 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
                     &config.user_prompt,
                     &mut refs,
                 );
+                extract_template_static_references_from_mapping_value(&config.provider, &mut refs);
+                if let Some(model) = &config.model {
+                    extract_template_static_references_from_mapping_value(model, &mut refs);
+                }
+                if let Some(temperature) = &config.temperature {
+                    extract_template_static_references_from_mapping_value(temperature, &mut refs);
+                }
+                if let Some(max_tokens) = &config.max_tokens {
+                    extract_template_static_references_from_mapping_value(max_tokens, &mut refs);
+                }
                 if let Some(ref memory) = config.memory {
                     extract_template_static_references_from_mapping_value(
                         &memory.conversation_id,
@@ -6402,7 +6422,7 @@ mod tests {
     // === MCP Edge Validation Tests ===
 
     fn ai_agent_with_connection(id: &str) -> Step {
-        use runtara_dsl::{AiAgentConfig, AiAgentProvider, ImmediateValue, MappingValue};
+        use runtara_dsl::{AiAgentConfig, ImmediateValue, MappingValue};
         Step::AiAgent(AiAgentStep {
             id: id.to_string(),
             name: None,
@@ -6415,8 +6435,12 @@ mod tests {
                 user_prompt: MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("hi"),
                 }),
-                provider: AiAgentProvider::OpenAi,
-                model: Some("gpt-4o".to_string()),
+                provider: Box::new(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("openai"),
+                })),
+                model: Some(Box::new(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("gpt-4o"),
+                }))),
                 max_iterations: None,
                 temperature: None,
                 max_tokens: None,
@@ -6429,6 +6453,49 @@ mod tests {
             breakpoint: None,
             durable: None,
         })
+    }
+
+    #[test]
+    fn ai_agent_runtime_parameter_references_are_collected_for_validation() {
+        fn reference(path: &str, type_hint: runtara_dsl::ValueType) -> MappingValue {
+            MappingValue::Reference(ReferenceValue {
+                value: path.to_string(),
+                type_hint: Some(type_hint),
+                default: None,
+            })
+        }
+
+        let mut step = ai_agent_with_connection("ai");
+        let Step::AiAgent(ai) = &mut step else {
+            panic!("expected ai step");
+        };
+        let config = ai.config.as_mut().expect("config");
+        *config.provider = reference("data.provider", runtara_dsl::ValueType::String);
+        config.model = Some(Box::new(reference(
+            "data.model",
+            runtara_dsl::ValueType::String,
+        )));
+        config.temperature = Some(Box::new(reference(
+            "data.temperature",
+            runtara_dsl::ValueType::Number,
+        )));
+        config.max_tokens = Some(Box::new(reference(
+            "data.maxTokens",
+            runtara_dsl::ValueType::Integer,
+        )));
+
+        let references = collect_references_from_step(&step);
+        for expected in [
+            "data.provider",
+            "data.model",
+            "data.temperature",
+            "data.maxTokens",
+        ] {
+            assert!(
+                references.iter().any(|actual| actual == expected),
+                "missing {expected}: {references:?}"
+            );
+        }
     }
 
     fn mcp_agent_step(id: &str) -> Step {
@@ -11304,7 +11371,7 @@ mod tests {
                 "ai": {{"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{{
                   "systemPrompt":{{"valueType":"immediate","value":"You are helpful"}},
                   "userPrompt":{{"valueType":"immediate","value":"Do the thing"}},
-                  "provider":"openai"
+                  "provider":{{"valueType":"immediate","value":"openai"}}
                 }}}},
                 "wait": {{"id":"wait","stepType":"WaitForSignal"{on_wait}}},
                 "finish": {{"id":"finish","stepType":"Finish"}}
@@ -11361,7 +11428,7 @@ mod tests {
                 "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
                   "systemPrompt":{"valueType":"immediate","value":"You are helpful"},
                   "userPrompt":{"valueType":"immediate","value":"Do the thing"},
-                  "provider":"openai"
+                  "provider":{"valueType":"immediate","value":"openai"}
                 }},
                 "wait": {"id":"wait","stepType":"WaitForSignal",
                   "onWait":{"entryPoint":"nf","executionPlan":[],"steps":{"nf":{"id":"nf","stepType":"Finish"}}}},

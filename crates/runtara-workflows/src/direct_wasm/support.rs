@@ -3585,7 +3585,7 @@ mod handler_step_on_error_tests {
                     "config": {
                         "systemPrompt": {"valueType": "immediate", "value": "sys"},
                         "userPrompt": {"valueType": "immediate", "value": "go"},
-                        "provider": "openai"
+                        "provider": {"valueType": "immediate", "value": "openai"}
                     }
                 },
                 "finish": { "stepType": "Finish", "id": "finish" }
@@ -3700,7 +3700,7 @@ mod handler_step_on_error_tests {
                     "config": {
                         "systemPrompt": {"valueType": "immediate", "value": "sys"},
                         "userPrompt": {"valueType": "immediate", "value": "go"},
-                        "provider": "openai"
+                        "provider": {"valueType": "immediate", "value": "openai"}
                     }
                 },
                 "tool_agent": {
@@ -3757,7 +3757,7 @@ mod handler_step_on_error_tests {
                     "config": {
                         "systemPrompt": {"valueType": "immediate", "value": "sys"},
                         "userPrompt": {"valueType": "immediate", "value": "go"},
-                        "provider": "openai"
+                        "provider": {"valueType": "immediate", "value": "openai"}
                     }
                 },
                 "tool_agent": {

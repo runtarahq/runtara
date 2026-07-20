@@ -11,8 +11,8 @@
       "config": {
         "systemPrompt": { "valueType": "immediate", "value": "Classify the sentiment." },
         "userPrompt": { "valueType": "reference", "value": "data.text" },
-        "provider": "openai",
-        "model": "gpt-4o",
+        "provider": { "valueType": "immediate", "value": "openai" },
+        "model": { "valueType": "immediate", "value": "gpt-4o" },
         "outputSchema": {
           "sentiment": { "type": "string", "required": true },
           "confidence": { "type": "number", "required": false }

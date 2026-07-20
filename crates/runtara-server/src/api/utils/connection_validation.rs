@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use runtara_dsl::agent_meta::AgentCatalog;
-use runtara_dsl::{AiAgentStep, Step, Workflow};
+use runtara_dsl::{AiAgentStep, MappingValue, Step, Workflow};
 
 use super::reference_validation::{IssueCategory, ValidationIssue};
 
@@ -336,7 +336,7 @@ fn validate_ai_agent_connection(
     let provider = ai_step
         .config
         .as_ref()
-        .map(|config| config.provider.as_str());
+        .and_then(|config| statically_bound_string(&config.provider));
 
     if !existing_connections.contains(conn_id) {
         let candidates: Vec<&ConnectionRef> = provider
@@ -429,6 +429,15 @@ fn validate_ai_agent_connection(
             )
             .with_field("connection_id"),
         );
+    }
+}
+
+/// Return a mapping's string value when it is statically known at save time.
+/// References and templates are deliberately deferred to runtime.
+fn statically_bound_string(value: &MappingValue) -> Option<&str> {
+    match value {
+        MappingValue::Immediate(immediate) => immediate.value.as_str(),
+        _ => None,
     }
 }
 
@@ -843,7 +852,7 @@ mod tests {
                         "config": {
                             "systemPrompt": {"valueType": "immediate", "value": "You are helpful"},
                             "userPrompt": {"valueType": "immediate", "value": "Do the thing"},
-                            "provider": provider
+                            "provider": {"valueType": "immediate", "value": provider}
                         }
                     }
                 },
@@ -897,6 +906,36 @@ mod tests {
             issue.message.contains("openai_api_key"),
             "{}",
             issue.message
+        );
+    }
+
+    #[test]
+    fn dynamic_ai_agent_provider_defers_connection_compatibility_to_runtime() {
+        let mut workflow = ai_agent_workflow("openai", "conn-aws");
+        let Step::AiAgent(ai_step) = workflow
+            .execution_graph
+            .steps
+            .get_mut("ai")
+            .expect("ai step")
+        else {
+            panic!("expected ai step");
+        };
+        *ai_step.config.as_mut().expect("config").provider =
+            MappingValue::Reference(runtara_dsl::ReferenceValue {
+                value: "data.provider".to_string(),
+                type_hint: Some(runtara_dsl::ValueType::String),
+                default: None,
+            });
+        let tenant = vec![ConnectionRef {
+            id: "conn-aws".to_string(),
+            integration_id: Some("aws_credentials".to_string()),
+            title: "AWS".to_string(),
+        }];
+
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
+        assert!(
+            issues.is_empty(),
+            "dynamic provider is checked at runtime: {issues:?}"
         );
     }
 

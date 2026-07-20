@@ -1007,13 +1007,7 @@ fn step_manifest(
                     "user_prompt".to_string(),
                     canonical_json(&config.user_prompt)?,
                 );
-                mapping.insert(
-                    "provider".to_string(),
-                    serde_json::json!({
-                        "valueType": "immediate",
-                        "value": config.provider.as_str(),
-                    }),
-                );
+                mapping.insert("provider".to_string(), canonical_json(&config.provider)?);
                 if let Some(output_schema) = &config.output_schema {
                     // Convert the DSL flat-map schema to JSON Schema, matching the
                     // generated loop, so the provider's structured-output params
@@ -1026,22 +1020,13 @@ fn step_manifest(
                     );
                 }
                 if let Some(model) = &config.model {
-                    mapping.insert(
-                        "model".to_string(),
-                        serde_json::json!({ "valueType": "immediate", "value": model }),
-                    );
+                    mapping.insert("model".to_string(), canonical_json(model)?);
                 }
-                if let Some(temperature) = config.temperature {
-                    mapping.insert(
-                        "temperature".to_string(),
-                        serde_json::json!({ "valueType": "immediate", "value": temperature }),
-                    );
+                if let Some(temperature) = &config.temperature {
+                    mapping.insert("temperature".to_string(), canonical_json(temperature)?);
                 }
-                if let Some(max_tokens) = config.max_tokens {
-                    mapping.insert(
-                        "max_tokens".to_string(),
-                        serde_json::json!({ "valueType": "immediate", "value": max_tokens }),
-                    );
+                if let Some(max_tokens) = &config.max_tokens {
+                    mapping.insert("max_tokens".to_string(), canonical_json(max_tokens)?);
                 }
                 // Per-attempt brain-turn timeout. Injected only when configured;
                 // when absent, the `ai-tools` chat capability defaults it to
@@ -2068,7 +2053,7 @@ mod tests {
                 "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
                   "systemPrompt":{"valueType":"immediate","value":"sys"},
                   "userPrompt":{"valueType":"immediate","value":"go"},
-                  "provider":"openai",
+                  "provider":{"valueType":"immediate","value":"openai"},
                   "maxRetries":3,
                   "retryDelay":10
                 }},
@@ -2088,6 +2073,48 @@ mod tests {
         assert_eq!(agent.capability_id, "chat-completion");
         assert_eq!(agent.max_retries, Some(3));
         assert_eq!(agent.retry_delay, Some(10));
+    }
+
+    #[test]
+    fn ai_agent_manifest_preserves_dynamic_runtime_parameter_mappings() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [{"fromStep":"ai","toStep":"finish","label":"next"}],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                  "systemPrompt":{"valueType":"immediate","value":"sys"},
+                  "userPrompt":{"valueType":"reference","value":"data.prompt"},
+                  "provider":{"valueType":"reference","value":"data.provider","type":"string"},
+                  "model":{"valueType":"reference","value":"data.model","type":"string"},
+                  "temperature":{"valueType":"reference","value":"data.temperature","type":"number"},
+                  "maxTokens":{"valueType":"reference","value":"data.maxTokens","type":"integer"}
+                }},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|agent| agent.step_id == "ai")
+            .expect("ai agent entry");
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == agent.input_mapping_id)
+            .expect("ai agent mapping");
+
+        for field in ["provider", "model", "temperature", "max_tokens"] {
+            assert_eq!(mapping.value[field]["valueType"], "reference", "{field}");
+        }
+        assert_eq!(mapping.value["provider"]["value"], "data.provider");
+        assert_eq!(mapping.value["max_tokens"]["type"], "integer");
     }
 
     #[test]
@@ -2226,7 +2253,7 @@ mod tests {
                   "config":{
                     "systemPrompt":{"valueType":"immediate","value":"sys"},
                     "userPrompt":{"valueType":"immediate","value":"go"},
-                    "provider":"openai"
+                    "provider":{"valueType":"immediate","value":"openai"}
                   }},
                 "finish": {"id":"finish","stepType":"Finish"}
               }
@@ -2267,7 +2294,7 @@ mod tests {
                   "config":{
                     "systemPrompt":{"valueType":"immediate","value":"sys"},
                     "userPrompt":{"valueType":"immediate","value":"go"},
-                    "provider":"openai",
+                    "provider":{"valueType":"immediate","value":"openai"},
                     "memory":{
                       "conversationId":{"valueType":"immediate","value":"c1"},
                       "compaction":{"maxMessages":2,"strategy":"summarize"}

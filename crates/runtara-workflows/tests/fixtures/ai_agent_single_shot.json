@@ -11,8 +11,8 @@
       "config": {
         "systemPrompt": { "valueType": "immediate", "value": "You are a helpful assistant." },
         "userPrompt": { "valueType": "reference", "value": "data.question" },
-        "provider": "openai",
-        "model": "gpt-4o"
+        "provider": { "valueType": "immediate", "value": "openai" },
+        "model": { "valueType": "immediate", "value": "gpt-4o" }
       }
     },
     "finish": {

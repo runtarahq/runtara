@@ -1230,9 +1230,10 @@ pub struct WaitForSignalActionConfig {
 ///   "config": {
 ///     "systemPrompt": { "valueType": "immediate", "value": "You are an inventory manager" },
 ///     "userPrompt": { "valueType": "reference", "value": "data.userRequest" },
-///     "model": "gpt-4o",
+///     "provider": { "valueType": "immediate", "value": "openai" },
+///     "model": { "valueType": "immediate", "value": "gpt-4o" },
 ///     "maxIterations": 10,
-///     "temperature": 0.7
+///     "temperature": { "valueType": "immediate", "value": 0.7 }
 ///   }
 /// }
 /// ```
@@ -1282,29 +1283,6 @@ pub struct AiAgentStep {
     pub durable: Option<bool>,
 }
 
-/// LLM provider used by an AI Agent step.
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum AiAgentProvider {
-    /// OpenAI-compatible chat completions provider.
-    #[serde(rename = "openai")]
-    OpenAi,
-    /// Amazon Bedrock Converse provider.
-    #[serde(rename = "bedrock")]
-    Bedrock,
-}
-
-impl AiAgentProvider {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AiAgentProvider::OpenAi => "openai",
-            AiAgentProvider::Bedrock => "bedrock",
-        }
-    }
-}
-
 /// Configuration for the AI Agent step.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1317,24 +1295,25 @@ pub struct AiAgentConfig {
     /// User message / request to process
     pub user_prompt: MappingValue,
 
-    /// LLM provider to use for the agent brain.
-    pub provider: AiAgentProvider,
+    /// LLM provider to use for the agent brain, resolved when the step starts.
+    /// Must resolve to a supported provider id such as `"openai"` or `"bedrock"`.
+    pub provider: Box<MappingValue>,
 
-    /// LLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514")
+    /// LLM model identifier, resolved when the step starts (e.g., "gpt-4o").
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<Box<MappingValue>>,
 
     /// Maximum number of tool-call iterations before stopping (default: 10)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
 
-    /// Temperature for LLM sampling (default: 0.7)
+    /// Temperature for LLM sampling, resolved when the step starts (default: 0.7).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
+    pub temperature: Option<Box<MappingValue>>,
 
-    /// Maximum tokens per LLM call
+    /// Maximum tokens per LLM call, resolved when the step starts.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
+    pub max_tokens: Option<Box<MappingValue>>,
 
     /// Maximum retry attempts for the LLM call (default: 0 — no retries).
     ///
@@ -2323,5 +2302,52 @@ mod connection_ref_tests {
         let json = serde_json::to_value(&step).expect("serializes");
         assert_eq!(json["connectionRef"]["valueType"], "reference");
         assert_eq!(json["connectionRef"]["value"], "data.llm");
+    }
+}
+
+#[cfg(test)]
+mod ai_agent_dynamic_config_tests {
+    use super::*;
+
+    fn base_config() -> serde_json::Value {
+        serde_json::json!({
+            "systemPrompt": {"valueType": "immediate", "value": "You are helpful"},
+            "userPrompt": {"valueType": "reference", "value": "data.prompt"},
+            "provider": {"valueType": "reference", "value": "steps.route.outputs.provider", "type": "string"},
+            "model": {"valueType": "reference", "value": "steps.route.outputs.model", "type": "string"},
+            "temperature": {"valueType": "reference", "value": "steps.route.outputs.temperature", "type": "number"},
+            "maxTokens": {"valueType": "reference", "value": "steps.route.outputs.maxTokens", "type": "integer"}
+        })
+    }
+
+    #[test]
+    fn ai_agent_runtime_parameters_are_mapping_values() {
+        let config: AiAgentConfig =
+            serde_json::from_value(base_config()).expect("dynamic config parses");
+        let json = serde_json::to_value(config).expect("dynamic config serializes");
+
+        for field in ["provider", "model", "temperature", "maxTokens"] {
+            assert_eq!(json[field]["valueType"], "reference", "{field}");
+        }
+        assert_eq!(json["provider"]["value"], "steps.route.outputs.provider");
+        assert_eq!(json["temperature"]["type"], "number");
+        assert_eq!(json["maxTokens"]["type"], "integer");
+    }
+
+    #[test]
+    fn ai_agent_runtime_parameters_reject_legacy_literals() {
+        let mut config = base_config();
+        config["provider"] = serde_json::json!("openai");
+        config["model"] = serde_json::json!("gpt-4o");
+        config["temperature"] = serde_json::json!(0.7);
+        config["maxTokens"] = serde_json::json!(2048);
+
+        let error = serde_json::from_value::<AiAgentConfig>(config)
+            .expect_err("literal runtime parameters are intentionally unsupported");
+        assert!(
+            error.to_string().contains("MappingValue")
+                || error.to_string().contains("internally tagged"),
+            "{error}"
+        );
     }
 }
