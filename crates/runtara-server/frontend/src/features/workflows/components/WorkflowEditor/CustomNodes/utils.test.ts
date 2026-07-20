@@ -1483,8 +1483,8 @@ describe('Backend DSL serialization', () => {
       config: {
         systemPrompt: { valueType: 'immediate', value: 'You help.' },
         userPrompt: { valueType: 'template', value: '{{ data.prompt }}' },
-        provider: 'openai',
-        model: 'gpt-4.1-mini',
+        provider: { valueType: 'immediate', value: 'openai' },
+        model: { valueType: 'immediate', value: 'gpt-4.1-mini' },
         maxRetries: 3,
         retryDelay: 250,
       },
@@ -1493,10 +1493,74 @@ describe('Backend DSL serialization', () => {
 
     const step = roundTripStep(graph);
     expect(step.config).toMatchObject({
-      provider: 'openai',
-      model: 'gpt-4.1-mini',
+      provider: { valueType: 'immediate', value: 'openai' },
+      model: { valueType: 'immediate', value: 'gpt-4.1-mini' },
       maxRetries: 3,
       retryDelay: 250,
+    });
+  });
+
+  it('round-trips dynamic AiAgent model parameters as mapping values', () => {
+    const graph = makeGraph({
+      id: 'ai',
+      stepType: 'AiAgent',
+      config: {
+        systemPrompt: { valueType: 'immediate', value: 'You help.' },
+        userPrompt: { valueType: 'reference', value: 'data.prompt' },
+        provider: {
+          valueType: 'reference',
+          value: 'data.provider',
+          type: 'string',
+          default: 'openai',
+        },
+        model: {
+          valueType: 'reference',
+          value: 'data.model',
+          type: 'string',
+          default: 'gpt-4.1-mini',
+        },
+        temperature: {
+          valueType: 'reference',
+          value: 'data.temperature',
+          type: 'number',
+          default: 0.7,
+        },
+        maxTokens: {
+          valueType: 'reference',
+          value: 'data.maxTokens',
+          type: 'integer',
+          default: 1024,
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config).toMatchObject({
+      provider: {
+        valueType: 'reference',
+        value: 'data.provider',
+        type: 'string',
+        default: 'openai',
+      },
+      model: {
+        valueType: 'reference',
+        value: 'data.model',
+        type: 'string',
+        default: 'gpt-4.1-mini',
+      },
+      temperature: {
+        valueType: 'reference',
+        value: 'data.temperature',
+        type: 'number',
+        default: 0.7,
+      },
+      maxTokens: {
+        valueType: 'reference',
+        value: 'data.maxTokens',
+        type: 'integer',
+        default: 1024,
+      },
     });
   });
 
@@ -2669,8 +2733,8 @@ describe('AiAgent onError and mcp.<toolset> edge round-trip', () => {
           name: 'Assistant',
           connectionId: 'conn-1',
           config: {
-            provider: 'openai',
-            model: 'gpt-4o',
+            provider: { valueType: 'immediate', value: 'openai' },
+            model: { valueType: 'immediate', value: 'gpt-4o' },
             userPrompt: { valueType: 'immediate', value: 'hi' },
           },
         },
@@ -2832,11 +2896,7 @@ describe('WaitForSignal clear-field round-trip', () => {
   }
 
   /** Patch an inputMapping entry on a loaded node, simulating a form edit. */
-  function editEntry(
-    node: Node,
-    type: string,
-    patch: Record<string, unknown>
-  ) {
+  function editEntry(node: Node, type: string, patch: Record<string, unknown>) {
     const mapping = ((node.data as any).inputMapping || []) as any[];
     const idx = mapping.findIndex((item) => item.type === type);
     expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
@@ -2958,8 +3018,8 @@ describe('AiAgent memory removal round-trip', () => {
           name: 'Assistant',
           connectionId: 'conn-1',
           config: {
-            provider: 'openai',
-            model: 'gpt-4o',
+            provider: { valueType: 'immediate', value: 'openai' },
+            model: { valueType: 'immediate', value: 'gpt-4o' },
             userPrompt: { valueType: 'immediate', value: 'hi' },
             memory: {
               conversationId: {
@@ -3028,8 +3088,8 @@ describe('AiAgent memory removal round-trip', () => {
     expect(step.config).not.toHaveProperty('memory');
     // The rest of the config survives
     expect(step.config).toMatchObject({
-      provider: 'openai',
-      model: 'gpt-4o',
+      provider: { valueType: 'immediate', value: 'openai' },
+      model: { valueType: 'immediate', value: 'gpt-4o' },
     });
     // Provider step and memory edge are gone from the saved graph
     expect(round!.steps).not.toHaveProperty('mem');
@@ -3171,7 +3231,10 @@ describe('Mapping-object round-trip (Log/Error/WaitForSignal contexts)', () => {
       expect(entry, `${stepId}.${entryType} entry missing`).toBeDefined();
 
       const normalized = normalizeMappingObject(entry.value);
-      expect(normalized, `${stepId}.${entryType} not normalizable`).not.toBeNull();
+      expect(
+        normalized,
+        `${stepId}.${entryType} not normalizable`
+      ).not.toBeNull();
       editEntry(node, entryType, { value: normalized, valueType: 'composite' });
 
       const round = composeExecutionGraph(nodes, edges, { name: 'norm' });

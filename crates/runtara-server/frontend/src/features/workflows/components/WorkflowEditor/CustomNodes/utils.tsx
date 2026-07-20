@@ -1510,11 +1510,11 @@ function cleanNodeData(steps: Record<string, any>) {
       const aiAgentConfig: {
         systemPrompt?: { valueType: string; value: unknown };
         userPrompt?: { valueType: string; value: unknown };
-        provider?: string;
-        model?: string | null;
+        provider?: Record<string, unknown>;
+        model?: Record<string, unknown>;
         maxIterations?: number | null;
-        temperature?: number | null;
-        maxTokens?: number | null;
+        temperature?: Record<string, unknown>;
+        maxTokens?: Record<string, unknown>;
         maxRetries?: number | null;
         retryDelay?: number | null;
       } = {};
@@ -1550,14 +1550,22 @@ function cleanNodeData(steps: Record<string, any>) {
           (item: any) => item.type === 'provider'
         );
         if (providerItem?.value) {
-          aiAgentConfig.provider = String(providerItem.value);
+          const [, provider] = processMappingEntry(providerItem) as [
+            string,
+            Record<string, unknown>,
+          ];
+          aiAgentConfig.provider = provider;
         }
 
         const modelItem = inputMapping.find(
           (item: any) => item.type === 'model'
         );
         if (modelItem?.value) {
-          aiAgentConfig.model = String(modelItem.value);
+          const [, model] = processMappingEntry(modelItem) as [
+            string,
+            Record<string, unknown>,
+          ];
+          aiAgentConfig.model = model;
         }
 
         const maxIterationsItem = inputMapping.find(
@@ -1577,14 +1585,22 @@ function cleanNodeData(steps: Record<string, any>) {
           temperatureItem?.value !== undefined &&
           temperatureItem.value !== ''
         ) {
-          aiAgentConfig.temperature = Number(temperatureItem.value);
+          const [, temperature] = processMappingEntry(temperatureItem) as [
+            string,
+            Record<string, unknown>,
+          ];
+          aiAgentConfig.temperature = temperature;
         }
 
         const maxTokensItem = inputMapping.find(
           (item: any) => item.type === 'maxTokens'
         );
         if (maxTokensItem?.value !== undefined && maxTokensItem.value !== '') {
-          aiAgentConfig.maxTokens = Number(maxTokensItem.value);
+          const [, maxTokens] = processMappingEntry(maxTokensItem) as [
+            string,
+            Record<string, unknown>,
+          ];
+          aiAgentConfig.maxTokens = maxTokens;
         }
 
         const maxRetriesItem = inputMapping.find(
@@ -2340,18 +2356,26 @@ function normalizeNodesAndEdges(
               if (config?.provider) {
                 aiInputMapping.push({
                   type: 'provider',
-                  value: config.provider,
-                  valueType: 'immediate',
-                  typeHint: 'string',
+                  value: config.provider.value ?? '',
+                  valueType: config.provider.valueType || 'immediate',
+                  typeHint: config.provider.type || 'string',
+                  ...(config.provider.valueType === 'reference' &&
+                  config.provider.default !== undefined
+                    ? { defaultValue: config.provider.default }
+                    : {}),
                 });
               }
 
               if (config?.model) {
                 aiInputMapping.push({
                   type: 'model',
-                  value: config.model,
-                  valueType: 'immediate',
-                  typeHint: 'string',
+                  value: config.model.value ?? '',
+                  valueType: config.model.valueType || 'immediate',
+                  typeHint: config.model.type || 'string',
+                  ...(config.model.valueType === 'reference' &&
+                  config.model.default !== undefined
+                    ? { defaultValue: config.model.default }
+                    : {}),
                 });
               }
 
@@ -2373,9 +2397,13 @@ function normalizeNodesAndEdges(
               ) {
                 aiInputMapping.push({
                   type: 'temperature',
-                  value: config.temperature,
-                  valueType: 'immediate',
-                  typeHint: 'number',
+                  value: config.temperature.value ?? '',
+                  valueType: config.temperature.valueType || 'immediate',
+                  typeHint: config.temperature.type || 'number',
+                  ...(config.temperature.valueType === 'reference' &&
+                  config.temperature.default !== undefined
+                    ? { defaultValue: config.temperature.default }
+                    : {}),
                 });
               }
 
@@ -2385,9 +2413,13 @@ function normalizeNodesAndEdges(
               ) {
                 aiInputMapping.push({
                   type: 'maxTokens',
-                  value: config.maxTokens,
-                  valueType: 'immediate',
-                  typeHint: 'integer',
+                  value: config.maxTokens.value ?? '',
+                  valueType: config.maxTokens.valueType || 'immediate',
+                  typeHint: config.maxTokens.type || 'integer',
+                  ...(config.maxTokens.valueType === 'reference' &&
+                  config.maxTokens.default !== undefined
+                    ? { defaultValue: config.maxTokens.default }
+                    : {}),
                 });
               }
 

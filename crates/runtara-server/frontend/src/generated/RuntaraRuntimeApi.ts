@@ -105,7 +105,8 @@ export type SchemaFieldType =
   | "boolean"
   | "array"
   | "object"
-  | "file";
+  | "file"
+  | "connection";
 
 export type ReportWorkflowRuntimeEntity =
   | "instances"
@@ -360,9 +361,6 @@ export type BulkValidationMode = "stop" | "skip";
 /** Behavior on unique-key conflict for bulk-create. */
 export type BulkConflictMode = "error" | "skip" | "upsert";
 
-/** LLM provider used by an AI Agent step. */
-export type AiAgentProvider = "openai" | "bedrock";
-
 /** Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE. */
 export type AggregateFn =
   | "COUNT"
@@ -411,8 +409,26 @@ export interface AgentStep {
    * (validation warns with W070). Use `onError` routing for rollback logic.
    */
   compensation?: null | CompensationConfig;
-  /** Connection ID for agents requiring authentication */
+  /**
+   * Connection ID for agents requiring authentication.
+   *
+   * A same-tenant literal id, pinned at author time (back-compat). Ignored
+   * when `connection_ref` is set — the ref then supplies the id at runtime.
+   */
   connectionId?: string | null;
+  /**
+   * Resolvable connection binding, evaluated against the execution source at
+   * runtime to ONE concrete connection id.
+   *
+   * This is how a step binds to a caller-supplied connection (a `connection`
+   * input, `{"valueType": "reference", "value": "data.crm"}`), rotates
+   * connections (point the ref at a different value), or selects one
+   * dynamically per record (`data.chosenConnectionId`). When set, it takes
+   * precedence over the `connection_id` literal; the resolved value is an
+   * opaque per-tenant connection id (never a secret — the host resolves
+   * credentials by id at outbound-call time).
+   */
+  connectionRef?: null | MappingValue;
   /**
    * Disable durability for this step when `Some(false)`. Skips checkpoint
    * read/write around the capability call. Ignored when the enclosing
@@ -554,19 +570,15 @@ export interface AiAgentConfig {
    * @min 0
    */
   maxRetries?: number | null;
-  /**
-   * Maximum tokens per LLM call
-   * @format int64
-   * @min 0
-   */
-  maxTokens?: number | null;
+  /** Maximum tokens per LLM call, resolved when the step starts. */
+  maxTokens?: null | MappingValue;
   /**
    * Conversation memory configuration.
    * Requires a "memory" labeled edge pointing to a memory provider Agent step.
    */
   memory?: null | AiAgentMemory;
-  /** LLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514") */
-  model?: string | null;
+  /** LLM model identifier, resolved when the step starts (e.g., "gpt-4o"). */
+  model?: null | MappingValue;
   /**
    * Output schema for structured responses (DSL flat-map format).
    *
@@ -588,8 +600,11 @@ export interface AiAgentConfig {
    * The step output `response` will be a parsed JSON object instead of a string.
    */
   outputSchema?: Partial<Record<string, SchemaField>> | null;
-  /** LLM provider to use for the agent brain. */
-  provider: AiAgentProvider;
+  /**
+   * LLM provider to use for the agent brain, resolved when the step starts.
+   * Must resolve to a supported provider id such as `"openai"` or `"bedrock"`.
+   */
+  provider: MappingValue;
   /**
    * Base delay between retries in milliseconds (default: 1000).
    * @format int64
@@ -598,11 +613,8 @@ export interface AiAgentConfig {
   retryDelay?: number | null;
   /** System prompt / instructions for the LLM */
   systemPrompt: MappingValue;
-  /**
-   * Temperature for LLM sampling (default: 0.7)
-   * @format double
-   */
-  temperature?: number | null;
+  /** Temperature for LLM sampling, resolved when the step starts (default: 0.7). */
+  temperature?: null | MappingValue;
   /**
    * Maximum duration of a single LLM "brain" turn, per attempt, in
    * milliseconds (default: 180000).
@@ -685,9 +697,10 @@ export interface AiAgentMemory {
  *   "config": {
  *     "systemPrompt": { "valueType": "immediate", "value": "You are an inventory manager" },
  *     "userPrompt": { "valueType": "reference", "value": "data.userRequest" },
- *     "model": "gpt-4o",
+ *     "provider": { "valueType": "immediate", "value": "openai" },
+ *     "model": { "valueType": "immediate", "value": "gpt-4o" },
  *     "maxIterations": 10,
- *     "temperature": 0.7
+ *     "temperature": { "valueType": "immediate", "value": 0.7 }
  *   }
  * }
  * ```
@@ -697,8 +710,22 @@ export interface AiAgentStep {
   breakpoint?: boolean | null;
   /** AI Agent configuration */
   config?: null | AiAgentConfig;
-  /** Connection ID for the LLM provider (e.g., OpenAI, Anthropic) */
+  /**
+   * Connection ID for the LLM provider (e.g., OpenAI, Anthropic).
+   *
+   * A same-tenant literal id, pinned at author time (back-compat). Ignored
+   * when `connection_ref` is set — the ref then supplies the id at runtime.
+   */
   connectionId?: string | null;
+  /**
+   * Resolvable connection binding, evaluated against the execution source at
+   * runtime to ONE concrete connection id (see `AgentStep::connection_ref`).
+   *
+   * Lets an AI step bind to a caller-supplied `connection` input, rotate LLM
+   * provider connections, or select one dynamically. When set, it takes
+   * precedence over the `connection_id` literal.
+   */
+  connectionRef?: null | MappingValue;
   /**
    * Disable durability for this step when `Some(false)`. Skips the
    * per-turn checkpoints inside the tool loop (each completed turn — LLM
@@ -993,6 +1020,13 @@ export interface ApiResponseWorkflowDto {
      * Defaults to "/" (root folder)
      */
     path?: string;
+    /**
+     * Stable, per-tenant-unique capability id — the workflow-as-agent exports
+     * `runtara:agent-<slug>/capabilities`. Auto-derived from the name at
+     * create time, editable via the dedicated slug endpoint, never re-derived
+     * on rename. `None` only for rows created before the slug backfill ran.
+     */
+    slug?: string | null;
     started?: string | null;
     /** Whether this version is compiled with step-event tracking instrumentation */
     trackEvents?: boolean;
@@ -1727,6 +1761,11 @@ export interface CreateWorkflowRequest {
   description: string;
   memoryTier?: null | MemoryTier;
   name: string;
+  /**
+   * Capability id override (lowercase kebab, ≤64 chars). Auto-derived from
+   * the name when absent; a supplied slug that is taken or reserved is a 409.
+   */
+  slug?: string | null;
   /** Enable step-event tracking for this workflow version (default: true) */
   trackEvents?: boolean | null;
 }
@@ -4456,6 +4495,12 @@ export interface SchemaField {
    * Unknown formats fall back to the default input for the type.
    */
   format?: string | null;
+  /**
+   * For `type: "connection"` — the integration id the bound connection must
+   * belong to (e.g. `hubspot`, `s3`). Drives the connection-picker filter in
+   * the editor and tenant-ownership + integration validation at bind time.
+   */
+  integration?: string | null;
   /** For array types, the type of items in the array */
   items?: null | SchemaField;
   /**
@@ -4558,10 +4603,16 @@ export interface SplitConfig {
    */
   maxRetries?: number | null;
   /**
-   * Maximum concurrent iterations (0 = unlimited).
+   * Maximum concurrent iterations (0 = unlimited, capped by the runtime's
+   * per-agent instance pool).
    *
-   * **Ignored** — Split iterations execute strictly sequentially in the
-   * WASM runtime; any value other than 1 triggers validation warning W073.
+   * When > 1 and the Split body is an eligible single-Agent subgraph (no
+   * breakpoints, no split-level retries/timeout, not a workflow-agent
+   * child), iterations run as CONCURRENT windows: agent calls are launched
+   * as component-model-async subtasks and their I/O overlaps. Ineligible
+   * shapes keep the strictly sequential execution (advisory W073).
+   * Results, error routing, and `dontStopOnFailed` semantics are identical
+   * to sequential execution. See docs/wasip3-parallelism.md.
    * @format int32
    * @min 0
    */
@@ -4918,7 +4969,11 @@ export interface StepSummaryResponse {
   /** Step input data */
   inputs?: any;
   /**
-   * Real launch wall-clock (epoch ms) of a parallel branch's async work. Present only for steps that ran concurrently; with settledAtMs it gives the true overlapping interval, versus startedAt/durationMs (derived from the sequential assemble-order event rows). Consumers prefer [launchedAtMs, settledAtMs] when both are present.
+   * Real launch wall-clock (epoch ms) of a parallel branch's async work.
+   * Present only for steps that ran concurrently; with `settled_at_ms` it
+   * gives the true overlapping interval, versus `started_at`/`duration_ms`
+   * (derived from the sequential assemble-order event rows). Consumers prefer
+   * `[launched_at_ms, settled_at_ms]` when both are present.
    * @format int64
    */
   launchedAtMs?: number | null;
@@ -4929,7 +4984,8 @@ export interface StepSummaryResponse {
   /** Step's scope ID for hierarchy */
   scopeId?: string | null;
   /**
-   * Real settle wall-clock (epoch ms) of a parallel branch's async work. See launchedAtMs.
+   * Real settle wall-clock (epoch ms) of a parallel branch's async work. See
+   * `launched_at_ms`.
    * @format int64
    */
   settledAtMs?: number | null;
@@ -5224,6 +5280,11 @@ export interface UpdateWorkflowRequest {
   memoryTier?: null | MemoryTier;
   /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
   trackEvents?: boolean | null;
+}
+
+export interface UpdateWorkflowSlugRequest {
+  /** The new slug (lowercase kebab, ≤64 chars, per-tenant unique). */
+  slug: string;
 }
 
 /** Response for validate-mappings endpoint */
@@ -5541,6 +5602,13 @@ export interface WorkflowDto {
    * Defaults to "/" (root folder)
    */
   path?: string;
+  /**
+   * Stable, per-tenant-unique capability id — the workflow-as-agent exports
+   * `runtara:agent-<slug>/capabilities`. Auto-derived from the name at
+   * create time, editable via the dedicated slug endpoint, never re-derived
+   * on rename. `None` only for rows created before the slug backfill ran.
+   */
+  slug?: string | null;
   started?: string | null;
   /** Whether this version is compiled with step-event tracking instrumentation */
   trackEvents?: boolean;
@@ -8041,6 +8109,22 @@ export class Api<
      * No description
      *
      * @tags workflow-controller
+     * @name PublishWorkflowAgentHandler
+     * @summary Publish a workflow AS an agent: compile the current (or latest) version with the AgentCapabilities ABI, synthesize catalog metadata from its input/output schemas, and stage both into the tenant's workflow-agent dir. Any parent workflow can then target it as `agentId: <slug>, capabilityId: "run"`.
+     * @request POST:/api/runtime/workflows/{id}/publish-agent
+     */
+    publishWorkflowAgentHandler: (id: string, params: RequestParams = {}) =>
+      this.request<any, any>({
+        path: `/api/runtime/workflows/${id}/publish-agent`,
+        method: "POST",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags workflow-controller
      * @name ScheduleWorkflowHandler
      * @summary Schedule a workflow execution (placeholder - not implemented)
      * @request POST:/api/runtime/workflows/{id}/schedule
@@ -8055,6 +8139,28 @@ export class Api<
         method: "POST",
         body: data,
         type: ContentType.Json,
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags workflow-controller
+     * @name UpdateWorkflowSlugHandler
+     * @summary Update a workflow's slug — the stable capability id a workflow-as-agent exports. Identity-level write (never rides the graph-JSON path); always allowed — a parent that composed `agent-<oldslug>` keeps that pin until it recompiles.
+     * @request PUT:/api/runtime/workflows/{id}/slug
+     */
+    updateWorkflowSlugHandler: (
+      id: string,
+      data: UpdateWorkflowSlugRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<any, any>({
+        path: `/api/runtime/workflows/${id}/slug`,
+        method: "PUT",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
         ...params,
       }),
 

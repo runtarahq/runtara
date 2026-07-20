@@ -38,7 +38,7 @@ interface MappingValueInputProps {
   fieldName?: string;
   placeholder?: string;
   disabled?: boolean;
-  enumOptions?: string[];
+  enumOptions?: Array<string | { value: string; label: string }>;
   className?: string;
   /** Hide the reference mode toggle button (for testing/immediate-only contexts) */
   hideReferenceToggle?: boolean;
@@ -400,8 +400,11 @@ export function MappingValueInput({
           </SelectTrigger>
           <SelectContent>
             {enumOptions.map((option) => (
-              <SelectItem key={option} value={option}>
-                {option}
+              <SelectItem
+                key={typeof option === 'string' ? option : option.value}
+                value={typeof option === 'string' ? option : option.value}
+              >
+                {typeof option === 'string' ? option : option.label}
               </SelectItem>
             ))}
           </SelectContent>

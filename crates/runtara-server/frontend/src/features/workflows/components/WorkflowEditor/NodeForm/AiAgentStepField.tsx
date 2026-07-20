@@ -61,6 +61,13 @@ const PROVIDER_OPTIONS: Array<{
   },
 ];
 
+const AI_AGENT_FIELD_TYPE_HINTS: Record<string, string> = {
+  provider: 'string',
+  model: 'string',
+  temperature: 'number',
+  maxTokens: 'integer',
+};
+
 interface ModelOption {
   value: string;
   label: string;
@@ -171,26 +178,41 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
   const selectedProvider: AiProvider | undefined = useMemo(() => {
     const providerField = (inputMapping || []).find(
       (item: any) => item.type === 'provider'
-    )?.value;
-    if (providerField === 'bedrock' || providerField === 'openai') {
-      return providerField;
+    );
+    if (
+      (providerField?.valueType || 'immediate') === 'immediate' &&
+      (providerField?.value === 'bedrock' || providerField?.value === 'openai')
+    ) {
+      return providerField.value;
     }
     return undefined;
   }, [inputMapping]);
 
+  const hasDynamicProvider = useMemo(() => {
+    const providerField = (inputMapping || []).find(
+      (item: any) => item.type === 'provider'
+    );
+    return Boolean(
+      providerField && (providerField.valueType || 'immediate') !== 'immediate'
+    );
+  }, [inputMapping]);
+
   const llmConnections = useMemo(() => {
     const allConnections = connectionsQuery.data ?? [];
-    const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
-      (option) => option.value === selectedProvider
-    )?.compatibleIntegrationIds;
-    if (!compatibleIntegrationIds) return [];
+    const compatibleIntegrationIds = hasDynamicProvider
+      ? LLM_INTEGRATION_IDS
+      : new Set(
+          PROVIDER_OPTIONS.find((option) => option.value === selectedProvider)
+            ?.compatibleIntegrationIds ?? []
+        );
+    if (compatibleIntegrationIds.size === 0) return [];
     return allConnections.filter(
       (conn: any) =>
         conn.integrationId &&
         LLM_INTEGRATION_IDS.has(conn.integrationId) &&
-        compatibleIntegrationIds.includes(conn.integrationId)
+        compatibleIntegrationIds.has(conn.integrationId)
     );
-  }, [connectionsQuery.data, selectedProvider]);
+  }, [connectionsQuery.data, hasDynamicProvider, selectedProvider]);
 
   const connectionOptions = useMemo(() => {
     const noneOption = {
@@ -449,6 +471,12 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     return (field?.valueType as ValueMode) || 'immediate';
   };
 
+  const getDefaultValue = (fieldName: string) => {
+    const mapping = inputMapping || [];
+    const field = mapping.find((item: any) => item.type === fieldName);
+    return field?.defaultValue;
+  };
+
   // Helper to update a field in the inputMapping array
   const updateField = (
     fieldName: string,
@@ -481,7 +509,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
           {
             type: fieldName,
             value,
-            typeHint: 'string',
+            typeHint: AI_AGENT_FIELD_TYPE_HINTS[fieldName] || 'string',
             valueType: valueType || 'immediate',
           },
         ],
@@ -492,6 +520,22 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
         }
       );
     }
+  };
+
+  const updateDefaultValue = (
+    fieldName: string,
+    defaultValue: string | undefined
+  ) => {
+    const mapping = form.getValues(name) || [];
+    const fieldIndex = mapping.findIndex(
+      (item: any) => item.type === fieldName
+    );
+    if (fieldIndex < 0) return;
+    form.setValue(`${name}.${fieldIndex}.defaultValue`, defaultValue, {
+      shouldDirty: true,
+      shouldTouch: true,
+      shouldValidate: true,
+    });
   };
 
   // Get current tools list from inputMapping
@@ -664,49 +708,55 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
   return (
     <div className="space-y-4">
-      {/* Provider Selector */}
+      {/* Provider */}
       <FormItem>
         <FormLabel>Provider *</FormLabel>
         <FormDescription>
-          Select the LLM provider for this agent
+          Select the LLM provider or resolve it from workflow data
         </FormDescription>
-        <Select
-          value={selectedProvider}
-          onValueChange={(value) => {
-            const provider = value as AiProvider;
-            updateField('provider', provider);
-            updateField('model', '');
-            const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
-              (option) => option.value === provider
-            )?.compatibleIntegrationIds;
-            if (
-              connectionId &&
-              selectedConnectionIntegrationId &&
-              !compatibleIntegrationIds?.includes(
-                selectedConnectionIntegrationId
-              )
-            ) {
-              form.setValue('connectionId', '', {
-                shouldDirty: true,
-                shouldTouch: true,
-                shouldValidate: true,
-              });
+        <FormControl>
+          <MappingValueInput
+            value={getValue('provider')}
+            onChange={(value) => {
+              updateField('provider', value);
+              if (!value || getValueType('provider') !== 'immediate') return;
+
+              const provider = value as AiProvider;
+              updateField('model', '');
+              const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
+                (option) => option.value === provider
+              )?.compatibleIntegrationIds;
+              if (
+                connectionId &&
+                selectedConnectionIntegrationId &&
+                !compatibleIntegrationIds?.includes(
+                  selectedConnectionIntegrationId
+                )
+              ) {
+                form.setValue('connectionId', '', {
+                  shouldDirty: true,
+                  shouldTouch: true,
+                  shouldValidate: true,
+                });
+              }
+            }}
+            valueType={getValueType('provider')}
+            onValueTypeChange={(valueType) =>
+              updateField('provider', getValue('provider'), valueType)
             }
-          }}
-        >
-          <FormControl>
-            <SelectTrigger>
-              <SelectValue placeholder="Select provider" />
-            </SelectTrigger>
-          </FormControl>
-          <SelectContent>
-            {PROVIDER_OPTIONS.map((provider) => (
-              <SelectItem key={provider.value} value={provider.value}>
-                {provider.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            fieldType="string"
+            fieldName="provider"
+            placeholder="Select provider"
+            enumOptions={PROVIDER_OPTIONS.map(({ value, label }) => ({
+              value,
+              label,
+            }))}
+            defaultValue={getDefaultValue('provider')}
+            onDefaultValueChange={(value) =>
+              updateDefaultValue('provider', value)
+            }
+          />
+        </FormControl>
       </FormItem>
 
       {/* Connection Selector */}
@@ -717,7 +767,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             ? `Select a compatible ${
                 selectedProvider === 'bedrock' ? 'AWS Bedrock' : 'OpenAI'
               } connection`
-            : 'Select a provider first'}
+            : hasDynamicProvider
+              ? 'Select the connection used by the resolved provider'
+              : 'Select a provider first'}
         </FormDescription>
         <Select
           value={connectionId === '' ? '__none__' : connectionId || '__none__'}
@@ -728,7 +780,10 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               shouldValidate: true,
             });
           }}
-          disabled={!selectedProvider || connectionsQuery.isFetching}
+          disabled={
+            (!selectedProvider && !hasDynamicProvider) ||
+            connectionsQuery.isFetching
+          }
         >
           <FormControl>
             <SelectTrigger>
@@ -843,46 +898,22 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               ? 'Select a model or type a custom identifier'
               : 'Select a connection first to see available models'}
         </FormDescription>
-        {modelOptions.length > 0 ? (
-          <Select
-            value={String(getValue('model') || '__none__')}
-            onValueChange={(value) =>
-              updateField('model', value === '__none__' ? '' : value)
+        <FormControl>
+          <MappingValueInput
+            value={getValue('model')}
+            onChange={(value) => updateField('model', value)}
+            valueType={getValueType('model')}
+            onValueTypeChange={(valueType) =>
+              updateField('model', getValue('model'), valueType)
             }
-          >
-            <FormControl>
-              <SelectTrigger className="font-mono text-sm">
-                <SelectValue placeholder="Select model...">
-                  {getValue('model')
-                    ? modelOptions.find((m) => m.value === getValue('model'))
-                        ?.label || String(getValue('model'))
-                    : 'Select model...'}
-                </SelectValue>
-              </SelectTrigger>
-            </FormControl>
-            <SelectContent>
-              {modelOptions.map((model) => (
-                <SelectItem key={model.value} value={model.value}>
-                  <div className="flex flex-col">
-                    <span>{model.label}</span>
-                    <span className="text-xs text-muted-foreground font-mono">
-                      {model.value}
-                    </span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <FormControl>
-            <Input
-              value={String(getValue('model'))}
-              onChange={(e) => updateField('model', e.target.value)}
-              placeholder="gpt-4o"
-              className="font-mono text-sm"
-            />
-          </FormControl>
-        )}
+            fieldType="string"
+            fieldName="model"
+            placeholder="gpt-4o"
+            enumOptions={modelOptions}
+            defaultValue={getDefaultValue('model')}
+            onDefaultValueChange={(value) => updateDefaultValue('model', value)}
+          />
+        </FormControl>
       </FormItem>
 
       {/* Advanced Settings */}
@@ -929,19 +960,24 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               <FormLabel>Temperature</FormLabel>
               <FormDescription>LLM sampling temperature (0-2)</FormDescription>
               <FormControl>
-                <Input
-                  type="number"
-                  min={0}
-                  max={2}
-                  step={0.1}
+                <MappingValueInput
                   value={getValue('temperature') ?? 0.7}
-                  onChange={(e) =>
+                  onChange={(value) => updateField('temperature', value)}
+                  valueType={getValueType('temperature')}
+                  onValueTypeChange={(valueType) =>
                     updateField(
                       'temperature',
-                      e.target.value ? Number(e.target.value) : ''
+                      getValue('temperature'),
+                      valueType
                     )
                   }
-                  className="w-24"
+                  fieldType="number"
+                  fieldName="temperature"
+                  placeholder="0.7"
+                  defaultValue={getDefaultValue('temperature')}
+                  onDefaultValueChange={(value) =>
+                    updateDefaultValue('temperature', value)
+                  }
                 />
               </FormControl>
             </FormItem>
@@ -954,18 +990,20 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 default)
               </FormDescription>
               <FormControl>
-                <Input
-                  type="number"
-                  min={1}
+                <MappingValueInput
                   value={getValue('maxTokens') || ''}
-                  onChange={(e) =>
-                    updateField(
-                      'maxTokens',
-                      e.target.value ? Number(e.target.value) : ''
-                    )
+                  onChange={(value) => updateField('maxTokens', value)}
+                  valueType={getValueType('maxTokens')}
+                  onValueTypeChange={(valueType) =>
+                    updateField('maxTokens', getValue('maxTokens'), valueType)
                   }
+                  fieldType="integer"
+                  fieldName="maxTokens"
                   placeholder="Provider default"
-                  className="w-32"
+                  defaultValue={getDefaultValue('maxTokens')}
+                  onDefaultValueChange={(value) =>
+                    updateDefaultValue('maxTokens', value)
+                  }
                 />
               </FormControl>
             </FormItem>
