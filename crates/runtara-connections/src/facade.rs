@@ -17,7 +17,10 @@ use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredential
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
-use crate::resolution::{ConnectionDescriptor, features_for_integration};
+use crate::resolution::{
+    ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest,
+    features_for_integration,
+};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::{ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitEventType};
 
@@ -151,6 +154,52 @@ impl ConnectionsFacade {
             features: features_for_integration(&integration_id),
             metadata: Value::Null,
         }))
+    }
+
+    /// Resolve a read-only resource advertised by a tenant-owned connection.
+    /// The semantic resource key is validated against the connection's safe
+    /// descriptor before its registered resolver receives decrypted parameters.
+    pub async fn resolve_connection_resource(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        request: &ConnectionResourceRequest,
+    ) -> Result<ConnectionResourcePage, ConnectionsError> {
+        let connection = self
+            .get_with_parameters(id, tenant_id)
+            .await?
+            .ok_or_else(|| ConnectionsError::NotFound(format!("Connection '{id}' not found")))?;
+        let integration_id = connection.integration_id.as_deref().ok_or_else(|| {
+            ConnectionsError::Validation(format!(
+                "Connection '{id}' has no integrationId and cannot resolve resources"
+            ))
+        })?;
+        let feature = features_for_integration(integration_id)
+            .into_iter()
+            .find(|feature| feature.key == request.resource)
+            .ok_or_else(|| {
+                ConnectionsError::Validation(format!(
+                    "Connection '{id}' does not expose resource '{}'",
+                    request.resource
+                ))
+            })?;
+        let resolver_id = feature.resource_resolver.ok_or_else(|| {
+            ConnectionsError::Validation(format!(
+                "Connection resource '{}' is not enumerable",
+                request.resource
+            ))
+        })?;
+        let empty_parameters = Value::Null;
+        crate::resource_resolver::resolve_resource(
+            &self.state.http_client,
+            &resolver_id,
+            connection
+                .connection_parameters
+                .as_ref()
+                .unwrap_or(&empty_parameters),
+            request,
+        )
+        .await
     }
 
     /// List connections for a tenant (no secrets).

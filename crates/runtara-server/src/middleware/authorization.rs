@@ -384,6 +384,10 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/connections") | ("POST", "/connections") => ConnectionCreate,
         ("GET", "/api/runtime/connections") | ("GET", "/connections") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}") | ("GET", "/connections/{id}") => ConnectionRead,
+        ("GET", "/api/runtime/connections/{id}/metadata")
+        | ("GET", "/connections/{id}/metadata")
+        | ("POST", "/api/runtime/connections/{id}/resources")
+        | ("POST", "/connections/{id}/resources") => ConnectionRead,
         ("PUT", "/api/runtime/connections/{id}") | ("PUT", "/connections/{id}") => ConnectionUpdate,
         ("DELETE", "/api/runtime/connections/{id}") | ("DELETE", "/connections/{id}") => {
             ConnectionDelete

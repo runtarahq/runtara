@@ -9,6 +9,7 @@ pub mod integration_compatibility;
 pub mod net;
 pub mod repository;
 pub mod resolution;
+pub mod resource_resolver;
 pub mod router;
 pub mod service;
 pub mod tenant;

@@ -14,9 +14,14 @@ use std::sync::Arc;
 
 use crate::config::ConnectionsState;
 use crate::crypto::CredentialCipher;
+use crate::error::ConnectionsError;
+use crate::facade::ConnectionsFacade;
 use crate::integration_compatibility::IntegrationCompatibility;
 use crate::repository::connections::ConnectionRepository;
-use crate::resolution::{ConnectionDescriptor, features_for_integration};
+use crate::resolution::{
+    ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest,
+    features_for_integration,
+};
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
@@ -258,6 +263,29 @@ pub async fn get_connection_metadata_handler(
     Path(connection_id): Path<String>,
 ) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
     describe_connection(&state, &tenant_id, &connection_id).await
+}
+
+/// Enumerate a resource exposed by a tenant-owned connection.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/{id}/resources",
+    request_body = ConnectionResourceRequest,
+    params(("id" = String, Path, description = "Connection ID")),
+    responses(
+        (status = 200, description = "Normalized connection resources", body = ConnectionResourcePage),
+        (status = 400, description = "Unsupported resource", body = ErrorResponse),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 502, description = "Provider discovery failed", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn resolve_connection_resource_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(state): State<ConnectionsState>,
+    Path(connection_id): Path<String>,
+    Json(request): Json<ConnectionResourceRequest>,
+) -> Result<Json<ConnectionResourcePage>, (StatusCode, Json<Value>)> {
+    resolve_connection_resource(&state, &tenant_id, &connection_id, &request).await
 }
 
 /// Update a connection
@@ -688,6 +716,53 @@ pub async fn get_connection_metadata_for_runtime_handler(
     Path((tenant_id, connection_id)): Path<(String, String)>,
 ) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
     describe_connection(&state, &tenant_id, &connection_id).await
+}
+
+/// Internal resource-discovery counterpart of
+/// [`resolve_connection_resource_handler`]. The tenant comes from the trusted
+/// runtime path rather than authenticated request extensions.
+pub async fn resolve_connection_resource_for_runtime_handler(
+    State(state): State<ConnectionsState>,
+    Path((tenant_id, connection_id)): Path<(String, String)>,
+    Json(request): Json<ConnectionResourceRequest>,
+) -> Result<Json<ConnectionResourcePage>, (StatusCode, Json<Value>)> {
+    resolve_connection_resource(&state, &tenant_id, &connection_id, &request).await
+}
+
+async fn resolve_connection_resource(
+    state: &ConnectionsState,
+    tenant_id: &str,
+    connection_id: &str,
+    request: &ConnectionResourceRequest,
+) -> Result<Json<ConnectionResourcePage>, (StatusCode, Json<Value>)> {
+    ConnectionsFacade::new(state.clone())
+        .resolve_connection_resource(connection_id, tenant_id, request)
+        .await
+        .map(Json)
+        .map_err(connection_resource_error)
+}
+
+fn connection_resource_error(error: ConnectionsError) -> (StatusCode, Json<Value>) {
+    let status = error.status_code();
+    let code = match &error {
+        ConnectionsError::Validation(_) => "INVALID_RESOURCE_REQUEST",
+        ConnectionsError::NotFound(_) => "CONNECTION_NOT_FOUND",
+        ConnectionsError::AuthResolution(_) => "RESOURCE_DISCOVERY_FAILED",
+        _ => "INTERNAL_ERROR",
+    };
+    let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        "Failed to resolve connection resource".to_string()
+    } else {
+        error.to_string()
+    };
+    (
+        status,
+        Json(json!({
+            "success": false,
+            "error": code,
+            "message": message
+        })),
+    )
 }
 
 async fn describe_connection(

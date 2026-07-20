@@ -20,6 +20,13 @@ use crate::workflow::WorkflowState;
 type ResourceCacheKey = (String, Vec<u8>);
 type ResourceCache = HashMap<ResourceCacheKey, Vec<u8>>;
 
+fn refresh_requested(request: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(request)
+        .ok()
+        .and_then(|value| value.get("refresh").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// Fully-qualified component import name of the resolver interface.
 pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str =
     runtara_workflow_wit::CONNECTION_RESOLVER_INTERFACE_NAME;
@@ -132,8 +139,9 @@ impl ConnectionResolverHost for HttpConnectionResolverHost {
         connection_id: String,
         request: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
+        let refresh = refresh_requested(&request);
         let cache_key = (connection_id.clone(), request.clone());
-        if let Some(cached) = self.resources.lock().await.get(&cache_key).cloned() {
+        if !refresh && let Some(cached) = self.resources.lock().await.get(&cache_key).cloned() {
             return Ok(cached);
         }
 
@@ -146,7 +154,9 @@ impl ConnectionResolverHost for HttpConnectionResolverHost {
             .await
             .map_err(|error| format!("resolve connection resource: {error}"))?;
         let bytes = Self::response_bytes(response, "resource resolution").await?;
-        self.resources.lock().await.insert(cache_key, bytes.clone());
+        if !refresh {
+            self.resources.lock().await.insert(cache_key, bytes.clone());
+        }
         Ok(bytes)
     }
 }
@@ -192,4 +202,18 @@ pub fn add_connection_resolver_to_linker(linker: &mut Linker<WorkflowState>) -> 
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_refresh_flag_bypasses_run_cache() {
+        assert!(refresh_requested(
+            br#"{"resource":"llm.models","refresh":true}"#
+        ));
+        assert!(!refresh_requested(br#"{"resource":"llm.models"}"#));
+        assert!(!refresh_requested(b"not-json"));
+    }
 }

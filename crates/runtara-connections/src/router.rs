@@ -27,6 +27,10 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
             get(handler::connections::get_connection_metadata_handler),
         )
         .route(
+            "/connections/{id}/resources",
+            post(handler::connections::resolve_connection_resource_handler),
+        )
+        .route(
             "/connections/{id}",
             put(handler::connections::update_connection_handler),
         )
@@ -100,6 +104,10 @@ pub fn runtime_router(config: ConnectionsConfig) -> Router {
         .route(
             "/{tenant_id}/{connection_id}/metadata",
             get(handler::connections::get_connection_metadata_for_runtime_handler),
+        )
+        .route(
+            "/{tenant_id}/{connection_id}/resources",
+            post(handler::connections::resolve_connection_resource_for_runtime_handler),
         )
         .with_state(state)
 }
