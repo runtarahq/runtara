@@ -9491,7 +9491,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         "ai": { "id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
           "systemPrompt": { "valueType": "immediate", "value": "You call tools" },
           "userPrompt": { "valueType": "immediate", "value": "Echo twice" },
-          "provider": { "valueType": "immediate", "value": "openai" },
           "model": { "valueType": "immediate", "value": "gpt-4o" } } },
         "wf_tool": { "id": "wf_tool", "stepType": "Agent", "name": "wf_echo",
           "agentId": "tool-delay-echo", "capabilityId": "run", "inputMapping": {} },
@@ -9554,6 +9553,13 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     env.insert(
         "RUNTARA_HTTP_PROXY_URL".to_string(),
         format!("http://{addr}/llm-proxy"),
+    );
+    // This test constructs WorkflowRunSpec directly, bypassing the
+    // environment runner that translates RUNTARA_CONNECTION_SERVICE_URL into
+    // the per-run CONNECTION_SERVICE_URL consumed by the resolver host.
+    env.insert(
+        "CONNECTION_SERVICE_URL".to_string(),
+        format!("http://{addr}"),
     );
     env.insert(
         "RUNTARA_TENANT_ID".to_string(),
