@@ -133,8 +133,18 @@ pub struct RawConnection {
     pub connection_subtype: Option<String>,
     pub integration_id: String,
     pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<RawConnectionFeature>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConnectionFeature {
+    pub key: String,
+    pub driver: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_resolver: Option<String>,
 }
 
 // ============================================================================
@@ -173,32 +183,28 @@ fn require_provider(provider: &str) -> Result<&str, AgentError> {
     Ok(provider)
 }
 
-fn require_provider_for_connection<'a>(
-    provider: &'a str,
-    connection: &RawConnection,
-) -> Result<&'a str, AgentError> {
-    let provider = require_provider(provider)?;
-    // Workflow components receive an opaque connection id; credentials and
-    // integration metadata are resolved by the host proxy. Validate here when
-    // metadata is present (direct capability calls), otherwise defer the same
-    // compatibility check to the proxy where the integration is known.
-    if !connection.integration_id.trim().is_empty()
-        && !runtara_ai::provider::provider_supports_integration(
-            provider,
-            &connection.integration_id,
-        )
-    {
-        return Err(AgentError::permanent(
-            "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH",
-            format!(
-                "LLM provider '{}' is not compatible with connection integration '{}'",
-                provider, connection.integration_id
-            ),
-        )
-        .with_attr("provider", provider)
-        .with_attr("integration_id", &connection.integration_id));
-    }
-    Ok(provider)
+fn require_provider_for_connection(connection: &RawConnection) -> Result<&str, AgentError> {
+    let provider = connection
+        .features
+        .iter()
+        .find(|feature| feature.key == "ai.chat")
+        .map(|feature| feature.driver.as_str())
+        .or(match connection.integration_id.as_str() {
+            "openai_api_key" => Some(PROVIDER_OPENAI),
+            "aws_credentials" => Some(PROVIDER_BEDROCK),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            AgentError::permanent(
+                "AI_TOOLS_UNSUPPORTED_CONNECTION",
+                format!(
+                    "connection integration '{}' does not provide the ai.chat feature",
+                    connection.integration_id
+                ),
+            )
+            .with_attr("integration_id", &connection.integration_id)
+        })?;
+    require_provider(provider)
 }
 
 fn unsupported_provider(provider: &str) -> AgentError {
@@ -723,13 +729,6 @@ pub struct ChatCompletionInput {
     pub _connection: Option<RawConnection>,
 
     #[field(
-        display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
-    )]
-    #[serde(default)]
-    pub provider: String,
-
-    #[field(
         display_name = "System Prompt",
         description = "System instructions / preamble for the model"
     )]
@@ -835,7 +834,7 @@ pub struct ChatCompletionOutput {
 )]
 pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider_for_connection(&input.provider, connection)?;
+    let provider = require_provider_for_connection(connection)?;
 
     let chat_history = serde_json::from_value::<Vec<runtara_ai::Message>>(Value::Array(
         input.chat_history.clone(),
@@ -926,12 +925,6 @@ pub struct ChatTurnInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
 
-    #[field(
-        display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\")"
-    )]
-    #[serde(default)]
-    pub provider: String,
     #[field(display_name = "Model", description = "Model identifier")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1055,7 +1048,7 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
     use runtara_ai::message::{AssistantContent, Message, ToolResultContent, UserContent};
 
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider_for_connection(&input.provider, connection)?;
+    let provider = require_provider_for_connection(connection)?;
 
     let mut history =
         serde_json::from_value::<Vec<Message>>(Value::Array(input.chat_history.clone())).map_err(
@@ -1218,12 +1211,6 @@ pub struct SummarizeMemoryInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
 
-    #[field(
-        display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\")"
-    )]
-    #[serde(default)]
-    pub provider: String,
     #[field(display_name = "Model", description = "Model identifier")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1270,7 +1257,7 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
     use runtara_ai::message::Message;
 
     let connection = require_connection(input._connection.as_ref())?;
-    let provider = require_provider_for_connection(&input.provider, connection)?;
+    let provider = require_provider_for_connection(connection)?;
 
     let mut state = input.state.clone();
     let history = state
@@ -2693,6 +2680,7 @@ mod tests {
             connection_subtype: None,
             integration_id: integration_id.into(),
             parameters: serde_json::Value::Null,
+            features: Vec::new(),
             rate_limit_config: None,
         }
     }
@@ -2735,28 +2723,35 @@ mod tests {
     }
 
     #[test]
-    fn chat_completion_rejects_provider_connection_mismatch_before_http() {
-        let input = ChatCompletionInput {
-            _connection: Some(fake_connection("aws_credentials")),
-            provider: PROVIDER_OPENAI.into(),
-            system_prompt: "sys".into(),
-            user_prompt: "hello".into(),
-            ..Default::default()
-        };
-
-        let err = chat_completion(input).unwrap_err();
-        assert_eq!(err.code, "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH");
-        assert!(err.message.contains(PROVIDER_OPENAI), "{}", err.message);
-        assert!(err.message.contains("aws_credentials"), "{}", err.message);
+    fn provider_is_inferred_from_connection_integration() {
+        assert_eq!(
+            require_provider_for_connection(&fake_connection("openai_api_key")).unwrap(),
+            PROVIDER_OPENAI
+        );
+        assert_eq!(
+            require_provider_for_connection(&fake_connection("aws_credentials")).unwrap(),
+            PROVIDER_BEDROCK
+        );
     }
 
     #[test]
-    fn provider_validation_defers_when_connection_metadata_is_host_resolved() {
-        let connection = fake_connection("");
+    fn safe_feature_metadata_is_authoritative_for_provider_routing() {
+        let mut connection = fake_connection("future_llm_connection");
+        connection.features.push(RawConnectionFeature {
+            key: "ai.chat".into(),
+            driver: PROVIDER_OPENAI.into(),
+            resource_resolver: Some("future.models".into()),
+        });
         assert_eq!(
-            require_provider_for_connection(PROVIDER_OPENAI, &connection).unwrap(),
+            require_provider_for_connection(&connection).unwrap(),
             PROVIDER_OPENAI
         );
+    }
+
+    #[test]
+    fn connection_without_ai_chat_metadata_is_rejected() {
+        let err = require_provider_for_connection(&fake_connection("sqs_credentials")).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_UNSUPPORTED_CONNECTION");
     }
 
     #[test]

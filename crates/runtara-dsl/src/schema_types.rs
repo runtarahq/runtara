@@ -1237,7 +1237,6 @@ pub struct WaitForSignalActionConfig {
 ///   "config": {
 ///     "systemPrompt": { "valueType": "immediate", "value": "You are an inventory manager" },
 ///     "userPrompt": { "valueType": "reference", "value": "data.userRequest" },
-///     "provider": { "valueType": "immediate", "value": "openai" },
 ///     "model": { "valueType": "immediate", "value": "gpt-4o" },
 ///     "maxIterations": 10,
 ///     "temperature": { "valueType": "immediate", "value": 0.7 }
@@ -1302,9 +1301,13 @@ pub struct AiAgentConfig {
     /// User message / request to process
     pub user_prompt: MappingValue,
 
-    /// LLM provider to use for the agent brain, resolved when the step starts.
-    /// Must resolve to a supported provider id such as `"openai"` or `"bedrock"`.
-    pub provider: Box<MappingValue>,
+    /// Legacy provider selector. Accepted so stored workflows still parse, but
+    /// ignored at runtime and omitted from generated schemas/serialization.
+    /// The selected connection's authoritative metadata chooses the AI driver.
+    #[serde(default, rename = "provider", skip_serializing)]
+    #[cfg_attr(feature = "json-schema", schemars(skip))]
+    #[cfg_attr(feature = "utoipa", schema(ignore))]
+    pub legacy_provider: Option<Box<MappingValue>>,
 
     /// LLM model identifier, resolved when the step starts (e.g., "gpt-4o").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2333,10 +2336,10 @@ mod ai_agent_dynamic_config_tests {
             serde_json::from_value(base_config()).expect("dynamic config parses");
         let json = serde_json::to_value(config).expect("dynamic config serializes");
 
-        for field in ["provider", "model", "temperature", "maxTokens"] {
+        for field in ["model", "temperature", "maxTokens"] {
             assert_eq!(json[field]["valueType"], "reference", "{field}");
         }
-        assert_eq!(json["provider"]["value"], "steps.route.outputs.provider");
+        assert!(json.get("provider").is_none());
         assert_eq!(json["temperature"]["type"], "number");
         assert_eq!(json["maxTokens"]["type"], "integer");
     }
@@ -2344,7 +2347,6 @@ mod ai_agent_dynamic_config_tests {
     #[test]
     fn ai_agent_runtime_parameters_reject_legacy_literals() {
         let mut config = base_config();
-        config["provider"] = serde_json::json!("openai");
         config["model"] = serde_json::json!("gpt-4o");
         config["temperature"] = serde_json::json!(0.7);
         config["maxTokens"] = serde_json::json!(2048);
@@ -2356,5 +2358,14 @@ mod ai_agent_dynamic_config_tests {
                 || error.to_string().contains("internally tagged"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn ai_agent_legacy_provider_is_accepted_but_not_serialized() {
+        let config: AiAgentConfig =
+            serde_json::from_value(base_config()).expect("legacy provider parses");
+        assert!(config.legacy_provider.is_some());
+        let json = serde_json::to_value(config).expect("config serializes");
+        assert!(json.get("provider").is_none());
     }
 }

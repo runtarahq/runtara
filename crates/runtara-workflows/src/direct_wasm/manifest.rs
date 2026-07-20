@@ -1007,7 +1007,6 @@ fn step_manifest(
                     "user_prompt".to_string(),
                     canonical_json(&config.user_prompt)?,
                 );
-                mapping.insert("provider".to_string(), canonical_json(&config.provider)?);
                 if let Some(output_schema) = &config.output_schema {
                     // Convert the DSL flat-map schema to JSON Schema, matching the
                     // generated loop, so the provider's structured-output params
@@ -1182,7 +1181,8 @@ fn step_manifest(
                 // summarize-memory capability before the save (the LLM
                 // summarizes the oldest messages). The default sliding window
                 // needs no provider. The summarize LLM call reuses the AiAgent's
-                // own connection (provider/model are passed in the input).
+                // own connection (the model is passed in the input; provider
+                // routing comes from resolved connection metadata).
                 let use_summarize = memory
                     .and_then(|memory| memory.compaction.as_ref())
                     .and_then(|compaction| compaction.strategy.as_ref())
@@ -2110,10 +2110,10 @@ mod tests {
             .find(|mapping| mapping.id == agent.input_mapping_id)
             .expect("ai agent mapping");
 
-        for field in ["provider", "model", "temperature", "max_tokens"] {
+        assert!(mapping.value.get("provider").is_none());
+        for field in ["model", "temperature", "max_tokens"] {
             assert_eq!(mapping.value[field]["valueType"], "reference", "{field}");
         }
-        assert_eq!(mapping.value["provider"]["value"], "data.provider");
         assert_eq!(mapping.value["max_tokens"]["type"], "integer");
     }
 

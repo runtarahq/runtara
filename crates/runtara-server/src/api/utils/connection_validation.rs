@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use runtara_dsl::agent_meta::AgentCatalog;
-use runtara_dsl::{AiAgentStep, MappingValue, Step, Workflow};
+use runtara_dsl::{AiAgentStep, Step, Workflow};
 
 use super::reference_validation::{IssueCategory, ValidationIssue};
 
@@ -333,42 +333,29 @@ fn validate_ai_agent_connection(
         return;
     };
 
-    let provider = ai_step
-        .config
-        .as_ref()
-        .and_then(|config| statically_bound_string(&config.provider));
-
     if !existing_connections.contains(conn_id) {
-        let candidates: Vec<&ConnectionRef> = provider
-            .and_then(runtara_ai::provider::compatible_integration_ids_for_provider)
-            .map(|accepted| {
-                tenant_connections
-                    .iter()
-                    .filter(|c| match &c.integration_id {
-                        Some(int_id) => accepted.contains(&int_id.as_str()),
-                        None => false,
+        let candidates: Vec<&ConnectionRef> = tenant_connections
+            .iter()
+            .filter(|connection| {
+                connection
+                    .integration_id
+                    .as_deref()
+                    .is_some_and(|integration_id| {
+                        runtara_connections::features_for_integration(integration_id)
+                            .iter()
+                            .any(|feature| feature.key == "ai.chat")
                     })
-                    .collect()
             })
-            .unwrap_or_default();
+            .collect();
 
         let suggestion = if !candidates.is_empty() {
             format!(
-                ". Available connections for provider '{}': {}",
-                provider.unwrap_or("unknown"),
+                ". Available AI connections: {}",
                 format_candidates(&candidates)
             )
         } else {
-            provider
-                .and_then(runtara_ai::provider::compatible_integration_ids_for_provider)
-                .map(|accepted| {
-                    format!(
-                        ". AI provider '{}' accepts integrationIds [{}] — none configured for this tenant",
-                        provider.unwrap_or("unknown"),
-                        accepted.join(", ")
-                    )
-                })
-                .unwrap_or_default()
+            ". No connection exposing the 'ai.chat' feature is configured for this tenant"
+                .to_string()
         };
 
         let message = if let Some(parent) = parent_context {
@@ -390,10 +377,6 @@ fn validate_ai_agent_connection(
         return;
     }
 
-    let Some(provider) = provider else {
-        return;
-    };
-
     // The legacy entry point only provides an existence set. Without tenant
     // metadata there is no DB-backed context to validate compatibility against.
     let Some(connection) = tenant_connections.iter().find(|c| c.id == *conn_id) else {
@@ -405,8 +388,8 @@ fn validate_ai_agent_connection(
                 IssueCategory::MissingConnection,
                 &ai_step.id,
                 format!(
-                    "Connection '{}' has no integrationId; cannot validate compatibility with AI provider '{}'",
-                    conn_id, provider
+                    "Connection '{}' has no integrationId and cannot provide AI Agent routing metadata",
+                    conn_id
                 ),
             )
             .with_field("connection_id"),
@@ -414,30 +397,21 @@ fn validate_ai_agent_connection(
         return;
     };
 
-    if !runtara_ai::provider::provider_supports_integration(provider, integration_id) {
-        let accepted = runtara_ai::provider::compatible_integration_ids_for_provider(provider)
-            .map(|ids| ids.join(", "))
-            .unwrap_or_else(|| "none".to_string());
+    let supports_ai_chat = runtara_connections::features_for_integration(integration_id)
+        .iter()
+        .any(|feature| feature.key == "ai.chat" && feature.driver.is_some());
+    if !supports_ai_chat {
         issues.push(
             ValidationIssue::error(
                 IssueCategory::MissingConnection,
                 &ai_step.id,
                 format!(
-                    "Connection '{}' integrationId '{}' is not compatible with AI provider '{}'. Compatible integrationIds: [{}]",
-                    conn_id, integration_id, provider, accepted
+                    "Connection '{}' integrationId '{}' does not expose the 'ai.chat' feature required by an AI Agent",
+                    conn_id, integration_id
                 ),
             )
             .with_field("connection_id"),
         );
-    }
-}
-
-/// Return a mapping's string value when it is statically known at save time.
-/// References and templates are deliberately deferred to runtime.
-fn statically_bound_string(value: &MappingValue) -> Option<&str> {
-    match value {
-        MappingValue::Immediate(immediate) => immediate.value.as_str(),
-        _ => None,
     }
 }
 
@@ -865,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_agent_openai_connection_is_valid_when_integration_matches_provider() {
+    fn ai_agent_openai_connection_is_valid_when_it_exposes_ai_chat() {
         let workflow = ai_agent_workflow("openai", "conn-openai");
         let tenant = vec![ConnectionRef {
             id: "conn-openai".to_string(),
@@ -878,54 +852,8 @@ mod tests {
     }
 
     #[test]
-    fn ai_agent_provider_connection_mismatch_is_rejected() {
+    fn ai_agent_legacy_provider_is_ignored_in_favor_of_connection_metadata() {
         let workflow = ai_agent_workflow("openai", "conn-aws");
-        let tenant = vec![ConnectionRef {
-            id: "conn-aws".to_string(),
-            integration_id: Some("aws_credentials".to_string()),
-            title: "AWS".to_string(),
-        }];
-
-        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
-        assert_eq!(issues.len(), 1);
-        let issue = &issues[0];
-        assert_eq!(issue.step_id, "ai");
-        assert_eq!(issue.field_name.as_deref(), Some("connection_id"));
-        assert!(
-            issue.message.contains("not compatible"),
-            "{}",
-            issue.message
-        );
-        assert!(issue.message.contains("openai"), "{}", issue.message);
-        assert!(
-            issue.message.contains("aws_credentials"),
-            "{}",
-            issue.message
-        );
-        assert!(
-            issue.message.contains("openai_api_key"),
-            "{}",
-            issue.message
-        );
-    }
-
-    #[test]
-    fn dynamic_ai_agent_provider_defers_connection_compatibility_to_runtime() {
-        let mut workflow = ai_agent_workflow("openai", "conn-aws");
-        let Step::AiAgent(ai_step) = workflow
-            .execution_graph
-            .steps
-            .get_mut("ai")
-            .expect("ai step")
-        else {
-            panic!("expected ai step");
-        };
-        *ai_step.config.as_mut().expect("config").provider =
-            MappingValue::Reference(runtara_dsl::ReferenceValue {
-                value: "data.provider".to_string(),
-                type_hint: Some(runtara_dsl::ValueType::String),
-                default: None,
-            });
         let tenant = vec![ConnectionRef {
             id: "conn-aws".to_string(),
             integration_id: Some("aws_credentials".to_string()),
@@ -935,12 +863,30 @@ mod tests {
         let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
         assert!(
             issues.is_empty(),
-            "dynamic provider is checked at runtime: {issues:?}"
+            "connection metadata is authoritative: {issues:?}"
         );
     }
 
     #[test]
-    fn ai_agent_missing_connection_suggests_provider_compatible_connections() {
+    fn ai_agent_rejects_connection_without_ai_chat_metadata() {
+        let workflow = ai_agent_workflow("openai", "conn-db");
+        let tenant = vec![ConnectionRef {
+            id: "conn-db".to_string(),
+            integration_id: Some("postgres".to_string()),
+            title: "Database".to_string(),
+        }];
+
+        let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].message.contains("ai.chat"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    #[test]
+    fn ai_agent_missing_connection_suggests_all_ai_connections() {
         let workflow = ai_agent_workflow("bedrock", "wrong-id");
         let tenant = vec![
             ConnectionRef {
@@ -953,6 +899,11 @@ mod tests {
                 integration_id: Some("aws_credentials".to_string()),
                 title: "Bedrock".to_string(),
             },
+            ConnectionRef {
+                id: "conn-db".to_string(),
+                integration_id: Some("postgres".to_string()),
+                title: "Database".to_string(),
+            },
         ];
 
         let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
@@ -961,6 +912,7 @@ mod tests {
         assert!(msg.contains("wrong-id"), "{msg}");
         assert!(msg.contains("Bedrock"), "{msg}");
         assert!(msg.contains("conn-bedrock"), "{msg}");
-        assert!(!msg.contains("conn-openai"), "{msg}");
+        assert!(msg.contains("conn-openai"), "{msg}");
+        assert!(!msg.contains("conn-db"), "{msg}");
     }
 }

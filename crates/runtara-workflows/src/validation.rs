@@ -5556,7 +5556,6 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
             if let Some(ref config) = ai_agent_step.config {
                 extract_references_from_mapping_value(&config.system_prompt, &mut refs);
                 extract_references_from_mapping_value(&config.user_prompt, &mut refs);
-                extract_references_from_mapping_value(&config.provider, &mut refs);
                 if let Some(model) = &config.model {
                     extract_references_from_mapping_value(model, &mut refs);
                 }
@@ -5692,7 +5691,6 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
                     &config.user_prompt,
                     &mut refs,
                 );
-                extract_template_static_references_from_mapping_value(&config.provider, &mut refs);
                 if let Some(model) = &config.model {
                     extract_template_static_references_from_mapping_value(model, &mut refs);
                 }
@@ -6510,9 +6508,9 @@ mod tests {
                 user_prompt: MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("hi"),
                 }),
-                provider: Box::new(MappingValue::Immediate(ImmediateValue {
+                legacy_provider: Some(Box::new(MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("openai"),
-                })),
+                }))),
                 model: Some(Box::new(MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("gpt-4o"),
                 }))),
@@ -6545,7 +6543,10 @@ mod tests {
             panic!("expected ai step");
         };
         let config = ai.config.as_mut().expect("config");
-        *config.provider = reference("data.provider", runtara_dsl::ValueType::String);
+        config.legacy_provider = Some(Box::new(reference(
+            "data.provider",
+            runtara_dsl::ValueType::String,
+        )));
         config.model = Some(Box::new(reference(
             "data.model",
             runtara_dsl::ValueType::String,
@@ -6560,12 +6561,8 @@ mod tests {
         )));
 
         let references = collect_references_from_step(&step);
-        for expected in [
-            "data.provider",
-            "data.model",
-            "data.temperature",
-            "data.maxTokens",
-        ] {
+        assert!(!references.iter().any(|actual| actual == "data.provider"));
+        for expected in ["data.model", "data.temperature", "data.maxTokens"] {
             assert!(
                 references.iter().any(|actual| actual == expected),
                 "missing {expected}: {references:?}"

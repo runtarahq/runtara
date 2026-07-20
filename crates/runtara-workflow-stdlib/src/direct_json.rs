@@ -1954,8 +1954,8 @@ impl DirectJsonManifest {
     }
 
     /// Build the `summarize-memory` capability input from the base chat-turn
-    /// config (for the LLM provider/model), the final loop state, and the
-    /// compaction threshold: `{provider, model, max_messages, state}`. The
+    /// config (for the LLM model), the final loop state, and the compaction
+    /// threshold: `{model, max_messages, state}`. The
     /// capability decides internally whether the conversation is over the
     /// threshold (mirroring the generated Summarize branch's guard).
     pub fn ai_summarize_input(
@@ -1968,10 +1968,6 @@ impl DirectJsonManifest {
         let state: Value = serde_json::from_slice(state)
             .map_err(|err| format!("failed to parse ai-summarize state: {err}"))?;
         let mut input = serde_json::Map::new();
-        input.insert(
-            "provider".to_string(),
-            base.get("provider").cloned().unwrap_or(Value::Null),
-        );
         if let Some(model) = base.get("model").filter(|model| !model.is_null()) {
             input.insert("model".to_string(), model.clone());
         }
@@ -10791,9 +10787,8 @@ mod tests {
     }
 
     #[test]
-    fn ai_summarize_input_carries_provider_and_state() {
+    fn ai_summarize_input_carries_model_and_state() {
         let base = json!({
-            "provider": "openai",
             "model": "gpt-4o",
             "system_prompt": "be helpful",
             "chat_history": [],
@@ -10806,7 +10801,7 @@ mod tests {
         )
         .expect("summarize input");
         let value: Value = serde_json::from_slice(&input).unwrap();
-        assert_eq!(value["provider"], json!("openai"));
+        assert!(value.get("provider").is_none());
         assert_eq!(value["model"], json!("gpt-4o"));
         assert_eq!(value["max_messages"], json!(2));
         assert_eq!(value["state"]["iterations"], json!(3));
