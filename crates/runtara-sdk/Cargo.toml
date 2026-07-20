@@ -42,14 +42,14 @@ tracing = ["dep:tracing", "dep:tracing-attributes"]
 
 [dependencies]
 # Core (optional, for embedded mode)
-runtara-core = { path = "../runtara-core", version = "8.3", optional = true }
+runtara-core = { path = "../runtara-core", version = "8.4", optional = true }
 
 # HTTP client (optional, for http mode)
 runtara-http = { workspace = true, optional = true }
 percent-encoding = { version = "2", optional = true }
 
 # Macros
-runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "8.3" }
+runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "8.4" }
 
 # Async runtime (optional, for embedded mode - bridge to async Persistence trait)
 tokio = { version = "1", features = ["rt", "time"], optional = true }
@@ -79,4 +79,4 @@ futures = "0.3"
 async-trait = "0.1"
 
 # For embedded heartbeat tests
-runtara-core = { path = "../runtara-core", version = "8.3" }
+runtara-core = { path = "../runtara-core", version = "8.4" }
