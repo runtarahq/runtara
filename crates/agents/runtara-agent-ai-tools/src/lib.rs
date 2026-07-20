@@ -178,7 +178,16 @@ fn require_provider_for_connection<'a>(
     connection: &RawConnection,
 ) -> Result<&'a str, AgentError> {
     let provider = require_provider(provider)?;
-    if !runtara_ai::provider::provider_supports_integration(provider, &connection.integration_id) {
+    // Workflow components receive an opaque connection id; credentials and
+    // integration metadata are resolved by the host proxy. Validate here when
+    // metadata is present (direct capability calls), otherwise defer the same
+    // compatibility check to the proxy where the integration is known.
+    if !connection.integration_id.trim().is_empty()
+        && !runtara_ai::provider::provider_supports_integration(
+            provider,
+            &connection.integration_id,
+        )
+    {
         return Err(AgentError::permanent(
             "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH",
             format!(
@@ -2739,6 +2748,15 @@ mod tests {
         assert_eq!(err.code, "AI_TOOLS_PROVIDER_CONNECTION_MISMATCH");
         assert!(err.message.contains(PROVIDER_OPENAI), "{}", err.message);
         assert!(err.message.contains("aws_credentials"), "{}", err.message);
+    }
+
+    #[test]
+    fn provider_validation_defers_when_connection_metadata_is_host_resolved() {
+        let connection = fake_connection("");
+        assert_eq!(
+            require_provider_for_connection(PROVIDER_OPENAI, &connection).unwrap(),
+            PROVIDER_OPENAI
+        );
     }
 
     #[test]
