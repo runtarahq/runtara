@@ -207,6 +207,44 @@ export function VariablePickerModal({
               </div>
             ) : (
               <>
+                {/* Uniform iteration context (Split and While scopes) */}
+                {groupedSuggestions['Iteration Context'].length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Iteration Context
+                    </h4>
+                    <div className="space-y-0.5">
+                      {groupedSuggestions['Iteration Context'].map(
+                        (suggestion) => (
+                          <button
+                            key={suggestion.value}
+                            type="button"
+                            onClick={() => handleSelect(suggestion)}
+                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          >
+                            {getIconForType(suggestion.type, suggestion.value)}
+                            <div className="flex-1 min-w-0">
+                              <p className="font-mono text-sm truncate">
+                                {suggestion.label}
+                              </p>
+                              {suggestion.description && (
+                                <p className="text-xs truncate opacity-70">
+                                  {suggestion.description}
+                                </p>
+                              )}
+                            </div>
+                            {suggestion.type && (
+                              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                                {suggestion.type}
+                              </span>
+                            )}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* Loop Context (While loop scope) */}
                 {groupedSuggestions['Loop Context'].length > 0 && (
                   <div>

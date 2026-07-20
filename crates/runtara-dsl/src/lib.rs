@@ -1739,6 +1739,14 @@ mod tests {
             }),
             config: Some(WhileConfig {
                 max_iterations: Some(10),
+                variables: Some(HashMap::from([(
+                    "tenant".to_string(),
+                    MappingValue::Reference(ReferenceValue {
+                        value: "data.tenant".to_string(),
+                        type_hint: Some(ValueType::String),
+                        default: None,
+                    }),
+                )])),
                 timeout: Some(5000),
             }),
             breakpoint: None,
@@ -1748,8 +1756,27 @@ mod tests {
         assert_eq!(json.get("id").unwrap(), "while1");
         let config = json.get("config").unwrap();
         assert_eq!(config.get("maxIterations").unwrap(), 10);
+        assert_eq!(
+            config["variables"]["tenant"]["value"],
+            serde_json::json!("data.tenant")
+        );
         // WhileConfig uses "timeout" not "timeoutMs"
         assert_eq!(config.get("timeout").unwrap(), 5000);
+    }
+
+    #[test]
+    fn test_while_max_iterations_remains_static() {
+        let result = serde_json::from_value::<WhileConfig>(serde_json::json!({
+            "maxIterations": {
+                "valueType": "reference",
+                "value": "data.limit"
+            }
+        }));
+
+        assert!(
+            result.is_err(),
+            "maxIterations must remain a literal integer, not a MappingValue"
+        );
     }
 
     // ========================================================================

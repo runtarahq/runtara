@@ -224,6 +224,28 @@ export function resolveReferenceType(
     return 'object';
   }
 
+  if (path === 'iteration') {
+    return 'object';
+  }
+  if (path === 'iteration.index') {
+    return 'integer';
+  }
+  if (path === 'iteration.indices') {
+    return 'array';
+  }
+  const iterationItemRest = stripPrefix(path, ['iteration.item']);
+  if (iterationItemRest !== null) {
+    if (iterationItemRest === '') {
+      return context.insideSplitScope ? 'object' : undefined;
+    }
+    return context.insideSplitScope
+      ? resolveSchemaFieldType(
+          iterationItemRest.split('.'),
+          context.splitItemSchemaFields
+        )
+      : undefined;
+  }
+
   return undefined;
 }
 
@@ -303,7 +325,9 @@ export function referenceTypeMismatch(
   if (
     options.scalarsCoerceToString &&
     field === 'string' &&
-    (reference === 'integer' || reference === 'number' || reference === 'boolean')
+    (reference === 'integer' ||
+      reference === 'number' ||
+      reference === 'boolean')
   ) {
     return null;
   }
@@ -364,6 +388,21 @@ export function validateReferencePath(
       context.inputSchemaFields,
       'the workflow input schema'
     );
+  }
+
+  if (path.startsWith('iteration.')) {
+    const segments = path.split('.');
+    const field = segments[1];
+    if (!['index', 'indices', 'item'].includes(field)) {
+      return `'iteration' has no field '${field}'. Available: index, indices, item`;
+    }
+    if (field === 'item' && segments.length > 2 && context.insideSplitScope) {
+      return validateSchemaFieldPath(
+        segments.slice(2),
+        context.splitItemSchemaFields,
+        'the nearest Split iteration schema'
+      );
+    }
   }
 
   return null;

@@ -727,6 +727,12 @@ pub struct WhileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_iterations: Option<u32>,
 
+    /// Additional variables to pass to every iteration's subgraph.
+    /// Mappings are evaluated against the parent execution scope when the
+    /// While step is entered, matching `SplitConfig.variables` semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<InputMapping>,
+
     /// Step timeout in milliseconds. If exceeded, step fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
@@ -736,6 +742,7 @@ impl Default for WhileConfig {
     fn default() -> Self {
         Self {
             max_iterations: Some(10),
+            variables: None,
             timeout: None,
         }
     }

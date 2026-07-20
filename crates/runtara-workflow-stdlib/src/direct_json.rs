@@ -824,6 +824,25 @@ impl DirectJsonManifest {
             )
         })?;
         source.insert("loop".to_string(), while_loop_context(&state));
+        let parent_variables = source
+            .get("variables")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut indices = parent_variables
+            .get("_loop_indices")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        indices.push(serde_json::json!(state.index));
+        source.insert(
+            "iteration".to_string(),
+            serde_json::json!({
+                "index": state.index,
+                "indices": indices,
+                "item": parent_variables.get("_item").cloned().unwrap_or(Value::Null),
+            }),
+        );
         serde_json::to_vec(&Value::Object(source.clone()))
             .map_err(|err| format!("failed to serialize While condition source: {err}"))
     }
@@ -844,17 +863,17 @@ impl DirectJsonManifest {
     pub fn while_iteration_variables(
         &self,
         while_id: u32,
-        variables: &[u8],
+        source: &[u8],
         state: &[u8],
     ) -> Result<Vec<u8>, String> {
         let while_step = self
             .whiles
             .get(&while_id)
             .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
-        let variables: Value = serde_json::from_slice(variables)
-            .map_err(|err| format!("failed to parse While variables: {err}"))?;
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While source: {err}"))?;
         let state = parse_while_state(while_step, state)?;
-        let variables = while_iteration_variables(while_step, variables, &state);
+        let variables = while_iteration_variables(while_step, &source, &state)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize While iteration variables: {err}"))
     }
@@ -1170,7 +1189,7 @@ impl DirectJsonManifest {
                 let while_step = self
                     .while_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
-                while_debug_inputs(while_step)?
+                while_debug_inputs(while_step, &source)?
             }
             "Log" => {
                 let log = self
@@ -3114,7 +3133,7 @@ impl DirectJsonManifest {
                 let while_step = self
                     .while_by_step(step.id.as_str())
                     .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
-                let inputs = while_debug_inputs(while_step)?;
+                let inputs = while_debug_inputs(while_step, source)?;
                 Ok((inputs, None))
             }
             other => Err(format!(
@@ -3479,6 +3498,10 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         serde_json::json!({ "inputs": Value::Object(workflow_inputs) }),
     );
 
+    if let Some(iteration) = iteration_context(&variables) {
+        source.insert("iteration".to_string(), iteration);
+    }
+
     if let Some(loop_ctx) = variables.as_object().and_then(|vars| vars.get("_loop")) {
         source.insert("loop".to_string(), loop_ctx.clone());
     }
@@ -3488,6 +3511,23 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
 
     serde_json::to_vec(&Value::Object(source))
         .map_err(|err| format!("failed to serialize source: {err}"))
+}
+
+/// Build the uniform public iteration context from the runtime's legacy
+/// per-container variables. `_item` is intentionally inherited through While
+/// scopes, so `iteration.item` always names the nearest active Split item.
+fn iteration_context(variables: &Value) -> Option<Value> {
+    let variables = variables.as_object()?;
+    let indices = variables.get("_loop_indices")?.as_array()?.clone();
+    let index = variables
+        .get("_index")
+        .cloned()
+        .or_else(|| indices.last().cloned())?;
+    Some(serde_json::json!({
+        "index": index,
+        "indices": indices,
+        "item": variables.get("_item").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /// Insert generated-code-compatible `onError` context into the steps map.
@@ -4012,6 +4052,14 @@ fn split_iteration_variables(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    // Derive public nesting state only from the actual parent scope. Authored
+    // variables named like private runtime bindings must not forge ancestry.
+    let parent_indices = variables
+        .get("_loop_indices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let parent_loop = variables.get("_loop").cloned();
 
     if let Some(extra_variables_mapping) = split.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
@@ -4019,12 +4067,12 @@ fn split_iteration_variables(
             variables.extend(extra_variables);
         }
     }
+    if let Some(parent_loop) = parent_loop {
+        variables.insert("_loop".to_string(), parent_loop);
+    } else {
+        variables.remove("_loop");
+    }
 
-    let parent_indices = variables
-        .get("_loop_indices")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(index));
     variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
@@ -4183,10 +4231,19 @@ fn while_max_iterations(while_step: &DirectJsonWhile) -> Result<u32, String> {
     })
 }
 
-fn while_debug_inputs(while_step: &DirectJsonWhile) -> Result<Value, String> {
-    Ok(serde_json::json!({
-        "maxIterations": while_max_iterations(while_step)?,
-    }))
+fn while_debug_inputs(while_step: &DirectJsonWhile, source: &Value) -> Result<Value, String> {
+    let mut inputs = serde_json::Map::new();
+    inputs.insert(
+        "maxIterations".to_string(),
+        serde_json::json!(while_max_iterations(while_step)?),
+    );
+    if let Some(variables) = while_step.value.get("variables") {
+        inputs.insert(
+            "variables".to_string(),
+            bounded_debug_value(apply_input_mapping(variables, source)?),
+        );
+    }
+    Ok(Value::Object(inputs))
 }
 
 fn parse_while_state(
@@ -4227,19 +4284,41 @@ fn while_loop_context(state: &DirectJsonWhileState) -> Value {
 
 fn while_iteration_variables(
     while_step: &DirectJsonWhile,
-    variables: Value,
+    source: &Value,
     state: &DirectJsonWhileState,
-) -> Map<String, Value> {
-    let mut variables = variables.as_object().cloned().unwrap_or_default();
+) -> Result<Map<String, Value>, String> {
+    let mut variables = source
+        .get("variables")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    // Capture ancestry before applying authored variables. Reserved-looking
+    // mapping keys cannot manufacture a Split item or rewrite the index stack.
     let parent_indices = variables
         .get("_loop_indices")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let parent_item = variables.get("_item").cloned();
+    if let Some(extra_variables_mapping) = while_step.value.get("variables") {
+        let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
+        if let Value::Object(extra_variables) = extra_variables {
+            variables.extend(extra_variables);
+        }
+    }
+    if let Some(parent_item) = parent_item {
+        variables.insert("_item".to_string(), parent_item);
+    } else {
+        variables.remove("_item");
+    }
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(state.index));
     variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
     variables.insert("_index".to_string(), serde_json::json!(state.index));
+    // Never leak an enclosing While's previous output into iteration zero of
+    // an inner While. The public `loop.outputs` context has always been null in
+    // that case; keep the legacy alias consistent with it.
+    variables.remove("_previousOutputs");
     if !state.outputs.is_null() {
         variables.insert("_previousOutputs".to_string(), state.outputs.clone());
     }
@@ -4253,7 +4332,7 @@ fn while_iteration_variables(
     variables.insert("_parent_scope_id".to_string(), parent_scope_id);
     variables.insert("_scope_id".to_string(), Value::String(scope_id));
 
-    variables
+    Ok(variables)
 }
 
 fn validate_split_schema(value: &Value, schema: &Value, ctx: &str) -> Result<(), String> {
@@ -5791,7 +5870,7 @@ fn is_unqualified_reference_envelope(map: &Map<String, Value>) -> bool {
 fn is_qualified_workflow_path(path: &str) -> bool {
     matches!(
         path.split('.').next(),
-        Some("data" | "variables" | "workflow" | "steps" | "loop" | "item")
+        Some("data" | "variables" | "workflow" | "steps" | "loop" | "item" | "iteration")
     )
 }
 
@@ -8773,7 +8852,9 @@ mod tests {
         let manifest = DirectJsonManifest::parse(&split_manifest(json!({
             "value": { "valueType": "reference", "value": "data.items" },
             "variables": {
-                "tenant": { "valueType": "reference", "value": "data.tenant" }
+                "tenant": { "valueType": "reference", "value": "data.tenant" },
+                "_loop": { "valueType": "immediate", "value": { "index": 99 } },
+                "_loop_indices": { "valueType": "immediate", "value": [99] }
             }
         })))
         .expect("manifest");
@@ -8796,6 +8877,23 @@ mod tests {
         assert_eq!(variables["_index"], json!(3));
         assert_eq!(variables["_item"], json!({ "id": 7 }));
         assert_eq!(variables["_scope_id"], json!("parent_split_3"));
+        assert!(
+            variables.get("_loop").is_none(),
+            "authored Split variables must not manufacture a While context"
+        );
+
+        let iteration_source = build_source(
+            br#"{"tenant":"acme","items":[{"id":7}]}"#,
+            &serde_json::to_vec(&variables).expect("variables bytes"),
+            b"{}",
+        )
+        .expect("iteration source");
+        let iteration_source: Value =
+            serde_json::from_slice(&iteration_source).expect("source json");
+        assert_eq!(
+            iteration_source["iteration"],
+            json!({ "index": 3, "indices": [2, 3], "item": { "id": 7 } })
+        );
     }
 
     #[test]
@@ -9096,6 +9194,151 @@ mod tests {
     }
 
     #[test]
+    fn while_resolves_iteration_variables_from_parent_source() {
+        let manifest = DirectJsonManifest::parse(&while_manifest(
+            json!({
+                "maxIterations": 4,
+                "variables": {
+                    "tenant": {
+                        "valueType": "reference",
+                        "value": "data.tenant"
+                    },
+                    "parentIndex": {
+                        "valueType": "reference",
+                        "value": "iteration.index"
+                    },
+                    "_item": {
+                        "valueType": "immediate",
+                        "value": { "id": "forged" }
+                    },
+                    "_loop_indices": {
+                        "valueType": "immediate",
+                        "value": [99]
+                    }
+                }
+            }),
+            json!({ "valueType": "immediate", "value": false }),
+        ))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"limit":4,"tenant":"acme"}"#,
+            br#"{"_loop_indices":[2],"_index":2,"_item":{"id":7},"_previousOutputs":{"outer":true}}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        assert_eq!(manifest.while_max_iterations(0).expect("max iterations"), 4);
+
+        let state = manifest.while_initial_state(0).expect("initial state");
+        let variables = manifest
+            .while_iteration_variables(0, &source, &state)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).expect("variables json");
+        assert_eq!(variables["tenant"], json!("acme"));
+        assert_eq!(variables["parentIndex"], json!(2));
+        assert_eq!(variables["_loop_indices"], json!([2, 0]));
+        assert_eq!(variables["_item"], json!({ "id": 7 }));
+        assert!(
+            variables.get("_previousOutputs").is_none(),
+            "an enclosing While's output must not leak into iteration zero"
+        );
+
+        let iteration_source = build_source(
+            br#"{"limit":4,"tenant":"acme"}"#,
+            &serde_json::to_vec(&variables).expect("variables bytes"),
+            b"{}",
+        )
+        .expect("iteration source");
+        let iteration_source: Value =
+            serde_json::from_slice(&iteration_source).expect("source json");
+        assert_eq!(
+            iteration_source["iteration"],
+            json!({ "index": 0, "indices": [2, 0], "item": { "id": 7 } })
+        );
+    }
+
+    #[test]
+    fn nested_iteration_context_tracks_all_indices_and_nearest_split_item() {
+        let split = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("split manifest");
+        let while_loop = DirectJsonManifest::parse(&while_manifest(
+            json!({ "maxIterations": 4 }),
+            json!({ "valueType": "immediate", "value": false }),
+        ))
+        .expect("while manifest");
+
+        // Split inside Split: the inner item replaces the outer item while the
+        // ordered index stack retains both scopes.
+        let root = build_source(br#"{"items":[]}"#, b"{}", b"{}").expect("root source");
+        let outer_split_variables = split
+            .split_iteration_variables(0, &root, br#"{"id":"outer"}"#, 1)
+            .expect("outer split variables");
+        let outer_split_source = build_source(br#"{"items":[]}"#, &outer_split_variables, b"{}")
+            .expect("outer split source");
+        let inner_split_variables = split
+            .split_iteration_variables(0, &outer_split_source, br#"{"id":"inner"}"#, 2)
+            .expect("inner split variables");
+        let inner_split_source = build_source(br#"{"items":[]}"#, &inner_split_variables, b"{}")
+            .expect("inner split source");
+        let inner_split_source: Value =
+            serde_json::from_slice(&inner_split_source).expect("source json");
+        assert_eq!(
+            inner_split_source["iteration"],
+            json!({ "index": 2, "indices": [1, 2], "item": { "id": "inner" } })
+        );
+
+        // While inside While: no Split exists, so item is null. The inner
+        // first iteration must also not inherit the outer previous output.
+        let outer_state = while_loop
+            .while_advance_state(
+                0,
+                &while_loop.while_initial_state(0).expect("outer state"),
+                br#"{"outer":true}"#,
+            )
+            .expect("advanced outer state");
+        let outer_while_variables = while_loop
+            .while_iteration_variables(0, &root, &outer_state)
+            .expect("outer while variables");
+        let outer_while_source =
+            build_source(b"{}", &outer_while_variables, b"{}").expect("outer while source");
+        let inner_state = while_loop.while_initial_state(0).expect("inner state");
+        let inner_while_variables = while_loop
+            .while_iteration_variables(0, &outer_while_source, &inner_state)
+            .expect("inner while variables");
+        let inner_while_variables_value: Value =
+            serde_json::from_slice(&inner_while_variables).expect("variables json");
+        assert!(
+            inner_while_variables_value
+                .get("_previousOutputs")
+                .is_none()
+        );
+        let inner_while_source =
+            build_source(b"{}", &inner_while_variables, b"{}").expect("inner while source");
+        let inner_while_source: Value =
+            serde_json::from_slice(&inner_while_source).expect("source json");
+        assert_eq!(
+            inner_while_source["iteration"],
+            json!({ "index": 0, "indices": [1, 0], "item": null })
+        );
+
+        // Split inside While: the new Split supplies item while retaining the
+        // enclosing While index.
+        let inner_split_variables = split
+            .split_iteration_variables(0, &outer_while_source, br#"{"id":"split"}"#, 3)
+            .expect("nested split variables");
+        let inner_split_source =
+            build_source(b"{}", &inner_split_variables, b"{}").expect("nested split source");
+        let inner_split_source: Value =
+            serde_json::from_slice(&inner_split_source).expect("source json");
+        assert_eq!(
+            inner_split_source["iteration"],
+            json!({ "index": 3, "indices": [1, 3], "item": { "id": "split" } })
+        );
+    }
+
+    #[test]
     fn while_helpers_match_generated_state_condition_and_output_shape() {
         let manifest = DirectJsonManifest::parse(&while_manifest(
             json!({ "maxIterations": 3 }),
@@ -9130,6 +9373,10 @@ mod tests {
             condition_source["loop"],
             json!({ "index": 0, "outputs": null })
         );
+        assert_eq!(
+            condition_source["iteration"],
+            json!({ "index": 0, "indices": [4, 0], "item": null })
+        );
         assert!(
             manifest
                 .while_condition(
@@ -9140,11 +9387,7 @@ mod tests {
         );
 
         let iteration_variables = manifest
-            .while_iteration_variables(
-                0,
-                br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[4],"keep":true}"#,
-                &state,
-            )
+            .while_iteration_variables(0, &source, &state)
             .expect("iteration variables");
         let iteration_variables: Value =
             serde_json::from_slice(&iteration_variables).expect("variables json");
@@ -9163,11 +9406,7 @@ mod tests {
             .while_advance_state(0, &state, br#"{"counter":1}"#)
             .expect("advanced state");
         let iteration_variables = manifest
-            .while_iteration_variables(
-                0,
-                br#"{"_workflow_id":"wf-1","_scope_id":"parent","_loop_indices":[4]}"#,
-                &state,
-            )
+            .while_iteration_variables(0, &source, &state)
             .expect("iteration variables");
         let iteration_variables: Value =
             serde_json::from_slice(&iteration_variables).expect("variables json");

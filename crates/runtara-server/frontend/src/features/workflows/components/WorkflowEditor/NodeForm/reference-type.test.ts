@@ -130,9 +130,9 @@ describe('describeStepReference', () => {
   });
 
   it('returns nothing for unknown steps or non-step paths', () => {
-    expect(describeStepReference("steps['nope'].outputs", PREVIOUS_STEPS)).toEqual(
-      {}
-    );
+    expect(
+      describeStepReference("steps['nope'].outputs", PREVIOUS_STEPS)
+    ).toEqual({});
     expect(describeStepReference('data.flag', PREVIOUS_STEPS)).toEqual({});
   });
 });
@@ -174,9 +174,7 @@ describe('resolveReferenceType', () => {
     expect(resolveReferenceType('workflow.inputs.data.flag', CONTEXT)).toBe(
       'string'
     );
-    expect(resolveReferenceType('data.customer.email', CONTEXT)).toBe(
-      'string'
-    );
+    expect(resolveReferenceType('data.customer.email', CONTEXT)).toBe('string');
     expect(resolveReferenceType('workflow.inputs.data', CONTEXT)).toBe(
       'object'
     );
@@ -203,6 +201,25 @@ describe('resolveReferenceType', () => {
   it('resolves loop context references', () => {
     expect(resolveReferenceType('loop.index', CONTEXT)).toBe('integer');
     expect(resolveReferenceType('loop.outputs', CONTEXT)).toBeUndefined();
+  });
+
+  it('resolves the uniform iteration context', () => {
+    expect(resolveReferenceType('iteration', CONTEXT)).toBe('object');
+    expect(resolveReferenceType('iteration.index', CONTEXT)).toBe('integer');
+    expect(resolveReferenceType('iteration.indices', CONTEXT)).toBe('array');
+    expect(resolveReferenceType('iteration.item', CONTEXT)).toBeUndefined();
+
+    const splitContext = {
+      ...CONTEXT,
+      insideSplitScope: true,
+      splitItemSchemaFields: [
+        { name: 'sku', type: 'string', required: true, description: '' },
+      ],
+    };
+    expect(resolveReferenceType('iteration.item', splitContext)).toBe('object');
+    expect(resolveReferenceType('iteration.item.sku', splitContext)).toBe(
+      'string'
+    );
   });
 
   it('treats data.* as unknown inside a Split body without a declared schema', () => {
@@ -338,13 +355,11 @@ describe('validateReferencePath', () => {
   });
 
   it('flags references to steps that are not upstream', () => {
-    expect(
-      validateReferencePath("steps['nope'].outputs.x", CONTEXT)
-    ).toMatch(/'nope' is not an upstream step/);
+    expect(validateReferencePath("steps['nope'].outputs.x", CONTEXT)).toMatch(
+      /'nope' is not an upstream step/
+    );
     // The onError pseudo-step is always legal.
-    expect(
-      validateReferencePath('steps.__error.message', CONTEXT)
-    ).toBeNull();
+    expect(validateReferencePath('steps.__error.message', CONTEXT)).toBeNull();
   });
 
   it('flags named fields missing from closed-shape outputs (E058 parity)', () => {
@@ -422,12 +437,28 @@ describe('validateReferencePath', () => {
     expect(validateReferencePath('item.email', CONTEXT)).toBeNull();
   });
 
+  it('validates iteration fields and nearest Split item paths', () => {
+    expect(validateReferencePath('iteration.index', CONTEXT)).toBeNull();
+    expect(validateReferencePath('iteration.unknown', CONTEXT)).toMatch(
+      /Available: index, indices, item/
+    );
+    const insideSplit = {
+      ...CONTEXT,
+      insideSplitScope: true,
+      splitItemSchemaFields: [
+        { name: 'sku', type: 'string', required: true, description: '' },
+      ],
+    };
+    expect(validateReferencePath('iteration.item.sku', insideSplit)).toBeNull();
+    expect(
+      validateReferencePath('iteration.item.missing', insideSplit)
+    ).toMatch(/not declared in the nearest Split iteration schema/);
+  });
+
   it('never flags bracket-indexed data references (runtime normalizes them)', () => {
     // 'orders[0]' must not be matched against the declared field 'orders';
     // the backend parses the index into a separate numeric segment.
-    expect(
-      validateReferencePath('data.customer[0].email', CONTEXT)
-    ).toBeNull();
+    expect(validateReferencePath('data.customer[0].email', CONTEXT)).toBeNull();
     expect(validateReferencePath('data.flag[0]', CONTEXT)).toBeNull();
   });
 

@@ -1,0 +1,77 @@
+{
+  "name": "While Iteration Context",
+  "description": "Agentless end-to-end coverage for public iteration context and While variables",
+  "steps": {
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "iteration.index" },
+          { "valueType": "immediate", "value": 2 }
+        ]
+      },
+      "config": {
+        "maxIterations": 5,
+        "variables": {
+          "tenant": {
+            "valueType": "reference",
+            "value": "data.tenant",
+            "type": "string"
+          }
+        }
+      },
+      "subgraph": {
+        "entryPoint": "iteration-finish",
+        "executionPlan": [],
+        "steps": {
+          "iteration-finish": {
+            "stepType": "Finish",
+            "id": "iteration-finish",
+            "inputMapping": {
+              "tenant": {
+                "valueType": "reference",
+                "value": "variables.tenant"
+              },
+              "index": {
+                "valueType": "reference",
+                "value": "iteration.index"
+              },
+              "indices": {
+                "valueType": "reference",
+                "value": "iteration.indices"
+              },
+              "item": {
+                "valueType": "reference",
+                "value": "iteration.item"
+              }
+            }
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "iterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        },
+        "last": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "loop",
+  "executionPlan": [{ "fromStep": "loop", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": {
+    "tenant": { "type": "string", "required": true }
+  },
+  "outputSchema": {}
+}

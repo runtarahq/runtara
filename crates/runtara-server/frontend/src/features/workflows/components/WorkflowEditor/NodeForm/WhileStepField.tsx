@@ -5,6 +5,7 @@ import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { ConditionEditor } from '@/shared/components/ui/condition-editor';
 import { composeConditionSuggestions } from './InputMappingValueField/VariableSuggestions';
+import { IterationVariablesField } from './IterationVariablesField';
 
 type WhileStepFieldProps = {
   name: string;
@@ -111,7 +112,7 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
         <Label className="text-sm font-medium">Loop Condition</Label>
         <p className="text-xs text-muted-foreground">
           The loop repeats while this condition is true. Use{' '}
-          <code className="bg-muted px-1 rounded">loop.index</code> for the
+          <code className="bg-muted px-1 rounded">iteration.index</code> for the
           current iteration or{' '}
           <code className="bg-muted px-1 rounded">loop.outputs</code> for the
           previous iteration&apos;s Finish outputs.
@@ -127,8 +128,8 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
       <div className="space-y-2">
         <Label className="text-sm font-medium">Max Iterations</Label>
         <p className="text-xs text-muted-foreground">
-          Safety limit to prevent infinite loops. The loop exits once this many iterations have
-          run.
+          Safety limit to prevent infinite loops. The loop exits once this many
+          iterations have run.
         </p>
         <Input
           type="number"
@@ -144,18 +145,23 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
         />
         {whileMaxIterations === 0 && (
           <p className="text-xs text-amber-600">
-            With 0 the loop body never runs — there is no &quot;unlimited&quot; mode. Use a high
-            value instead.
+            With 0 the loop body never runs — there is no &quot;unlimited&quot;
+            mode. Use a high value instead.
           </p>
         )}
       </div>
+
+      <IterationVariablesField
+        fieldArrayName="whileVariablesFields"
+        description="Map parent-scope values explicitly into every iteration. They are available as variables.* inside the While subgraph."
+      />
 
       {/* Timeout */}
       <div className="space-y-2">
         <Label className="text-sm font-medium">Timeout (milliseconds)</Label>
         <p className="text-xs text-muted-foreground">
-          Overall timeout for the entire While step, in milliseconds (e.g. 60000 = 1 minute).
-          Leave empty for no timeout.
+          Overall timeout for the entire While step, in milliseconds (e.g. 60000
+          = 1 minute). Leave empty for no timeout.
         </p>
         <Input
           type="number"

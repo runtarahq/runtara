@@ -58,8 +58,8 @@
 //! | E058 | UndefinedReferenceField | Nested `data.*`/`variables.*` field not known under a validated prefix |
 //! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
-//! | E126 | UnknownReferenceRoot | Reference root is not `data`/`variables`/`workflow`/`steps`/`loop`/`item` |
-//! | E127 | ReferenceRootOutOfScope | `loop`/`item` root used where the runtime never populates it |
+//! | E126 | UnknownReferenceRoot | Reference root is not one of the runtime's supported roots |
+//! | E127 | ReferenceRootOutOfScope | `iteration`/`loop`/`item` root used where the runtime never populates it |
 //! | E070 | UnknownVariable | Variable doesn't exist |
 //! | E072 | InvalidConditionalEdge | Conditional outgoing edge is not a true/false branch |
 //! | E080 | TypeMismatch | Value type doesn't match expected |
@@ -2337,6 +2337,7 @@ fn validate_references_with_inherited(
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.remove("_loop");
                 injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 // Split never sets `_loop` itself — it's only present here if
                 // this Split is nested inside a While and inherits it.
@@ -2346,10 +2347,14 @@ fn validate_references_with_inherited(
                 validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                let mut injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let mut injected_vars: HashSet<String> = while_step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.variables.as_ref())
+                    .map(|variables| variables.keys().cloned().collect())
+                    .unwrap_or_default();
+                injected_vars.remove("_item");
+                injected_vars.extend(WHILE_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 // While never sets `_item` itself — it's only present here if
                 // this While is nested inside a Split and inherits it.
                 if variable_names.contains("_item") {
@@ -2623,6 +2628,13 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(m);
             }
         }
+        Step::While(while_step) => {
+            if let Some(config) = &while_step.config
+                && let Some(m) = &config.variables
+            {
+                mappings.push(m);
+            }
+        }
         Step::Error(error_step) => {
             if let Some(m) = &error_step.context {
                 mappings.push(m);
@@ -2638,7 +2650,6 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
         }
         Step::Conditional(_)
         | Step::Switch(_)
-        | Step::While(_)
         | Step::Delay(_)
         | Step::WaitForSignal(_)
         | Step::AiAgent(_) => {}
@@ -2797,12 +2808,17 @@ fn validate_template_static_references_with_context(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                let injected_vars: HashSet<String> = split_step
+                let mut injected_vars: HashSet<String> = split_step
                     .config
                     .as_ref()
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.remove("_loop");
+                injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
+                if variable_names.contains("_loop") {
+                    injected_vars.insert("_loop".to_string());
+                }
                 validate_template_static_references_with_context(
                     &split_step.subgraph,
                     &injected_vars,
@@ -2811,9 +2827,20 @@ fn validate_template_static_references_with_context(
                 );
             }
             Step::While(while_step) => {
+                let mut injected_vars: HashSet<String> = while_step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.variables.as_ref())
+                    .map(|variables| variables.keys().cloned().collect())
+                    .unwrap_or_default();
+                injected_vars.remove("_item");
+                injected_vars.extend(WHILE_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
+                if variable_names.contains("_item") {
+                    injected_vars.insert("_item".to_string());
+                }
                 validate_template_static_references_with_context(
                     &while_step.subgraph,
-                    &HashSet::new(),
+                    &injected_vars,
                     data_scope.for_while_body(graph),
                     result,
                 );
@@ -4645,7 +4672,15 @@ fn parse_reference(reference: &str) -> Option<(&str, &str)> {
 /// and conditionally populates `loop`/`item` (see [`ValidationError::ReferenceRootOutOfScope`]).
 /// Anything else falls through `lookup_source_path` to a silent `null`
 /// instead of failing to compile.
-const LEGAL_REFERENCE_ROOTS: &[&str] = &["data", "variables", "workflow", "steps", "loop", "item"];
+const LEGAL_REFERENCE_ROOTS: &[&str] = &[
+    "data",
+    "variables",
+    "workflow",
+    "steps",
+    "iteration",
+    "loop",
+    "item",
+];
 
 /// The leading identifier of a reference path, up to the first `.` or `[`
 /// (e.g. `"data"` from `"data.foo"`, `"steps"` from `"steps['id'].outputs"`,
@@ -5070,6 +5105,7 @@ fn validate_data_and_variable_references_with_context(
     // inheritance for free.
     let has_loop_context = all_variables.contains("_loop");
     let has_item_context = all_variables.contains("_item");
+    let has_iteration_context = all_variables.contains("_loop_indices");
 
     // Check each step for references
     for (step_id, step) in &graph.steps {
@@ -5084,6 +5120,7 @@ fn validate_data_and_variable_references_with_context(
                 &available_variables,
                 has_loop_context,
                 has_item_context,
+                has_iteration_context,
                 result,
             );
         }
@@ -5102,6 +5139,7 @@ fn validate_data_and_variable_references_with_context(
                 &available_variables,
                 has_loop_context,
                 true,
+                has_iteration_context,
                 result,
             );
         }
@@ -5115,6 +5153,7 @@ fn validate_data_and_variable_references_with_context(
                 &available_variables,
                 true,
                 has_item_context,
+                true,
                 result,
             );
         }
@@ -5134,6 +5173,7 @@ fn validate_data_and_variable_references_with_context(
                     .and_then(|c| c.variables.as_ref())
                     .map(|v| v.keys().cloned().collect())
                     .unwrap_or_default();
+                injected_vars.remove("_loop");
                 injected_vars.extend(SPLIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 // Split never sets `_loop` itself — it's only present here if
                 // this Split is nested inside a While and inherits it.
@@ -5151,11 +5191,15 @@ fn validate_data_and_variable_references_with_context(
                 // While subgraphs:
                 // 1. See the enclosing scope's `data` unchanged (the runtime
                 //    passes it through), so they inherit the enclosing schema
-                // 2. No config.variables, but the runtime injects per-iteration vars
-                let mut injected_vars: HashSet<String> = WHILE_SCOPE_VARIABLES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                // 2. Inherit config.variables and the runtime's per-iteration vars
+                let mut injected_vars: HashSet<String> = while_step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.variables.as_ref())
+                    .map(|variables| variables.keys().cloned().collect())
+                    .unwrap_or_default();
+                injected_vars.remove("_item");
+                injected_vars.extend(WHILE_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                 // While never sets `_item` itself — it's only present here if
                 // this While is nested inside a Split and inherits it.
                 if all_variables.contains("_item") {
@@ -5192,12 +5236,12 @@ fn validate_data_and_variable_references_with_context(
 
 /// Dispatch a single reference by its root segment: validate `data`/
 /// `variables`/`workflow` paths against schema, defer `steps`/`__error`/
-/// `error` to the checks that already cover them elsewhere, gate `loop`/
-/// `item` by whether this call site actually populates them, and reject
+/// `error` to the checks that already cover them elsewhere, gate `iteration`/
+/// `loop`/`item` by whether this call site actually populates them, and reject
 /// anything else as an unrecognized root. Shared between a step's own
 /// (unscoped) references and the item/loop-scoped ones from
-/// `collect_step_scoped_references` — `loop_allowed`/`item_allowed` are the
-/// only thing that differs between those call sites.
+/// `collect_step_scoped_references` — the scope flags are the only thing that
+/// differs between those call sites.
 #[allow(clippy::too_many_arguments)]
 fn validate_reference_root(
     step_id: &str,
@@ -5208,6 +5252,7 @@ fn validate_reference_root(
     available_variables: &[String],
     loop_allowed: bool,
     item_allowed: bool,
+    iteration_allowed: bool,
     result: &mut ValidationResult,
 ) {
     match reference_root(reference) {
@@ -5263,6 +5308,26 @@ fn validate_reference_root(
             // Step existence is checked separately by `validate_reference`
             // (`InvalidStepReference`); the bare `__error`/`error` alias
             // already gets its own `BareErrorReference` warning there.
+        }
+        "iteration" => {
+            if !iteration_allowed {
+                result.errors.push(ValidationError::ReferenceRootOutOfScope {
+                    step_id: step_id.to_string(),
+                    reference: reference.to_string(),
+                    root: "iteration".to_string(),
+                    reason: "`iteration.*` is only populated inside a Split/While subgraph or a While step's own condition".to_string(),
+                });
+            } else if let Some(field) = reference_segments(reference).get(1)
+                && !matches!(field.as_str(), "index" | "indices" | "item")
+            {
+                result.errors.push(ValidationError::InvalidReferencePath {
+                    step_id: step_id.to_string(),
+                    reference_path: reference.to_string(),
+                    reason: format!(
+                        "'iteration.*' references must use 'index', 'indices', or 'item', not '{field}'"
+                    ),
+                });
+            }
         }
         "loop" => {
             if !loop_allowed {
@@ -5462,12 +5527,17 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_mapping_value(&config.value, &mut refs);
             }
         }
-        Step::While(_) => {
+        Step::While(while_step) => {
             // `while_step.condition` is collected separately by
             // `collect_step_scoped_references`: the runtime evaluates it with
             // a `loop` context injected (see `while_condition_source` in the
             // direct-json runtime), so it needs different root permission
             // than a step with no such context.
+            if let Some(config) = &while_step.config
+                && let Some(variables) = &config.variables
+            {
+                extract_references_from_input_mapping(variables, &mut refs);
+            }
         }
         Step::Delay(delay_step) => {
             extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
@@ -5590,6 +5660,11 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
         }
         Step::While(while_step) => {
             extract_template_static_references_from_condition(&while_step.condition, &mut refs);
+            if let Some(config) = &while_step.config
+                && let Some(variables) = &config.variables
+            {
+                extract_template_static_references_from_input_mapping(variables, &mut refs);
+            }
         }
         Step::Delay(delay_step) => {
             extract_template_static_references_from_mapping_value(
@@ -7694,6 +7769,7 @@ mod tests {
             subgraph: Box::new(subgraph),
             config: Some(WhileConfig {
                 max_iterations,
+                variables: None,
                 timeout: None,
             }),
             breakpoint: None,
@@ -8307,7 +8383,10 @@ mod tests {
               ],
               "steps": {
                 "split": {"id":"split","stepType":"Split","config":{
-                    "value": {"valueType":"immediate","value":[1,2,3]}
+                    "value": {"valueType":"immediate","value":[1,2,3]},
+                    "variables": {
+                      "_loop": {"valueType":"immediate","value":{"index":99}}
+                    }
                   },
                   "subgraph": {
                     "entryPoint": "process",
@@ -8459,6 +8538,89 @@ mod tests {
                     | ValidationError::UnknownReferenceRoot { .. }
             )),
             "item.x inside a While nested in a Split should be allowed (inherited `_item`), got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_iteration_root_outside_split_or_while_is_rejected() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "finish",
+              "steps": {
+                "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+                  "index":{"valueType":"reference","value":"iteration.index"}
+                }}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::ReferenceRootOutOfScope { step_id, root, .. }
+                    if step_id == "finish" && root == "iteration"
+            )),
+            "expected iteration to be scope-gated, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_while_variables_and_iteration_context_are_validated() {
+        let graph: ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "loop",
+              "executionPlan": [{"fromStep":"loop","toStep":"finish"}],
+              "inputSchema": {
+                "limit": {"type":"integer","required":true},
+                "tenant": {"type":"string","required":true}
+              },
+              "steps": {
+                "loop": {
+                  "id":"loop",
+                  "stepType":"While",
+                  "condition":{"type":"operation","op":"LT","arguments":[
+                    {"valueType":"reference","value":"iteration.index"},
+                    {"valueType":"reference","value":"data.limit"}
+                  ]},
+                  "config": {
+                    "maxIterations":4,
+                    "variables":{
+                      "tenant":{"valueType":"reference","value":"data.tenant"}
+                    }
+                  },
+                  "subgraph": {
+                    "entryPoint":"sub_finish",
+                    "steps": {
+                      "sub_finish":{"id":"sub_finish","stepType":"Finish","inputMapping":{
+                        "tenant":{"valueType":"reference","value":"variables.tenant"},
+                        "index":{"valueType":"reference","value":"iteration.index"},
+                        "indices":{"valueType":"reference","value":"iteration.indices"},
+                        "item":{"valueType":"reference","value":"iteration.item"}
+                      }}
+                    }
+                  }
+                },
+                "finish":{"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::ReferenceRootOutOfScope { .. }
+                    | ValidationError::UnknownReferenceRoot { .. }
+                    | ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedDataReference { .. }
+                    | ValidationError::UndefinedVariableReference { .. }
+            )),
+            "new While references should validate, got: {:?}",
             result.errors
         );
     }

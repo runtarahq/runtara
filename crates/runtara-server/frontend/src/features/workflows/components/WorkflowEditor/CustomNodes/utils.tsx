@@ -608,6 +608,7 @@ function cleanNodeData(steps: Record<string, any>) {
       whileCondition,
       whileMaxIterations,
       whileTimeout,
+      whileVariablesFields,
       subgraphMeta: _15,
       ...restData
     } = data;
@@ -1446,13 +1447,52 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       // Build config object
-      const whileConfig: { maxIterations?: number; timeout?: number | null } =
-        {};
+      const whileConfig: {
+        maxIterations?: number;
+        timeout?: number | null;
+        variables?: Record<
+          string,
+          {
+            valueType: 'reference' | 'immediate' | 'composite' | 'template';
+            value: unknown;
+            type?: string;
+          }
+        >;
+      } = {};
       if (whileMaxIterations !== undefined && whileMaxIterations !== null) {
         whileConfig.maxIterations = whileMaxIterations;
       }
       if (whileTimeout !== undefined && whileTimeout !== null) {
         whileConfig.timeout = whileTimeout;
+      }
+      if (
+        Array.isArray(whileVariablesFields) &&
+        whileVariablesFields.length > 0
+      ) {
+        const mappedVariables: NonNullable<typeof whileConfig.variables> = {};
+        for (const variableField of whileVariablesFields) {
+          const variableName =
+            typeof variableField.name === 'string'
+              ? variableField.name.trim()
+              : '';
+          if (!variableName || variableField.value === undefined) continue;
+          const resolvedValueType =
+            variableField.valueType ||
+            (typeof variableField.value === 'object' &&
+            variableField.value !== null
+              ? 'composite'
+              : 'immediate');
+          const [, mappingValue] = processMappingEntry({
+            type: variableName,
+            value: variableField.value,
+            typeHint: variableField.type,
+            valueType: resolvedValueType,
+          }) as [string, NonNullable<typeof whileConfig.variables>[string]];
+          mappedVariables[variableName] = mappingValue;
+        }
+        if (Object.keys(mappedVariables).length > 0) {
+          whileConfig.variables = mappedVariables;
+        }
       }
 
       if (Object.keys(whileConfig).length > 0) {
@@ -2294,11 +2334,50 @@ function normalizeNodesAndEdges(
         ...((step.stepType as string) === 'While'
           ? (() => {
               const config = (data as any).config;
+              const whileVariablesFields = config?.variables
+                ? Object.entries(config.variables).map(([name, variable]) => {
+                    const typedVariable = variable as {
+                      valueType?:
+                        | 'reference'
+                        | 'immediate'
+                        | 'composite'
+                        | 'template';
+                      value: unknown;
+                      type?: string;
+                    };
+                    const valueType =
+                      typedVariable.valueType ||
+                      (typeof typedVariable.value === 'object' &&
+                      typedVariable.value !== null
+                        ? 'composite'
+                        : 'reference');
+                    const value =
+                      valueType === 'composite'
+                        ? Array.isArray(typedVariable.value)
+                          ? typedVariable.value
+                          : typeof typedVariable.value === 'object' &&
+                              typedVariable.value !== null
+                            ? typedVariable.value
+                            : {}
+                        : typedVariable.value === undefined
+                          ? ''
+                          : typedVariable.value;
+                    return {
+                      name,
+                      value,
+                      ...(typedVariable.type !== undefined
+                        ? { type: typedVariable.type }
+                        : {}),
+                      valueType,
+                    };
+                  })
+                : [];
               return {
                 inputMapping: [],
                 whileCondition: (data as any).condition,
                 whileMaxIterations: config?.maxIterations ?? 10,
                 whileTimeout: config?.timeout ?? null,
+                whileVariablesFields,
               };
             })()
           : {}),

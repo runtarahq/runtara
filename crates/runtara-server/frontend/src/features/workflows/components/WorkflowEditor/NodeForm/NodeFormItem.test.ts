@@ -206,6 +206,26 @@ describe('NodeFormItem schema', () => {
     }
   });
 
+  it('accepts template While variables', () => {
+    const result = testSchema.safeParse({
+      ...baseFormData,
+      stepType: 'While',
+      whileVariablesFields: [
+        {
+          name: 'greeting',
+          value: 'Hello {{ data.name }}',
+          valueType: 'template' as const,
+          type: 'string',
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.whileVariablesFields?.[0]?.valueType).toBe('template');
+    }
+  });
+
   it('rejects duplicate Finish output names on every duplicated row', () => {
     const result = testSchema.safeParse({
       ...baseFormData,

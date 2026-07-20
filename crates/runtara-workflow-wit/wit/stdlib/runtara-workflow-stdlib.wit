@@ -160,7 +160,7 @@ interface json {
 
     while-iteration-variables: func(
         while-id: u32,
-        variables: list<u8>,
+        source: list<u8>,
         state: list<u8>,
     ) -> result<list<u8>, string>;
 

@@ -2224,6 +2224,101 @@ describe('Split variable round-trip', () => {
   });
 });
 
+describe('While variable round-trip', () => {
+  it('preserves static maxIterations and all MappingValue variable modes', () => {
+    const graph = makeGraph({
+      id: 'w1',
+      stepType: 'While',
+      condition: { valueType: 'immediate', value: false },
+      config: {
+        maxIterations: 12,
+        variables: {
+          tenant: { valueType: 'reference', value: 'data.tenant' },
+          greeting: {
+            valueType: 'template',
+            value: 'Hello {{ data.name }}',
+          },
+          options: {
+            valueType: 'composite',
+            value: {
+              active: { valueType: 'immediate', value: true },
+            },
+          },
+        },
+      },
+      subgraph: {
+        entryPoint: 'done',
+        executionPlan: [],
+        steps: { done: { id: 'done', stepType: 'Finish' } },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.maxIterations).toBe(12);
+    expect(step.config.variables.tenant).toEqual({
+      valueType: 'reference',
+      value: 'data.tenant',
+    });
+    expect(step.config.variables.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hello {{ data.name }}',
+    });
+    expect(step.config.variables.options.valueType).toBe('composite');
+    expect(step.config.variables.options.value.active).toEqual({
+      valueType: 'immediate',
+      value: true,
+    });
+  });
+
+  it('serializes typed immediate variables from While form state', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'loop',
+          type: NODE_TYPES.ContainerNode,
+          position: { x: 0, y: 0 },
+          data: {
+            id: 'loop',
+            stepType: 'While',
+            name: 'Loop',
+            whileCondition: { valueType: 'immediate', value: false },
+            whileMaxIterations: 8,
+            whileVariablesFields: [
+              {
+                name: 'count',
+                value: '5',
+                valueType: 'immediate',
+                type: 'number',
+              },
+              {
+                name: 'tenant',
+                value: 'data.tenant',
+                valueType: 'reference',
+                type: 'string',
+              },
+            ],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'while-variable-fixture' }
+    );
+
+    const config = (graph!.steps as Record<string, any>).loop.config;
+    expect(config.maxIterations).toBe(8);
+    expect(config.variables.count).toEqual({
+      valueType: 'immediate',
+      value: 5,
+    });
+    expect(config.variables.tenant).toEqual({
+      valueType: 'reference',
+      value: 'data.tenant',
+      type: 'string',
+    });
+  });
+});
+
 describe('Empty-string immediate preservation', () => {
   it('round-trips a JSON-authored immediate empty string on an Agent input', () => {
     const graph = makeGraph({

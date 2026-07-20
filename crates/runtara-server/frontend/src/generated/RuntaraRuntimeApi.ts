@@ -5530,6 +5530,12 @@ export interface WhileConfig {
    * @min 0
    */
   timeout?: number | null;
+  /**
+   * Additional variables to pass to every iteration's subgraph.
+   * Mappings are evaluated against the parent execution scope when the
+   * While step is entered, matching `SplitConfig.variables` semantics.
+   */
+  variables?: null | HashMap;
 }
 
 /** Conditional loop - repeat subgraph until condition is false */

@@ -10,6 +10,7 @@ export interface VariableSuggestion {
     | 'Workflow Inputs'
     | 'Variables'
     | 'Step Outputs'
+    | 'Iteration Context'
     | 'Loop Context'
     | 'Split Scope'
     | 'Wait Scope'
@@ -218,6 +219,44 @@ export function composeVariableSuggestions(
     });
   }
 
+  // Uniform context for both Split and While bodies. `indices` is ordered
+  // outermost-first, and `item` remains the nearest active Split item (or
+  // null when the nesting stack contains only While steps).
+  if (isInsideWhileLoop || isInsideSplit) {
+    suggestions.push({
+      label: 'iteration.index',
+      value: 'iteration.index',
+      description: '0-based index of the innermost Split or While iteration',
+      group: 'Iteration Context',
+      type: 'integer',
+    });
+    suggestions.push({
+      label: 'iteration.indices',
+      value: 'iteration.indices',
+      description: 'All active Split/While indices, outermost first',
+      group: 'Iteration Context',
+      type: 'array',
+    });
+    suggestions.push({
+      label: 'iteration.item',
+      value: 'iteration.item',
+      description: 'Nearest active Split item, or null when none is active',
+      group: 'Iteration Context',
+      type:
+        isInsideSplit && splitItemSchemaFields?.length ? 'object' : undefined,
+    });
+    if (isInsideSplit && splitItemSchemaFields?.length) {
+      appendSchemaFieldSuggestions(
+        splitItemSchemaFields,
+        '',
+        'iteration.item',
+        'Iteration Context',
+        'Nearest Split item field',
+        suggestions
+      );
+    }
+  }
+
   // Add Split iteration scope variables when inside a Split subgraph.
   // The runtime injects these into each iteration's variables
   // (see SPLIT_SCOPE_VARIABLES in crates/runtara-workflows/src/validation.rs:
@@ -338,6 +377,7 @@ export function groupSuggestions(
 ): Record<string, VariableSuggestion[]> {
   const grouped: Record<string, VariableSuggestion[]> = {
     'Current Item': [],
+    'Iteration Context': [],
     'Loop Context': [],
     'Split Scope': [],
     'Wait Scope': [],

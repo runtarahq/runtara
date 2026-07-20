@@ -15,7 +15,7 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_retptr_error_or_return, emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg,
-    push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load, push_variables_args,
+    push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
@@ -338,7 +338,8 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::End);
 
     body.instruction(&Instruction::I32Const(while_id as i32));
-    push_variables_args(body, variables);
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
     push_retptr_arg(body);

@@ -410,7 +410,7 @@ mod component {
 
         fn while_iteration_variables(
             while_id: u32,
-            variables: Vec<u8>,
+            source: Vec<u8>,
             state: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
@@ -418,7 +418,7 @@ mod component {
                 let manifest = slot
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
-                manifest.while_iteration_variables(while_id, &variables, &state)
+                manifest.while_iteration_variables(while_id, &source, &state)
             })
         }
 

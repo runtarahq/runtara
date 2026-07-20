@@ -42,6 +42,7 @@ const WAIT_TIMEOUT_ON_ERROR: &str = include_str!("fixtures/wait_timeout_on_error
 const WAIT_DELAY_FINISH: &str = include_str!("fixtures/wait_delay_finish.json");
 const WAIT_WAIT_FINISH: &str = include_str!("fixtures/wait_wait_finish.json");
 const WHILE_DIRECT_INDEX_ONLY: &str = include_str!("fixtures/while_direct_index_only.json");
+const WHILE_ITERATION_CONTEXT: &str = include_str!("fixtures/while_iteration_context.json");
 const WHILE_TIMEOUT: &str = include_str!("fixtures/while_timeout.json");
 const SPLIT_TIMEOUT: &str = include_str!("fixtures/split_timeout.json");
 const SPLIT_WORKFLOW: &str = include_str!("fixtures/split_workflow.json");
@@ -2908,6 +2909,31 @@ fn direct_wasm_execute_while_loop_reports_completion() {
     assert!(
         result.checkpoints.is_empty(),
         "normal While execution should not use durable checkpoints"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_while_iteration_context_and_variables() {
+    let components_dir = direct_e2e_components_dir();
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-while-iteration-context",
+        WHILE_ITERATION_CONTEXT,
+        br#"{"tenant":"acme"}"#,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "iterations": 2,
+            "last": {
+                "tenant": "acme",
+                "index": 1,
+                "indices": [1],
+                "item": null
+            }
+        })
     );
 }
 

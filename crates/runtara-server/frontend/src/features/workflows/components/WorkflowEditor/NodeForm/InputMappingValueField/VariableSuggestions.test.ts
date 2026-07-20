@@ -50,6 +50,26 @@ describe('composeVariableSuggestions', () => {
       'loop.index',
       'loop.outputs',
     ]);
+    expect(
+      suggestions
+        .filter((s) => s.group === 'Iteration Context')
+        .map((s) => s.value)
+    ).toEqual(['iteration.index', 'iteration.indices', 'iteration.item']);
+  });
+
+  it('adds the same iteration context inside Split bodies', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      undefined,
+      undefined,
+      false,
+      true
+    );
+    expect(
+      suggestions
+        .filter((s) => s.group === 'Iteration Context')
+        .map((s) => s.value)
+    ).toEqual(['iteration.index', 'iteration.indices', 'iteration.item']);
   });
 
   it('groups Split Scope suggestions under their own section', () => {
@@ -59,6 +79,7 @@ describe('composeVariableSuggestions', () => {
 
     // The four injected variables plus the rebound `data` (current item).
     expect(grouped['Split Scope']).toHaveLength(5);
+    expect(grouped['Iteration Context']).toHaveLength(3);
     expect(grouped['Loop Context']).toHaveLength(2);
   });
 
@@ -161,7 +182,12 @@ describe('nested workflow input suggestions', () => {
               required: false,
               description: '',
               properties: [
-                { name: 'city', type: 'string', required: false, description: '' },
+                {
+                  name: 'city',
+                  type: 'string',
+                  required: false,
+                  description: '',
+                },
               ],
             },
           ],
@@ -171,9 +197,7 @@ describe('nested workflow input suggestions', () => {
 
     const byValue = Object.fromEntries(suggestions.map((s) => [s.value, s]));
     expect(byValue['workflow.inputs.data.customer']?.type).toBe('object');
-    expect(byValue['workflow.inputs.data.customer.email']?.type).toBe(
-      'string'
-    );
+    expect(byValue['workflow.inputs.data.customer.email']?.type).toBe('string');
     expect(byValue['workflow.inputs.data.customer.email']?.label).toBe(
       'customer.email'
     );
@@ -214,6 +238,8 @@ describe('Split item scope suggestions', () => {
     expect(byValue['data']?.type).toBe('object');
     expect(byValue['data.sku']?.type).toBe('string');
     expect(byValue['data.dims.weight']?.type).toBe('number');
+    expect(byValue['iteration.item.sku']?.type).toBe('string');
+    expect(byValue['iteration.item.dims.weight']?.type).toBe('number');
     // Workflow-level inputs are out of scope inside a Split body.
     expect(byValue['workflow.inputs.data.flag']).toBeUndefined();
     expect(byValue['workflow.inputs.data']).toBeUndefined();

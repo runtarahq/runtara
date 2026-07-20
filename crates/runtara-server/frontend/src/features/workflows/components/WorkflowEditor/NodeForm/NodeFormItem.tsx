@@ -1040,6 +1040,51 @@ export const schema = () =>
       whileCondition: z.any().optional(),
       whileMaxIterations: z.number().optional(),
       whileTimeout: z.number().nullable().optional(),
+      whileVariablesFields: z
+        .array(
+          z
+            .object({
+              name: z.string().optional(),
+              value: z.any().optional(),
+              type: z.string().optional(),
+              valueType: z
+                .enum(['reference', 'immediate', 'composite', 'template'])
+                .optional(),
+            })
+            .superRefine((item, ctx) => {
+              const trimmedName = (item.name || '').trim();
+              const isComposite = item.valueType === 'composite';
+              const isEmptyComposite =
+                isComposite &&
+                item.value !== undefined &&
+                item.value !== null &&
+                typeof item.value === 'object' &&
+                (Array.isArray(item.value)
+                  ? item.value.length === 0
+                  : Object.keys(item.value as object).length === 0);
+              const hasValue =
+                item.value !== undefined &&
+                (item.value !== null || item.valueType === 'immediate') &&
+                !(typeof item.value === 'string' && item.value.trim() === '') &&
+                !isEmptyComposite;
+
+              if (hasValue && !trimmedName) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  path: ['name'],
+                  message: 'Variable name is required',
+                });
+              }
+              if (trimmedName && !hasValue) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  path: ['value'],
+                  message: 'Variable value is required',
+                });
+              }
+            })
+        )
+        .optional(),
       // GroupBy step fields
       groupByKey: z.string().optional(),
       groupByExpectedKeys: z.array(z.string()).optional(),
@@ -1174,6 +1219,8 @@ export const initialValues: Partial<SchemaType> = {
   splitAllowNull: false,
   splitConvertSingleValue: false,
   splitBatchSize: undefined,
+  // While step fields
+  whileVariablesFields: [],
   // GroupBy step fields
   groupByKey: '',
   groupByExpectedKeys: [],
