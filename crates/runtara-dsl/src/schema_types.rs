@@ -63,6 +63,18 @@ pub enum MemoryTier {
 // Execution Graph
 // ============================================================================
 
+/// Accept an explicit `null` as an absent entry point.
+///
+/// Newly created workflows are seeded with `"entryPoint": null` until a step is
+/// added, and those definitions are persisted, so the runtime has to be able to
+/// read them back.
+fn deserialize_nullable_entry_point<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// The execution graph containing all steps and control flow
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +94,13 @@ pub struct ExecutionGraph {
     pub steps: HashMap<String, Step>,
 
     /// ID of the entry point step (step with no incoming edges)
+    ///
+    /// A workflow that has not been authored yet carries no entry point, so an
+    /// explicit `null` deserializes to an empty string. That lets a stepless
+    /// graph parse and reach validation, which reports the real problem,
+    /// instead of failing here with a type error. The field stays required so
+    /// the published JSON Schema is unchanged.
+    #[serde(deserialize_with = "deserialize_nullable_entry_point")]
     pub entry_point: String,
 
     /// Ordered list of step transitions defining control flow

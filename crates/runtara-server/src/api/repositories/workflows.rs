@@ -2015,9 +2015,11 @@ impl WorkflowRepository {
     /// synchronous execution path used to duplicate. Behaviour:
     /// - If the compilation row is `success` AND has a registered image id, returns
     ///   `CompilationStatus::Ready { translated_path, registered_image_id }`.
-    /// - If the row is `failed`, logs the stored error message at `error`, deletes
-    ///   the stale record so the next request can retry, and returns
-    ///   `CompilationStatus::Failed { error }`.
+    /// - If the row is `failed`, logs the stored error message at `error` and
+    ///   returns `CompilationStatus::Failed`. When the recorded
+    ///   `source_checksum` still matches the stored definition the failure is
+    ///   `terminal` and the record is kept; otherwise the stale record is
+    ///   deleted so the next request can retry.
     /// - Otherwise (no row, `pending`, or `success` without a registered image)
     ///   returns `CompilationStatus::NotReady`.
     pub async fn ensure_compilation_ready(
@@ -2074,6 +2076,25 @@ impl WorkflowRepository {
                 if compilation_status.as_deref() == Some("failed") {
                     let error_msg =
                         error_message.unwrap_or_else(|| "Unknown compilation error".to_string());
+
+                    // The failure was recorded against the definition still
+                    // stored, so recompiling it would fail identically. Keep
+                    // the record and report the failure as terminal, otherwise
+                    // every execution attempt requeues the same doomed build.
+                    if source_checksum.as_deref() == Some(current_checksum.as_str()) {
+                        tracing::error!(
+                            tenant_id = %tenant_id,
+                            workflow_id = %workflow_id,
+                            version = version,
+                            compilation_error = %error_msg,
+                            "COMPILATION FAILED - definition unchanged, not retrying"
+                        );
+                        return Ok(CompilationStatus::Failed {
+                            error: error_msg,
+                            terminal: true,
+                        });
+                    }
+
                     // Log at ERROR level so it's visible in logs
                     tracing::error!(
                         tenant_id = %tenant_id,
@@ -2091,7 +2112,10 @@ impl WorkflowRepository {
                     .bind(version)
                     .execute(&self.pool)
                     .await;
-                    return Ok(CompilationStatus::Failed { error: error_msg });
+                    return Ok(CompilationStatus::Failed {
+                        error: error_msg,
+                        terminal: false,
+                    });
                 }
 
                 Ok(CompilationStatus::NotReady)
@@ -2112,9 +2136,15 @@ pub enum CompilationStatus {
         /// Image id registered in runtara-environment.
         registered_image_id: String,
     },
-    /// Previous compilation attempt recorded a failure. The stale record has
-    /// been deleted so the caller may queue a retry.
-    Failed { error: String },
+    /// Previous compilation attempt recorded a failure.
+    Failed {
+        error: String,
+        /// `true` when the failure belongs to the definition currently stored,
+        /// so a retry would fail the same way and the record has been kept.
+        /// `false` when the definition changed since — the stale record has
+        /// been deleted and the caller may queue a fresh compilation.
+        terminal: bool,
+    },
     /// No successful compilation is available yet (no record, pending, or
     /// partially recorded).
     NotReady,

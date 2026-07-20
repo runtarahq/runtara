@@ -2844,10 +2844,9 @@ pub async fn set_workflow_metadata(
     }
 
     // A never-edited workflow's stored graph carries `entryPoint: null` (see
-    // `create_initial_version`), which the DSL `ExecutionGraph` (`entry_point: String`)
-    // cannot deserialize — so a metadata round-trip would 400 with
-    // "invalid type: null, expected a string". Coerce a null/missing entryPoint to "";
-    // it is harmless on a stepless graph and is overwritten once real steps are added.
+    // `create_initial_version`). The DSL reads that back as "", but a graph with
+    // the key missing entirely still fails to deserialize, so normalise both
+    // here. Harmless on a stepless graph, and overwritten once steps are added.
     if target
         .get("entryPoint")
         .is_none_or(serde_json::Value::is_null)
@@ -3576,8 +3575,8 @@ pub async fn apply_graph_mutations(
 mod metadata_tests {
     //! Regression coverage for the `set_workflow_metadata` entryPoint coercion.
     //! A freshly created workflow's stored graph carries `entryPoint: null` (see
-    //! `create_initial_version`), which the DSL `ExecutionGraph` cannot deserialize.
-    //! `set_workflow_metadata` coerces that to "" so the metadata round-trip parses.
+    //! `create_initial_version`). The DSL now reads that back as "", so the
+    //! coercion only still matters for a graph missing the key altogether.
 
     /// Mirror of the inline coercion in `set_workflow_metadata`.
     fn coerce_entry_point(target: &mut serde_json::Value) {
@@ -3601,14 +3600,28 @@ mod metadata_tests {
     }
 
     #[test]
-    fn null_entry_point_fails_to_deserialize() {
-        // Pins the root cause: the stored fresh-graph shape is not a valid DSL Workflow.
+    fn null_entry_point_deserializes_without_coercion() {
+        // The DSL tolerates the stored fresh-graph shape directly now, so a
+        // metadata round-trip no longer depends on the coercion below.
         let wrapped = serde_json::json!({ "executionGraph": fresh_graph() });
-        let parsed = serde_json::from_value::<runtara_dsl::Workflow>(wrapped);
-        assert!(
-            parsed.is_err(),
-            "fresh graph with entryPoint:null must not deserialize (that's the bug)"
-        );
+        serde_json::from_value::<runtara_dsl::Workflow>(wrapped)
+            .expect("fresh graph with entryPoint:null deserializes into a DSL Workflow");
+    }
+
+    #[test]
+    fn missing_entry_point_still_needs_coercion() {
+        // Only an explicit null is tolerated by the DSL, so the coercion is
+        // what keeps a graph with no entryPoint key at all round-tripping.
+        let mut graph = fresh_graph();
+        graph.as_object_mut().unwrap().remove("entryPoint");
+
+        let uncoerced = serde_json::json!({ "executionGraph": graph.clone() });
+        assert!(serde_json::from_value::<runtara_dsl::Workflow>(uncoerced).is_err());
+
+        coerce_entry_point(&mut graph);
+        let wrapped = serde_json::json!({ "executionGraph": graph });
+        serde_json::from_value::<runtara_dsl::Workflow>(wrapped)
+            .expect("coerced graph deserializes into a DSL Workflow");
     }
 
     #[test]

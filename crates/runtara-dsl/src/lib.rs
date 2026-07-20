@@ -453,6 +453,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_the_definition_seeded_for_a_new_workflow() {
+        // Byte-for-byte the shape `create_initial_version` writes for a
+        // workflow that has just been created and has no steps yet.
+        let seeded = serde_json::json!({
+            "name": "Untitled",
+            "description": null,
+            "steps": {},
+            "executionPlan": [],
+            "entryPoint": null
+        });
+
+        let graph = parse_execution_graph(&seeded)
+            .expect("a freshly seeded workflow definition must parse");
+
+        assert!(graph.steps.is_empty());
+        assert_eq!(graph.entry_point, "");
+    }
+
+    #[test]
+    fn entry_point_may_be_null() {
+        let explicit_null = serde_json::json!({ "steps": {}, "entryPoint": null });
+        assert_eq!(
+            parse_execution_graph(&explicit_null).unwrap().entry_point,
+            ""
+        );
+    }
+
+    #[test]
+    fn entry_point_is_still_required() {
+        // Only `null` is tolerated - the field stays mandatory so the published
+        // JSON Schema keeps requiring it.
+        let omitted = serde_json::json!({ "steps": {} });
+        assert!(parse_execution_graph(&omitted).is_err());
+    }
+
+    #[test]
+    fn entry_point_still_round_trips_when_set() {
+        let graph = serde_json::json!({ "steps": {}, "entryPoint": "start" });
+        assert_eq!(parse_execution_graph(&graph).unwrap().entry_point, "start");
+    }
+
+    #[test]
+    fn entry_point_rejects_non_string_values() {
+        // Tolerating null must not turn into tolerating anything.
+        let wrong_type = serde_json::json!({ "steps": {}, "entryPoint": 42 });
+        assert!(parse_execution_graph(&wrong_type).is_err());
+    }
+
+    #[test]
     fn test_get_step_types_from_static_registry() {
         let step_types = get_step_types();
 

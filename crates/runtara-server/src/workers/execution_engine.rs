@@ -1893,6 +1893,20 @@ impl ExecutionEngine {
             return Ok(());
         }
 
+        // A terminal failure will repeat for as long as the definition is
+        // unchanged, so surface it as a permanent error instead of queueing a
+        // compilation the caller would retry until it exhausted its budget.
+        if let CompilationStatus::Failed {
+            error,
+            terminal: true,
+        } = &status
+        {
+            return Err(ExecutionError::CompilationFailed(format!(
+                "Workflow '{}' version {} failed to compile: {}",
+                workflow_id, version, error
+            )));
+        }
+
         // Not compiled - queue compilation if not already pending
         let compilation_queued =
             if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
@@ -1991,6 +2005,19 @@ impl ExecutionEngine {
             return Ok(());
         }
 
+        // Waiting cannot help a failure that will reproduce on the unchanged
+        // definition - report it now rather than after the compile timeout.
+        if let CompilationStatus::Failed {
+            error,
+            terminal: true,
+        } = &status
+        {
+            return Err(ExecutionError::CompilationFailed(format!(
+                "Workflow '{}' version {} failed to compile: {}",
+                workflow_id, version, error
+            )));
+        }
+
         let valkey_config = match crate::valkey::ValkeyConfig::from_env() {
             Some(v) => v,
             None => {
@@ -2077,13 +2104,20 @@ impl ExecutionEngine {
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
-        if matches!(status_after, CompilationStatus::Ready { .. }) {
-            Ok(())
-        } else {
-            Err(ExecutionError::CompilationFailed(format!(
+        match status_after {
+            CompilationStatus::Ready { .. } => Ok(()),
+            // The compilation we waited on recorded why it failed; report that
+            // rather than the generic missing-binary message.
+            CompilationStatus::Failed { error, .. } => {
+                Err(ExecutionError::CompilationFailed(format!(
+                    "Workflow '{}' version {} failed to compile: {}",
+                    workflow_id, version, error
+                )))
+            }
+            _ => Err(ExecutionError::CompilationFailed(format!(
                 "Compilation for workflow '{}' version {} completed but binary not found.",
                 workflow_id, version
-            )))
+            ))),
         }
     }
 }
