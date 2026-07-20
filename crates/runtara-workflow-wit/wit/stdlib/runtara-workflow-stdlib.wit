@@ -539,16 +539,20 @@ interface json {
         input: list<u8>,
     ) -> result<list<u8>, string>;
 
-    // Inject the Agent's connection into its input as `_connection`, evaluated
-    // against the execution `source`. The connection is a resolvable value: a
-    // `connection_ref` (reference / dynamic selection / rotation) wins over the
-    // literal `connection_id`; an empty result leaves the input untouched.
+    // Resolve the concrete id first. A `connection_ref` (dynamic selection or
+    // rotation) wins over the literal `connection_id`; empty means no binding.
+    agent-connection-id: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Inject an authoritative, safe descriptor returned by the host resolver.
     // This is the SINGLE connection channel — agents read `input._connection`
-    // directly; there is no out-of-band `connection` argument.
+    // directly; there is no out-of-band connection argument.
     agent-connection-input: func(
         agent-id: u32,
         input: list<u8>,
-        source: list<u8>,
+        descriptor: list<u8>,
     ) -> result<list<u8>, string>;
 
     // Wrap a composed workflow-agent child's input in the canonical

@@ -11,13 +11,15 @@
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
-use super::abi::{emit_fail_if_retptr_error_inplace, load_retptr_list, push_retptr_arg};
+use super::abi::{
+    emit_fail_if_retptr_error_inplace, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
+};
 use super::{DirectCoreFunctionIndices, DirectCoreStaticData};
 
 /// Inject the Agent's connection into its input under `_connection` (the single
 /// connection channel — the invoke ABI has no connection argument). The stdlib
-/// resolves the id against `source` (a `connection_ref` wins over the literal)
-/// and rewrites the input in place; a connectionless agent is a no-op.
+/// first resolves the id against `source`, the trusted host describes it, then
+/// the stdlib injects that safe descriptor. A connectionless agent is a no-op.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_agent_connection_input(
     body: &mut WasmFunction,
@@ -34,14 +36,34 @@ pub(super) fn emit_agent_connection_input(
     }
 
     body.instruction(&Instruction::I32Const(agent_id as i32));
-    body.instruction(&Instruction::LocalGet(input_ptr_local));
-    body.instruction(&Instruction::LocalGet(input_len_local));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_connection_id));
+    emit_fail_if_retptr_error_inplace(body, indices);
+
+    // A dynamic ref may resolve to null/absent. Do not resolve an empty id.
+    push_retptr_i32_load(body, 8);
+    body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+
+    // The prior result stays in the shared return area until these params are
+    // consumed, avoiding scratch locals for both the id and descriptor.
+    push_retptr_i32_load(body, 4);
+    push_retptr_i32_load(body, 8);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.connection_resolver_describe));
+    emit_fail_if_retptr_error_inplace(body, indices);
+
+    body.instruction(&Instruction::I32Const(agent_id as i32));
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    push_retptr_i32_load(body, 4);
+    push_retptr_i32_load(body, 8);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
     emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, input_ptr_local, input_len_local);
+    body.instruction(&Instruction::End);
 }
 
 /// Wrap a workflow-agent child's input in the canonical `{data, variables}`

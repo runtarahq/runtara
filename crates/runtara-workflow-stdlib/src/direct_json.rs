@@ -2359,45 +2359,44 @@ impl DirectJsonManifest {
         }
     }
 
-    /// Inject generated-code-compatible connection fields into Agent JSON input.
-    /// Inject the Agent's connection into its input as `_connection` (plus a
-    /// top-level `connection_id`), evaluated against the execution `source`.
+    /// Inject a safe, authoritative connection descriptor into Agent JSON input.
     ///
-    /// This is the SINGLE connection channel: agents read `input._connection`
-    /// directly (there is no out-of-band `connection` WIT argument anymore).
-    /// The id is resolved by [`Self::resolve_connection_id`] — a resolvable
-    /// `connection_ref` wins over the literal `connection_id`; an empty result
-    /// (no connection, or a ref that resolves to null/absent) leaves the input
-    /// untouched. `integration_id`/`parameters` stay empty: a connection is an
-    /// opaque id, and the proxy resolves credentials by `(id, tenant)`
-    /// server-side, so nothing secret ever rides the input.
+    /// The concrete id was resolved separately by [`Self::resolve_connection_id`]
+    /// and the descriptor came from the trusted host resolver. Credentials and
+    /// raw parameters are not part of that descriptor; an empty `parameters`
+    /// object remains for the agent input ABI while the proxy resolves secrets.
     pub fn agent_connection_input(
         &self,
         agent_id: u32,
         input: &[u8],
-        source: &[u8],
+        descriptor: &[u8],
     ) -> Result<Vec<u8>, String> {
+        self.agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
         let mut input: Value = serde_json::from_slice(input)
             .map_err(|err| format!("failed to parse Agent input for connection: {err}"))?;
+        let mut descriptor: Value = serde_json::from_slice(descriptor)
+            .map_err(|err| format!("failed to parse resolved connection descriptor: {err}"))?;
+        let descriptor_object = descriptor
+            .as_object_mut()
+            .ok_or_else(|| "resolved connection descriptor must be a JSON object".to_string())?;
+        let connection_id = descriptor_object
+            .get("connection_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                "resolved connection descriptor has no non-empty connection_id".to_string()
+            })?
+            .to_string();
+        descriptor_object.insert("parameters".to_string(), Value::Object(Default::default()));
 
-        let resolved = self.resolve_connection_id(agent_id, source)?;
-        if !resolved.is_empty()
-            && let Value::Object(ref mut map) = input
-        {
-            let connection_id = String::from_utf8(resolved)
-                .map_err(|err| format!("resolved connection id is not valid UTF-8: {err}"))?;
+        if let Value::Object(ref mut map) = input {
             map.insert(
                 "connection_id".to_string(),
                 Value::String(connection_id.clone()),
             );
-            map.insert(
-                "_connection".to_string(),
-                serde_json::json!({
-                    "connection_id": connection_id,
-                    "integration_id": "",
-                    "parameters": {}
-                }),
-            );
+            map.insert("_connection".to_string(), descriptor);
         }
 
         serde_json::to_vec(&input).map_err(|err| format!("failed to serialize Agent input: {err}"))
@@ -11007,7 +11006,19 @@ mod tests {
             .expect("manifest");
 
         let input = manifest
-            .agent_connection_input(0, br#"{"value":"present"}"#, b"{}")
+            .agent_connection_input(
+                0,
+                br#"{"value":"present"}"#,
+                br#"{
+                    "connection_id":"shopify-main",
+                    "integration_id":"shopify_oauth",
+                    "connection_subtype":null,
+                    "status":"active",
+                    "features":[{"key":"commerce.orders","driver":"shopify","resource_resolver":null}],
+                    "metadata":{"account":"store.example"},
+                    "parameters":{"must_not":"survive"}
+                }"#,
+            )
             .expect("connection input");
         let input: Value = serde_json::from_slice(&input).expect("input json");
 
@@ -11016,7 +11027,15 @@ mod tests {
             input["_connection"],
             json!({
                 "connection_id": "shopify-main",
-                "integration_id": "",
+                "integration_id": "shopify_oauth",
+                "connection_subtype": null,
+                "status": "active",
+                "features": [{
+                    "key": "commerce.orders",
+                    "driver": "shopify",
+                    "resource_resolver": null
+                }],
+                "metadata": {"account": "store.example"},
                 "parameters": {}
             })
         );

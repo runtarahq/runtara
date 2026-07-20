@@ -126,6 +126,7 @@ mod tests {
             "workflow-error-retry-after-ms",
             "agent-output",
             "agent-validate-input",
+            "agent-connection-id",
             "agent-connection-input",
             "agent-cache-key",
             "agent-retry-sleep-key",

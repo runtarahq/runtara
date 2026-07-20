@@ -350,6 +350,10 @@ impl DirectCoreStaticData {
             || self.agent_connection_refs.contains(&agent_id)
     }
 
+    pub(super) fn has_connections(&self) -> bool {
+        !self.agent_connection_literals.is_empty() || !self.agent_connection_refs.is_empty()
+    }
+
     /// True when the Agent targets a published workflow-agent — its input is
     /// wrapped in the checkpoint-namespace envelope before the invoke. Gates
     /// the pre-invoke `agent-scope-input` call.

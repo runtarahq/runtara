@@ -1604,14 +1604,34 @@ fn emit_branch_launch(
     // connection injection (in-band `_connection`); no-op when connectionless.
     if static_data.agent_has_connection(branch.agent_id) {
         body.instruction(&Instruction::I32Const(branch.agent_id as i32));
-        body.instruction(&Instruction::LocalGet(output_ptr_local));
-        body.instruction(&Instruction::LocalGet(output_len_local));
         body.instruction(&Instruction::LocalGet(source_ptr_local));
         body.instruction(&Instruction::LocalGet(source_len_local));
         push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
+        body.instruction(&Instruction::Call(indices.stdlib_agent_connection_id));
         skip_on_error(body);
+        load_retptr_list(body, route_ptr_local, route_len_local);
+
+        body.instruction(&Instruction::LocalGet(route_len_local));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(route_ptr_local));
+        body.instruction(&Instruction::LocalGet(route_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.connection_resolver_describe));
+        load_retptr_tag(body);
+        body.instruction(&Instruction::BrIf(1)); // -> $skip
+        load_retptr_list(body, route_ptr_local, route_len_local);
+
+        body.instruction(&Instruction::I32Const(branch.agent_id as i32));
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
+        body.instruction(&Instruction::LocalGet(route_ptr_local));
+        body.instruction(&Instruction::LocalGet(route_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_connection_input));
+        load_retptr_tag(body);
+        body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, output_ptr_local, output_len_local);
+        body.instruction(&Instruction::End);
     }
 
     // Observational: record the wall clock at the moment this branch's async

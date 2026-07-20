@@ -41,6 +41,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_durable_sleep: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
     runtime_durable_sleep_checkpoint: Option<u32>,
+    connection_resolver_describe: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain: Option<u32>,
     stdlib_build_source: Option<u32>,
@@ -127,6 +128,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_summarize_input: Option<u32>,
     stdlib_ai_summarize_output: Option<u32>,
     stdlib_agent_validate_input: Option<u32>,
+    stdlib_agent_connection_id: Option<u32>,
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_scope_input: Option<u32>,
     stdlib_agent_tool_scope_input: Option<u32>,
@@ -162,6 +164,7 @@ impl DirectCoreImportIndices {
         abi: crate::direct_wasm::component::WorkflowAbi,
         store_freeing_sleep: bool,
         omit_runtime: bool,
+        has_connections: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
@@ -169,6 +172,10 @@ impl DirectCoreImportIndices {
             abi,
             store_freeing_sleep,
             omit_runtime,
+            connection_resolver_describe: require_connection_resolver(
+                self.connection_resolver_describe,
+                has_connections,
+            )?,
             runtime_load_input: require_runtime(
                 self.runtime_load_input,
                 "runtime.load-input",
@@ -549,6 +556,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_validate_input,
                 "stdlib.agent-validate-input",
             )?,
+            stdlib_agent_connection_id: require_import(
+                self.stdlib_agent_connection_id,
+                "stdlib.agent-connection-id",
+            )?,
             stdlib_agent_connection_input: require_import(
                 self.stdlib_agent_connection_input,
                 "stdlib.agent-connection-input",
@@ -638,6 +649,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// return value. Runtime index fields hold a poison sentinel and must never
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
+    pub(super) connection_resolver_describe: u32,
     pub(super) runtime_load_input: u32,
     // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
@@ -744,6 +756,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_summarize_input: u32,
     pub(super) stdlib_ai_summarize_output: u32,
     pub(super) stdlib_agent_validate_input: u32,
+    pub(super) stdlib_agent_connection_id: u32,
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_scope_input: u32,
     pub(super) stdlib_agent_tool_scope_input: u32,
@@ -811,6 +824,17 @@ fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileEr
 /// net for a `needs_runtime` misclassification, never a silent miscompile.
 const RUNTIME_OMITTED_POISON: u32 = u32::MAX;
 
+fn require_connection_resolver(
+    value: Option<u32>,
+    has_connections: bool,
+) -> Result<u32, DirectCompileError> {
+    if has_connections {
+        require_import(value, "connection-resolver.describe")
+    } else {
+        Ok(value.unwrap_or(RUNTIME_OMITTED_POISON))
+    }
+}
+
 /// `require_import` for a runtime function, tolerant of its absence under
 /// `omit_runtime` (returns the poison index instead of erroring).
 fn require_runtime(
@@ -847,6 +871,18 @@ fn is_stdlib_import(
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
+}
+
+fn is_connection_resolver_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+    function_name: &str,
+) -> bool {
+    function.name == function_name
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name.starts_with("runtara:connection-resolver/resolver"))
 }
 
 pub(super) fn agent_id_for_import(
@@ -922,7 +958,9 @@ pub(super) fn import_core_function(
     );
     imports.import(&module, &name, EntityType::Function(type_index));
 
-    if is_runtime_import(resolve, interface, function, "load-input") {
+    if is_connection_resolver_import(resolve, interface, function, "describe") {
+        import_indices.connection_resolver_describe = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "load-input") {
         import_indices.runtime_load_input = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete") {
         import_indices.runtime_complete = Some(function_index);
@@ -1142,6 +1180,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_summarize_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-validate-input") {
         import_indices.stdlib_agent_validate_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-connection-id") {
+        import_indices.stdlib_agent_connection_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-connection-input") {
         import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-scope-input") {

@@ -6683,8 +6683,10 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
         .expect("Agent connection core module validates");
 
     let mut agent_invoke_index = None;
+    let mut agent_connection_id_index = None;
+    let mut connection_describe_index = None;
     let mut agent_connection_input_index = None;
-    let mut saw_connection_input_before_invoke = false;
+    let mut saw_resolution_chain_before_invoke = false;
     let mut code_body_index = 0;
     let mut next_function_index = 0;
 
@@ -6695,6 +6697,18 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                     let import = import.expect("core import");
                     if import.module == actual_module && import.name == actual_name {
                         agent_invoke_index = Some(next_function_index);
+                    }
+                    if import.module.contains("runtara:workflow-stdlib/json")
+                        && import.name == "agent-connection-id"
+                    {
+                        agent_connection_id_index = Some(next_function_index);
+                    }
+                    if import
+                        .module
+                        .contains("runtara:connection-resolver/resolver")
+                        && import.name == "describe"
+                    {
+                        connection_describe_index = Some(next_function_index);
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-connection-input"
@@ -6708,22 +6722,30 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
             }
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
-                    // The connection is delivered inside `input` under
-                    // `_connection`: `agent-connection-input` rewrites the input
-                    // BEFORE `invoke` is called (the invoke ABI has no
-                    // connection argument).
+                    let mut saw_connection_id_call = false;
+                    let mut saw_describe_call = false;
                     let mut saw_connection_input_call = false;
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
                             Operator::Call { function_index }
+                                if Some(function_index) == agent_connection_id_index =>
+                            {
+                                saw_connection_id_call = true;
+                            }
+                            Operator::Call { function_index }
+                                if Some(function_index) == connection_describe_index =>
+                            {
+                                saw_describe_call = saw_connection_id_call;
+                            }
+                            Operator::Call { function_index }
                                 if Some(function_index) == agent_connection_input_index =>
                             {
-                                saw_connection_input_call = true;
+                                saw_connection_input_call = saw_describe_call;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_invoke_index =>
                             {
-                                saw_connection_input_before_invoke = saw_connection_input_call;
+                                saw_resolution_chain_before_invoke = saw_connection_input_call;
                             }
                             _ => {}
                         }
@@ -6736,12 +6758,14 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     }
 
     assert!(
-        agent_connection_input_index.is_some(),
-        "core should import stdlib.agent-connection-input"
+        agent_connection_id_index.is_some()
+            && connection_describe_index.is_some()
+            && agent_connection_input_index.is_some(),
+        "core should import id resolution, host metadata, and descriptor injection"
     );
     assert!(
-        saw_connection_input_before_invoke,
-        "Agent connection input injection should run before capabilities.invoke"
+        saw_resolution_chain_before_invoke,
+        "Agent connection id -> metadata -> input chain should run before capabilities.invoke"
     );
 }
 

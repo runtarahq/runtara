@@ -60,7 +60,8 @@ use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{
-    ABI_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
+    ABI_WIT, CONNECTION_RESOLVER_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT,
+    STDLIB_WIT, WORKFLOW_WIT_VERSION,
 };
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
@@ -821,14 +822,16 @@ pub fn compile_direct_workflow_composed_configured(
     // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
     // the import even when omit was requested), so the on-disk world/wac match
     // the module that was actually emitted.
-    result.component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
-        &agent_ids,
-        binding,
-        abi,
-        result.omit_runtime,
-        export_agent_id.as_deref(),
-        &result.parallel_pools,
-    );
+    result.component_artifacts =
+        super::component::emit_direct_component_artifacts_with_pools_and_connections(
+            &agent_ids,
+            binding,
+            abi,
+            result.omit_runtime,
+            export_agent_id.as_deref(),
+            &result.parallel_pools,
+            result.component_artifacts.has_connections,
+        );
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
         &result.world_wit_path,
@@ -1062,14 +1065,23 @@ fn compile_direct_workflow_inner(
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
-    let component_artifacts = super::component::emit_direct_component_artifacts_with_pools(
-        &manifest.feature_summary.agent_ids,
-        runtime_binding_from_env(),
-        abi,
-        omit_runtime,
-        export_agent_id.as_deref(),
-        &parallel_pools,
-    );
+    let has_connections = manifest.graph.agents.iter().any(|agent| {
+        agent
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+            || agent.connection_ref.is_some()
+    });
+    let component_artifacts =
+        super::component::emit_direct_component_artifacts_with_pools_and_connections(
+            &manifest.feature_summary.agent_ids,
+            runtime_binding_from_env(),
+            abi,
+            omit_runtime,
+            export_agent_id.as_deref(),
+            &parallel_pools,
+            has_connections,
+        );
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1230,12 +1242,14 @@ fn emit_direct_component(
     // composition satisfies with extra instantiations of the SAME package.
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
+    let has_connections = core_config.static_data.has_connections();
     let (resolve, world) = build_direct_component_resolve_configured(
         &manifest.feature_summary.agent_ids,
         abi,
         omit_runtime,
         export_agent_id,
         &parallel_pools,
+        has_connections,
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1260,6 +1274,7 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
         false,
         None,
         &std::collections::BTreeMap::new(),
+        false,
     )
 }
 
@@ -1274,6 +1289,7 @@ fn build_direct_component_resolve_with_agents(
         false,
         None,
         &std::collections::BTreeMap::new(),
+        true,
     )
 }
 
@@ -1283,8 +1299,12 @@ fn build_direct_component_resolve_configured(
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
+    has_connections: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
+    resolve
+        .push_str("runtara-connection-resolver.wit", CONNECTION_RESOLVER_WIT)
+        .map_err(component_error)?;
     resolve
         .push_str("runtara-workflow-stdlib.wit", STDLIB_WIT)
         .map_err(component_error)?;
@@ -1367,6 +1387,9 @@ fn build_direct_component_resolve_configured(
         workflow_wit.push_str(&format!(
             "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
         ));
+    }
+    if has_connections {
+        workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
     if !parallel_pools.is_empty() {
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");

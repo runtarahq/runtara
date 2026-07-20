@@ -349,8 +349,12 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    let import_indices =
-        import_indices.require_all(config.abi, config.store_freeing_sleep, config.omit_runtime)?;
+    let import_indices = import_indices.require_all(
+        config.abi,
+        config.store_freeing_sleep,
+        config.omit_runtime,
+        config.static_data.has_connections(),
+    )?;
 
     for (name, export) in &world.exports {
         match export {
