@@ -601,11 +601,6 @@ export interface AiAgentConfig {
    */
   outputSchema?: Partial<Record<string, SchemaField>> | null;
   /**
-   * LLM provider to use for the agent brain, resolved when the step starts.
-   * Must resolve to a supported provider id such as `"openai"` or `"bedrock"`.
-   */
-  provider: MappingValue;
-  /**
    * Base delay between retries in milliseconds (default: 1000).
    * @format int64
    * @min 0
@@ -697,7 +692,6 @@ export interface AiAgentMemory {
  *   "config": {
  *     "systemPrompt": { "valueType": "immediate", "value": "You are an inventory manager" },
  *     "userPrompt": { "valueType": "reference", "value": "data.userRequest" },
- *     "provider": { "valueType": "immediate", "value": "openai" },
  *     "model": { "valueType": "immediate", "value": "gpt-4o" },
  *     "maxIterations": 10,
  *     "temperature": { "valueType": "immediate", "value": 0.7 }
@@ -1520,6 +1514,20 @@ export interface ConnectionCategoryDto {
   id: string;
 }
 
+/** A non-secret description of one tenant-owned connection. */
+export interface ConnectionDescriptor {
+  connectionId: string;
+  connectionSubtype?: string | null;
+  features?: ConnectionFeature[];
+  integrationId: string;
+  /**
+   * Explicitly safe, integration-owned metadata. It must never contain
+   * connection parameters, credentials, tokens, or resolved auth headers.
+   */
+  metadata?: any;
+  status: ConnectionStatus;
+}
+
 /**
  * Connection DTO - Used for GET/LIST responses
  * SECURITY: Does NOT include connection_parameters field
@@ -1531,6 +1539,8 @@ export interface ConnectionDto {
   defaultFor?: string[];
   /** Safe edit projection. Present only on the single-connection endpoint. */
   editProjection?: null | ConnectionEditProjection;
+  /** Safe semantic capabilities derived from the integration registry. */
+  features?: ConnectionFeature[];
   /**
    * OAuth grant health. Present only for interactive-OAuth types on the
    * single-connection endpoint. Booleans + timestamps only — never secrets.
@@ -1558,6 +1568,16 @@ export interface ConnectionEditProjection {
   values: any;
   /** Optimistic concurrency token. This is the connection's `updatedAt` value. */
   version: string;
+}
+
+/** A semantic operation supported by a connection type. */
+export interface ConnectionFeature {
+  /** Runtime implementation selected by this connection, when applicable. */
+  driver?: string | null;
+  /** Domain-neutral key, for example `ai.chat` or `messaging.queues`. */
+  key: string;
+  /** Registered read-only resolver used to enumerate resources. */
+  resourceResolver?: string | null;
 }
 
 /**
@@ -1599,6 +1619,36 @@ export interface ConnectionParameterPatch {
    * access, so values remain typed JSON rather than a secret-only string map.
    */
   write?: Partial<Record<string, any>>;
+}
+
+/** One normalized option returned by a connection-backed resolver. */
+export interface ConnectionResourceItem {
+  description?: string | null;
+  label: string;
+  metadata?: any;
+  value: any;
+}
+
+/** A normalized, optionally paginated resource-discovery result. */
+export interface ConnectionResourcePage {
+  expiresAt?: string | null;
+  fetchedAt: string;
+  items: ConnectionResourceItem[];
+  nextCursor?: string | null;
+  stale?: boolean;
+}
+
+/** Generic request for connection-backed resources. */
+export interface ConnectionResourceRequest {
+  arguments?: any;
+  cursor?: string | null;
+  /**
+   * @format int32
+   * @min 0
+   */
+  limit?: number | null;
+  refresh?: boolean;
+  resource: string;
 }
 
 /** Response for single connection operations */
@@ -6514,6 +6564,22 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
+     * @tags connections-controller
+     * @name GetConnectionMetadataHandler
+     * @summary Resolve a connection to its non-secret runtime/editor descriptor.
+     * @request GET:/api/runtime/connections/{id}/metadata
+     */
+    getConnectionMetadataHandler: (id: string, params: RequestParams = {}) =>
+      this.request<ConnectionDescriptor, ErrorResponse>({
+        path: `/api/runtime/connections/${id}/metadata`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description The frontend should open this URL in a popup window. After user consent, the provider redirects to /api/oauth/{tenant_id}/callback.
      *
      * @tags connections-controller
@@ -6612,6 +6678,28 @@ export class Api<
         path: `/api/runtime/connections/${id}/rate-limit-timeline`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags connections-controller
+     * @name ResolveConnectionResourceHandler
+     * @summary Enumerate a resource exposed by a tenant-owned connection.
+     * @request POST:/api/runtime/connections/{id}/resources
+     */
+    resolveConnectionResourceHandler: (
+      id: string,
+      data: ConnectionResourceRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ConnectionResourcePage, ErrorResponse>({
+        path: `/api/runtime/connections/${id}/resources`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),

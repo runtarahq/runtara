@@ -40,29 +40,7 @@ import {
   type SchemaField as EditorSchemaField,
 } from '../EditorSidebar/SchemaFieldsEditor';
 
-const LLM_INTEGRATION_IDS = new Set(['openai_api_key', 'aws_credentials']);
-
-type AiProvider = 'openai' | 'bedrock';
-
-const PROVIDER_OPTIONS: Array<{
-  value: AiProvider;
-  label: string;
-  compatibleIntegrationIds: string[];
-}> = [
-  {
-    value: 'openai',
-    label: 'OpenAI',
-    compatibleIntegrationIds: ['openai_api_key'],
-  },
-  {
-    value: 'bedrock',
-    label: 'AWS Bedrock',
-    compatibleIntegrationIds: ['aws_credentials'],
-  },
-];
-
 const AI_AGENT_FIELD_TYPE_HINTS: Record<string, string> = {
-  provider: 'string',
   model: 'string',
   temperature: 'number',
   maxTokens: 'integer',
@@ -73,50 +51,37 @@ interface ModelOption {
   label: string;
 }
 
-const OPENAI_MODELS: ModelOption[] = [
-  { value: 'gpt-4.1', label: 'GPT-4.1' },
-  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini' },
-  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano' },
-  { value: 'gpt-4o', label: 'GPT-4o' },
-  { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-  { value: 'o3', label: 'o3' },
-  { value: 'o3-mini', label: 'o3 Mini' },
-  { value: 'o4-mini', label: 'o4 Mini' },
-];
-
-interface LlmModelMetadata {
-  provider?: string;
-  modelName?: string;
-  modelId: string;
-  recommendedForAiAgent?: boolean;
+interface ConnectionResourcePage {
+  items?: Array<{
+    value: unknown;
+    label: string;
+  }>;
 }
 
-interface LlmModelsResponse {
-  models?: LlmModelMetadata[];
-}
-
-async function getLlmModels(token: string | undefined, context?: any) {
-  const provider = String(context?.queryKey?.[1] || 'bedrock');
+async function getConnectionModels(token: string | undefined, context?: any) {
+  const connectionId = String(context?.queryKey?.[1] || '');
   const response = await fetch(
-    `${getRuntimeBaseUrl()}/metadata/llm-models?provider=${encodeURIComponent(
-      provider
-    )}`,
+    `${getRuntimeBaseUrl()}/connections/${encodeURIComponent(
+      connectionId
+    )}/resources`,
     {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ resource: 'llm.models', arguments: {} }),
     }
   );
   if (!response.ok) {
-    throw new Error(`Failed to fetch LLM models: ${response.statusText}`);
+    throw new Error(
+      `Failed to resolve connection models: ${response.statusText}`
+    );
   }
-  const data = (await response.json()) as LlmModelsResponse;
-  return (data.models ?? []).map((model) => ({
-    value: model.modelId,
-    label: model.modelName
-      ? model.provider
-        ? `${model.provider} ${model.modelName}`
-        : model.modelName
-      : model.modelId,
-  }));
+  const data = (await response.json()) as ConnectionResourcePage;
+  return (data.items ?? [])
+    .filter((item) => typeof item.value === 'string')
+    .map((item) => ({ value: item.value as string, label: item.label }));
 }
 
 const RESERVED_HANDLE_IDS = new Set([
@@ -166,53 +131,14 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     defaultValue: [],
   });
 
-  const selectedConnectionIntegrationId = useMemo(() => {
-    if (!connectionId) return null;
-    const allConnections = connectionsQuery.data ?? [];
-    const selected = allConnections.find(
-      (conn: any) => conn.id === connectionId
-    );
-    return selected?.integrationId ?? null;
-  }, [connectionId, connectionsQuery.data]);
-
-  const selectedProvider: AiProvider | undefined = useMemo(() => {
-    const providerField = (inputMapping || []).find(
-      (item: any) => item.type === 'provider'
-    );
-    if (
-      (providerField?.valueType || 'immediate') === 'immediate' &&
-      (providerField?.value === 'bedrock' || providerField?.value === 'openai')
-    ) {
-      return providerField.value;
-    }
-    return undefined;
-  }, [inputMapping]);
-
-  const hasDynamicProvider = useMemo(() => {
-    const providerField = (inputMapping || []).find(
-      (item: any) => item.type === 'provider'
-    );
-    return Boolean(
-      providerField && (providerField.valueType || 'immediate') !== 'immediate'
-    );
-  }, [inputMapping]);
-
   const llmConnections = useMemo(() => {
     const allConnections = connectionsQuery.data ?? [];
-    const compatibleIntegrationIds = hasDynamicProvider
-      ? LLM_INTEGRATION_IDS
-      : new Set(
-          PROVIDER_OPTIONS.find((option) => option.value === selectedProvider)
-            ?.compatibleIntegrationIds ?? []
-        );
-    if (compatibleIntegrationIds.size === 0) return [];
     return allConnections.filter(
       (conn: any) =>
-        conn.integrationId &&
-        LLM_INTEGRATION_IDS.has(conn.integrationId) &&
-        compatibleIntegrationIds.has(conn.integrationId)
+        Array.isArray(conn.features) &&
+        conn.features.some((feature: any) => feature.key === 'ai.chat')
     );
-  }, [connectionsQuery.data, hasDynamicProvider, selectedProvider]);
+  }, [connectionsQuery.data]);
 
   const connectionOptions = useMemo(() => {
     const noneOption = {
@@ -239,22 +165,17 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     return selected?.integrationId ?? null;
   }, [connectionId, connectionOptions]);
 
-  const bedrockModelsQuery = useCustomQuery<ModelOption[]>({
-    queryKey: queryKeys.llmModels.byProvider('bedrock'),
-    queryFn: getLlmModels,
+  const modelsQuery = useCustomQuery<ModelOption[]>({
+    queryKey: queryKeys.connectionResources.byConnection(
+      connectionId || '',
+      'llm.models'
+    ),
+    queryFn: getConnectionModels,
     placeholderData: [],
-    enabled: selectedProvider === 'bedrock',
+    enabled: Boolean(connectionId),
   });
 
-  const modelOptions = useMemo(() => {
-    if (selectedProvider === 'bedrock') {
-      return bedrockModelsQuery.data ?? [];
-    }
-    if (!selectedProvider) {
-      return [];
-    }
-    return OPENAI_MODELS;
-  }, [bedrockModelsQuery.data, selectedProvider]);
+  const modelOptions = modelsQuery.data ?? [];
 
   // Get tool edges from workflow store
   const edges = useWorkflowStore((state) => state.edges);
@@ -294,12 +215,6 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     const currentMapping = form.getValues(name) || [];
     if (currentMapping.length === 0) {
       form.setValue(name, [
-        {
-          type: 'provider',
-          value: 'openai',
-          typeHint: 'string',
-          valueType: 'immediate',
-        },
         {
           type: 'systemPrompt',
           value: '',
@@ -708,68 +623,11 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
   return (
     <div className="space-y-4">
-      {/* Provider */}
-      <FormItem>
-        <FormLabel>Provider *</FormLabel>
-        <FormDescription>
-          Select the LLM provider or resolve it from workflow data
-        </FormDescription>
-        <FormControl>
-          <MappingValueInput
-            value={getValue('provider')}
-            onChange={(value) => {
-              updateField('provider', value);
-              if (!value || getValueType('provider') !== 'immediate') return;
-
-              const provider = value as AiProvider;
-              updateField('model', '');
-              const compatibleIntegrationIds = PROVIDER_OPTIONS.find(
-                (option) => option.value === provider
-              )?.compatibleIntegrationIds;
-              if (
-                connectionId &&
-                selectedConnectionIntegrationId &&
-                !compatibleIntegrationIds?.includes(
-                  selectedConnectionIntegrationId
-                )
-              ) {
-                form.setValue('connectionId', '', {
-                  shouldDirty: true,
-                  shouldTouch: true,
-                  shouldValidate: true,
-                });
-              }
-            }}
-            valueType={getValueType('provider')}
-            onValueTypeChange={(valueType) =>
-              updateField('provider', getValue('provider'), valueType)
-            }
-            fieldType="string"
-            fieldName="provider"
-            placeholder="Select provider"
-            enumOptions={PROVIDER_OPTIONS.map(({ value, label }) => ({
-              value,
-              label,
-            }))}
-            defaultValue={getDefaultValue('provider')}
-            onDefaultValueChange={(value) =>
-              updateDefaultValue('provider', value)
-            }
-          />
-        </FormControl>
-      </FormItem>
-
       {/* Connection Selector */}
       <FormItem>
         <FormLabel>LLM Connection *</FormLabel>
         <FormDescription>
-          {selectedProvider
-            ? `Select a compatible ${
-                selectedProvider === 'bedrock' ? 'AWS Bedrock' : 'OpenAI'
-              } connection`
-            : hasDynamicProvider
-              ? 'Select the connection used by the resolved provider'
-              : 'Select a provider first'}
+          The provider and available models are inferred from this connection
         </FormDescription>
         <Select
           value={connectionId === '' ? '__none__' : connectionId || '__none__'}
@@ -779,11 +637,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               shouldTouch: true,
               shouldValidate: true,
             });
+            updateField('model', '');
           }}
-          disabled={
-            (!selectedProvider && !hasDynamicProvider) ||
-            connectionsQuery.isFetching
-          }
+          disabled={connectionsQuery.isFetching}
         >
           <FormControl>
             <SelectTrigger>
@@ -892,11 +748,11 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       <FormItem>
         <FormLabel>Model</FormLabel>
         <FormDescription>
-          {!selectedProvider
-            ? 'Select a provider first'
-            : selectedIntegrationId
-              ? 'Select a model or type a custom identifier'
-              : 'Select a connection first to see available models'}
+          {!selectedIntegrationId
+            ? 'Select a connection first to discover available models'
+            : modelsQuery.isError
+              ? 'Models could not be loaded; you can still type an identifier'
+              : 'Select a model from the connection or type a custom identifier'}
         </FormDescription>
         <FormControl>
           <MappingValueInput

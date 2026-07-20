@@ -1550,7 +1550,6 @@ function cleanNodeData(steps: Record<string, any>) {
       const aiAgentConfig: {
         systemPrompt?: { valueType: string; value: unknown };
         userPrompt?: { valueType: string; value: unknown };
-        provider?: Record<string, unknown>;
         model?: Record<string, unknown>;
         maxIterations?: number | null;
         temperature?: Record<string, unknown>;
@@ -1584,17 +1583,6 @@ function cleanNodeData(steps: Record<string, any>) {
             valueType: userPromptItem.valueType || 'immediate',
             value: userPromptItem.value,
           };
-        }
-
-        const providerItem = inputMapping.find(
-          (item: any) => item.type === 'provider'
-        );
-        if (providerItem?.value) {
-          const [, provider] = processMappingEntry(providerItem) as [
-            string,
-            Record<string, unknown>,
-          ];
-          aiAgentConfig.provider = provider;
         }
 
         const modelItem = inputMapping.find(
@@ -2429,19 +2417,6 @@ function normalizeNodesAndEdges(
                   value: config.userPrompt.value ?? '',
                   valueType: config.userPrompt.valueType || 'immediate',
                   typeHint: 'string',
-                });
-              }
-
-              if (config?.provider) {
-                aiInputMapping.push({
-                  type: 'provider',
-                  value: config.provider.value ?? '',
-                  valueType: config.provider.valueType || 'immediate',
-                  typeHint: config.provider.type || 'string',
-                  ...(config.provider.valueType === 'reference' &&
-                  config.provider.default !== undefined
-                    ? { defaultValue: config.provider.default }
-                    : {}),
                 });
               }
 

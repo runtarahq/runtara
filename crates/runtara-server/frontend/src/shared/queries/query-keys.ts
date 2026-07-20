@@ -250,11 +250,11 @@ export const queryKeys = {
       [...queryKeys.agents.byId(agentId), 'test'] as const,
   },
 
-  // LLM model metadata
-  llmModels: {
-    all: ['llmModels'] as const,
-    byProvider: (provider: string) =>
-      [...queryKeys.llmModels.all, provider] as const,
+  // Read-only resources resolved through a selected connection
+  connectionResources: {
+    all: ['connectionResources'] as const,
+    byConnection: (connectionId: string, resource: string) =>
+      [...queryKeys.connectionResources.all, connectionId, resource] as const,
   },
 
   // API Keys domain

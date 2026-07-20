@@ -1493,11 +1493,11 @@ describe('Backend DSL serialization', () => {
 
     const step = roundTripStep(graph);
     expect(step.config).toMatchObject({
-      provider: { valueType: 'immediate', value: 'openai' },
       model: { valueType: 'immediate', value: 'gpt-4.1-mini' },
       maxRetries: 3,
       retryDelay: 250,
     });
+    expect(step.config).not.toHaveProperty('provider');
   });
 
   it('round-trips dynamic AiAgent model parameters as mapping values', () => {
@@ -1537,12 +1537,6 @@ describe('Backend DSL serialization', () => {
 
     const step = roundTripStep(graph);
     expect(step.config).toMatchObject({
-      provider: {
-        valueType: 'reference',
-        value: 'data.provider',
-        type: 'string',
-        default: 'openai',
-      },
       model: {
         valueType: 'reference',
         value: 'data.model',
@@ -1562,6 +1556,7 @@ describe('Backend DSL serialization', () => {
         default: 1024,
       },
     });
+    expect(step.config).not.toHaveProperty('provider');
   });
 
   it('round-trips WaitForSignal action metadata without synthesizing poll interval', () => {
@@ -3183,9 +3178,9 @@ describe('AiAgent memory removal round-trip', () => {
     expect(step.config).not.toHaveProperty('memory');
     // The rest of the config survives
     expect(step.config).toMatchObject({
-      provider: { valueType: 'immediate', value: 'openai' },
       model: { valueType: 'immediate', value: 'gpt-4o' },
     });
+    expect(step.config).not.toHaveProperty('provider');
     // Provider step and memory edge are gone from the saved graph
     expect(round!.steps).not.toHaveProperty('mem');
     expect(round!.executionPlan).not.toContainEqual(
