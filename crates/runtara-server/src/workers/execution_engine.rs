@@ -41,7 +41,6 @@ use crate::workers::runtara_dto::{
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
     runtara_instance_to_dto_with_info,
 };
-use runtara_workflows::ValidationError;
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
 /// Result of workflow execution (native path; currently unused by the server).
@@ -150,18 +149,6 @@ impl ExecutionError {
             ExecutionError::EntitlementDenied(_) => StatusCode::FORBIDDEN,
         }
     }
-}
-
-/// Whether a stored execution graph defines no steps at all.
-///
-/// A workflow is seeded with `"steps": {}` when it is created and stays that
-/// way until it is authored. A missing or non-object `steps` is treated the
-/// same way: there is nothing to run either way.
-fn graph_has_no_steps(execution_graph: &Value) -> bool {
-    execution_graph
-        .get("steps")
-        .and_then(Value::as_object)
-        .is_none_or(serde_json::Map::is_empty)
 }
 
 /// Trigger source classification used to dispatch to the matching
@@ -463,36 +450,25 @@ impl ExecutionEngine {
                 ))
             })?;
 
-        // 3. Reject a workflow with no steps before anything is queued.
-        //
-        // It cannot compile, so queueing it would return success to the caller
-        // and then fail in the worker, where the only trace is an error log.
-        // Failing here reports the problem to whoever asked for the run.
-        if graph_has_no_steps(&workflow.execution_graph) {
-            return Err(ExecutionError::ValidationError(
-                ValidationError::EmptyWorkflow.to_string(),
-            ));
-        }
-
-        // 4. Validate canonical inputs and inputs.data against input schema
+        // 3. Validate canonical inputs and inputs.data against input schema
         let validated_inputs =
             validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
                 .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
-        // 5. Get track_events (already have it from workflow)
+        // 4. Get track_events (already have it from workflow)
         let track_events = workflow.track_events;
 
-        // 6. Require trigger stream
+        // 5. Require trigger stream
         let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected(
                 "Valkey trigger stream not configured. Cannot queue execution.".to_string(),
             )
         })?;
 
-        // 7. Generate instance ID
+        // 6. Generate instance ID
         let instance_id = Uuid::new_v4();
 
-        // 8. Build TriggerEvent appropriate to the source.
+        // 7. Build TriggerEvent appropriate to the source.
         //
         // Sessions, chat, webhooks, and cron-originated requests that go
         // through the engine share the `http_api` factory. Replay keeps its
@@ -2150,48 +2126,6 @@ impl ExecutionEngine {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // =========================================================================
-    // Stepless workflow detection
-    // =========================================================================
-
-    #[test]
-    fn freshly_created_workflow_has_no_steps() {
-        // Shape written by create_initial_version.
-        let seeded = json!({
-            "name": "Untitled",
-            "steps": {},
-            "executionPlan": [],
-            "entryPoint": null
-        });
-        assert!(graph_has_no_steps(&seeded));
-    }
-
-    #[test]
-    fn absent_or_malformed_steps_count_as_no_steps() {
-        assert!(graph_has_no_steps(&json!({})));
-        assert!(graph_has_no_steps(&json!({ "steps": null })));
-        assert!(graph_has_no_steps(&json!({ "steps": [] })));
-        assert!(graph_has_no_steps(&Value::Null));
-    }
-
-    #[test]
-    fn an_authored_workflow_has_steps() {
-        let authored = json!({
-            "steps": { "start": { "stepType": "Start" } },
-            "entryPoint": "start"
-        });
-        assert!(!graph_has_no_steps(&authored));
-    }
-
-    #[test]
-    fn stepless_rejection_message_is_the_validation_error() {
-        // What the caller of /execute sees instead of a queued instance.
-        assert_eq!(
-            ValidationError::EmptyWorkflow.to_string(),
-            "[E004] Workflow has no steps defined"
-        );
-    }
 
     // =========================================================================
     // ExecutionError Display tests
