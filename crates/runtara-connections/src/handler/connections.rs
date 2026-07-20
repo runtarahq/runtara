@@ -16,6 +16,7 @@ use crate::config::ConnectionsState;
 use crate::crypto::CredentialCipher;
 use crate::integration_compatibility::IntegrationCompatibility;
 use crate::repository::connections::ConnectionRepository;
+use crate::resolution::{ConnectionDescriptor, features_for_integration};
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
@@ -237,6 +238,26 @@ pub async fn get_connection_handler(
         )),
         Err(_) => unreachable!("Get should only return NotFound or DatabaseError"),
     }
+}
+
+/// Resolve a connection to its non-secret runtime/editor descriptor.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/{id}/metadata",
+    params(("id" = String, Path, description = "Connection ID")),
+    responses(
+        (status = 200, description = "Safe connection metadata", body = ConnectionDescriptor),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn get_connection_metadata_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(state): State<ConnectionsState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
+    describe_connection(&state, &tenant_id, &connection_id).await
 }
 
 /// Update a connection
@@ -657,4 +678,55 @@ pub async fn get_connection_for_runtime_handler(
             })),
         )),
     }
+}
+
+/// Internal metadata-only counterpart of [`get_connection_for_runtime_handler`].
+/// Unlike the credential endpoint, this response is safe to inject into a
+/// workflow component and never decrypts connection parameters.
+pub async fn get_connection_metadata_for_runtime_handler(
+    State(state): State<ConnectionsState>,
+    Path((tenant_id, connection_id)): Path<(String, String)>,
+) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
+    describe_connection(&state, &tenant_id, &connection_id).await
+}
+
+async fn describe_connection(
+    state: &ConnectionsState,
+    tenant_id: &str,
+    connection_id: &str,
+) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
+    let repository = ConnectionRepository::new(state.db_pool.clone(), state.cipher.clone());
+    let connection = repository
+        .get_by_id(connection_id, tenant_id)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "success": false,
+                    "error": "DATABASE_ERROR",
+                    "message": error.to_string()
+                })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "success": false,
+                    "error": "CONNECTION_NOT_FOUND",
+                    "message": format!("Connection '{}' not found", connection_id)
+                })),
+            )
+        })?;
+
+    let integration_id = connection.integration_id.unwrap_or_default();
+    Ok(Json(ConnectionDescriptor {
+        connection_id: connection.id,
+        integration_id: integration_id.clone(),
+        connection_subtype: connection.connection_subtype,
+        status: connection.status,
+        features: features_for_integration(&integration_id),
+        metadata: Value::Null,
+    }))
 }
