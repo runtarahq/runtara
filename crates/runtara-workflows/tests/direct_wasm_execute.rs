@@ -368,6 +368,8 @@ struct CapturedRun {
     checkpoints: Vec<CheckpointRequest>,
     /// LLM-proxy request envelopes the workflow sent (one per model call).
     llm_requests: Vec<Value>,
+    /// Connection ids described through the host resolver, in request order.
+    connection_metadata_requests: Vec<String>,
     /// Raw-SQL request paths the workflow sent (one per attempt — retries
     /// included), in order.
     sql_requests: Vec<String>,
@@ -404,6 +406,8 @@ struct ServerState {
     llm_responses: Mutex<Vec<Value>>,
     /// Proxy request envelopes received on POST /llm-proxy, in order.
     llm_requests: Mutex<Vec<Value>>,
+    /// Connection ids received on the internal metadata endpoint.
+    connection_metadata_requests: Mutex<Vec<String>>,
     /// Scripted `(status, body)` responses for the object-model raw-SQL
     /// routes, served front-to-back. Empty script → generic success, so
     /// unrelated tests are unaffected.
@@ -611,6 +615,36 @@ fn route(
 
     if method == "GET" && path == "/health" {
         return (200, serde_json::json!({"ok": true}));
+    }
+
+    // Trusted connection-metadata endpoint used by the host resolver. The id
+    // controls the fixture's authoritative AI driver so tests can prove a
+    // legacy authored provider never wins over resolved connection metadata.
+    if method == "GET" && path.ends_with("/metadata") {
+        let connection_id = path.split('/').rev().nth(1).unwrap_or_default().to_string();
+        server_state
+            .connection_metadata_requests
+            .lock()
+            .expect("connection metadata requests lock")
+            .push(connection_id.clone());
+        let (integration_id, driver, resolver) = if connection_id == "conn-bedrock" {
+            ("aws_credentials", "bedrock", "aws.bedrock.models")
+        } else {
+            ("openai_api_key", "openai", "openai.models")
+        };
+        return (
+            200,
+            serde_json::json!({
+                "connectionId": connection_id,
+                "integrationId": integration_id,
+                "status": "ACTIVE",
+                "features": [
+                    {"key": "ai.chat", "driver": driver},
+                    {"key": "llm.models", "resourceResolver": resolver}
+                ],
+                "metadata": null
+            }),
+        );
     }
 
     // Hermetic LLM stub: `call_agent()` forwards provider requests here when
@@ -1243,6 +1277,7 @@ fn run_direct_workflow_capture_attempt(
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
         llm_responses: Mutex::new(llm_script),
         llm_requests: Mutex::new(Vec::new()),
+        connection_metadata_requests: Mutex::new(Vec::new()),
         sql_responses: Mutex::new(sql_script),
         sql_requests: Mutex::new(Vec::new()),
         custom_signals: Mutex::new(custom_signals),
@@ -1269,6 +1304,7 @@ fn run_direct_workflow_capture_attempt(
             "RUNTARA_OBJECT_MODEL_URL".into(),
             format!("http://{addr}/object-model"),
         ),
+        ("CONNECTION_SERVICE_URL".into(), format!("http://{addr}")),
         ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
         ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
@@ -1329,6 +1365,11 @@ fn run_direct_workflow_capture_attempt(
         .lock()
         .expect("llm_requests lock")
         .clone();
+    let connection_metadata_requests = server_state_for_assertions
+        .connection_metadata_requests
+        .lock()
+        .expect("connection metadata requests lock")
+        .clone();
     let sql_requests = server_state_for_assertions
         .sql_requests
         .lock()
@@ -1350,6 +1391,7 @@ fn run_direct_workflow_capture_attempt(
         sleeps,
         checkpoints,
         llm_requests,
+        connection_metadata_requests,
         sql_requests,
         custom_signal_polls,
         slow_item_arrivals,
@@ -3017,7 +3059,7 @@ fn dynamic_single_shot_ai_agent_graph_json() -> &'static str {
       "entryPoint": "ai",
       "executionPlan": [{"fromStep":"ai","toStep":"finish","label":"next"}],
       "steps": {
-        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+        "ai": {"id":"ai","stepType":"AiAgent","connectionRef":{"valueType":"reference","value":"data.connection","type":"string"},"config":{
           "systemPrompt":{"valueType":"immediate","value":"You are a test stub caller"},
           "userPrompt":{"valueType":"reference","value":"data.prompt"},
           "provider":{"valueType":"reference","value":"data.provider","type":"string"},
@@ -3065,7 +3107,12 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
         vec![llm_ok("hello from stub")],
     );
 
-    assert!(result.status_success, "stderr: {}", result.stderr);
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?} metadata requests: {:?} llm requests: {:?}",
+        result.stderr, result.error_json, result.connection_metadata_requests, result.llm_requests
+    );
+    assert_eq!(result.connection_metadata_requests, ["conn-1"]);
     let output = result.output_json.expect("workflow completes");
     assert_eq!(
         output.get("answer").and_then(Value::as_str),
@@ -3088,17 +3135,18 @@ fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
 }
 
 #[test]
-fn direct_wasm_execute_ai_agent_resolves_runtime_model_parameters() {
+fn direct_wasm_execute_ai_agent_resolves_connection_ref_and_runtime_model_parameters() {
     let components_dir = direct_e2e_components_dir();
     let result = run_direct_workflow_with_llm_script(
         &components_dir,
         "ai-dynamic-runtime-parameters",
         dynamic_single_shot_ai_agent_graph_json(),
-        br#"{"prompt":"Say hello","provider":"openai","model":"gpt-4.1-mini","temperature":0.25,"maxTokens":321}"#,
+        br#"{"connection":"conn-1","prompt":"Say hello","provider":"bedrock","model":"gpt-4.1-mini","temperature":0.25,"maxTokens":321}"#,
         vec![llm_ok("dynamic hello")],
     );
 
     assert!(result.status_success, "stderr: {}", result.stderr);
+    assert_eq!(result.connection_metadata_requests, ["conn-1"]);
     assert_eq!(result.llm_requests.len(), 1, "exactly one model call");
     let request = &result.llm_requests[0];
     assert_eq!(request["ai_provider"], "openai", "{request}");
@@ -5331,6 +5379,10 @@ fn run_direct_workflow_embedded(
         "RUNTARA_OBJECT_MODEL_URL".to_string(),
         format!("http://{addr}/object-model"),
     );
+    env.insert(
+        "CONNECTION_SERVICE_URL".to_string(),
+        format!("http://{addr}"),
+    );
     env.insert("RUNTARA_SERVER_ADDR".to_string(), addr.to_string());
     env.insert("RUNTARA_INSTANCE_ID".to_string(), workflow_id.to_string());
     env.insert(
@@ -5383,6 +5435,11 @@ fn run_direct_workflow_embedded(
         .lock()
         .expect("llm_requests lock")
         .clone();
+    let connection_metadata_requests = server_state_for_assertions
+        .connection_metadata_requests
+        .lock()
+        .expect("connection metadata requests lock")
+        .clone();
     let sql_requests = server_state_for_assertions
         .sql_requests
         .lock()
@@ -5408,6 +5465,7 @@ fn run_direct_workflow_embedded(
         sleeps,
         checkpoints,
         llm_requests,
+        connection_metadata_requests,
         sql_requests,
         custom_signal_polls,
         slow_item_arrivals,

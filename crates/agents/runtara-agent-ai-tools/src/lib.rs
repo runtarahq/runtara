@@ -142,7 +142,8 @@ pub struct RawConnection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawConnectionFeature {
     pub key: String,
-    pub driver: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_resolver: Option<String>,
 }
@@ -188,7 +189,7 @@ fn require_provider_for_connection(connection: &RawConnection) -> Result<&str, A
         .features
         .iter()
         .find(|feature| feature.key == "ai.chat")
-        .map(|feature| feature.driver.as_str())
+        .and_then(|feature| feature.driver.as_deref())
         .or(match connection.integration_id.as_str() {
             "openai_api_key" => Some(PROVIDER_OPENAI),
             "aws_credentials" => Some(PROVIDER_BEDROCK),
@@ -2739,7 +2740,7 @@ mod tests {
         let mut connection = fake_connection("future_llm_connection");
         connection.features.push(RawConnectionFeature {
             key: "ai.chat".into(),
-            driver: PROVIDER_OPENAI.into(),
+            driver: Some(PROVIDER_OPENAI.into()),
             resource_resolver: Some("future.models".into()),
         });
         assert_eq!(

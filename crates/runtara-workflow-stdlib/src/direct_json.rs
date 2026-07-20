@@ -2377,6 +2377,34 @@ impl DirectJsonManifest {
         let descriptor_object = descriptor
             .as_object_mut()
             .ok_or_else(|| "resolved connection descriptor must be a JSON object".to_string())?;
+        // The public/internal metadata API uses its camelCase JSON contract,
+        // while the established RawConnection agent ABI is snake_case. Keep
+        // that translation at this trusted boundary instead of making every
+        // agent understand both representations.
+        for (snake_case, camel_case) in [
+            ("connection_id", "connectionId"),
+            ("integration_id", "integrationId"),
+            ("connection_subtype", "connectionSubtype"),
+        ] {
+            if !descriptor_object.contains_key(snake_case)
+                && let Some(value) = descriptor_object.remove(camel_case)
+            {
+                descriptor_object.insert(snake_case.to_string(), value);
+            }
+        }
+        if let Some(features) = descriptor_object
+            .get_mut("features")
+            .and_then(Value::as_array_mut)
+        {
+            for feature in features {
+                if let Some(feature) = feature.as_object_mut()
+                    && !feature.contains_key("resource_resolver")
+                    && let Some(value) = feature.remove("resourceResolver")
+                {
+                    feature.insert("resource_resolver".to_string(), value);
+                }
+            }
+        }
         let connection_id = descriptor_object
             .get("connection_id")
             .and_then(Value::as_str)
@@ -11005,11 +11033,11 @@ mod tests {
                 0,
                 br#"{"value":"present"}"#,
                 br#"{
-                    "connection_id":"shopify-main",
-                    "integration_id":"shopify_oauth",
-                    "connection_subtype":null,
-                    "status":"active",
-                    "features":[{"key":"commerce.orders","driver":"shopify","resource_resolver":null}],
+                    "connectionId":"shopify-main",
+                    "integrationId":"shopify_oauth",
+                    "connectionSubtype":null,
+                    "status":"ACTIVE",
+                    "features":[{"key":"commerce.orders","driver":"shopify","resourceResolver":null}],
                     "metadata":{"account":"store.example"},
                     "parameters":{"must_not":"survive"}
                 }"#,
@@ -11024,7 +11052,7 @@ mod tests {
                 "connection_id": "shopify-main",
                 "integration_id": "shopify_oauth",
                 "connection_subtype": null,
-                "status": "active",
+                "status": "ACTIVE",
                 "features": [{
                     "key": "commerce.orders",
                     "driver": "shopify",
