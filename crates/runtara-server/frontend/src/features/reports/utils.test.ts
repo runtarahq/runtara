@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalConditionToReportVisibility,
   canonicalToLegacyCondition,
+  getDefaultReportViewTarget,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
@@ -207,16 +208,16 @@ describe('legacyToCanonicalCondition — condition editor shapes', () => {
     // A nested condition where a field is expected.
     expect(
       legacyToCanonicalCondition(
-        op('EQ', [
-          { op: 'EQ', arguments: ['a', 'b'] },
-          editorImm('x'),
-        ]) as never
+        op('EQ', [{ op: 'EQ', arguments: ['a', 'b'] }, editorImm('x')]) as never
       )
     ).toBeUndefined();
     // A reference object whose value isn't a string.
     expect(
       legacyToCanonicalCondition(
-        op('EQ', [{ valueType: 'reference', value: 123 }, editorImm('x')]) as never
+        op('EQ', [
+          { valueType: 'reference', value: 123 },
+          editorImm('x'),
+        ]) as never
       )
     ).toBeUndefined();
   });
@@ -313,6 +314,28 @@ describe('report view navigation', () => {
     expect(
       getReportViewBreadcrumbs(reportDefinition, view, labelForView)
     ).toEqual(view.breadcrumb);
+  });
+
+  it('uses a stage group as the default target so the server resolves current stage', () => {
+    const stagedDefinition: ReportDefinition = {
+      ...reportDefinition,
+      viewGroups: [
+        {
+          id: 'case_flow',
+          mode: 'stages',
+          stages: [
+            { viewId: 'a', value: 'A' },
+            { viewId: 'b', value: 'B' },
+            { viewId: 'c', value: 'C' },
+          ],
+          currentFrom: { type: 'filter', filterId: 'stage' },
+          access: 'through_current',
+        },
+      ],
+    };
+
+    expect(getDefaultReportViewTarget(stagedDefinition)).toBe('case_flow');
+    expect(getDefaultReportViewTarget(reportDefinition)).toBe('a');
   });
 });
 

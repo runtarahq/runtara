@@ -69,10 +69,15 @@ beforeEach(() => {
   );
 });
 
-function renderTile(client = makeClient()) {
+function renderTile(client = makeClient(), activeViewId?: string) {
   return render(
     <QueryClientProvider client={client}>
-      <ReportBlockHost reportId="rep_abc" block={lazyMetric} filters={{}} />
+      <ReportBlockHost
+        reportId="rep_abc"
+        activeViewId={activeViewId}
+        block={lazyMetric}
+        filters={{}}
+      />
     </QueryClientProvider>
   );
 }
@@ -82,13 +87,11 @@ const skeleton = () => screen.queryByLabelText('Loading report block');
 describe('lazy tile with a transient failure', () => {
   it('self-heals with no user action once the network recovers', async () => {
     // Fails once, then succeeds — a dropped connection.
-    getReportBlockData
-      .mockRejectedValueOnce(networkError())
-      .mockResolvedValue({
-        blockType: 'metric',
-        status: 'ok',
-        data: { value: 42 },
-      });
+    getReportBlockData.mockRejectedValueOnce(networkError()).mockResolvedValue({
+      blockType: 'metric',
+      status: 'ok',
+      data: { value: 42 },
+    });
 
     renderTile();
 
@@ -106,16 +109,13 @@ describe('lazy tile with a transient failure', () => {
     renderTile();
 
     // 1 initial attempt + 3 retries, then the budget is spent.
-    await waitFor(
-      () => expect(getReportBlockData).toHaveBeenCalledTimes(4),
-      { timeout: 15000 }
-    );
+    await waitFor(() => expect(getReportBlockData).toHaveBeenCalledTimes(4), {
+      timeout: 15000,
+    });
 
     await waitFor(
       () =>
-        expect(
-          screen.queryByRole('button', { name: /retry/i })
-        ).not.toBeNull(),
+        expect(screen.queryByRole('button', { name: /retry/i })).not.toBeNull(),
       { timeout: 5000 }
     );
     expect(skeleton()).toBeNull();
@@ -123,6 +123,24 @@ describe('lazy tile with a transient failure', () => {
 });
 
 describe('lazy tile with a deterministic failure', () => {
+  it('includes the active view in scoped block-data requests', async () => {
+    getReportBlockData.mockResolvedValue({
+      blockType: 'metric',
+      status: 'ok',
+      data: { value: 12 },
+    });
+
+    renderTile(makeClient(), 'stage_b');
+
+    await waitFor(() => expect(getReportBlockData).toHaveBeenCalledOnce());
+    const context = getReportBlockData.mock.calls[0][1] as {
+      queryKey: readonly unknown[];
+    };
+    expect(context.queryKey[5]).toEqual(
+      expect.objectContaining({ viewId: 'stage_b' })
+    );
+  });
+
   it('surfaces the error immediately without burning retries', async () => {
     getReportBlockData.mockRejectedValue(httpError(404));
 
@@ -130,9 +148,7 @@ describe('lazy tile with a deterministic failure', () => {
 
     await waitFor(
       () =>
-        expect(
-          screen.queryByRole('button', { name: /retry/i })
-        ).not.toBeNull(),
+        expect(screen.queryByRole('button', { name: /retry/i })).not.toBeNull(),
       { timeout: 5000 }
     );
 
@@ -142,13 +158,11 @@ describe('lazy tile with a deterministic failure', () => {
   }, 15000);
 
   it('retries a 500, which may be load-related', async () => {
-    getReportBlockData
-      .mockRejectedValueOnce(httpError(500))
-      .mockResolvedValue({
-        blockType: 'metric',
-        status: 'ok',
-        data: { value: 7 },
-      });
+    getReportBlockData.mockRejectedValueOnce(httpError(500)).mockResolvedValue({
+      blockType: 'metric',
+      status: 'ok',
+      data: { value: 7 },
+    });
 
     renderTile();
 

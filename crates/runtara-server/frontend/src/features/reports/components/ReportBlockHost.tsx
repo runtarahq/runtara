@@ -24,6 +24,7 @@ import { encodeFilterValue } from '../utils';
 
 type ReportBlockHostProps = {
   reportId: string;
+  activeViewId?: string | null;
   block: ReportBlockDefinition;
   initialResult?: ReportBlockResult | ReportBlockRenderResult;
   filters: Record<string, unknown>;
@@ -42,6 +43,7 @@ type ReportBlockHostProps = {
 
 export function ReportBlockHost({
   reportId,
+  activeViewId,
   block,
   initialResult,
   filters,
@@ -145,6 +147,7 @@ export function ReportBlockHost({
   const request = useMemo(
     () => ({
       filters,
+      viewId: activeViewId ?? undefined,
       page: block.type === 'table' ? page : undefined,
       sort,
       search:
@@ -155,6 +158,7 @@ export function ReportBlockHost({
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }),
     [
+      activeViewId,
       block.type,
       blockFilters,
       debouncedSearch,
@@ -578,7 +582,10 @@ function escapeMarkdownText(value: string) {
 function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
   if (block.type === 'metric') {
     return (
-      <div className="rounded-lg border bg-card p-4" aria-label="Loading report block">
+      <div
+        className="rounded-lg border bg-card p-4"
+        aria-label="Loading report block"
+      >
         <div className="h-3 w-20 animate-pulse rounded bg-muted/50" />
         <div className="mt-3 h-7 w-24 animate-pulse rounded bg-muted/50" />
       </div>
@@ -587,7 +594,10 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
 
   if (block.type === 'table') {
     return (
-      <div className="overflow-hidden rounded-lg border bg-card" aria-label="Loading report block">
+      <div
+        className="overflow-hidden rounded-lg border bg-card"
+        aria-label="Loading report block"
+      >
         <div className="h-9 animate-pulse bg-muted/40" />
         <div className="divide-y">
           {Array.from({ length: 6 }).map((_, index) => (
@@ -622,7 +632,10 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
 
   // markdown / card / default
   return (
-    <div className="space-y-3 rounded-lg border bg-card p-4" aria-label="Loading report block">
+    <div
+      className="space-y-3 rounded-lg border bg-card p-4"
+      aria-label="Loading report block"
+    >
       <div className="h-4 w-1/3 animate-pulse rounded bg-muted/40" />
       <div className="h-3 w-full animate-pulse rounded bg-muted/40" />
       <div className="h-3 w-5/6 animate-pulse rounded bg-muted/40" />

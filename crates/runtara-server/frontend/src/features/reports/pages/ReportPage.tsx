@@ -42,6 +42,7 @@ import {
   encodeFilterValue,
   getFilterDefaultValue,
   getDefaultReportViewId,
+  getDefaultReportViewTarget,
   slugify,
 } from '../utils';
 
@@ -100,7 +101,7 @@ export function ReportPage() {
   const createReport = useCreateReport();
   const updateReport = useUpdateReport();
   const validateReport = useValidateReport();
-  const activeViewId = searchParams.get('view');
+  const requestedViewId = searchParams.get('view');
 
   usePageTitle(existingReport?.name ?? (isExisting ? 'Report' : 'New report'));
 
@@ -142,16 +143,44 @@ export function ReportPage() {
       !editing && isExisting
         ? {
             filters: filterValues,
+            viewId:
+              requestedViewId ??
+              getDefaultReportViewTarget(definition) ??
+              undefined,
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }
         : undefined,
-    [editing, filterValues, isExisting]
+    [definition, editing, filterValues, isExisting, requestedViewId]
   );
   const renderQuery = useReportRender(
     reportId,
     renderRequest,
     Boolean(renderRequest)
   );
+  const resolvedActiveViewId =
+    renderQuery.data?.navigation?.activeViewId ??
+    requestedViewId ??
+    getDefaultReportViewId(definition);
+
+  useEffect(() => {
+    const canonicalViewId = renderQuery.data?.navigation?.activeViewId;
+    if (editing || !canonicalViewId || requestedViewId === canonicalViewId) {
+      return;
+    }
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.set('view', canonicalViewId);
+        return next;
+      },
+      { replace: true }
+    );
+  }, [
+    editing,
+    renderQuery.data?.navigation?.activeViewId,
+    requestedViewId,
+    setSearchParams,
+  ]);
 
   // Phase 9: in-place block preview for the wizard. Debounced from the
   // live definition so live edits don't pummel the preview API.
@@ -366,20 +395,14 @@ export function ReportPage() {
       {editing ? (
         isExisting && reportId ? (
           <Link to={`/reports/${reportId}`} className="w-full sm:w-auto">
-            <Button
-              variant="outline"
-              className="w-full sm:px-4"
-            >
+            <Button variant="outline" className="w-full sm:px-4">
               <Eye className="mr-2 h-4 w-4" />
               View
             </Button>
           </Link>
         ) : (
           <Link to="/reports" className="w-full sm:w-auto">
-            <Button
-              variant="outline"
-              className="w-full sm:px-4"
-            >
+            <Button variant="outline" className="w-full sm:px-4">
               Cancel
             </Button>
           </Link>
@@ -388,10 +411,7 @@ export function ReportPage() {
         <>
           {explorePath ? (
             <Link to={explorePath} className="w-full sm:w-auto">
-              <Button
-                variant="outline"
-                className="w-full sm:px-4"
-              >
+              <Button variant="outline" className="w-full sm:px-4">
                 <Compass className="mr-2 h-4 w-4" />
                 Explore
               </Button>
@@ -425,11 +445,11 @@ export function ReportPage() {
             </Can>
           ) : null}
           <Can permission="report:update">
-            <Link to={`/reports/${reportId}?edit=1`} className="w-full sm:w-auto">
-              <Button
-                variant="outline"
-                className="w-full sm:px-4"
-              >
+            <Link
+              to={`/reports/${reportId}?edit=1`}
+              className="w-full sm:w-auto"
+            >
+              <Button variant="outline" className="w-full sm:px-4">
                 <Edit className="mr-2 h-4 w-4" />
                 Edit
               </Button>
@@ -448,11 +468,7 @@ export function ReportPage() {
       ) : null}
       {editing ? (
         <Can permission="report:update">
-          <Button
-            className="sm:px-4"
-            disabled={!canSave}
-            onClick={handleSave}
-          >
+          <Button className="sm:px-4" disabled={!canSave} onClick={handleSave}>
             <Save className="mr-2 h-4 w-4" />
             Save
           </Button>
@@ -547,7 +563,7 @@ export function ReportPage() {
           definition={definition}
           renderResponse={renderQuery.data}
           filters={filterValues}
-          activeViewId={activeViewId ?? getDefaultReportViewId(definition)}
+          activeViewId={resolvedActiveViewId}
           onFilterChange={handleFilterChange}
           onFiltersChange={applyFilterUpdates}
           onNavigateView={handleNavigateView}

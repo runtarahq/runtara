@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ReportPage } from './ReportPage';
 import type { ReportDto } from '../types';
@@ -61,6 +61,37 @@ const emptyReport: ReportDto = {
   },
 };
 
+const stagedReport: ReportDto = {
+  ...sampleReport,
+  id: 'rep_staged',
+  definition: {
+    definitionVersion: 1,
+    layout: { id: 'root', items: [] },
+    filters: [{ id: 'stage', label: 'Stage', type: 'text' }],
+    blocks: [],
+    views: [
+      { id: 'stage_a', title: 'Stage A', layout: { id: 'a', items: [] } },
+      { id: 'stage_b', title: 'Stage B', layout: { id: 'b', items: [] } },
+      { id: 'stage_c', title: 'Stage C', layout: { id: 'c', items: [] } },
+    ],
+    viewGroups: [
+      {
+        id: 'approval',
+        mode: 'stages',
+        stages: [
+          { viewId: 'stage_a', value: 'A' },
+          { viewId: 'stage_b', value: 'B' },
+          { viewId: 'stage_c', value: 'C' },
+        ],
+        currentFrom: { type: 'filter', filterId: 'stage' },
+        access: 'through_current',
+      },
+    ],
+  },
+};
+
+const useReportRenderMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../hooks/useReports', () => ({
   useReport: (reportId: string | undefined) => ({
     data:
@@ -68,14 +99,17 @@ vi.mock('../hooks/useReports', () => ({
         ? sampleReport
         : reportId === emptyReport.id
           ? emptyReport
-          : null,
+          : reportId === stagedReport.id
+            ? stagedReport
+            : null,
     isFetching: false,
   }),
-  useReportRender: () => ({
-    data: undefined,
-    isFetching: false,
-    refetch: vi.fn(),
-  }),
+  useReportRender: (...args: unknown[]) =>
+    useReportRenderMock(...args) ?? {
+      data: undefined,
+      isFetching: false,
+      refetch: vi.fn(),
+    },
   useReportBlockData: () => ({
     data: undefined,
     isFetching: false,
@@ -147,12 +181,29 @@ function renderAt(path: string) {
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/reports/new" element={<ReportPage />} />
-          <Route path="/reports/:reportId" element={<ReportPage />} />
+          <Route
+            path="/reports/:reportId"
+            element={
+              <>
+                <ReportPage />
+                <LocationProbe />
+              </>
+            }
+          />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>
   );
 }
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-search">{location.search}</output>;
+}
+
+beforeEach(() => {
+  useReportRenderMock.mockReset();
+});
 
 describe('ReportPage existing-report load', () => {
   it('renders the loaded report definition (not an empty wizard)', async () => {
@@ -180,5 +231,41 @@ describe('ReportPage existing-report load', () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText(/Switch to edit mode/i)).toBeInTheDocument();
+  });
+
+  it('replaces an inaccessible future-stage URL with the server-resolved current view', async () => {
+    useReportRenderMock.mockReturnValue({
+      data: {
+        success: true,
+        report: { id: stagedReport.id, definitionVersion: 1 },
+        resolvedFilters: { stage: 'B' },
+        blocks: {},
+        navigation: {
+          activeViewId: 'stage_b',
+          group: {
+            id: 'approval',
+            mode: 'stages',
+            currentViewId: 'stage_b',
+            accessibleViewIds: ['stage_a', 'stage_b'],
+          },
+        },
+        errors: [],
+      },
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderAt(`/reports/${stagedReport.id}?view=stage_c`);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        '?view=stage_b'
+      );
+    });
+    expect(useReportRenderMock).toHaveBeenCalledWith(
+      stagedReport.id,
+      expect.objectContaining({ viewId: 'stage_c' }),
+      true
+    );
   });
 });

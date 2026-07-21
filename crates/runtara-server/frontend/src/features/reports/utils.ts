@@ -112,6 +112,35 @@ export function getDefaultReportViewId(
   return getActiveReportView(definition)?.id ?? null;
 }
 
+/** Default URL/render target. Stage groups use their group id so the server
+ * resolves the persisted current stage instead of treating the first stage
+ * as an intentional historical deep link. */
+export function getDefaultReportViewTarget(
+  definition: ReportDefinition
+): string | null {
+  const viewId = getDefaultReportViewId(definition);
+  if (!viewId) return null;
+  const stageGroup = (definition.viewGroups ?? []).find(
+    (group) =>
+      group.mode === 'stages' &&
+      (group.stages ?? []).some((stage) => stage.viewId === viewId)
+  );
+  return stageGroup?.id ?? viewId;
+}
+
+export function getReportViewGroupViewIds(
+  definition: ReportDefinition,
+  groupId: string
+): string[] {
+  const group = (definition.viewGroups ?? []).find(
+    (candidate) => candidate.id === groupId
+  );
+  if (!group) return [];
+  return group.mode === 'stages'
+    ? (group.stages ?? []).map((stage) => stage.viewId)
+    : (group.viewIds ?? []);
+}
+
 export function getReportViewBreadcrumbs(
   definition: ReportDefinition,
   view: ReportViewDefinition,
