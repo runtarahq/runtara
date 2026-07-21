@@ -26,7 +26,11 @@ import {
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
-import { useReportWorkflowAction } from './useReportWorkflowAction';
+import {
+  ReportWorkflowActionPhase,
+  ReportWorkflowActionResult,
+  useReportWorkflowAction,
+} from './useReportWorkflowAction';
 
 type BadgeVariant =
   | 'default'
@@ -73,7 +77,10 @@ export function CardBlock({
   result: ReportBlockResult;
   filters: Record<string, unknown>;
   blockFilters: Record<string, unknown>;
-  onRefresh?: () => void | Promise<void>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<void>;
 }) {
   const data = (result.data ?? {}) as CardData;
   const groups = block.card?.groups ?? [];
@@ -132,7 +139,7 @@ export function CardBlock({
       filters={filters}
       blockFilters={blockFilters}
       onRunWorkflow={workflowAction.run}
-      isWorkflowRunning={workflowAction.isRunning}
+      workflowActionPhase={workflowAction.phase}
     />
   );
 }
@@ -168,7 +175,7 @@ type FieldEditingProps = {
     value: unknown;
     fallbackField: string;
   }) => void | Promise<void>;
-  isWorkflowRunning?: (key: string) => boolean;
+  workflowActionPhase?: (key: string) => ReportWorkflowActionPhase | undefined;
   /** True when the rendered row carries the id+schemaId needed for writeback. */
   rowEditable?: boolean;
 };
@@ -186,7 +193,7 @@ function CardGroups({
   filters,
   blockFilters,
   onRunWorkflow,
-  isWorkflowRunning,
+  workflowActionPhase,
 }: {
   groups: ReportCardGroup[];
   row: Record<string, unknown>;
@@ -213,7 +220,7 @@ function CardGroups({
           filters={filters}
           blockFilters={blockFilters}
           onRunWorkflow={onRunWorkflow}
-          isWorkflowRunning={isWorkflowRunning}
+          workflowActionPhase={workflowActionPhase}
           rowEditable={rowEditable}
         />
       ))}
@@ -235,7 +242,7 @@ function CardGroup({
   filters,
   blockFilters,
   onRunWorkflow,
-  isWorkflowRunning,
+  workflowActionPhase,
 }: {
   group: ReportCardGroup;
   row: Record<string, unknown>;
@@ -277,7 +284,7 @@ function CardGroup({
             filters={filters}
             blockFilters={blockFilters}
             onRunWorkflow={onRunWorkflow}
-            isWorkflowRunning={isWorkflowRunning}
+            workflowActionPhase={workflowActionPhase}
             rowEditable={rowEditable}
           />
         ))}
@@ -301,7 +308,7 @@ function CardField({
   filters,
   blockFilters,
   onRunWorkflow,
-  isWorkflowRunning,
+  workflowActionPhase,
 }: {
   field: ReportCardField;
   row: Record<string, unknown>;
@@ -399,7 +406,7 @@ function CardField({
           <WorkflowActionButton
             action={field.workflowAction}
             labelFallback={field.label ?? 'Run'}
-            running={isWorkflowRunning?.(actionKey) ?? false}
+            phase={workflowActionPhase?.(actionKey)}
             disabled={isWorkflowActionDisabled(field.workflowAction, row)}
             value={value}
             row={row}
@@ -447,7 +454,7 @@ function shouldRefreshAfterWriteback(field: ReportCardField): boolean {
 function WorkflowActionButton({
   action,
   labelFallback,
-  running,
+  phase,
   disabled,
   value,
   row,
@@ -457,7 +464,7 @@ function WorkflowActionButton({
 }: {
   action: ReportWorkflowActionConfig;
   labelFallback: string;
-  running: boolean;
+  phase?: ReportWorkflowActionPhase;
   disabled: boolean;
   value: unknown;
   row: Record<string, unknown>;
@@ -477,7 +484,7 @@ function WorkflowActionButton({
       variant="outline"
       size="sm"
       className="report-print-hidden h-8 max-w-full gap-1.5"
-      disabled={running || disabled || !onRun}
+      disabled={Boolean(phase) || disabled || !onRun}
       onClick={() => {
         if (disabled) return;
         void onRun?.({
@@ -489,18 +496,27 @@ function WorkflowActionButton({
         });
       }}
     >
-      {running ? (
+      {phase ? (
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
       ) : (
         <Play className="h-3.5 w-3.5" />
       )}
       <span className="truncate">
-        {running
-          ? (action.runningLabel ?? 'Running...')
+        {phase
+          ? workflowActionPhaseLabel(action, phase)
           : (action.label ?? labelFallback)}
       </span>
     </Button>
   );
+}
+
+function workflowActionPhaseLabel(
+  action: ReportWorkflowActionConfig,
+  phase: ReportWorkflowActionPhase
+): string {
+  if (phase === 'submitting') return 'Starting...';
+  if (phase === 'refreshing') return 'Updating report...';
+  return action.runningLabel ?? 'Running...';
 }
 
 function SubcardField({

@@ -80,7 +80,11 @@ import {
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
-import { useReportWorkflowAction } from './useReportWorkflowAction';
+import {
+  ReportWorkflowActionPhase,
+  ReportWorkflowActionResult,
+  useReportWorkflowAction,
+} from './useReportWorkflowAction';
 
 type TableColumn = {
   key: string;
@@ -145,7 +149,10 @@ type TableBlockProps = {
     actions: ReportInteractionAction[],
     row: Record<string, unknown>
   ) => boolean;
-  onRefresh?: () => void | Promise<void>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<void>;
 };
 
 const EMPTY_ROWS: NonNullable<TableData['rows']> = [];
@@ -172,9 +179,9 @@ export function TableBlock({
     () => new Set()
   );
   const workflowAction = useReportWorkflowAction({
-    onCompleted: async () => {
+    onCompleted: async (result, action) => {
       setSelectedRowKeys(new Set());
-      await onRefresh?.();
+      await onRefresh?.(result, action);
     },
   });
   const [editingCell, setEditingCell] = useState<{
@@ -460,7 +467,7 @@ export function TableBlock({
                   onCellClick={onCellClick}
                   onInteractionButtonClick={onInteractionButtonClick}
                   onRunWorkflow={workflowAction.run}
-                  isWorkflowRunning={workflowAction.isRunning}
+                  workflowActionPhase={workflowAction.phase}
                 />
               );
             })
@@ -598,7 +605,9 @@ type TableBodyRowProps = {
     fallbackField?: string;
     selectedRows?: Record<string, unknown>[];
   }) => void | Promise<void>;
-  isWorkflowRunning: (key: string) => boolean;
+  workflowActionPhase: (
+    key: string
+  ) => ReportWorkflowActionPhase | undefined;
 };
 
 const MemoizedTableBodyRow = memo(TableBodyRow, areTableBodyRowPropsEqual);
@@ -626,7 +635,7 @@ function TableBodyRow({
   onCellClick,
   onInteractionButtonClick,
   onRunWorkflow,
-  isWorkflowRunning,
+  workflowActionPhase,
 }: TableBodyRowProps) {
   return (
     <TableRow
@@ -653,9 +662,9 @@ function TableBodyRow({
         const displayValue = getCellDisplayValue(rowObject, column, value);
         const writebackContext = getWritebackContext(column, rowObject);
         const workflowActionKey = `${blockId}:${rowKey}:${column.key}`;
-        const isWorkflowActionRunning =
+        const workflowPhase =
           column.workflowAction != null &&
-          isWorkflowRunning(workflowActionKey);
+          workflowActionPhase(workflowActionKey);
         const shouldRenderWorkflowAction =
           column.workflowAction != null &&
           isWorkflowActionVisible(column.workflowAction, rowObject);
@@ -724,7 +733,7 @@ function TableBodyRow({
                   <WorkflowActionButton
                     action={column.workflowAction}
                     labelFallback="Run"
-                    running={isWorkflowActionRunning}
+                    phase={workflowPhase || undefined}
                     disabled={isWorkflowDisabled}
                     value={value}
                     row={rowObject}
@@ -797,7 +806,7 @@ function areTableBodyRowPropsEqual(
     Boolean(previous.onCellClick) === Boolean(next.onCellClick) &&
     Boolean(previous.onInteractionButtonClick) ===
       Boolean(next.onInteractionButtonClick) &&
-    previous.isWorkflowRunning === next.isWorkflowRunning
+    previous.workflowActionPhase === next.workflowActionPhase
   );
 }
 
@@ -1128,13 +1137,13 @@ function TableActionsToolbar({
       <div className="flex flex-wrap gap-2">
         {actions.map((action) => {
           const actionKey = `${blockId}:table-action:${action.id}`;
-          const running = workflowAction.isRunning(actionKey);
+          const phase = workflowAction.phase(actionKey);
           return (
             <WorkflowActionButton
               key={action.id}
               action={action.workflowAction}
               labelFallback={action.label ?? 'Run'}
-              running={running}
+              phase={phase}
               disabled={selectedCount === 0}
               value={selectedRows}
               row={{}}
@@ -1153,7 +1162,7 @@ function TableActionsToolbar({
 function WorkflowActionButton({
   action,
   labelFallback,
-  running,
+  phase,
   disabled,
   value,
   row,
@@ -1164,7 +1173,7 @@ function WorkflowActionButton({
 }: {
   action: ReportWorkflowActionConfig;
   labelFallback: string;
-  running: boolean;
+  phase?: ReportWorkflowActionPhase;
   disabled: boolean;
   value: unknown;
   row: Record<string, unknown>;
@@ -1186,7 +1195,7 @@ function WorkflowActionButton({
       variant="outline"
       size="sm"
       className="report-print-hidden h-8 max-w-full gap-1.5"
-      disabled={running || disabled}
+      disabled={Boolean(phase) || disabled}
       onClick={(event) => {
         event.stopPropagation();
         if (disabled) return;
@@ -1200,18 +1209,27 @@ function WorkflowActionButton({
         });
       }}
     >
-      {running ? (
+      {phase ? (
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
       ) : (
         <Play className="h-3.5 w-3.5" />
       )}
       <span className="truncate">
-        {running
-          ? (action.runningLabel ?? 'Running...')
+        {phase
+          ? workflowActionPhaseLabel(action, phase)
           : (action.label ?? labelFallback)}
       </span>
     </Button>
   );
+}
+
+function workflowActionPhaseLabel(
+  action: ReportWorkflowActionConfig,
+  phase: ReportWorkflowActionPhase
+): string {
+  if (phase === 'submitting') return 'Starting...';
+  if (phase === 'refreshing') return 'Updating report...';
+  return action.runningLabel ?? 'Running...';
 }
 
 function InteractionButtonsCell({

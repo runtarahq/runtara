@@ -285,6 +285,10 @@ export interface ReportWorkflowAction {
 export interface ReportWorkflowInstanceStatus {
   id: string;
   status: string;
+  outputs?: unknown;
+  error?: string | null;
+  usedVersion?: number;
+  executionDurationSeconds?: number | null;
 }
 
 /** Run-workflow request sent by FE workflow-button handlers. */

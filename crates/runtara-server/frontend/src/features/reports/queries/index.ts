@@ -325,7 +325,8 @@ export async function getReportWorkflowInstanceStatus(
     id?: string;
     status?: string;
   };
-  const instance = wrapped.data?.instance ?? {
+  const instance: Partial<ReportWorkflowInstanceStatus> =
+    wrapped.data?.instance ?? {
     id: wrapped.id,
     status: wrapped.status,
   };
@@ -337,5 +338,9 @@ export async function getReportWorkflowInstanceStatus(
   return {
     id: instance.id,
     status: instance.status,
+    outputs: instance.outputs,
+    error: instance.error,
+    usedVersion: instance.usedVersion,
+    executionDurationSeconds: instance.executionDurationSeconds,
   };
 }
