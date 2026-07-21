@@ -689,6 +689,11 @@ pub struct ReportActionSubmitConfig {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportWorkflowActionConfig {
+    /// Stable identity of this launcher within its report block. New report
+    /// definitions should always set this; legacy definitions are addressed by
+    /// their enclosing table action / column / card field key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(rename = "workflowId")]
     pub workflow_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1834,6 +1839,41 @@ pub struct ReportRenderRequest {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ExecuteReportWorkflowActionTrigger {
+    /// Rendered row that owns the launcher. The server evaluates visibility,
+    /// disabled state, and `context.mode=row|field` against this value.
+    #[serde(default)]
+    pub row: Value,
+    /// Cell / card-field value used by `context.mode=value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    /// Enclosing column / card field. Used as the default for
+    /// `context.mode=field` when the action does not configure a field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Current selected rows used by table-wide selection actions.
+    #[serde(
+        default,
+        rename = "selectedRows",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub selected_rows: Vec<Value>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExecuteReportWorkflowActionRequest {
+    #[serde(default)]
+    pub trigger: ExecuteReportWorkflowActionTrigger,
+    pub render: ReportRenderRequest,
+    /// Bounded observation window. This never changes the workflow's own
+    /// timeout and never cancels an execution when the window elapses.
+    #[serde(default, rename = "waitMs", skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReportPreviewRequest {
     pub definition: ReportDefinition,
@@ -2078,6 +2118,60 @@ pub struct ReportRenderResponse {
     pub navigation: Option<ReportViewNavigationState>,
     #[serde(default)]
     pub errors: Vec<ReportBlockError>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportWorkflowActionExecution {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    pub version: i32,
+    #[serde(rename = "instanceId")]
+    pub instance_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(
+        default,
+        rename = "durationMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub duration_ms: Option<u64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExecuteReportWorkflowActionResponse {
+    #[serde(rename = "completedWithinWait")]
+    pub completed_within_wait: bool,
+    pub execution: ReportWorkflowActionExecution,
+    #[serde(
+        default,
+        rename = "canonicalViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub canonical_view_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<ReportRenderResponse>,
+    #[serde(
+        default,
+        rename = "retryAfterMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retry_after_ms: Option<u64>,
+    /// True when execution reached a terminal state but the report could not
+    /// be rendered in the same response. The execution status remains
+    /// authoritative and the client should perform one normal refresh.
+    #[serde(default, rename = "refreshRequired", skip_serializing_if = "is_false")]
+    pub refresh_required: bool,
+    #[serde(
+        default,
+        rename = "reportError",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub report_error: Option<String>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

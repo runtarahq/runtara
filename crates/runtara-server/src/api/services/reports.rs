@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -21,9 +22,9 @@ use crate::api::services::object_model::{
 };
 use crate::api::services::workflow_runtime::{WorkflowRuntimeError, submit_workflow_action};
 use crate::auth::{AuthContext, AuthMethod};
-use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::ExecutionEngine;
+use crate::runtime_client::{RuntimeClient, RuntimeError, TerminalOutcome};
 use crate::workers::execution_engine::ExecutionError;
+use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 
 mod providers;
 pub(crate) mod query_plan;
@@ -517,6 +518,230 @@ impl ReportService {
             metadata,
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_report_workflow_action(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        action_id: &str,
+        request: ExecuteReportWorkflowActionRequest,
+        instance_id: Uuid,
+        idempotent_replay: bool,
+    ) -> Result<ExecuteReportWorkflowActionResponse, ReportServiceError> {
+        const DEFAULT_WAIT_MS: u64 = 2_000;
+        const MAX_WAIT_MS: u64 = 5_000;
+
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown block '{}'", block_id))
+            })?;
+        let resolved_filters = resolve_filters(&report.definition, &request.render.filters);
+        let navigation = self
+            .resolve_navigation_only(
+                tenant_id,
+                &report.definition,
+                request.render.view_id.as_deref(),
+                &resolved_filters,
+            )
+            .await;
+        let scoped_block_ids = report_navigation_block_ids(&report.definition, &navigation);
+        if !idempotent_replay
+            && !report.definition.views.is_empty()
+            && navigation.active_view_id.is_some()
+            && !scoped_block_ids.contains(block_id)
+        {
+            return Err(ReportServiceError::Conflict(format!(
+                "Block '{}' is not available in the current report view",
+                block_id
+            )));
+        }
+
+        let located = locate_report_workflow_action(block, action_id).ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Unknown workflow action '{}' in block '{}'",
+                action_id, block_id
+            ))
+        })?;
+        if !idempotent_replay {
+            ensure_report_workflow_action_enabled(located.action, &request.trigger.row)?;
+        }
+        let context = resolve_report_workflow_action_context(
+            located.action,
+            located.fallback_field,
+            &request.trigger,
+        );
+        let queued = self
+            .require_execution_engine()?
+            .queue(QueueRequest {
+                tenant_id,
+                workflow_id: &located.action.workflow_id,
+                version: located.action.version,
+                inputs: json!({ "data": context, "variables": {} }),
+                debug: false,
+                correlation_id: Some(format!("report:{id_or_slug}:{block_id}:{action_id}")),
+                trigger_source: TriggerSource::HttpApi,
+                instance_id: Some(instance_id),
+            })
+            .await?;
+
+        let wait_ms = request
+            .wait_ms
+            .unwrap_or(DEFAULT_WAIT_MS)
+            .clamp(1, MAX_WAIT_MS);
+        let terminal = observe_report_execution(
+            self.require_runtime_client()?,
+            &queued.instance_id.to_string(),
+            StdDuration::from_millis(wait_ms),
+        )
+        .await?;
+
+        let Some(terminal) = terminal else {
+            return Ok(ExecuteReportWorkflowActionResponse {
+                completed_within_wait: false,
+                execution: ReportWorkflowActionExecution {
+                    workflow_id: queued.workflow_id,
+                    version: queued.version,
+                    instance_id: queued.instance_id.to_string(),
+                    status: "running".to_string(),
+                    output: None,
+                    error: None,
+                    duration_ms: None,
+                },
+                canonical_view_id: None,
+                render: None,
+                retry_after_ms: Some(500),
+                refresh_required: false,
+                report_error: None,
+            });
+        };
+
+        // A terminal workflow has completed all of its capability side effects.
+        // Probe only the cheap navigation source briefly before the one full
+        // render, covering stores whose committed update becomes readable a few
+        // milliseconds after the runtime records terminal status.
+        if navigation.group.as_ref().is_some_and(|group| {
+            group.mode == ReportViewNavigationMode::Stages
+                && group.current_view_id == navigation.active_view_id
+        }) {
+            let starting_current = navigation
+                .group
+                .as_ref()
+                .and_then(|group| group.current_view_id.as_deref());
+            for delay_ms in [0, 25, 50, 100] {
+                if delay_ms > 0 {
+                    tokio::time::sleep(StdDuration::from_millis(delay_ms)).await;
+                }
+                let next = self
+                    .resolve_navigation_only(
+                        tenant_id,
+                        &report.definition,
+                        request.render.view_id.as_deref(),
+                        &resolved_filters,
+                    )
+                    .await;
+                if next
+                    .group
+                    .as_ref()
+                    .and_then(|group| group.current_view_id.as_deref())
+                    != starting_current
+                {
+                    break;
+                }
+            }
+        }
+
+        let rendered = match self
+            .render_blocks(
+                tenant_id,
+                &report.definition,
+                request.render.filters,
+                request.render.view_id.as_deref(),
+                request.render.blocks,
+                ReportRenderMetadata {
+                    id: report.id,
+                    definition_version: report.definition_version,
+                },
+            )
+            .await
+        {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                return Ok(ExecuteReportWorkflowActionResponse {
+                    completed_within_wait: true,
+                    execution: ReportWorkflowActionExecution {
+                        workflow_id: queued.workflow_id,
+                        version: queued.version,
+                        instance_id: queued.instance_id.to_string(),
+                        status: terminal.status,
+                        output: terminal.output,
+                        error: terminal.error,
+                        duration_ms: terminal.duration_ms,
+                    },
+                    canonical_view_id: None,
+                    render: None,
+                    retry_after_ms: None,
+                    refresh_required: true,
+                    report_error: Some(error.to_string()),
+                });
+            }
+        };
+        let canonical_view_id = rendered
+            .navigation
+            .as_ref()
+            .and_then(|navigation| navigation.active_view_id.clone());
+
+        Ok(ExecuteReportWorkflowActionResponse {
+            completed_within_wait: true,
+            execution: ReportWorkflowActionExecution {
+                workflow_id: queued.workflow_id,
+                version: queued.version,
+                instance_id: queued.instance_id.to_string(),
+                status: terminal.status,
+                output: terminal.output,
+                error: terminal.error,
+                duration_ms: terminal.duration_ms,
+            },
+            canonical_view_id,
+            render: Some(rendered),
+            retry_after_ms: None,
+            refresh_required: false,
+            report_error: None,
+        })
+    }
+
+    async fn resolve_navigation_only(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        requested_view_id: Option<&str>,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> ReportViewNavigationState {
+        let preliminary =
+            resolve_report_view_navigation(definition, requested_view_id, resolved_filters, None);
+        let mut block_stage_value = None;
+        if let Some((block_id, field)) =
+            navigation_stage_block_source(definition, preliminary.group.as_ref())
+            && let Some(block) = definition.blocks.iter().find(|block| block.id == block_id)
+        {
+            let (rendered, _) = self
+                .render_block_captured(tenant_id, definition, block, resolved_filters, None)
+                .await;
+            block_stage_value = resolve_navigation_block_value(&rendered, field);
+        }
+        resolve_report_view_navigation(
+            definition,
+            requested_view_id,
+            resolved_filters,
+            block_stage_value.as_ref(),
+        )
     }
 
     pub async fn preview_report(
@@ -1731,6 +1956,7 @@ impl ReportService {
                     }
                 }
             }
+            validate_report_block_workflow_action_ids(block)?;
 
             for group_field in &block.source.group_by {
                 if !is_known_field(group_field) {
@@ -4918,6 +5144,11 @@ pub(crate) fn validate_report_workflow_action_config(
     action: &ReportWorkflowActionConfig,
     context: &str,
 ) -> Result<(), ReportServiceError> {
+    if action.id.as_ref().is_some_and(|id| id.trim().is_empty()) {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.id must not be empty"
+        )));
+    }
     if action.workflow_id.trim().is_empty() {
         return Err(ReportServiceError::Validation(format!(
             "{context} workflowAction.workflowId must not be empty"
@@ -4936,6 +5167,249 @@ pub(crate) fn validate_report_workflow_action_config(
         )));
     }
     Ok(())
+}
+
+struct LocatedReportWorkflowAction<'a> {
+    action: &'a ReportWorkflowActionConfig,
+    fallback_field: &'a str,
+}
+
+fn locate_report_workflow_action<'a>(
+    block: &'a ReportBlockDefinition,
+    action_id: &str,
+) -> Option<LocatedReportWorkflowAction<'a>> {
+    if let Some(table) = &block.table {
+        for action in &table.actions {
+            let resolved_id = action
+                .workflow_action
+                .id
+                .as_deref()
+                .unwrap_or(action.id.as_str());
+            if resolved_id == action_id {
+                return Some(LocatedReportWorkflowAction {
+                    action: &action.workflow_action,
+                    fallback_field: &action.id,
+                });
+            }
+        }
+        for column in &table.columns {
+            if let Some(action) = &column.workflow_action
+                && action.id.as_deref().unwrap_or(column.field.as_str()) == action_id
+            {
+                return Some(LocatedReportWorkflowAction {
+                    action,
+                    fallback_field: &column.field,
+                });
+            }
+        }
+    }
+    block
+        .card
+        .as_ref()
+        .and_then(|card| locate_card_workflow_action(card, action_id))
+}
+
+fn validate_report_block_workflow_action_ids(
+    block: &ReportBlockDefinition,
+) -> Result<(), ReportServiceError> {
+    let mut ids = Vec::new();
+    if let Some(table) = &block.table {
+        ids.extend(table.actions.iter().map(|action| {
+            action
+                .workflow_action
+                .id
+                .as_deref()
+                .unwrap_or(action.id.as_str())
+        }));
+        ids.extend(table.columns.iter().filter_map(|column| {
+            column
+                .workflow_action
+                .as_ref()
+                .map(|action| action.id.as_deref().unwrap_or(column.field.as_str()))
+        }));
+    }
+    if let Some(card) = &block.card {
+        collect_card_workflow_action_ids(card, &mut ids);
+    }
+    let mut unique = HashSet::new();
+    for id in ids {
+        if !unique.insert(id) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' has duplicate workflow action ID '{}'",
+                block.id, id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_card_workflow_action_ids<'a>(card: &'a ReportCardConfig, ids: &mut Vec<&'a str>) {
+    for group in &card.groups {
+        for field in &group.fields {
+            if let Some(action) = &field.workflow_action {
+                ids.push(action.id.as_deref().unwrap_or(field.field.as_str()));
+            }
+            if let Some(subcard) = field.subcard.as_deref() {
+                collect_card_workflow_action_ids(subcard, ids);
+            }
+        }
+    }
+}
+
+fn locate_card_workflow_action<'a>(
+    card: &'a ReportCardConfig,
+    action_id: &str,
+) -> Option<LocatedReportWorkflowAction<'a>> {
+    for group in &card.groups {
+        for field in &group.fields {
+            if let Some(action) = &field.workflow_action
+                && action.id.as_deref().unwrap_or(field.field.as_str()) == action_id
+            {
+                return Some(LocatedReportWorkflowAction {
+                    action,
+                    fallback_field: &field.field,
+                });
+            }
+            if let Some(subcard) = field.subcard.as_deref()
+                && let Some(action) = locate_card_workflow_action(subcard, action_id)
+            {
+                return Some(action);
+            }
+        }
+    }
+    None
+}
+
+fn ensure_report_workflow_action_enabled(
+    action: &ReportWorkflowActionConfig,
+    row: &Value,
+) -> Result<(), ReportServiceError> {
+    let evaluate = |condition: &runtara_dsl::ConditionExpression| {
+        runtara_dsl::condition_eval::evaluate_condition(condition, row).map_err(|error| {
+            ReportServiceError::Validation(format!(
+                "Failed to evaluate report workflow action condition: {error}"
+            ))
+        })
+    };
+    if let Some(condition) = &action.visible_when
+        && !evaluate(condition)?
+    {
+        return Err(ReportServiceError::Conflict(
+            "Workflow action is not visible for the submitted row".to_string(),
+        ));
+    }
+    if let Some(condition) = &action.hidden_when
+        && evaluate(condition)?
+    {
+        return Err(ReportServiceError::Conflict(
+            "Workflow action is hidden for the submitted row".to_string(),
+        ));
+    }
+    if let Some(condition) = &action.disabled_when
+        && evaluate(condition)?
+    {
+        return Err(ReportServiceError::Conflict(
+            "Workflow action is disabled for the submitted row".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_report_workflow_action_context(
+    action: &ReportWorkflowActionConfig,
+    fallback_field: &str,
+    trigger: &ExecuteReportWorkflowActionTrigger,
+) -> Value {
+    let context = match action.context.mode {
+        ReportWorkflowActionContextMode::Row => trigger.row.clone(),
+        ReportWorkflowActionContextMode::Field => trigger
+            .row
+            .as_object()
+            .and_then(|row| row.get(action.context.field.as_deref().unwrap_or(fallback_field)))
+            .cloned()
+            .unwrap_or(Value::Null),
+        ReportWorkflowActionContextMode::Value => trigger.value.clone().unwrap_or(Value::Null),
+        ReportWorkflowActionContextMode::Selection => Value::Array(trigger.selected_rows.clone()),
+    };
+    match action.context.input_key.as_deref() {
+        Some(input_key) => Value::Object(serde_json::Map::from_iter([(
+            input_key.to_string(),
+            context,
+        )])),
+        None => context,
+    }
+}
+
+struct ObservedReportExecution {
+    status: String,
+    output: Option<Value>,
+    error: Option<String>,
+    duration_ms: Option<u64>,
+}
+
+async fn observe_report_execution(
+    runtime: &RuntimeClient,
+    instance_id: &str,
+    max_wait: StdDuration,
+) -> Result<Option<ObservedReportExecution>, ReportServiceError> {
+    let started = Instant::now();
+    loop {
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        match runtime
+            .poll_until_terminal(instance_id, StdDuration::from_millis(25), remaining)
+            .await
+        {
+            Ok(TerminalOutcome::Completed(output)) => {
+                return Ok(Some(ObservedReportExecution {
+                    status: "completed".to_string(),
+                    output: output.output,
+                    error: output.error,
+                    duration_ms: output.duration_ms,
+                }));
+            }
+            Ok(TerminalOutcome::Failed(output)) => {
+                return Ok(Some(ObservedReportExecution {
+                    status: "failed".to_string(),
+                    output: output.output,
+                    error: output.error,
+                    duration_ms: output.duration_ms,
+                }));
+            }
+            Ok(TerminalOutcome::Cancelled(output)) => {
+                return Ok(Some(ObservedReportExecution {
+                    status: "cancelled".to_string(),
+                    output: output.output,
+                    error: output.error,
+                    duration_ms: output.duration_ms,
+                }));
+            }
+            Ok(TerminalOutcome::TimedOut(output)) => {
+                return Ok(Some(ObservedReportExecution {
+                    status: "timeout".to_string(),
+                    output: output.output,
+                    error: output.error,
+                    duration_ms: output.duration_ms,
+                }));
+            }
+            Ok(TerminalOutcome::GaveUp) => return Ok(None),
+            Err(error) if runtime_instance_not_ready(&error) => {
+                tokio::time::sleep(StdDuration::from_millis(25)).await;
+            }
+            Err(error) => {
+                return Err(ReportServiceError::Database(format!(
+                    "Failed to observe report workflow execution: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn runtime_instance_not_ready(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::InstanceNotFound(_))
+        || error.to_string().to_ascii_lowercase().contains("not found")
 }
 
 fn collect_card_workflow_actions<'a>(
@@ -5387,6 +5861,9 @@ fn navigation_stage_block_source<'a>(
 
 fn resolve_navigation_block_value(result: &ReportBlockRenderResult, field: &str) -> Option<Value> {
     let data = result.data.as_ref()?.as_object()?;
+    if let Some(row) = data.get("row").and_then(Value::as_object) {
+        return row.get(field).cloned();
+    }
     let first_row = data.get("rows")?.as_array()?.first()?;
     if let Some(row) = first_row.as_object() {
         return row.get(field).cloned();
@@ -10230,6 +10707,105 @@ mod tests {
 
     fn row_condition_expr(value: Value) -> runtara_dsl::ConditionExpression {
         serde_json::from_value(value).expect("valid ConditionExpression JSON")
+    }
+
+    #[test]
+    fn report_workflow_action_uses_stable_id_and_server_side_context_mapping() {
+        let mut block = test_block("case_card");
+        block.block_type = ReportBlockType::Card;
+        block.card = Some(
+            serde_json::from_value(json!({
+                "groups": [{
+                    "id": "actions",
+                    "fields": [{
+                        "field": "stage",
+                        "kind": "workflow_button",
+                        "workflowAction": {
+                            "id": "advance_stage",
+                            "workflowId": "advance_case",
+                            "context": {"mode": "field", "field": "id", "inputKey": "caseId"}
+                        }
+                    }]
+                }]
+            }))
+            .unwrap(),
+        );
+
+        let located = locate_report_workflow_action(&block, "advance_stage").unwrap();
+        assert_eq!(located.action.workflow_id, "advance_case");
+        assert_eq!(located.fallback_field, "stage");
+        let context = resolve_report_workflow_action_context(
+            located.action,
+            located.fallback_field,
+            &ExecuteReportWorkflowActionTrigger {
+                row: json!({"id": "case-123", "stage": "intake"}),
+                value: Some(json!("intake")),
+                field: Some("stage".to_string()),
+                selected_rows: vec![],
+            },
+        );
+        assert_eq!(context, json!({"caseId": "case-123"}));
+    }
+
+    #[test]
+    fn report_workflow_action_rejects_disabled_rows() {
+        let action: ReportWorkflowActionConfig = serde_json::from_value(json!({
+            "id": "advance_stage",
+            "workflowId": "advance_case",
+            "disabledWhen": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    {"valueType": "reference", "value": "stage"},
+                    {"valueType": "immediate", "value": "published"}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let error = ensure_report_workflow_action_enabled(
+            &action,
+            &json!({"id": "case-123", "stage": "published"}),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ReportServiceError::Conflict(_)));
+    }
+
+    #[test]
+    fn navigation_stage_value_supports_card_rows() {
+        let result = ReportBlockRenderResult {
+            block_type: ReportBlockType::Card,
+            status: ReportBlockStatus::Ready,
+            title: None,
+            data: Some(json!({"row": {"id": "case-123", "stage": "review"}})),
+            error: None,
+        };
+
+        assert_eq!(
+            resolve_navigation_block_value(&result, "stage"),
+            Some(json!("review"))
+        );
+    }
+
+    #[test]
+    fn duplicate_workflow_action_ids_are_rejected_within_a_block() {
+        let mut block = test_block("case_actions");
+        block.table = Some(
+            serde_json::from_value(json!({
+                "columns": [
+                    {"field": "advance", "workflowAction": {"id": "advance", "workflowId": "one"}},
+                    {"field": "publish", "workflowAction": {"id": "advance", "workflowId": "two"}}
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let error = validate_report_block_workflow_action_ids(&block).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate workflow action ID 'advance'")
+        );
     }
 
     #[test]

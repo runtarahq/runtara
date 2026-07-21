@@ -2133,6 +2133,54 @@ export interface ErrorStep {
   severity?: null | ErrorSeverity;
 }
 
+export interface ExecuteReportWorkflowActionRequest {
+  render: ReportRenderRequest;
+  trigger?: ExecuteReportWorkflowActionTrigger;
+  /**
+   * Bounded observation window. This never changes the workflow's own
+   * timeout and never cancels an execution when the window elapses.
+   * @format int64
+   * @min 0
+   */
+  waitMs?: number | null;
+}
+
+export interface ExecuteReportWorkflowActionResponse {
+  canonicalViewId?: string | null;
+  completedWithinWait: boolean;
+  execution: ReportWorkflowActionExecution;
+  /**
+   * True when execution reached a terminal state but the report could not
+   * be rendered in the same response. The execution status remains
+   * authoritative and the client should perform one normal refresh.
+   */
+  refreshRequired?: boolean;
+  render?: null | ReportRenderResponse;
+  reportError?: string | null;
+  /**
+   * @format int64
+   * @min 0
+   */
+  retryAfterMs?: number | null;
+}
+
+export interface ExecuteReportWorkflowActionTrigger {
+  /**
+   * Enclosing column / card field. Used as the default for
+   * `context.mode=field` when the action does not configure a field.
+   */
+  field?: string | null;
+  /**
+   * Rendered row that owns the launcher. The server evaluates visibility,
+   * disabled state, and `context.mode=row|field` against this value.
+   */
+  row?: any;
+  /** Current selected rows used by table-wide selection actions. */
+  selectedRows?: any[];
+  /** Cell / card-field value used by `context.mode=value`. */
+  value?: any;
+}
+
 export interface ExecuteWorkflowRequest {
   /**
    * When true, enables debug mode: execution pauses at steps with breakpoints.
@@ -4553,6 +4601,12 @@ export interface ReportWorkflowActionConfig {
    * for rows that match this condition.
    */
   hiddenWhen?: null | ConditionExpression;
+  /**
+   * Stable identity of this launcher within its report block. New report
+   * definitions should always set this; legacy definitions are addressed by
+   * their enclosing table action / column / card field key.
+   */
+  id?: string | null;
   label?: string | null;
   reloadBlock?: boolean;
   runningLabel?: string | null;
@@ -4571,6 +4625,21 @@ export interface ReportWorkflowActionContext {
   field?: string | null;
   inputKey?: string | null;
   mode?: ReportWorkflowActionContextMode;
+}
+
+export interface ReportWorkflowActionExecution {
+  /**
+   * @format int64
+   * @min 0
+   */
+  durationMs?: number | null;
+  error?: string | null;
+  instanceId: string;
+  output?: any;
+  status: string;
+  /** @format int32 */
+  version: number;
+  workflowId: string;
 }
 
 export interface Schema {
@@ -7682,6 +7751,29 @@ export class Api<
         path: `/api/runtime/rate-limits`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags reports-controller
+     * @name ExecuteReportWorkflowAction
+     * @request POST:/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute
+     */
+    executeReportWorkflowAction: (
+      reportId: string,
+      blockId: string,
+      actionId: string,
+      data: ExecuteReportWorkflowActionRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ExecuteReportWorkflowActionResponse, void>({
+        path: `/api/runtime/reports/${reportId}/blocks/${blockId}/workflow-actions/${actionId}/execute`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),

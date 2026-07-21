@@ -1,14 +1,17 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Extension,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::api::dto::reports::*;
 use crate::api::repositories::object_model::ObjectStoreManager;
@@ -281,6 +284,179 @@ pub async fn render_report(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
+    params(
+        ("report_id" = String, Path, description = "Report identifier or slug"),
+        ("block_id" = String, Path, description = "Origin report block"),
+        ("action_id" = String, Path, description = "Stable workflow action identity")
+    ),
+    request_body = ExecuteReportWorkflowActionRequest,
+    responses(
+        (status = 200, description = "Workflow completed within the observation window", body = ExecuteReportWorkflowActionResponse),
+        (status = 202, description = "Workflow remains queued or running", body = ExecuteReportWorkflowActionResponse),
+        (status = 400, description = "Invalid report action request"),
+        (status = 403, description = "Insufficient report or workflow permissions"),
+        (status = 409, description = "Action is stale, inaccessible, hidden, disabled, or conflicts with the idempotency key")
+    ),
+    tag = "reports-controller"
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_report_workflow_action(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    Extension(auth_context): Extension<AuthContext>,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    State(engine): State<Arc<ExecutionEngine>>,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(valkey): State<Option<redis::aio::ConnectionManager>>,
+    Path((report_id, block_id, action_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ExecuteReportWorkflowActionRequest>,
+) -> Result<(StatusCode, Json<ExecuteReportWorkflowActionResponse>), (StatusCode, Json<Value>)> {
+    if let Err(denial) = crate::middleware::authorization::require_permission(
+        crate::auth::membership_policy(),
+        auth_context.role,
+        crate::authz::Permission::ReportRead,
+    ) {
+        return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
+    }
+    let idempotency_key = headers
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 200)
+        .ok_or_else(|| {
+            error_response(ReportServiceError::Validation(
+                "Idempotency-Key header is required and must be at most 200 characters".to_string(),
+            ))
+        })?;
+    let identity = format!("{tenant_id}:{report_id}:{block_id}:{action_id}:{idempotency_key}");
+    let instance_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, identity.as_bytes());
+    let idempotent_replay = reserve_report_action_idempotency(
+        valkey,
+        &identity,
+        report_action_request_fingerprint(&request),
+    )
+    .await?;
+
+    let service =
+        ReportService::new(pool, manager, connections).with_runtime(engine, runtime_client);
+    let started_at = Instant::now();
+    match service
+        .execute_report_workflow_action(
+            &tenant_id,
+            &report_id,
+            &block_id,
+            &action_id,
+            request,
+            instance_id,
+            idempotent_replay,
+        )
+        .await
+    {
+        Ok(response) => {
+            let status = if response.completed_within_wait {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            };
+            tracing::info!(
+                tenant_id,
+                report_id,
+                block_id,
+                action_id,
+                instance_id = %response.execution.instance_id,
+                workflow_id = %response.execution.workflow_id,
+                workflow_status = %response.execution.status,
+                completed_within_wait = response.completed_within_wait,
+                refresh_required = response.refresh_required,
+                idempotent_replay,
+                endpoint_duration_ms = started_at.elapsed().as_millis() as u64,
+                workflow_duration_ms = response.execution.duration_ms,
+                "Executed report workflow action"
+            );
+            Ok((status, Json(response)))
+        }
+        Err(error) => {
+            tracing::warn!(
+                tenant_id,
+                report_id,
+                block_id,
+                action_id,
+                %instance_id,
+                idempotent_replay,
+                endpoint_duration_ms = started_at.elapsed().as_millis() as u64,
+                error = %error,
+                "Report workflow action failed"
+            );
+            Err(error_response(error))
+        }
+    }
+}
+
+fn report_action_request_fingerprint(request: &ExecuteReportWorkflowActionRequest) -> String {
+    let bytes = serde_json::to_vec(&json!({
+        "trigger": &request.trigger,
+        "render": &request.render,
+    }))
+    .unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
+}
+
+async fn reserve_report_action_idempotency(
+    valkey: Option<redis::aio::ConnectionManager>,
+    identity: &str,
+    fingerprint: String,
+) -> Result<bool, (StatusCode, Json<Value>)> {
+    let Some(mut connection) = valkey else {
+        // Queueing itself will report a runtime configuration error when the
+        // trigger stream is unavailable. Deterministic instance IDs still
+        // protect deployments whose trigger stream is configured separately.
+        return Ok(false);
+    };
+    let key = format!(
+        "report_workflow_action:{}",
+        hex::encode(Sha256::digest(identity.as_bytes()))
+    );
+    let inserted: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg(&fingerprint)
+        .arg("NX")
+        .arg("EX")
+        .arg(600)
+        .query_async(&mut connection)
+        .await
+        .map_err(|error| {
+            error_response(ReportServiceError::Database(format!(
+                "Failed to reserve report workflow action idempotency key: {error}"
+            )))
+        })?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let existing: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .map_err(|error| {
+            error_response(ReportServiceError::Database(format!(
+                "Failed to read report workflow action idempotency key: {error}"
+            )))
+        })?;
+    if existing
+        .as_deref()
+        .is_some_and(|value| value != fingerprint)
+    {
+        return Err(error_response(ReportServiceError::Conflict(
+            "Idempotency-Key was already used with a different report action payload".to_string(),
+        )));
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn get_report_block_data(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
@@ -508,5 +684,45 @@ fn error_response(error: ReportServiceError) -> (StatusCode, Json<Value>) {
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "message": message })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn execute_request(wait_ms: u64, stage: &str) -> ExecuteReportWorkflowActionRequest {
+        ExecuteReportWorkflowActionRequest {
+            trigger: ExecuteReportWorkflowActionTrigger {
+                row: json!({"id": "case-123", "stage": stage}),
+                value: Some(json!(stage)),
+                field: Some("stage".to_string()),
+                selected_rows: vec![],
+            },
+            render: ReportRenderRequest {
+                filters: HashMap::new(),
+                view_id: Some(stage.to_string()),
+                blocks: None,
+                timezone: Some("Europe/Warsaw".to_string()),
+            },
+            wait_ms: Some(wait_ms),
+        }
+    }
+
+    #[test]
+    fn report_action_fingerprint_ignores_observation_window() {
+        assert_eq!(
+            report_action_request_fingerprint(&execute_request(100, "intake")),
+            report_action_request_fingerprint(&execute_request(5_000, "intake"))
+        );
+    }
+
+    #[test]
+    fn report_action_fingerprint_changes_with_semantic_payload() {
+        assert_ne!(
+            report_action_request_fingerprint(&execute_request(2_000, "intake")),
+            report_action_request_fingerprint(&execute_request(2_000, "review"))
+        );
     }
 }

@@ -193,6 +193,10 @@ pub struct QueueRequest<'a> {
     pub debug: bool,
     pub correlation_id: Option<String>,
     pub trigger_source: TriggerSource,
+    /// Optional caller-provided identity for idempotent queueing. Environment
+    /// deduplicates starts by instance ID, so retries can safely republish the
+    /// trigger without creating a second execution history entry.
+    pub instance_id: Option<Uuid>,
 }
 
 /// Result of queuing an execution.
@@ -504,7 +508,7 @@ impl ExecutionEngine {
         })?;
 
         // 6. Generate instance ID
-        let instance_id = Uuid::new_v4();
+        let instance_id = req.instance_id.unwrap_or_else(Uuid::new_v4);
 
         // 7. Build TriggerEvent appropriate to the source.
         //
@@ -1357,6 +1361,7 @@ impl ExecutionEngine {
             trigger_source: TriggerSource::Replay {
                 original_instance_id: original_instance_id.to_string(),
             },
+            instance_id: None,
         })
         .await
     }

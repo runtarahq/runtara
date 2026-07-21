@@ -1894,6 +1894,7 @@ pub async fn execute_workflow_handler(
             debug,
             correlation_id: None,
             trigger_source: TriggerSource::HttpApi,
+            instance_id: None,
         })
         .await
     {

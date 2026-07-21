@@ -41,6 +41,7 @@ use runtime_client::RuntimeClient;
     paths(
         // Reports endpoints
         api::handlers::reports::edit_report,
+        api::handlers::reports::execute_report_workflow_action,
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         // Workflow endpoints (refactored)
@@ -445,6 +446,8 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ValidateReportResponse,
             runtara_report_dsl::ReportValidationIssue,
             runtara_report_dsl::ReportRenderRequest,
+            runtara_report_dsl::ExecuteReportWorkflowActionTrigger,
+            runtara_report_dsl::ExecuteReportWorkflowActionRequest,
             runtara_report_dsl::ReportPreviewRequest,
             runtara_report_dsl::ReportFilterOptionsRequest,
             runtara_report_dsl::ReportLookupOptionsRequest,
@@ -466,6 +469,8 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ReportTableSearchRequest,
             runtara_report_dsl::ReportPageRequest,
             runtara_report_dsl::ReportRenderResponse,
+            runtara_report_dsl::ReportWorkflowActionExecution,
+            runtara_report_dsl::ExecuteReportWorkflowActionResponse,
             runtara_report_dsl::ReportRenderMetadata,
             runtara_report_dsl::ReportViewNavigationState,
             runtara_report_dsl::ReportViewGroupState,
@@ -1545,6 +1550,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
             post(api::handlers::reports::get_report_block_data),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
+            post(api::handlers::reports::execute_report_workflow_action),
         )
         .route(
             "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
