@@ -42,6 +42,11 @@ export type {
   ReportViewDefinition,
   ReportViewBreadcrumb,
   ReportTitleFromBlock,
+  ReportViewGroupDefinition,
+  ReportViewNavigationMode,
+  ReportViewGroupAccess,
+  ReportViewStageDefinition,
+  ReportViewStageSource,
   // Filters
   ReportFilterDefinition,
   ReportFilterType,

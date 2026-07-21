@@ -127,6 +127,13 @@ pub struct ReportDefinition {
     pub layout: ReportGridLayoutNode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ReportViewDefinition>,
+    /// Optional navigation presentations over named views. A view may belong
+    /// to at most one group so the viewer always has one unambiguous sibling
+    /// navigation model. `tabs` groups expose every member; `stages` groups
+    /// resolve a persisted current stage and can restrict access to completed
+    /// stages plus the current one.
+    #[serde(default, rename = "viewGroups", skip_serializing_if = "Vec::is_empty")]
+    pub view_groups: Vec<ReportViewGroupDefinition>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -172,6 +179,85 @@ pub struct ReportViewDefinition {
     /// flow as the main report.
     #[serde(default = "default_root_grid")]
     pub layout: ReportGridLayoutNode,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportViewNavigationMode {
+    Tabs,
+    Stages,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportViewGroupAccess {
+    #[default]
+    All,
+    ThroughCurrent,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewStageDefinition {
+    #[serde(rename = "viewId")]
+    pub view_id: String,
+    /// Persisted stage value that selects this view (for example `review`).
+    pub value: String,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReportViewStageSource {
+    Filter {
+        #[serde(rename = "filterId")]
+        filter_id: String,
+    },
+    Block {
+        #[serde(rename = "blockId")]
+        block_id: String,
+        field: String,
+    },
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewGroupDefinition {
+    pub id: String,
+    pub mode: ReportViewNavigationMode,
+    /// Ordered view ids for `mode=tabs`.
+    #[serde(default, rename = "viewIds", skip_serializing_if = "Vec::is_empty")]
+    pub view_ids: Vec<String>,
+    /// Ordered persisted-value/view pairs for `mode=stages`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ReportViewStageDefinition>,
+    #[serde(
+        default,
+        rename = "currentFrom",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_from: Option<ReportViewStageSource>,
+    #[serde(default, skip_serializing_if = "is_default_view_group_access")]
+    pub access: ReportViewGroupAccess,
+    #[serde(default, rename = "showPreviousNext", skip_serializing_if = "is_false")]
+    pub show_previous_next: bool,
+    #[serde(
+        default,
+        rename = "followCurrentOnAdvance",
+        skip_serializing_if = "is_false"
+    )]
+    pub follow_current_on_advance: bool,
+}
+
+fn is_default_view_group_access(value: &ReportViewGroupAccess) -> bool {
+    *value == ReportViewGroupAccess::All
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

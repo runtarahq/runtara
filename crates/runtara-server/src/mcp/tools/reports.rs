@@ -525,6 +525,7 @@ fn report_authoring_schema() -> Value {
             "definitionVersion": 1,
             "layout": "Mandatory single root grid (Phase 10). Every block must live inside its items[]. The root grid has a stable id (default 'root'), optional title/description, and required columns/items. Nested grids carry the legacy 'grid' type tag; the root grid omits it because the field is typed directly.",
             "views": "Optional named report views for master/detail navigation. Each view has an id, optional title/titleFrom/titleFromBlock, parentViewId + clearFiltersOnBack for generated breadcrumbs, optional manual breadcrumb override, and its own root-grid layout.",
+            "viewGroups": "Optional sibling navigation over named views. mode='tabs' uses ordered viewIds. mode='stages' uses ordered {viewId,value} stages plus currentFrom={type:'filter',filterId} or {type:'block',blockId,field}; access='through_current' keeps future stages unavailable. showPreviousNext and followCurrentOnAdvance control stage navigation behavior.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
@@ -539,6 +540,8 @@ fn report_authoring_schema() -> Value {
                 "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
                 "Use navigate_view with set_filter for master/detail navigation, e.g. row click sets case_id and opens the detail view. Omit navigate_view for inline dependent content.",
                 "For nested detail navigation, set parentViewId on each child view and clearFiltersOnBack to the filters that should be cleared when returning to the parent; breadcrumb can still be supplied manually as an override.",
+                "For peer detail pages, define a viewGroups entry with mode='tabs' and ordered viewIds. Members must share the same parentViewId.",
+                "For ordered workflows, define a viewGroups entry with mode='stages', ordered stages, currentFrom, and access='through_current'. Use a non-lazy block currentFrom when the persisted stage lives on the selected record.",
                 "For navigation-driven filters (set by row-click), mark them strictWhenReferenced=true so detail-view blocks render an explicit 'filter not set' empty state instead of silently falling back to an unfiltered query when someone hits the detail URL without the filter populated.",
                 "Use showWhen on layout nodes or blocks to show dependent content only after a filter is selected.",
                 "Keep exploration governed: only expose dimensions and measures declared in datasets and report blocks/filters/interactions that the report author intentionally configured."
@@ -579,9 +582,11 @@ fn report_authoring_schema() -> Value {
                 "filters": [{"id": "case_id", "label": "Case", "type": "text", "strictWhenReferenced": true}],
                 "views": [
                     {"id": "list", "title": "Review cases", "layout": {"id": "view_list_root", "columns": 1, "items": [{"id": "view_list_root_i0", "child": {"id": "cases_node", "type": "block", "blockId": "cases"}}]}},
-                    {"id": "detail", "titleFrom": "filters.case_id", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": {"id": "view_detail_root", "columns": 1, "items": [{"id": "view_detail_root_i0", "child": {"id": "case_summary_node", "type": "block", "blockId": "case_summary"}}]}}
+                    {"id": "summary", "title": "Summary", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": {"id": "view_summary_root", "columns": 1, "items": [{"id": "view_summary_root_i0", "child": {"id": "case_summary_node", "type": "block", "blockId": "case_summary"}}]}},
+                    {"id": "history", "title": "History", "parentViewId": "list", "clearFiltersOnBack": ["case_id"], "layout": {"id": "view_history_root", "columns": 1, "items": []}}
                 ],
-                "interaction": {"id": "open_case", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.case_id"}, {"type": "navigate_view", "viewId": "detail"}]}
+                "viewGroups": [{"id": "case_details", "mode": "tabs", "viewIds": ["summary", "history"]}],
+                "interaction": {"id": "open_case", "trigger": {"event": "row_click"}, "actions": [{"type": "set_filter", "filterId": "case_id", "valueFrom": "datum.case_id"}, {"type": "navigate_view", "viewId": "summary"}]}
             }
         },
         "layoutGuidance": {
