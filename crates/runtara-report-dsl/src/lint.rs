@@ -51,6 +51,7 @@ const ALLOWED_ROOT_KEYS: &[&str] = &[
     "filters",
     "datasets",
     "views",
+    "viewGroups",
     "layout",
     "interactions",
     "defaultCurrency",

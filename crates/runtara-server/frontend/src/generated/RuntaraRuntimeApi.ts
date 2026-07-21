@@ -123,6 +123,10 @@ export type ReportWorkflowActionContextMode =
   | "value"
   | "selection";
 
+export type ReportViewNavigationMode = "tabs" | "stages";
+
+export type ReportViewGroupAccess = "all" | "through_current";
+
 export type ReportTableColumnType =
   | "value"
   | "chart"
@@ -2162,7 +2166,15 @@ export interface ExecutionGraph {
    * Not used in compilation or execution.
    */
   edges?: any;
-  /** ID of the entry point step (step with no incoming edges) */
+  /**
+   * ID of the entry point step (step with no incoming edges)
+   *
+   * A workflow that has not been authored yet carries no entry point, so an
+   * explicit `null` deserializes to an empty string. That lets a stepless
+   * graph parse and reach validation, which reports the real problem,
+   * instead of failing here with a type error. The field stays required so
+   * the published JSON Schema is unchanged.
+   */
   entryPoint: string;
   /** Ordered list of step transitions defining control flow */
   executionPlan?: ExecutionPlanEdge[];
@@ -3720,6 +3732,14 @@ export interface ReportDefinition {
    * arrays into a wrapping root grid before deserialization.
    */
   layout?: ReportGridLayoutNode;
+  /**
+   * Optional navigation presentations over named views. A view may belong
+   * to at most one group so the viewer always has one unambiguous sibling
+   * navigation model. `tabs` groups expose every member; `stages` groups
+   * resolve a persisted current stage and can restrict access to completed
+   * stages plus the current one.
+   */
+  viewGroups?: ReportViewGroupDefinition[];
   views?: ReportViewDefinition[];
 }
 
@@ -4440,6 +4460,36 @@ export interface ReportViewDefinition {
    */
   titleFromBlock?: null | ReportTitleFromBlock;
 }
+
+export interface ReportViewGroupDefinition {
+  access?: ReportViewGroupAccess;
+  currentFrom?: null | ReportViewStageSource;
+  followCurrentOnAdvance?: boolean;
+  id: string;
+  mode: ReportViewNavigationMode;
+  showPreviousNext?: boolean;
+  /** Ordered persisted-value/view pairs for `mode=stages`. */
+  stages?: ReportViewStageDefinition[];
+  /** Ordered view ids for `mode=tabs`. */
+  viewIds?: string[];
+}
+
+export interface ReportViewStageDefinition {
+  /** Persisted stage value that selects this view (for example `review`). */
+  value: string;
+  viewId: string;
+}
+
+export type ReportViewStageSource =
+  | {
+      filterId: string;
+      type: "filter";
+    }
+  | {
+      blockId: string;
+      field: string;
+      type: "block";
+    };
 
 /**
  * Visibility condition for a report block or layout node. Evaluated

@@ -313,11 +313,12 @@ fn salvage_definition(
         None => runtara_report_dsl::types::default_root_grid(),
     };
 
-    // Blocks, views, filters, datasets: deserialize each element on its own so
+    // Blocks, views, view groups, filters, datasets: deserialize each element on its own so
     // one incompatible entry drops in isolation rather than taking the whole
     // collection (and the whole report) down with it.
     let blocks = salvage_vec(object.get("blocks"), "block", &mut dropped);
     let views = salvage_vec(object.get("views"), "view", &mut dropped);
+    let view_groups = salvage_vec(object.get("viewGroups"), "view group", &mut dropped);
     let filters = salvage_vec(object.get("filters"), "filter", &mut dropped);
     let datasets = salvage_vec(object.get("datasets"), "dataset", &mut dropped);
 
@@ -325,6 +326,7 @@ fn salvage_definition(
         definition_version,
         layout,
         views,
+        view_groups,
         filters,
         datasets,
         blocks,
@@ -382,6 +384,7 @@ fn empty_definition(definition_version: i32) -> ReportDefinition {
         definition_version,
         layout: runtara_report_dsl::types::default_root_grid(),
         views: vec![],
+        view_groups: vec![],
         filters: vec![],
         datasets: vec![],
         blocks: vec![],

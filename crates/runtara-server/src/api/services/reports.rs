@@ -1242,6 +1242,13 @@ impl ReportService {
             }
         }
         validate_report_view_navigation(&definition.views, &view_ids, &filter_ids)?;
+        validate_report_view_groups(
+            &definition.view_groups,
+            &definition.views,
+            &view_ids,
+            &filter_ids,
+            &definition.blocks,
+        )?;
 
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
@@ -4253,6 +4260,188 @@ fn validate_report_view_navigation(
                 )));
             }
             current = parent;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_report_view_groups(
+    groups: &[ReportViewGroupDefinition],
+    views: &[ReportViewDefinition],
+    view_ids: &HashSet<String>,
+    filter_ids: &HashSet<String>,
+    blocks: &[ReportBlockDefinition],
+) -> Result<(), ReportServiceError> {
+    let views_by_id = views
+        .iter()
+        .map(|view| (view.id.as_str(), view))
+        .collect::<HashMap<_, _>>();
+    let blocks_by_id = blocks
+        .iter()
+        .map(|block| (block.id.as_str(), block))
+        .collect::<HashMap<_, _>>();
+    let mut group_ids = HashSet::new();
+    let mut grouped_views = HashMap::<&str, &str>::new();
+
+    for group in groups {
+        if group.id.trim().is_empty() {
+            return Err(ReportServiceError::Validation(
+                "Report view group IDs cannot be empty".to_string(),
+            ));
+        }
+        if !group_ids.insert(group.id.as_str()) {
+            return Err(ReportServiceError::Validation(format!(
+                "Duplicate report view group ID '{}'",
+                group.id
+            )));
+        }
+
+        let members = match group.mode {
+            ReportViewNavigationMode::Tabs => {
+                if group.view_ids.len() < 2 {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report tab group '{}' must include at least two viewIds",
+                        group.id
+                    )));
+                }
+                if !group.stages.is_empty() || group.current_from.is_some() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report tab group '{}' cannot define stages or currentFrom",
+                        group.id
+                    )));
+                }
+                if group.access != ReportViewGroupAccess::All {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report tab group '{}' must use access='all'",
+                        group.id
+                    )));
+                }
+                group
+                    .view_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            }
+            ReportViewNavigationMode::Stages => {
+                if group.stages.len() < 2 {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report stage group '{}' must include at least two stages",
+                        group.id
+                    )));
+                }
+                if !group.view_ids.is_empty() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report stage group '{}' uses stages, not viewIds",
+                        group.id
+                    )));
+                }
+                let Some(source) = group.current_from.as_ref() else {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report stage group '{}' must define currentFrom",
+                        group.id
+                    )));
+                };
+                validate_report_stage_source(&group.id, source, filter_ids, &blocks_by_id)?;
+
+                let mut values = HashSet::new();
+                for stage in &group.stages {
+                    if stage.value.trim().is_empty() {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Report stage group '{}' has an empty stage value",
+                            group.id
+                        )));
+                    }
+                    if !values.insert(stage.value.as_str()) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Report stage group '{}' has duplicate stage value '{}'",
+                            group.id, stage.value
+                        )));
+                    }
+                }
+                group
+                    .stages
+                    .iter()
+                    .map(|stage| stage.view_id.as_str())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let mut member_ids = HashSet::new();
+        let mut parent_view_id: Option<Option<&str>> = None;
+        for view_id in members {
+            if !member_ids.insert(view_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view group '{}' references view '{}' more than once",
+                    group.id, view_id
+                )));
+            }
+            if !view_ids.contains(view_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view group '{}' references unknown view '{}'",
+                    group.id, view_id
+                )));
+            }
+            if let Some(existing_group) = grouped_views.insert(view_id, group.id.as_str()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report view '{}' belongs to both view groups '{}' and '{}'",
+                    view_id, existing_group, group.id
+                )));
+            }
+
+            let view_parent = views_by_id
+                .get(view_id)
+                .and_then(|view| view.parent_view_id.as_deref());
+            if let Some(expected_parent) = parent_view_id {
+                if expected_parent != view_parent {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report view group '{}' members must share the same parentViewId",
+                        group.id
+                    )));
+                }
+            } else {
+                parent_view_id = Some(view_parent);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_report_stage_source(
+    group_id: &str,
+    source: &ReportViewStageSource,
+    filter_ids: &HashSet<String>,
+    blocks_by_id: &HashMap<&str, &ReportBlockDefinition>,
+) -> Result<(), ReportServiceError> {
+    match source {
+        ReportViewStageSource::Filter { filter_id } => {
+            if !filter_ids.contains(filter_id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report stage group '{}' currentFrom references unknown filter '{}'",
+                    group_id, filter_id
+                )));
+            }
+        }
+        ReportViewStageSource::Block { block_id, field } => {
+            let Some(block) = blocks_by_id.get(block_id.as_str()) else {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report stage group '{}' currentFrom references unknown block '{}'",
+                    group_id, block_id
+                )));
+            };
+            if block.lazy {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report stage group '{}' currentFrom block '{}' cannot be lazy",
+                    group_id, block_id
+                )));
+            }
+            if field.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Report stage group '{}' currentFrom block field cannot be empty",
+                    group_id
+                )));
+            }
         }
     }
 
@@ -7987,6 +8176,7 @@ mod tests {
             definition_version: 1,
             layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
+            view_groups: vec![],
             filters,
             datasets,
             blocks,
@@ -8264,6 +8454,22 @@ mod tests {
         }
     }
 
+    fn test_tab_group(id: &str, view_ids: &[&str]) -> ReportViewGroupDefinition {
+        ReportViewGroupDefinition {
+            id: id.to_string(),
+            mode: ReportViewNavigationMode::Tabs,
+            view_ids: view_ids
+                .iter()
+                .map(|view_id| (*view_id).to_string())
+                .collect(),
+            stages: vec![],
+            current_from: None,
+            access: ReportViewGroupAccess::All,
+            show_previous_next: false,
+            follow_current_on_advance: false,
+        }
+    }
+
     fn test_dataset() -> ReportDatasetDefinition {
         ReportDatasetDefinition {
             id: "stock_snapshots".to_string(),
@@ -8530,6 +8736,107 @@ mod tests {
         let err = validate_report_view_navigation(&views, &view_ids, &filter_ids).unwrap_err();
 
         assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn report_view_groups_accept_tabs_and_ordered_stages() {
+        let views = vec![
+            test_view("summary", Some("list")),
+            test_view("history", Some("list")),
+            test_view("stage_a", Some("list")),
+            test_view("stage_b", Some("list")),
+        ];
+        let view_ids = views.iter().map(|view| view.id.clone()).collect();
+        let filter_ids = HashSet::from(["stage".to_string()]);
+        let groups = vec![
+            test_tab_group("details", &["summary", "history"]),
+            ReportViewGroupDefinition {
+                id: "approval".to_string(),
+                mode: ReportViewNavigationMode::Stages,
+                view_ids: vec![],
+                stages: vec![
+                    ReportViewStageDefinition {
+                        view_id: "stage_a".to_string(),
+                        value: "A".to_string(),
+                    },
+                    ReportViewStageDefinition {
+                        view_id: "stage_b".to_string(),
+                        value: "B".to_string(),
+                    },
+                ],
+                current_from: Some(ReportViewStageSource::Filter {
+                    filter_id: "stage".to_string(),
+                }),
+                access: ReportViewGroupAccess::ThroughCurrent,
+                show_previous_next: true,
+                follow_current_on_advance: true,
+            },
+        ];
+
+        validate_report_view_groups(&groups, &views, &view_ids, &filter_ids, &[]).unwrap();
+    }
+
+    #[test]
+    fn report_view_groups_reject_duplicate_membership() {
+        let views = vec![
+            test_view("summary", Some("list")),
+            test_view("history", Some("list")),
+            test_view("audit", Some("list")),
+        ];
+        let view_ids = views.iter().map(|view| view.id.clone()).collect();
+        let groups = vec![
+            test_tab_group("primary", &["summary", "history"]),
+            test_tab_group("secondary", &["summary", "audit"]),
+        ];
+
+        let err = validate_report_view_groups(&groups, &views, &view_ids, &HashSet::new(), &[])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("belongs to both view groups"));
+    }
+
+    #[test]
+    fn report_view_groups_reject_lazy_stage_source_block() {
+        let views = vec![
+            test_view("stage_a", Some("list")),
+            test_view("stage_b", Some("list")),
+        ];
+        let view_ids = views.iter().map(|view| view.id.clone()).collect();
+        let mut state_block = test_block("case_state");
+        state_block.lazy = true;
+        let groups = vec![ReportViewGroupDefinition {
+            id: "approval".to_string(),
+            mode: ReportViewNavigationMode::Stages,
+            view_ids: vec![],
+            stages: vec![
+                ReportViewStageDefinition {
+                    view_id: "stage_a".to_string(),
+                    value: "A".to_string(),
+                },
+                ReportViewStageDefinition {
+                    view_id: "stage_b".to_string(),
+                    value: "B".to_string(),
+                },
+            ],
+            current_from: Some(ReportViewStageSource::Block {
+                block_id: "case_state".to_string(),
+                field: "stage".to_string(),
+            }),
+            access: ReportViewGroupAccess::ThroughCurrent,
+            show_previous_next: true,
+            follow_current_on_advance: true,
+        }];
+
+        let err = validate_report_view_groups(
+            &groups,
+            &views,
+            &view_ids,
+            &HashSet::new(),
+            &[state_block],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cannot be lazy"));
     }
 
     // Position-index resolution lives in `runtara-report-dsl::edit_ops`
@@ -8873,6 +9180,7 @@ mod tests {
             definition_version: 1,
             layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
+            view_groups: vec![],
             filters: vec![ReportFilterDefinition {
                 id: "vendor".to_string(),
                 label: "Vendor".to_string(),
@@ -8927,6 +9235,7 @@ mod tests {
                 definition_version: 1,
                 layout: runtara_report_dsl::default_root_grid(),
                 views: vec![],
+                view_groups: vec![],
                 filters: vec![],
                 datasets: vec![dataset.clone()],
                 blocks: vec![],
@@ -8973,6 +9282,7 @@ mod tests {
             definition_version: 1,
             layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
+            view_groups: vec![],
             filters: vec![],
             datasets: vec![dataset],
             blocks: vec![block.clone()],
@@ -9659,6 +9969,7 @@ mod tests {
             definition_version: 1,
             layout: runtara_report_dsl::default_root_grid(),
             views: vec![],
+            view_groups: vec![],
             filters: vec![case_filter],
             datasets: vec![],
             blocks: vec![],
