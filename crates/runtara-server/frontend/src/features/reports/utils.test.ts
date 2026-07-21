@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalConditionToReportVisibility,
   canonicalToLegacyCondition,
+  getCanonicalReportViewTarget,
   getDefaultReportViewTarget,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
@@ -336,6 +337,48 @@ describe('report view navigation', () => {
 
     expect(getDefaultReportViewTarget(stagedDefinition)).toBe('case_flow');
     expect(getDefaultReportViewTarget(reportDefinition)).toBe('a');
+  });
+
+  it('follows an advancing current stage only from the previous current view', () => {
+    const stagedDefinition: ReportDefinition = {
+      ...reportDefinition,
+      viewGroups: [
+        {
+          id: 'case_flow',
+          mode: 'stages',
+          stages: [
+            { viewId: 'a', value: 'A' },
+            { viewId: 'b', value: 'B' },
+            { viewId: 'c', value: 'C' },
+          ],
+          currentFrom: { type: 'filter', filterId: 'stage' },
+          access: 'through_current',
+          followCurrentOnAdvance: true,
+        },
+      ],
+    };
+    const navigation = {
+      requestedViewId: 'b',
+      activeViewId: 'b',
+      group: {
+        id: 'case_flow',
+        mode: 'stages' as const,
+        currentViewId: 'c',
+        accessibleViewIds: ['a', 'b', 'c'],
+      },
+    };
+
+    expect(
+      getCanonicalReportViewTarget(stagedDefinition, 'b', navigation, 'b')
+    ).toBe('c');
+    expect(
+      getCanonicalReportViewTarget(
+        stagedDefinition,
+        'a',
+        { ...navigation, requestedViewId: 'a', activeViewId: 'a' },
+        'b'
+      )
+    ).toBe('a');
   });
 });
 

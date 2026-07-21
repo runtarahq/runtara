@@ -7,6 +7,7 @@ import {
   ReportRowCondition,
   ReportViewBreadcrumb,
   ReportViewDefinition,
+  ReportViewNavigationState,
   ReportVisibilityCondition,
   ReportWorkflowActionConfig,
 } from './types';
@@ -139,6 +140,30 @@ export function getReportViewGroupViewIds(
   return group.mode === 'stages'
     ? (group.stages ?? []).map((stage) => stage.viewId)
     : (group.viewIds ?? []);
+}
+
+export function getCanonicalReportViewTarget(
+  definition: ReportDefinition,
+  requestedViewId: string | null,
+  navigation: ReportViewNavigationState,
+  previousCurrentViewId: string | null
+): string | null {
+  const groupState = navigation.group;
+  const group = (definition.viewGroups ?? []).find(
+    (candidate) => candidate.id === groupState?.id
+  );
+  const currentViewId = groupState?.currentViewId ?? null;
+  if (
+    group?.mode === 'stages' &&
+    group.followCurrentOnAdvance &&
+    previousCurrentViewId &&
+    currentViewId &&
+    currentViewId !== previousCurrentViewId &&
+    requestedViewId === previousCurrentViewId
+  ) {
+    return currentViewId;
+  }
+  return navigation.activeViewId ?? requestedViewId;
 }
 
 export function getReportViewBreadcrumbs(

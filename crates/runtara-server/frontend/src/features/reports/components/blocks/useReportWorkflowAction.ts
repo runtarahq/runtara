@@ -72,9 +72,7 @@ export function useReportWorkflowAction({
 
         if (finalStatus === 'completed') {
           toast.success(action.successMessage ?? 'Workflow completed');
-          if (action.reloadBlock) {
-            await onCompleted?.();
-          }
+          await onCompleted?.();
           return;
         }
 

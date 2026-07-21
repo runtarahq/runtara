@@ -5264,6 +5264,7 @@ fn resolve_report_view_navigation(
 
     let Some(selected_view_id) = selected_view_id else {
         return ReportViewNavigationState {
+            requested_view_id: requested_view_id.map(str::to_string),
             active_view_id: None,
             group: None,
         };
@@ -5277,6 +5278,7 @@ fn resolve_report_view_navigation(
 
     let Some(group) = active_group else {
         return ReportViewNavigationState {
+            requested_view_id: requested_view_id.map(str::to_string),
             active_view_id: Some(selected_view_id.to_string()),
             group: None,
         };
@@ -5285,6 +5287,7 @@ fn resolve_report_view_navigation(
 
     match group.mode {
         ReportViewNavigationMode::Tabs => ReportViewNavigationState {
+            requested_view_id: requested_view_id.map(str::to_string),
             active_view_id: Some(selected_view_id.to_string()),
             group: Some(ReportViewGroupState {
                 id: group.id.clone(),
@@ -5325,6 +5328,7 @@ fn resolve_report_view_navigation(
             };
 
             ReportViewNavigationState {
+                requested_view_id: requested_view_id.map(str::to_string),
                 active_view_id: Some(active_view_id),
                 group: Some(ReportViewGroupState {
                     id: group.id.clone(),

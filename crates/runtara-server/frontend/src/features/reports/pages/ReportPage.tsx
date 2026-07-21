@@ -1,4 +1,12 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   AlertTriangle,
@@ -40,6 +48,7 @@ import {
 import {
   decodeFilterValue,
   encodeFilterValue,
+  getCanonicalReportViewTarget,
   getFilterDefaultValue,
   getDefaultReportViewId,
   getDefaultReportViewTarget,
@@ -61,6 +70,9 @@ const EMPTY_DEFINITION: ReportDefinition = {
   filters: [],
   blocks: [],
 };
+
+const waitForReportState = (milliseconds: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
 /** Unified report page. Same DOM in view and edit modes — toggling `?edit=1`
  *  swaps the header chrome and shows/hides editing affordances inside the
@@ -157,16 +169,50 @@ export function ReportPage() {
     renderRequest,
     Boolean(renderRequest)
   );
+  const responseMatchesRequest =
+    (renderQuery.data?.navigation?.requestedViewId ?? null) ===
+    (renderRequest?.viewId ?? null);
   const resolvedActiveViewId =
-    renderQuery.data?.navigation?.activeViewId ??
+    (responseMatchesRequest
+      ? renderQuery.data?.navigation?.activeViewId
+      : undefined) ??
     requestedViewId ??
     getDefaultReportViewId(definition);
+  const previousStageRef = useRef<{
+    reportId?: string;
+    groupId?: string;
+    currentViewId: string | null;
+  }>({ currentViewId: null });
 
   useEffect(() => {
-    const canonicalViewId = renderQuery.data?.navigation?.activeViewId;
-    if (editing || !canonicalViewId || requestedViewId === canonicalViewId) {
+    const navigation = renderQuery.data?.navigation;
+    const submittedViewId = renderRequest?.viewId ?? null;
+    if (
+      editing ||
+      !navigation ||
+      (navigation.requestedViewId ?? null) !== submittedViewId
+    ) {
       return;
     }
+    const groupId = navigation.group?.id;
+    const previous = previousStageRef.current;
+    const previousCurrentViewId =
+      previous.reportId === reportId && previous.groupId === groupId
+        ? previous.currentViewId
+        : null;
+    const canonicalViewId = getCanonicalReportViewTarget(
+      definition,
+      submittedViewId,
+      navigation,
+      previousCurrentViewId
+    );
+    previousStageRef.current = {
+      reportId,
+      groupId,
+      currentViewId: navigation.group?.currentViewId ?? null,
+    };
+    if (!canonicalViewId || requestedViewId === canonicalViewId) return;
+
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
@@ -176,11 +222,49 @@ export function ReportPage() {
       { replace: true }
     );
   }, [
+    definition,
     editing,
-    renderQuery.data?.navigation?.activeViewId,
+    renderQuery.data?.navigation,
+    renderRequest?.viewId,
+    reportId,
     requestedViewId,
     setSearchParams,
   ]);
+
+  const handleReportActionRefresh = useCallback(async () => {
+    const startingGroup = renderQuery.data?.navigation?.group;
+    const group = (definition.viewGroups ?? []).find(
+      (candidate) => candidate.id === startingGroup?.id
+    );
+    const startingCurrentViewId = startingGroup?.currentViewId;
+    const shouldPoll = Boolean(
+      group?.mode === 'stages' &&
+        group.followCurrentOnAdvance &&
+        startingCurrentViewId &&
+        requestedViewId === startingCurrentViewId
+    );
+    const delays = shouldPoll ? [0, 400, 800, 1600, 2400] : [0];
+    let result: Awaited<ReturnType<typeof renderQuery.refetch>> | undefined;
+
+    for (const delay of delays) {
+      if (delay > 0) await waitForReportState(delay);
+      result = await renderQuery.refetch();
+      const nextCurrentViewId = result.data?.navigation?.group?.currentViewId;
+      if (!shouldPoll) break;
+      if (nextCurrentViewId && nextCurrentViewId !== startingCurrentViewId) {
+        setSearchParams(
+          (current) => {
+            const next = new URLSearchParams(current);
+            next.set('view', nextCurrentViewId);
+            return next;
+          },
+          { replace: true }
+        );
+        break;
+      }
+    }
+    return result;
+  }, [definition.viewGroups, renderQuery, requestedViewId, setSearchParams]);
 
   // Phase 9: in-place block preview for the wizard. Debounced from the
   // live definition so live edits don't pummel the preview API.
@@ -430,7 +514,7 @@ export function ReportPage() {
             variant="outline"
             className="sm:px-4"
             disabled={renderQuery.isFetching}
-            onClick={() => renderQuery.refetch()}
+            onClick={() => void handleReportActionRefresh()}
           >
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
@@ -567,7 +651,7 @@ export function ReportPage() {
           onFilterChange={handleFilterChange}
           onFiltersChange={applyFilterUpdates}
           onNavigateView={handleNavigateView}
-          onRefresh={() => renderQuery.refetch()}
+          onRefresh={handleReportActionRefresh}
         />
       ) : null}
       {saveError ? (

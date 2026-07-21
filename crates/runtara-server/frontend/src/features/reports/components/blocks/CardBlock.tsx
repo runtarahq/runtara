@@ -106,7 +106,7 @@ export function CardBlock({
       row={data.row}
       editingField={editingField}
       onEditField={setEditingField}
-      onCommitField={(field, value, refreshAfterCommit) => {
+      onCommitField={(field, value) => {
         const ctx = getCardWritebackContext(data.row);
         if (ctx) {
           writeback.mutate(
@@ -118,9 +118,7 @@ export function CardBlock({
             },
             {
               onSuccess: () => {
-                if (refreshAfterCommit) {
-                  void onRefresh?.();
-                }
+                void onRefresh?.();
               },
             }
           );
