@@ -5,6 +5,7 @@ import {
   canonicalToLegacyCondition,
   getCanonicalReportViewTarget,
   getDefaultReportViewTarget,
+  getReportLayoutBlockIds,
   getReportViewBreadcrumbs,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
@@ -379,6 +380,60 @@ describe('report view navigation', () => {
         'b'
       )
     ).toBe('a');
+  });
+
+  it('collects only block ids in the selected view layout', () => {
+    const definition: ReportDefinition = {
+      ...reportDefinition,
+      layout: {
+        id: 'root',
+        items: [
+          {
+            id: 'root-summary',
+            child: { id: 'n_summary', type: 'block', blockId: 'summary' },
+          },
+        ],
+      },
+      views: [
+        {
+          id: 'detail',
+          layout: {
+            id: 'detail-root',
+            items: [
+              {
+                id: 'detail-card',
+                child: { id: 'n_card', type: 'block', blockId: 'card' },
+              },
+              {
+                id: 'detail-nested',
+                child: {
+                  id: 'nested',
+                  type: 'grid',
+                  items: [
+                    {
+                      id: 'detail-history',
+                      child: {
+                        id: 'n_history',
+                        type: 'block',
+                        blockId: 'history',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    expect([...getReportLayoutBlockIds(definition, 'detail')]).toEqual([
+      'card',
+      'history',
+    ]);
+    expect([
+      ...getReportLayoutBlockIds({ ...definition, views: [] }, null),
+    ]).toEqual(['summary']);
   });
 });
 
