@@ -296,6 +296,7 @@ async fn start_chat_stream(
             debug: false,
             correlation_id: None,
             trigger_source: TriggerSource::Chat,
+            instance_id: None,
         })
         .await
         .map_err(|e| execution_error_response(&e))?;

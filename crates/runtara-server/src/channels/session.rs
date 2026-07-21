@@ -414,6 +414,7 @@ async fn session_loop(
             debug: false,
             correlation_id: None,
             trigger_source: TriggerSource::Webhook,
+            instance_id: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to queue execution: {:?}", e))?;
@@ -643,6 +644,7 @@ async fn session_loop(
                                 debug: false,
                                 correlation_id: None,
                                 trigger_source: TriggerSource::Webhook,
+                                instance_id: None,
                             }).await {
                                 Ok(result) => {
                                     instance_id = result.instance_id.to_string();

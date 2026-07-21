@@ -342,6 +342,10 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/reports/{report_id}/blocks/{block_id}/data") => ReportRead,
         (
             "POST",
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
+        ) => WorkflowExecute,
+        (
+            "POST",
             "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
         ) => ReportRead,
         ("POST", "/api/runtime/reports/{report_id}/filters/{filter_id}/options") => ReportRead,
@@ -1063,6 +1067,11 @@ mod tests {
                 Method::DELETE,
                 "/api/runtime/reports/{report_id}",
                 Permission::ReportDelete,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
+                Permission::WorkflowExecute,
             ),
             (
                 Method::POST,

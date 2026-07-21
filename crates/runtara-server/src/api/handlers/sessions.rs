@@ -141,6 +141,7 @@ pub async fn create_session(
             debug: false,
             correlation_id: None,
             trigger_source: TriggerSource::Session,
+            instance_id: None,
         })
         .await
         .map_err(|e| execution_error_response(&e))?;
@@ -560,6 +561,7 @@ async fn start_new_instance(
             debug: false,
             correlation_id: None,
             trigger_source: TriggerSource::Session,
+            instance_id: None,
         })
         .await
     {
