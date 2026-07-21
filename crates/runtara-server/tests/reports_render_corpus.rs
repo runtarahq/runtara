@@ -303,6 +303,7 @@ async fn render_report_snapshots() {
                 &report_id,
                 ReportRenderRequest {
                     filters: fixed_filters(),
+                    view_id: None,
                     blocks: None,
                     timezone: Some("UTC".to_string()),
                 },

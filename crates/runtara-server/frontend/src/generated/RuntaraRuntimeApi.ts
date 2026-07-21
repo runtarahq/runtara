@@ -3489,6 +3489,7 @@ export interface ReportBlockOnlyDataRequest {
   search?: null | ReportTableSearchRequest;
   sort?: ReportOrderBy[];
   timezone?: string | null;
+  viewId?: string | null;
 }
 
 export interface ReportBlockRenderResult {
@@ -4159,6 +4160,7 @@ export interface ReportPreviewRequest {
   definition: ReportDefinition;
   filters?: Partial<Record<string, any>>;
   timezone?: string | null;
+  viewId?: string | null;
 }
 
 export interface ReportRenderMetadata {
@@ -4171,11 +4173,13 @@ export interface ReportRenderRequest {
   blocks?: ReportBlockDataRequest[] | null;
   filters?: Partial<Record<string, any>>;
   timezone?: string | null;
+  viewId?: string | null;
 }
 
 export interface ReportRenderResponse {
   blocks: Partial<Record<string, ReportBlockRenderResult>>;
   errors?: ReportBlockError[];
+  navigation?: null | ReportViewNavigationState;
   report: ReportRenderMetadata;
   resolvedFilters: Partial<Record<string, any>>;
   success: boolean;
@@ -4472,6 +4476,18 @@ export interface ReportViewGroupDefinition {
   stages?: ReportViewStageDefinition[];
   /** Ordered view ids for `mode=tabs`. */
   viewIds?: string[];
+}
+
+export interface ReportViewGroupState {
+  accessibleViewIds?: string[];
+  currentViewId?: string | null;
+  id: string;
+  mode: ReportViewNavigationMode;
+}
+
+export interface ReportViewNavigationState {
+  activeViewId?: string | null;
+  group?: null | ReportViewGroupState;
 }
 
 export interface ReportViewStageDefinition {

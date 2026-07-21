@@ -1804,6 +1804,8 @@ impl fmt::Display for ReportValidationIssue {
 pub struct ReportRenderRequest {
     #[serde(default)]
     pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(default)]
     pub blocks: Option<Vec<ReportBlockDataRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1816,6 +1818,8 @@ pub struct ReportPreviewRequest {
     pub definition: ReportDefinition,
     #[serde(default)]
     pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(default)]
     pub blocks: Option<Vec<ReportBlockDataRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1985,6 +1989,8 @@ fn default_filter_options_limit() -> i64 {
 pub struct ReportBlockOnlyDataRequest {
     #[serde(default)]
     pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "viewId", skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<ReportPageRequest>,
     #[serde(default)]
@@ -2047,6 +2053,8 @@ pub struct ReportRenderResponse {
     #[serde(rename = "resolvedFilters")]
     pub resolved_filters: HashMap<String, Value>,
     pub blocks: HashMap<String, ReportBlockRenderResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation: Option<ReportViewNavigationState>,
     #[serde(default)]
     pub errors: Vec<ReportBlockError>,
 }
@@ -2057,6 +2065,34 @@ pub struct ReportRenderMetadata {
     pub id: String,
     #[serde(rename = "definitionVersion")]
     pub definition_version: i32,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewNavigationState {
+    #[serde(
+        default,
+        rename = "activeViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_view_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<ReportViewGroupState>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportViewGroupState {
+    pub id: String,
+    pub mode: ReportViewNavigationMode,
+    #[serde(
+        default,
+        rename = "currentViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_view_id: Option<String>,
+    #[serde(default, rename = "accessibleViewIds")]
+    pub accessible_view_ids: Vec<String>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
