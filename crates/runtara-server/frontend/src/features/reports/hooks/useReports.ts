@@ -1,5 +1,9 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { ApiError, useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
+import {
+  ApiError,
+  useCustomMutation,
+  useCustomQuery,
+} from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
   createReport,
@@ -91,6 +95,7 @@ export function useReportBlockData(
   request:
     | (Omit<ReportBlockDataRequest, 'id'> & {
         filters: Record<string, unknown>;
+        viewId?: string;
         timezone?: string;
       })
     | undefined,

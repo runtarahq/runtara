@@ -16,6 +16,7 @@ import {
 } from '../utils';
 import { useReportDsl } from '../hooks/useReportDsl';
 import { ReportBlockHost } from './ReportBlockHost';
+import { ReportViewNavigation } from './ReportViewNavigation';
 
 type ReportRendererProps = {
   reportId: string;
@@ -44,9 +45,7 @@ export function ReportRenderer(props: ReportRendererProps) {
 }
 
 function ReportRendererSkeleton() {
-  return (
-    <div className="h-32 w-full animate-pulse rounded-lg bg-muted/30" />
-  );
+  return <div className="h-32 w-full animate-pulse rounded-lg bg-muted/30" />;
 }
 
 function ReportRendererInner({
@@ -73,23 +72,19 @@ function ReportRendererInner({
     [activeViewId, definition]
   );
   const hasStructuredLayout = (layout.items ?? []).length > 0;
-
-  if (!hasStructuredLayout && definition.blocks.length === 0) {
-    return (
-      <div className="grid place-items-center gap-2 rounded-lg border border-dashed bg-muted/10 px-6 py-12 text-center">
-        <p className="text-sm font-medium text-foreground">
-          This report has no content yet
-        </p>
-        <p className="max-w-prose text-xs text-muted-foreground">
-          Switch to edit mode to add a markdown section, metric, chart, table,
-          or card.
-        </p>
-      </div>
-    );
-  }
+  const resolvedViewId = activeView?.id ?? activeViewId ?? null;
+  const showEmptyState =
+    !hasStructuredLayout &&
+    Boolean(activeView || definition.blocks.length === 0);
 
   return (
     <div className="w-full">
+      <ReportViewNavigation
+        definition={definition}
+        navigation={renderResponse?.navigation}
+        activeViewId={resolvedViewId}
+        onNavigateView={onNavigateView}
+      />
       {activeView && (
         <ReportViewHeader
           view={activeView}
@@ -99,10 +94,23 @@ function ReportRendererInner({
           onNavigateView={onNavigateView}
         />
       )}
-      {hasStructuredLayout ? (
+      {showEmptyState ? (
+        <div className="grid place-items-center gap-2 rounded-lg border border-dashed bg-muted/10 px-6 py-12 text-center">
+          <p className="text-sm font-medium text-foreground">
+            {activeView
+              ? 'This report view has no content yet'
+              : 'This report has no content yet'}
+          </p>
+          <p className="max-w-prose text-xs text-muted-foreground">
+            Switch to edit mode to add a markdown section, metric, chart, table,
+            or card.
+          </p>
+        </div>
+      ) : hasStructuredLayout ? (
         <LayoutNodes
           nodes={(layout.items ?? []).map((item) => item.child)}
           reportId={reportId}
+          activeViewId={resolvedViewId}
           definition={definition}
           renderResponse={renderResponse}
           filters={filters}
@@ -118,6 +126,7 @@ function ReportRendererInner({
             <Fragment key={block.id}>
               <ReportBlockHost
                 reportId={reportId}
+                activeViewId={resolvedViewId}
                 block={block}
                 initialResult={renderResponse?.blocks[block.id]}
                 filters={filters}
@@ -136,6 +145,7 @@ function ReportRendererInner({
 function LayoutNodes({
   nodes,
   reportId,
+  activeViewId,
   definition,
   renderResponse,
   filters,
@@ -147,6 +157,7 @@ function LayoutNodes({
 }: {
   nodes: ReportLayoutNode[];
   reportId: string;
+  activeViewId: string | null;
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
@@ -173,6 +184,7 @@ function LayoutNodes({
             key={node.id}
             node={node}
             reportId={reportId}
+            activeViewId={activeViewId}
             definition={definition}
             renderResponse={renderResponse}
             filters={filters}
@@ -191,6 +203,7 @@ function LayoutNodes({
 function LayoutNode({
   node,
   reportId,
+  activeViewId,
   definition,
   renderResponse,
   filters,
@@ -202,6 +215,7 @@ function LayoutNode({
 }: {
   node: ReportLayoutNode;
   reportId: string;
+  activeViewId: string | null;
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
@@ -222,6 +236,7 @@ function LayoutNode({
       <ReportBlockById
         blockId={node.blockId}
         reportId={reportId}
+        activeViewId={activeViewId}
         definition={definition}
         renderResponse={renderResponse}
         filters={filters}
@@ -300,6 +315,7 @@ function LayoutNode({
                 <LayoutNodes
                   nodes={[item.child]}
                   reportId={reportId}
+                  activeViewId={activeViewId}
                   definition={definition}
                   renderResponse={renderResponse}
                   filters={filters}
@@ -323,6 +339,7 @@ function LayoutNode({
 function ReportBlockById({
   blockId,
   reportId,
+  activeViewId,
   definition,
   renderResponse,
   filters,
@@ -334,6 +351,7 @@ function ReportBlockById({
 }: {
   blockId: string;
   reportId: string;
+  activeViewId: string | null;
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
@@ -365,6 +383,7 @@ function ReportBlockById({
   return (
     <ReportBlockHost
       reportId={reportId}
+      activeViewId={activeViewId}
       block={block}
       initialResult={renderResponse?.blocks[blockId]}
       filters={filters}

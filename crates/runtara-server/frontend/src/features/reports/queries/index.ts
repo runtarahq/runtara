@@ -158,6 +158,7 @@ export async function getReportBlockData(
   const request = context.queryKey[5] as
     | (Omit<ReportBlockDataRequest, 'id'> & {
         filters: Record<string, unknown>;
+        viewId?: string;
         timezone?: string;
       })
     | undefined;
