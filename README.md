@@ -129,7 +129,7 @@ rustup target add wasm32-wasip2
 
 - PostgreSQL for platform, environment, and core state.
 - A separate PostgreSQL database for the object model when running `runtara-server`.
-- Valkey or Redis for `runtara-server` checkpoint storage during workflow execution and MCP session recovery.
+- Valkey or Redis for `runtara-server` checkpoint storage during workflow execution (and, optionally, opt-in cross-instance MCP session recovery — process-local sessions are the default).
 - `crun` and Linux container support only if you enable the OCI runner.
 
 ### Start The Local Runtime

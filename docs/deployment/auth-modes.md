@@ -20,7 +20,7 @@ For SaaS multi-tenant deployments, per-user **roles and permissions** (Owner / A
 
 The MCP Streamable HTTP endpoint validates the inbound `Host` header before MCP auth and tool dispatch. Local loopback hosts are allowed by default. Public or proxied deployments must set `RUNTARA_MCP_ALLOWED_HOSTS` to the comma-separated public host authorities clients use, for example `runtara.example.com,runtara.example.com:7001`.
 
-MCP session recovery uses Valkey by default (`RUNTARA_MCP_SESSION_STORE=valkey`). Valkey mode requires `VALKEY_HOST` and a working shared Valkey connection at startup; the server exits instead of falling back to process-local sessions. Set `RUNTARA_MCP_SESSION_STORE=local` only for explicit single-process development. `RUNTARA_MCP_SESSION_TTL_SECONDS` controls the persisted recovery-state TTL and defaults to `86400`.
+MCP sessions are process-local by default (`RUNTARA_MCP_SESSION_STORE=local`). Set `RUNTARA_MCP_SESSION_STORE=valkey` to opt into cross-instance session recovery, where each session's `initialize` state is persisted so another process can transparently restore it. Valkey mode requires `VALKEY_HOST` and a working shared Valkey connection at startup; the server exits instead of falling back to process-local sessions. `RUNTARA_MCP_SESSION_TTL_SECONDS` controls the persisted recovery-state TTL (valkey mode only) and defaults to `86400`. Cross-instance recovery only matters when several processes serve a single tenant; it is not recommended at present, because the underlying rmcp restore path can race on concurrent requests to a process holding no in-memory copy of the session and drop the session with a 500.
 
 ## `AUTH_PROVIDER=oidc`
 

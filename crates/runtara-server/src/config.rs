@@ -432,7 +432,12 @@ fn secs_to_opt_duration(secs: u64) -> Option<Duration> {
 
 fn mcp_session_store_from_raw(raw: Option<&str>) -> Result<McpSessionStore, ConfigError> {
     match raw.map(str::trim) {
-        None => Ok(McpSessionStore::Valkey),
+        // Default to process-local sessions. The Valkey recovery store is
+        // opt-in: it only helps cross-instance restore (irrelevant to a
+        // single-instance-per-tenant deployment), and rmcp's restore path
+        // currently races on concurrent requests to a cold instance — killing
+        // the session and returning 500 — so it must not be the silent default.
+        None => Ok(McpSessionStore::Local),
         Some("local") => Ok(McpSessionStore::Local),
         Some("valkey") => Ok(McpSessionStore::Valkey),
         Some(_) => Err(ConfigError::Invalid(
@@ -752,10 +757,10 @@ mod tests {
     }
 
     #[test]
-    fn mcp_session_store_defaults_to_valkey() {
+    fn mcp_session_store_defaults_to_local() {
         assert_eq!(
             mcp_session_store_from_raw(None).unwrap(),
-            McpSessionStore::Valkey
+            McpSessionStore::Local
         );
     }
 

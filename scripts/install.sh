@@ -403,7 +403,7 @@ write_config() {
     local tenant_id="${TENANT_ID:-}"
     local server_port="${SERVER_PORT:-7001}"
     local mcp_allowed_hosts="${RUNTARA_MCP_ALLOWED_HOSTS:-}"
-    local mcp_session_store="${RUNTARA_MCP_SESSION_STORE:-valkey}"
+    local mcp_session_store="${RUNTARA_MCP_SESSION_STORE:-local}"
     local mcp_session_ttl_seconds="${RUNTARA_MCP_SESSION_TTL_SECONDS:-86400}"
     local auth_provider="${AUTH_PROVIDER:-oidc}"
 
