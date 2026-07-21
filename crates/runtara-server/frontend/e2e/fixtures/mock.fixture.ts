@@ -397,6 +397,13 @@ const factory: MockApi = {
     // overrides) take precedence (Playwright matches page.route handlers LIFO).
     await page.route(/\/api\/runtime\//, (route) => fulfill(route, {}));
     await page.route(/\/api\/management\//, (route) => fulfill(route, {}));
+    // Vite has no server-inlined entitlement snapshot. Force the fetch down
+    // its documented error path so `useEntitlements` returns the permissive
+    // singleton instead of accepting the catch-all's `{}` as a malformed
+    // snapshot and crashing while reading `features`.
+    await page.route(runtimeUrl('entitlements'), (route) =>
+      fulfill(route, { message: 'Use local permissive fallback' }, 500)
+    );
     // Sidebar → useFolders; Sidebar → menu
     await page.route(runtimeUrl('workflows/folders'), (route) =>
       fulfill(route, { folders: [] })

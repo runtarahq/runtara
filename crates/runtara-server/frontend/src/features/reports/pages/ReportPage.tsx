@@ -240,7 +240,8 @@ export function ReportPage() {
   ]);
 
   const handleReportActionRefresh = useCallback(async () => {
-    const startingGroup = renderQuery.data?.navigation?.group;
+    const startingNavigation = renderQuery.data?.navigation;
+    const startingGroup = startingNavigation?.group;
     const group = (definition.viewGroups ?? []).find(
       (candidate) => candidate.id === startingGroup?.id
     );
@@ -249,7 +250,7 @@ export function ReportPage() {
       group?.mode === 'stages' &&
         group.followCurrentOnAdvance &&
         startingCurrentViewId &&
-        requestedViewId === startingCurrentViewId
+        startingNavigation?.activeViewId === startingCurrentViewId
     );
     const delays = shouldPoll ? [0, 400, 800, 1600, 2400] : [0];
     let result: Awaited<ReturnType<typeof renderQuery.refetch>> | undefined;
@@ -272,7 +273,7 @@ export function ReportPage() {
       }
     }
     return result;
-  }, [definition.viewGroups, renderQuery, requestedViewId, setSearchParams]);
+  }, [definition.viewGroups, renderQuery, setSearchParams]);
 
   // Phase 9: in-place block preview for the wizard. Debounced from the
   // live definition so live edits don't pummel the preview API.
