@@ -17,6 +17,8 @@ import type {
 const TAB_REPORT_ID = 'report_tabs_navigation';
 const STAGE_REPORT_ID = 'report_stage_navigation';
 const AUTHOR_REPORT_ID = 'report_navigation_authoring';
+const WORKFLOW_STAGE_REPORT_ID = 'report_workflow_stage_navigation';
+const WORKFLOW_TABLE_REPORT_ID = 'report_workflow_table_interactions';
 
 function runtimeUrl(suffix: string): RegExp {
   const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -127,6 +129,334 @@ async function bootstrapReport(
 }
 
 test.describe('report view navigation (mocked)', () => {
+  test('workflow action applies the endpoint render without polling or a second report render', async ({
+    page,
+    mockApi,
+  }) => {
+    const caseCard = {
+      id: 'case_card',
+      type: 'card' as const,
+      title: 'Case',
+      source: { schema: 'ReportStageCase', mode: 'filter' as const },
+      card: {
+        groups: [
+          {
+            id: 'actions',
+            fields: [
+              {
+                field: 'advance_action',
+                label: 'Advance',
+                kind: 'workflow_button' as const,
+                workflowAction: {
+                  id: 'advance_stage',
+                  workflowId: 'advance-case',
+                  label: 'Advance',
+                  successMessage: 'Stage advanced',
+                  context: { mode: 'row' as const },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      layout: { id: 'root', items: [] },
+      filters: [],
+      blocks: [caseCard],
+      views: [
+        view('intake', 'Intake', caseCard.id),
+        view('review', 'Review', caseCard.id),
+      ],
+      viewGroups: [
+        {
+          id: 'case_stage',
+          mode: 'stages',
+          stages: [
+            { viewId: 'intake', value: 'intake' },
+            { viewId: 'review', value: 'review' },
+          ],
+          currentFrom: {
+            type: 'block',
+            blockId: caseCard.id,
+            field: 'stage',
+          },
+          access: 'current_only',
+          followCurrentOnAdvance: true,
+        },
+      ],
+    };
+    const renderFor = (stage: 'intake' | 'review'): ReportRenderResponse => ({
+      success: true,
+      report: { id: WORKFLOW_STAGE_REPORT_ID, definitionVersion: 1 },
+      resolvedFilters: {},
+      blocks: {
+        [caseCard.id]: {
+          type: 'card',
+          status: 'ready',
+          data: {
+            row: {
+              id: 'case-1',
+              stage,
+              advance_action: stage,
+            },
+          },
+        },
+      },
+      navigation: {
+        requestedViewId: stage,
+        activeViewId: stage,
+        group: {
+          id: 'case_stage',
+          mode: 'stages',
+          currentViewId: stage,
+          accessibleViewIds: [stage],
+        },
+      },
+      errors: [],
+    });
+    let reportRenderRequests = 0;
+    const workflowRequests: string[] = [];
+    page.on('request', (request) => {
+      if (/\/api\/runtime(?:\/[^/]+)?\/workflows\//.test(request.url())) {
+        workflowRequests.push(request.url());
+      }
+    });
+
+    await bootstrapReport(
+      page,
+      mockApi as MockApi,
+      WORKFLOW_STAGE_REPORT_ID,
+      definition,
+      () => {
+        reportRenderRequests += 1;
+        return renderFor('intake');
+      }
+    );
+    await mockApi.raw(
+      page,
+      runtimeUrl(
+        `reports/${WORKFLOW_STAGE_REPORT_ID}/blocks/${caseCard.id}/workflow-actions/advance_stage/execute`
+      ),
+      async (route) => {
+        expect(route.request().headers()['idempotency-key']).toBeTruthy();
+        await fulfill(route, {
+          completedWithinWait: true,
+          execution: {
+            workflowId: 'advance-case',
+            version: 2,
+            instanceId: 'instance-1',
+            status: 'completed',
+            durationMs: 45,
+          },
+          canonicalViewId: 'review',
+          render: renderFor('review'),
+        });
+      }
+    );
+
+    await gotoAppRoute(
+      page,
+      `/reports/${WORKFLOW_STAGE_REPORT_ID}?view=intake`
+    );
+    await expect(page.getByRole('button', { name: 'Advance' })).toBeVisible();
+    expect(reportRenderRequests).toBe(1);
+
+    await page.getByRole('button', { name: 'Advance' }).click();
+
+    await expectView(page, 'review');
+    await expect(page.getByText('Stage advanced')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Review/ })).toHaveAttribute(
+      'aria-current',
+      'step'
+    );
+    expect(reportRenderRequests).toBe(1);
+    expect(workflowRequests).toEqual([]);
+  });
+
+  test('table inline editing and a row workflow action refresh the record in place', async ({
+    page,
+    mockApi,
+  }) => {
+    const casesTable = {
+      id: 'cases_table',
+      type: 'table' as const,
+      title: 'Workflow cases',
+      source: { schema: 'ReportStageCase', mode: 'filter' as const },
+      table: {
+        columns: [
+          { field: 'case_ref', label: 'Reference' },
+          {
+            field: 'owner',
+            label: 'Owner',
+            editable: true,
+            editor: { kind: 'text' as const },
+          },
+          { field: 'stage', label: 'Stage', format: 'pill' },
+          {
+            field: 'advance_action',
+            label: 'Advance',
+            type: 'workflow_button' as const,
+            workflowAction: {
+              id: 'advance_case_row',
+              workflowId: 'advance-case',
+              label: 'Advance',
+              successMessage: 'Case advanced',
+              context: { mode: 'row' as const },
+            },
+          },
+        ],
+        defaultSort: [],
+      },
+    };
+    const definition: ReportDefinition = {
+      definitionVersion: 1,
+      layout: {
+        id: 'root',
+        columns: 1,
+        items: [
+          {
+            id: 'cases_item',
+            child: {
+              id: 'cases_node',
+              type: 'block',
+              blockId: casesTable.id,
+            },
+          },
+        ],
+      },
+      filters: [],
+      blocks: [casesTable],
+    };
+    let owner = 'Avery Stone';
+    let stage = 'intake';
+    let reportRenderRequests = 0;
+    const workflowRequests: string[] = [];
+    const renderTable = (): ReportRenderResponse => ({
+      success: true,
+      report: { id: WORKFLOW_TABLE_REPORT_ID, definitionVersion: 1 },
+      resolvedFilters: {},
+      blocks: {
+        [casesTable.id]: {
+          type: 'table',
+          status: 'ready',
+          data: {
+            columns: [
+              { key: 'case_ref', label: 'Reference' },
+              { key: 'owner', label: 'Owner' },
+              { key: 'stage', label: 'Stage', format: 'pill' },
+              { key: 'advance_action', label: 'Advance' },
+            ],
+            rows: [
+              {
+                id: 'case-1',
+                schemaId: 'schema-1',
+                case_ref: 'FLOW-TBL-001',
+                owner,
+                stage,
+              },
+            ],
+            totalCount: 1,
+            offset: 0,
+            limit: 50,
+            hasNextPage: false,
+          },
+        },
+      },
+      errors: [],
+    });
+    page.on('request', (request) => {
+      if (/\/api\/runtime(?:\/[^/]+)?\/workflows\//.test(request.url())) {
+        workflowRequests.push(request.url());
+      }
+    });
+
+    await bootstrapReport(
+      page,
+      mockApi as MockApi,
+      WORKFLOW_TABLE_REPORT_ID,
+      definition,
+      () => {
+        reportRenderRequests += 1;
+        return renderTable();
+      }
+    );
+    await mockApi.raw(
+      page,
+      runtimeUrl('object-model/instances/schema-1/case-1'),
+      async (route) => {
+        if (route.request().method() === 'PUT') {
+          owner = (
+            route.request().postDataJSON() as { properties: { owner: string } }
+          ).properties.owner;
+          await fulfill(route, {
+            success: true,
+            message: 'Instance updated successfully',
+          });
+          return;
+        }
+        await fulfill(route, {
+          success: true,
+          instance: {
+            id: 'case-1',
+            tenantId: 'tenant-1',
+            schemaId: 'schema-1',
+            schemaName: 'ReportStageCase',
+            properties: { case_ref: 'FLOW-TBL-001', owner, stage },
+            createdAt: '2026-07-21T00:00:00Z',
+            updatedAt: '2026-07-21T00:01:00Z',
+          },
+        });
+      }
+    );
+    await mockApi.raw(
+      page,
+      runtimeUrl(
+        `reports/${WORKFLOW_TABLE_REPORT_ID}/blocks/${casesTable.id}/workflow-actions/advance_case_row/execute`
+      ),
+      async (route) => {
+        const body = route.request().postDataJSON() as {
+          trigger: { row: { owner: string; stage: string } };
+        };
+        expect(body.trigger.row).toMatchObject({ owner, stage: 'intake' });
+        stage = 'review';
+        await fulfill(route, {
+          completedWithinWait: true,
+          execution: {
+            workflowId: 'advance-case',
+            version: 2,
+            instanceId: 'instance-table-1',
+            status: 'completed',
+            durationMs: 38,
+          },
+          render: renderTable(),
+        });
+      }
+    );
+
+    await gotoAppRoute(page, `/reports/${WORKFLOW_TABLE_REPORT_ID}`);
+    const row = page.getByRole('row').filter({ hasText: 'FLOW-TBL-001' });
+    await expect(row).toContainText('Avery Stone');
+    expect(reportRenderRequests).toBe(1);
+
+    await row.getByRole('button', { name: 'Edit cell' }).click();
+    const ownerInput = row.getByRole('textbox');
+    await ownerInput.fill('Morgan Reed');
+    await ownerInput.press('Enter');
+
+    await expect(page.getByText('Updated')).toBeVisible();
+    await expect(row).toContainText('Morgan Reed');
+    await expect.poll(() => reportRenderRequests).toBe(2);
+
+    await row.getByRole('button', { name: 'Advance' }).click();
+
+    await expect(page.getByText('Case advanced')).toBeVisible();
+    await expect(row).toContainText('Review');
+    expect(reportRenderRequests).toBe(2);
+    expect(workflowRequests).toEqual([]);
+  });
+
   test('tabs change the active detail, scope filters, and preserve browser history', async ({
     page,
     mockApi,

@@ -66,6 +66,7 @@ type CardData = {
 
 export function CardBlock({
   reportId,
+  activeViewId,
   block,
   result,
   filters,
@@ -73,6 +74,7 @@ export function CardBlock({
   onRefresh,
 }: {
   reportId: string;
+  activeViewId?: string | null;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   filters: Record<string, unknown>;
@@ -85,7 +87,15 @@ export function CardBlock({
   const data = (result.data ?? {}) as CardData;
   const groups = block.card?.groups ?? [];
   const writeback = useReportWriteback(reportId);
-  const workflowAction = useReportWorkflowAction({ onCompleted: onRefresh });
+  const workflowAction = useReportWorkflowAction({
+    onCompleted: onRefresh,
+    report: {
+      reportId,
+      blockId: block.id,
+      viewId: activeViewId,
+      filters,
+    },
+  });
   const [editingField, setEditingField] = useState<string | null>(null);
 
   if (data.missing || !data.row) {

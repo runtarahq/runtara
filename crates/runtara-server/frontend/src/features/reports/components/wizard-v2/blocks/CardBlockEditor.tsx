@@ -17,6 +17,10 @@ import {
   ReportCardFieldKind,
   ReportCardGroup,
 } from '../../../types';
+import {
+  createDefaultWorkflowAction,
+  WorkflowActionEditor,
+} from './tableActionEditors';
 
 interface CardBlockEditorProps {
   block: ReportBlockDefinition;
@@ -73,8 +77,8 @@ export function CardBlockEditor({
     <div className="grid gap-3">
       {groups.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          No groups yet. A card has one or more groups, each with its own
-          column layout and fields.
+          No groups yet. A card has one or more groups, each with its own column
+          layout and fields.
         </p>
       ) : (
         <div className="grid gap-3">
@@ -84,9 +88,7 @@ export function CardBlockEditor({
               group={group}
               availableFields={availableFields}
               onChange={(updated) =>
-                updateGroups(
-                  groups.map((g, i) => (i === gIndex ? updated : g))
-                )
+                updateGroups(groups.map((g, i) => (i === gIndex ? updated : g)))
               }
               onDelete={() =>
                 updateGroups(groups.filter((_, i) => i !== gIndex))
@@ -263,9 +265,17 @@ function FieldEditor({
         />
         <Select
           value={kind}
-          onValueChange={(value) =>
-            onChange({ ...field, kind: value as ReportCardFieldKind })
-          }
+          onValueChange={(value) => {
+            const nextKind = value as ReportCardFieldKind;
+            onChange({
+              ...field,
+              kind: nextKind,
+              workflowAction:
+                nextKind === 'workflow_button'
+                  ? (field.workflowAction ?? createDefaultWorkflowAction())
+                  : field.workflowAction,
+            });
+          }}
         >
           <SelectTrigger className="h-7 text-xs">
             <SelectValue />
@@ -314,6 +324,13 @@ function FieldEditor({
           Subcard / subtable nested config is preserved on save; edit advanced
           structure via the legacy wizard until v2 exposes the recursive form.
         </p>
+      ) : null}
+      {kind === 'workflow_button' && field.workflowAction ? (
+        <WorkflowActionEditor
+          action={field.workflowAction}
+          fields={availableFields}
+          onChange={(workflowAction) => onChange({ ...field, workflowAction })}
+        />
       ) : null}
     </div>
   );
