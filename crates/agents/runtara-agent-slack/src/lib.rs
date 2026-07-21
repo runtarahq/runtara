@@ -258,6 +258,10 @@ fn slack_api_call(
             "channel_not_found" => ("SLACK_CHANNEL_NOT_FOUND", false),
             "not_in_channel" => ("SLACK_NOT_IN_CHANNEL", false),
             "is_archived" => ("SLACK_CHANNEL_ARCHIVED", false),
+            "already_reacted" => ("SLACK_ALREADY_REACTED", false),
+            "invalid_name" => ("SLACK_INVALID_REACTION", false),
+            "bad_timestamp" | "message_not_found" => ("SLACK_MESSAGE_NOT_FOUND", false),
+            "missing_scope" | "no_permission" => ("SLACK_PERMISSION_ERROR", false),
             "invalid_auth" | "account_inactive" | "token_revoked" => ("SLACK_AUTH_ERROR", false),
             _ => ("SLACK_API_ERROR", false),
         };
@@ -402,6 +406,107 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
         ok: true,
         channel: resp["channel"].as_str().unwrap_or("").to_string(),
         ts: resp["ts"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+// ============================================================================
+// Add Reaction
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Add Reaction Input")]
+pub struct AddReactionInput {
+    /// Connection data injected by the wasm Guest::invoke wrapper before
+    /// dispatching to the capability executor.
+    #[field(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Channel",
+        description = "Slack channel ID containing the message",
+        example = "C01234ABCDE"
+    )]
+    pub channel: String,
+
+    #[field(
+        display_name = "Message Timestamp",
+        description = "Timestamp of the message to react to (e.g. 1234567890.123456)",
+        example = "1234567890.123456"
+    )]
+    pub timestamp: String,
+
+    #[field(
+        display_name = "Reaction",
+        description = "Emoji name without surrounding colons (e.g. thumbsup)",
+        example = "thumbsup"
+    )]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Add Reaction Output")]
+pub struct AddReactionOutput {
+    #[field(
+        display_name = "OK",
+        description = "Whether the reaction was added successfully"
+    )]
+    pub ok: bool,
+
+    #[field(
+        display_name = "Channel",
+        description = "Channel containing the reacted message"
+    )]
+    pub channel: String,
+
+    #[field(
+        display_name = "Message Timestamp",
+        description = "Timestamp of the reacted message"
+    )]
+    pub timestamp: String,
+
+    #[field(display_name = "Reaction", description = "Emoji reaction name")]
+    pub name: String,
+}
+
+#[capability(
+    module = "slack",
+    display_name = "Add Reaction",
+    description = "Add an emoji reaction to a Slack message. Requires the reactions:write scope.",
+    side_effects = true,
+    idempotent = false,
+    rate_limited = true,
+    module_display_name = "Slack",
+    module_description = "Slack messaging for sending messages, files, and reactions",
+    module_has_side_effects = true,
+    module_supports_connections = true,
+    module_integration_ids = "slack_bot",
+    module_secure = true
+)]
+pub fn add_reaction(input: AddReactionInput) -> Result<AddReactionOutput, AgentError> {
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SLACK_MISSING_CONNECTION",
+            "SLACK capability invoked without a connection — add one in the step configuration",
+        )
+        .with_attr("integration", "SLACK")
+    })?;
+
+    slack_api_call(
+        "reactions.add",
+        connection,
+        &json!({
+            "channel": input.channel,
+            "timestamp": input.timestamp,
+            "name": input.name,
+        }),
+    )?;
+
+    Ok(AddReactionOutput {
+        ok: true,
+        channel: input.channel,
+        timestamp: input.timestamp,
+        name: input.name,
     })
 }
 
@@ -681,6 +786,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
     let caps: &[&'static CapabilityMeta] = &[
         &__CAPABILITY_META_SEND_MESSAGE,
+        &__CAPABILITY_META_ADD_REACTION,
         &__CAPABILITY_META_UPLOAD_FILE,
     ];
     let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
@@ -688,6 +794,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "SendMessageInput",
             &__INPUT_META_SendMessageInput as &InputTypeMeta,
         ),
+        ("AddReactionInput", &__INPUT_META_AddReactionInput),
         ("UploadFileInput", &__INPUT_META_UploadFileInput),
     ]
     .into_iter()
@@ -697,6 +804,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "SendMessageOutput",
             &__OUTPUT_META_SendMessageOutput as &OutputTypeMeta,
         ),
+        ("AddReactionOutput", &__OUTPUT_META_AddReactionOutput),
         ("UploadFileOutput", &__OUTPUT_META_UploadFileOutput),
     ]
     .into_iter()
@@ -742,6 +850,7 @@ impl Guest for Component {
 
         let executor_result = match capability_id.as_str() {
             "send-message" => __executor_send_message(value),
+            "add-reaction" => __executor_add_reaction(value),
             "upload-file" => __executor_upload_file(value),
             other => {
                 return Err(ErrorInfo {
@@ -825,3 +934,42 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_info_exposes_add_reaction() {
+        let info = agent_info();
+        let capability = info
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "add-reaction")
+            .expect("add-reaction capability should be registered");
+
+        assert_eq!(info.capabilities.len(), 3);
+        assert_eq!(
+            capability
+                .inputs
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["channel", "timestamp", "name"]
+        );
+        assert!(capability.has_side_effects);
+    }
+
+    #[test]
+    fn add_reaction_requires_connection() {
+        let error = add_reaction(AddReactionInput {
+            _connection: None,
+            channel: "C123".into(),
+            timestamp: "1712345678.000100".into(),
+            name: "thumbsup".into(),
+        })
+        .expect_err("connection is required");
+
+        assert_eq!(error.code, "SLACK_MISSING_CONNECTION");
+    }
+}

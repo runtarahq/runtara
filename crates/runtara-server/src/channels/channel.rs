@@ -94,23 +94,33 @@ impl Channel for SlackChannel {
                 return Ok(());
             }
 
+            // Slack conversation ids include the thread timestamp after the
+            // first colon. This is also how reaction callbacks target replies
+            // at the message that was reacted to.
+            let (channel_id, thread_ts) = split_slack_conversation_id(&conversation_id);
+
             // Slack has a 4000 char limit per message.
             for chunk in split_message(&text, 4000) {
+                let mut request = json!({
+                    "channel": channel_id,
+                    "text": chunk,
+                });
+                if let Some(thread_ts) = thread_ts {
+                    request["thread_ts"] = json!(thread_ts);
+                }
+
                 let resp = self
                     .client
                     .post("https://slack.com/api/chat.postMessage")
                     .header("Authorization", format!("Bearer {}", self.token))
-                    .json(&json!({
-                        "channel": conversation_id,
-                        "text": chunk,
-                    }))
+                    .json(&request)
                     .send()
                     .await?;
 
                 let body: serde_json::Value = resp.json().await?;
                 if body["ok"].as_bool() != Some(true) {
                     tracing::warn!(
-                        channel = %conversation_id,
+                        channel = %channel_id,
                         error = %body["error"],
                         "Slack chat.postMessage failed"
                     );
@@ -119,6 +129,15 @@ impl Channel for SlackChannel {
 
             Ok(())
         })
+    }
+}
+
+fn split_slack_conversation_id(conversation_id: &str) -> (&str, Option<&str>) {
+    match conversation_id.split_once(':') {
+        Some((channel_id, thread_ts)) if !channel_id.is_empty() && !thread_ts.is_empty() => {
+            (channel_id, Some(thread_ts))
+        }
+        _ => (conversation_id, None),
     }
 }
 
@@ -373,4 +392,23 @@ fn split_message(text: &str, max_len: usize) -> Vec<&str> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_slack_thread_conversation_id() {
+        assert_eq!(
+            split_slack_conversation_id("C123:1712345678.000100"),
+            ("C123", Some("1712345678.000100"))
+        );
+        assert_eq!(split_slack_conversation_id("C123"), ("C123", None));
+    }
+
+    #[test]
+    fn split_message_respects_utf8_boundaries() {
+        assert_eq!(split_message("a😀b", 5), vec!["a😀", "b"]);
+    }
 }

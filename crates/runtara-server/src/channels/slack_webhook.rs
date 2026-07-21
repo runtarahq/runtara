@@ -14,9 +14,10 @@ use super::session::{Attachment, ChannelRouter, InboundMessage};
 
 /// Slack Events API webhook handler.
 ///
-/// Handles two event types:
+/// Handles these callback types:
 /// - `url_verification`: Responds with the challenge value (required during app setup).
-/// - `event_callback`: Processes incoming messages and routes them to the session manager.
+/// - `event_callback`: Processes messages, `app_mention`, `reaction_added`,
+///   and `reaction_removed` events and routes them to the session manager.
 ///
 /// All requests are verified using HMAC-SHA256 signature validation with the
 /// connection's `signing_secret`.
@@ -61,83 +62,142 @@ pub async fn slack_webhook(
         return StatusCode::OK.into_response();
     }
 
-    let event = match payload.get("event") {
-        Some(e) => e,
-        None => return StatusCode::OK.into_response(),
-    };
-
-    // Only handle message events (not message_changed, message_deleted, etc.)
-    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    if event_type != "message" {
-        return StatusCode::OK.into_response();
-    }
-
-    // Ignore bot messages to prevent loops.
-    if event.get("bot_id").is_some() {
-        return StatusCode::OK.into_response();
-    }
-
-    // Ignore subtypes except file_share (user uploaded a file).
-    let subtype = event.get("subtype").and_then(|s| s.as_str());
-    if subtype.is_some() && subtype != Some("file_share") {
-        return StatusCode::OK.into_response();
-    }
-
-    let channel_id = event.get("channel").and_then(|c| c.as_str());
-    let text = event.get("text").and_then(|t| t.as_str());
-
-    let (Some(channel_id), Some(text)) = (channel_id, text) else {
+    let Some(mut msg) = normalize_slack_event(&payload) else {
         return StatusCode::OK.into_response();
     };
 
-    // Strip Slack mention markup like <@U12345> from the message text.
-    // Users type "@BotName hello" but Slack sends "<@U12345> hello".
-    let clean_text = strip_slack_mentions(text);
-    let clean_text = clean_text.trim();
-    if clean_text.is_empty() {
-        return StatusCode::OK.into_response();
+    if !msg.attachments.is_empty() {
+        upload_slack_attachments_to_storage(&router, &connection_id, &mut msg.attachments).await;
     }
 
-    // Use channel_id + optional thread_ts as conversation ID.
-    // If threaded, scope to the thread. If not, scope to the channel.
-    let conv_id = if let Some(thread_ts) = event.get("thread_ts").and_then(|t| t.as_str()) {
-        format!("{}:{}", channel_id, thread_ts)
-    } else {
-        channel_id.to_string()
-    };
-
-    let sender_id = event
-        .get("user")
-        .and_then(|u| u.as_str())
-        .unwrap_or(&conv_id)
-        .to_string();
-
-    // Extract file attachments from Slack event.
-    let mut attachments = extract_slack_files(event);
-    if !attachments.is_empty() {
-        upload_slack_attachments_to_storage(&router, &connection_id, &mut attachments).await;
-    }
-
-    let msg = InboundMessage {
-        text: clean_text.to_string(),
-        sender_id,
-        conv_id,
-        channel: "slack".into(),
-        attachments,
-        original_message: payload.clone(),
-    };
-
-    debug!(connection_id = %connection_id, channel = %msg.conv_id, "Slack message received");
+    let event_type = payload["event"]["type"].as_str().unwrap_or("unknown");
+    debug!(
+        connection_id = %connection_id,
+        channel = %msg.conv_id,
+        event_type,
+        "Slack event received"
+    );
 
     if let Err(e) = router.handle_message(&connection_id, &msg).await {
         warn!(
             connection_id = %connection_id,
             error = %e,
-            "Failed to handle Slack message"
+            "Failed to handle Slack event"
         );
     }
 
     StatusCode::OK.into_response()
+}
+
+/// Normalize supported Slack Events API callbacks into channel session input.
+///
+/// Message and app-mention events share the same text behavior. Reaction events
+/// become a compact textual signal (`reaction_added: emoji` /
+/// `reaction_removed: emoji`) while the complete callback remains available in
+/// `original_message` for workflow mappings that need structured fields.
+fn normalize_slack_event(payload: &Value) -> Option<InboundMessage> {
+    let event = payload.get("event")?;
+    match event.get("type").and_then(Value::as_str)? {
+        "message" | "app_mention" => normalize_text_event(payload, event),
+        "reaction_added" | "reaction_removed" => normalize_reaction_event(payload, event),
+        _ => None,
+    }
+}
+
+fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage> {
+    // Ignore bot messages to prevent loops.
+    if event.get("bot_id").is_some() {
+        return None;
+    }
+
+    // Ignore subtypes except file_share (user uploaded a file).
+    let subtype = event.get("subtype").and_then(Value::as_str);
+    if subtype.is_some() && subtype != Some("file_share") {
+        return None;
+    }
+
+    let channel_id = event.get("channel").and_then(Value::as_str)?;
+    let text = event.get("text").and_then(Value::as_str)?;
+
+    // Users type "@BotName hello" but Slack sends "<@U12345> hello".
+    let clean_text = strip_slack_mentions(text);
+    let clean_text = clean_text.trim();
+    if clean_text.is_empty() {
+        return None;
+    }
+
+    let conv_id = slack_conversation_id(channel_id, event.get("thread_ts").and_then(Value::as_str));
+    let sender_id = event
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or(&conv_id)
+        .to_string();
+
+    Some(InboundMessage {
+        text: clean_text.to_string(),
+        sender_id,
+        conv_id,
+        channel: "slack".into(),
+        attachments: extract_slack_files(event),
+        original_message: payload.clone(),
+    })
+}
+
+fn normalize_reaction_event(payload: &Value, event: &Value) -> Option<InboundMessage> {
+    // `reactions.add` also emits reaction_added. Ignore callbacks produced by
+    // this connection's bot identity so a reaction-triggered workflow cannot
+    // recursively trigger itself.
+    if reaction_is_from_authorized_bot(payload, event) {
+        return None;
+    }
+
+    let item = event.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+
+    let event_type = event.get("type").and_then(Value::as_str)?;
+    let channel_id = item.get("channel").and_then(Value::as_str)?;
+    let message_ts = item.get("ts").and_then(Value::as_str)?;
+    let reaction = event.get("reaction").and_then(Value::as_str)?;
+    let conv_id = slack_conversation_id(channel_id, Some(message_ts));
+    let sender_id = event
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or(&conv_id)
+        .to_string();
+
+    Some(InboundMessage {
+        text: format!("{event_type}: {reaction}"),
+        sender_id,
+        conv_id,
+        channel: "slack".into(),
+        attachments: vec![],
+        original_message: payload.clone(),
+    })
+}
+
+fn slack_conversation_id(channel_id: &str, thread_ts: Option<&str>) -> String {
+    match thread_ts {
+        Some(thread_ts) => format!("{channel_id}:{thread_ts}"),
+        None => channel_id.to_string(),
+    }
+}
+
+fn reaction_is_from_authorized_bot(payload: &Value, event: &Value) -> bool {
+    let Some(event_user) = event.get("user").and_then(Value::as_str) else {
+        return false;
+    };
+
+    payload
+        .get("authorizations")
+        .and_then(Value::as_array)
+        .is_some_and(|authorizations| {
+            authorizations.iter().any(|authorization| {
+                authorization.get("is_bot").and_then(Value::as_bool) == Some(true)
+                    && authorization.get("user_id").and_then(Value::as_str) == Some(event_user)
+            })
+        })
 }
 
 /// Verify the Slack request signature using HMAC-SHA256.
@@ -421,4 +481,116 @@ async fn load_bot_token(router: &ChannelRouter, connection_id: &str) -> Option<S
         .and_then(|p| p.get("bot_token"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_threaded_message_event() {
+        let payload = json!({
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "thread_ts": "1712345678.000100",
+                "text": "<@UBOT> hello there"
+            }
+        });
+
+        let message = normalize_slack_event(&payload).expect("message should be supported");
+
+        assert_eq!(message.text, "hello there");
+        assert_eq!(message.sender_id, "U123");
+        assert_eq!(message.conv_id, "C123:1712345678.000100");
+        assert_eq!(message.original_message, payload);
+    }
+
+    #[test]
+    fn normalizes_threaded_app_mention_event() {
+        let payload = json!({
+            "type": "event_callback",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "channel": "C123",
+                "thread_ts": "1712345678.000100",
+                "ts": "1712345680.000200",
+                "text": "<@UBOT> could you help?"
+            }
+        });
+
+        let message = normalize_slack_event(&payload).expect("app mention should be supported");
+
+        assert_eq!(message.text, "could you help?");
+        assert_eq!(message.sender_id, "U123");
+        assert_eq!(message.conv_id, "C123:1712345678.000100");
+        assert_eq!(message.original_message, payload);
+    }
+
+    #[test]
+    fn normalizes_reaction_added_event() {
+        let payload = reaction_payload("reaction_added", "thumbsup");
+
+        let message = normalize_slack_event(&payload).expect("reaction should be supported");
+
+        assert_eq!(message.text, "reaction_added: thumbsup");
+        assert_eq!(message.sender_id, "U123");
+        assert_eq!(message.conv_id, "C123:1712345678.000100");
+        assert!(message.attachments.is_empty());
+        assert_eq!(message.original_message, payload);
+    }
+
+    #[test]
+    fn normalizes_reaction_removed_event() {
+        let payload = reaction_payload("reaction_removed", "eyes");
+
+        let message = normalize_slack_event(&payload).expect("reaction should be supported");
+
+        assert_eq!(message.text, "reaction_removed: eyes");
+        assert_eq!(message.conv_id, "C123:1712345678.000100");
+    }
+
+    #[test]
+    fn ignores_non_message_reactions() {
+        let mut payload = reaction_payload("reaction_added", "thumbsup");
+        payload["event"]["item"] = json!({
+            "type": "file",
+            "file": "F123"
+        });
+
+        assert!(normalize_slack_event(&payload).is_none());
+    }
+
+    #[test]
+    fn ignores_reactions_added_by_authorized_bot() {
+        let mut payload = reaction_payload("reaction_added", "white_check_mark");
+        payload["event"]["user"] = json!("UBOT");
+        payload["authorizations"] = json!([{
+            "user_id": "UBOT",
+            "is_bot": true
+        }]);
+
+        assert!(normalize_slack_event(&payload).is_none());
+    }
+
+    fn reaction_payload(event_type: &str, reaction: &str) -> Value {
+        json!({
+            "type": "event_callback",
+            "event": {
+                "type": event_type,
+                "user": "U123",
+                "reaction": reaction,
+                "item_user": "U456",
+                "item": {
+                    "type": "message",
+                    "channel": "C123",
+                    "ts": "1712345678.000100"
+                },
+                "event_ts": "1712345680.000200"
+            }
+        })
+    }
 }
