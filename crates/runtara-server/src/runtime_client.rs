@@ -31,6 +31,9 @@ pub enum RuntimeError {
     #[error("Instance start failed: {0}")]
     StartFailed(String),
 
+    #[error("Image not found: {0}")]
+    ImageNotFound(String),
+
     #[error("Instance not found: {0}")]
     InstanceNotFound(String),
 
@@ -58,6 +61,15 @@ pub struct ExecutionOutput {
     pub memory_peak_bytes: Option<u64>,
     /// Total CPU time consumed (in microseconds)
     pub cpu_usage_usec: Option<u64>,
+}
+
+/// Result of submitting an instance start to runtara-environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartInstanceOutcome {
+    pub instance_id: String,
+    /// `true` when Environment had already accepted this idempotency key and
+    /// deliberately did not launch another process.
+    pub deduplicated: bool,
 }
 
 /// Terminal outcome of [`RuntimeClient::poll_until_terminal`]. Distinct from
@@ -224,7 +236,7 @@ impl RuntimeClient {
         input: Option<Value>,
         timeout_secs: Option<u32>,
         debug: bool,
-    ) -> Result<String, RuntimeError> {
+    ) -> Result<StartInstanceOutcome, RuntimeError> {
         self.ensure_connected().await?;
         let sdk_guard = self.sdk.read().await;
         let sdk = sdk_guard
@@ -301,10 +313,12 @@ impl RuntimeClient {
             options = options.with_env_var("DEBUG_MODE", "true");
         }
 
-        let result = sdk
-            .start_instance(options)
-            .await
-            .map_err(|e| RuntimeError::StartFailed(e.to_string()))?;
+        let result = sdk.start_instance(options).await.map_err(|e| match e {
+            runtara_management_sdk::SdkError::ImageNotFound(message) => {
+                RuntimeError::ImageNotFound(message)
+            }
+            other => RuntimeError::StartFailed(other.to_string()),
+        })?;
 
         if !result.success {
             return Err(RuntimeError::StartFailed(
@@ -317,10 +331,14 @@ impl RuntimeClient {
             image_id = %image_id,
             workflow_id = %workflow_id,
             tenant_id = %tenant_id,
-            "Started workflow instance"
+            deduplicated = result.deduplicated,
+            "Instance start accepted"
         );
 
-        Ok(result.instance_id)
+        Ok(StartInstanceOutcome {
+            instance_id: result.instance_id,
+            deduplicated: result.deduplicated,
+        })
     }
 
     /// Get the status of a workflow instance
@@ -546,7 +564,7 @@ impl RuntimeClient {
         timeout_secs: Option<u32>,
         debug: bool,
     ) -> Result<ExecutionOutput, RuntimeError> {
-        let started_id = self
+        let start = self
             .start_instance(
                 image_id,
                 tenant_id,
@@ -558,7 +576,7 @@ impl RuntimeClient {
             )
             .await?;
 
-        self.wait_for_completion(&started_id, None, timeout_secs)
+        self.wait_for_completion(&start.instance_id, None, timeout_secs)
             .await
     }
 

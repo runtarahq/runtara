@@ -319,6 +319,12 @@ pub struct StartInstanceResult {
     pub success: bool,
     /// Instance ID (if successful).
     pub instance_id: String,
+    /// Whether this request reused an instance start that had already been accepted.
+    ///
+    /// A deduplicated response never launches a second process. This is `false`
+    /// when talking to an older Environment that does not return the field.
+    #[serde(default)]
+    pub deduplicated: bool,
     /// Error message (if failed).
     pub error: Option<String>,
 }

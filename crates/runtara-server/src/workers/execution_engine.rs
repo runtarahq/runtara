@@ -34,7 +34,7 @@ use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
 use crate::metrics::MetricsService;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
-use crate::runtime_client::RuntimeClient;
+use crate::runtime_client::{RuntimeClient, RuntimeError};
 use crate::workers::CancellationHandle;
 use crate::workers::runtara_dto::{
     ExecutionWithMetadata, enrich_pending_input, execution_status_to_runtara, parse_image_id,
@@ -202,6 +202,24 @@ pub struct QueuedExecution {
     pub status: String,
     pub workflow_id: String,
     pub version: i32,
+}
+
+/// Outcome of submitting a detached execution to Environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedExecution {
+    /// This call reserved the instance ID and launched the process.
+    Started(String),
+    /// Environment had already accepted this instance ID, so no process was
+    /// launched by this replayed trigger delivery.
+    Deduplicated(String),
+}
+
+impl DetachedExecution {
+    pub fn instance_id(&self) -> &str {
+        match self {
+            Self::Started(instance_id) | Self::Deduplicated(instance_id) => instance_id,
+        }
+    }
 }
 
 /// Request for synchronous execution via `ExecutionEngine::run_sync`.
@@ -801,7 +819,10 @@ impl ExecutionEngine {
     /// The instance will run on the runtara-environment server.
     /// Use `get_instance_status` to poll for completion.
     #[instrument(skip(self, event), fields(instance_id = %event.instance_id, workflow_id = %event.workflow_id))]
-    pub async fn execute_detached(&self, event: &TriggerEvent) -> Result<String, ExecutionError> {
+    pub async fn execute_detached(
+        &self,
+        event: &TriggerEvent,
+    ) -> Result<DetachedExecution, ExecutionError> {
         // Mark workflow as starting (for single_instance race condition prevention)
         let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
         {
@@ -815,7 +836,7 @@ impl ExecutionEngine {
         // Product analytics: an async execution started. No user context survives into the
         // worker, so attribute to the firing trigger when present, else the system. `source`
         // is `worker` (engine-emitted).
-        if result.is_ok() {
+        if matches!(result, Ok(DetachedExecution::Started(_))) {
             let actor = match event.trigger_id() {
                 Some(trigger_id) => ProductEvent::new(EventType::ExecutionStarted)
                     .no_user_actor(trigger_id, ActorType::Trigger),
@@ -837,7 +858,9 @@ impl ExecutionEngine {
         // finishes, so the terminal event has to be observed in the background. Spawn a
         // best-effort watcher — never blocks/fails `execute_detached` itself, and never
         // cancels the instance (see `RuntimeClient::poll_until_terminal` doc comment).
-        if let (Ok(instance_id), Some(runtime_client)) = (&result, self.runtime_client.clone()) {
+        if let (Ok(DetachedExecution::Started(instance_id)), Some(runtime_client)) =
+            (&result, self.runtime_client.clone())
+        {
             let events = self.events.clone();
             let workflow_id = event.workflow_id.clone();
             let version = event.version;
@@ -910,7 +933,10 @@ impl ExecutionEngine {
     }
 
     /// Inner implementation of execute_detached
-    async fn execute_detached_inner(&self, event: &TriggerEvent) -> Result<String, ExecutionError> {
+    async fn execute_detached_inner(
+        &self,
+        event: &TriggerEvent,
+    ) -> Result<DetachedExecution, ExecutionError> {
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
@@ -949,7 +975,7 @@ impl ExecutionEngine {
             .await?;
 
         // Start instance (non-blocking)
-        let started_id = match runtime_client
+        let start = match runtime_client
             .start_instance(
                 &image_id,
                 &event.tenant_id,
@@ -961,50 +987,73 @@ impl ExecutionEngine {
             )
             .await
         {
-            Ok(id) => id,
-            Err(e) => {
-                let error_str = e.to_string();
-                // Check if this is a stale image reference (image was purged from runtara-environment)
-                if error_str.contains("image not found")
-                    || error_str.contains("Image") && error_str.contains("not found")
-                {
-                    tracing::warn!(
-                        tenant_id = %event.tenant_id,
-                        workflow_id = %event.workflow_id,
-                        version = version,
-                        image_id = %image_id,
-                        "Image not found in runtara-environment - deleting stale compilation record for recompilation"
-                    );
+            Ok(start) => start,
+            Err(RuntimeError::ImageNotFound(error)) => {
+                tracing::warn!(
+                    tenant_id = %event.tenant_id,
+                    workflow_id = %event.workflow_id,
+                    version = version,
+                    image_id = %image_id,
+                    error,
+                    "Image or image artifact missing in Environment; forcing recompilation"
+                );
 
-                    // Delete the stale compilation record so it will be recompiled
-                    let _ = sqlx::query!(
-                        "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
-                        &event.tenant_id,
-                        &event.workflow_id,
-                        version
-                    )
-                    .execute(&self.pool)
-                    .await;
+                // The local compilation record and Environment image metadata
+                // can both outlive the on-disk artifact. Remove the local cache
+                // row and enqueue a forced build so compilation does not accept
+                // the metadata-only Environment cache hit again.
+                let _ = sqlx::query!(
+                    "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
+                    &event.tenant_id,
+                    &event.workflow_id,
+                    version
+                )
+                .execute(&self.pool)
+                .await;
 
-                    // Return NotCompiled to trigger recompilation queue
-                    return Err(ExecutionError::NotCompiled {
-                        workflow_id: event.workflow_id.clone(),
-                        version,
-                        compilation_queued: false,
-                    });
-                }
-                return Err(ExecutionError::RuntimeError(error_str));
+                let compilation_queued =
+                    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
+                        crate::workers::compilation_worker::enqueue_compilation(
+                            &valkey_config.connection_url(),
+                            &event.tenant_id,
+                            &event.workflow_id,
+                            version,
+                            true,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                return Err(ExecutionError::NotCompiled {
+                    workflow_id: event.workflow_id.clone(),
+                    version,
+                    compilation_queued,
+                });
             }
+            Err(e) => return Err(ExecutionError::RuntimeError(e.to_string())),
         };
 
-        info!(
-            instance_id = %started_id,
-            workflow_id = %event.workflow_id,
-            version = version,
-            "Started instance in detached mode"
-        );
+        let outcome = if start.deduplicated {
+            info!(
+                instance_id = %start.instance_id,
+                workflow_id = %event.workflow_id,
+                version,
+                "Detached instance start was deduplicated"
+            );
+            DetachedExecution::Deduplicated(start.instance_id)
+        } else {
+            info!(
+                instance_id = %start.instance_id,
+                workflow_id = %event.workflow_id,
+                version,
+                "Started instance in detached mode"
+            );
+            DetachedExecution::Started(start.instance_id)
+        };
 
-        Ok(started_id)
+        Ok(outcome)
     }
 
     // =========================================================================
@@ -2226,6 +2275,16 @@ mod tests {
             ExecutionError::NotConnected("no conn".to_string()).http_status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn detached_execution_preserves_started_and_deduplicated_instance_ids() {
+        let started = DetachedExecution::Started("started-id".into());
+        let deduplicated = DetachedExecution::Deduplicated("deduplicated-id".into());
+
+        assert_eq!(started.instance_id(), "started-id");
+        assert_eq!(deduplicated.instance_id(), "deduplicated-id");
+        assert_ne!(started, deduplicated);
     }
 
     // =========================================================================

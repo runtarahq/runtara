@@ -22,13 +22,16 @@ use crate::types::CancellationHandle;
 use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
 use crate::valkey::stream::StreamConsumer;
-use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
+use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
 
 /// Result of processing a trigger event
 #[derive(Debug)]
 enum ProcessResult {
     /// Event processed successfully - ACK it
     Success,
+    /// A prior delivery already started this instance - ACK without repeating
+    /// start/fired analytics.
+    Deduplicated,
     /// Event failed permanently - ACK it to prevent infinite retries
     PermanentFailure(String),
     /// The workflow cannot run as authored. ACKed like a permanent failure,
@@ -325,6 +328,7 @@ async fn process_event(
         // low-cardinality labels; per-workflow timing belongs in traces.
         let status = match &process_result {
             ProcessResult::Success => "success",
+            ProcessResult::Deduplicated => "deduplicated",
             ProcessResult::PermanentFailure(_) => "permanent_failure",
             ProcessResult::NotRunnable(_) => "not_runnable",
             ProcessResult::RetryLater(_) => "retry_later",
@@ -347,7 +351,7 @@ async fn process_event(
             ProcessResult::RetryLater(_) => {
                 // Don't count as failed yet - it will be retried
             }
-            ProcessResult::Success => {}
+            ProcessResult::Success | ProcessResult::Deduplicated => {}
         }
     }
 
@@ -388,6 +392,20 @@ async fn process_event(
                     instance_id = %trigger_event.instance_id,
                     duration_ms = (duration * 1000.0) as u64,
                     "Event processed and acknowledged"
+                );
+            }
+        }
+        ProcessResult::Deduplicated => {
+            // The original delivery owns execution and analytics. This replay
+            // only closes the at-least-once delivery loop.
+            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+                error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK deduplicated event");
+            } else {
+                info!(
+                    entry_id = %entry_id,
+                    instance_id = %trigger_event.instance_id,
+                    duration_ms = (duration * 1000.0) as u64,
+                    "Event start was already accepted; acknowledged replay"
                 );
             }
         }
@@ -552,13 +570,21 @@ async fn process_trigger_event(
     // - Collect results
     // All execution data is queried directly from runtara-environment via the Management SDK.
     match engine.execute_detached(event).await {
-        Ok(started_instance_id) => {
+        Ok(DetachedExecution::Started(started_instance_id)) => {
             info!(
                 instance_id = %event.instance_id,
                 runtara_instance_id = %started_instance_id,
                 "Instance started via runtara-environment"
             );
             ProcessResult::Success
+        }
+        Ok(DetachedExecution::Deduplicated(instance_id)) => {
+            info!(
+                instance_id,
+                workflow_id = %event.workflow_id,
+                "Trigger delivery deduplicated by runtara-environment"
+            );
+            ProcessResult::Deduplicated
         }
         Err(ExecutionError::NotCompiled {
             workflow_id,
@@ -669,12 +695,14 @@ mod tests {
         let success = ProcessResult::Success;
         let failure = ProcessResult::PermanentFailure("test error".to_string());
         let retry = ProcessResult::RetryLater("not compiled".to_string());
+        let deduplicated = ProcessResult::Deduplicated;
 
         assert!(format!("{:?}", success).contains("Success"));
         assert!(format!("{:?}", failure).contains("PermanentFailure"));
         assert!(format!("{:?}", failure).contains("test error"));
         assert!(format!("{:?}", retry).contains("RetryLater"));
         assert!(format!("{:?}", retry).contains("not compiled"));
+        assert!(format!("{:?}", deduplicated).contains("Deduplicated"));
     }
 
     #[test]

@@ -409,8 +409,85 @@ pub struct StartInstanceResponse {
     pub success: bool,
     /// Instance ID (assigned or generated).
     pub instance_id: String,
+    /// Whether an earlier request had already reserved this exact instance.
+    /// A deduplicated response never launches another process.
+    pub deduplicated: bool,
     /// Error message if failed.
     pub error: Option<String>,
+}
+
+async fn existing_start_response(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    tenant_id: &str,
+    image_id: &str,
+) -> Result<Option<StartInstanceResponse>> {
+    let Some(existing) = state.persistence.get_instance(instance_id).await? else {
+        return Ok(None);
+    };
+
+    if existing.tenant_id != tenant_id {
+        warn!(
+            instance_id,
+            requested_tenant_id = tenant_id,
+            existing_tenant_id = %existing.tenant_id,
+            "Rejecting reuse of an instance ID owned by another tenant"
+        );
+        return Ok(Some(StartInstanceResponse {
+            success: false,
+            instance_id: String::new(),
+            deduplicated: false,
+            error: Some(format!("Instance '{}' already exists", instance_id)),
+        }));
+    }
+
+    match db::get_instance_image_id(&state.pool, instance_id).await? {
+        Some(existing_image_id) if existing_image_id == image_id => {}
+        Some(existing_image_id) => {
+            warn!(
+                instance_id,
+                requested_image_id = image_id,
+                existing_image_id,
+                "Rejecting reuse of an instance ID for a different image"
+            );
+            return Ok(Some(StartInstanceResponse {
+                success: false,
+                instance_id: String::new(),
+                deduplicated: false,
+                error: Some(format!("Instance '{}' already exists", instance_id)),
+            }));
+        }
+        None => {
+            // An instance row without an image association is an incomplete or
+            // self-registered instance, not proof that this exact start request
+            // was accepted.
+            warn!(
+                instance_id,
+                requested_image_id = image_id,
+                "Rejecting reuse of an instance ID without an image association"
+            );
+            return Ok(Some(StartInstanceResponse {
+                success: false,
+                instance_id: String::new(),
+                deduplicated: false,
+                error: Some(format!("Instance '{}' already exists", instance_id)),
+            }));
+        }
+    }
+
+    info!(
+        instance_id,
+        tenant_id,
+        image_id,
+        status = %existing.status,
+        "Instance start already accepted; returning deduplicated response"
+    );
+    Ok(Some(StartInstanceResponse {
+        success: true,
+        instance_id: instance_id.to_string(),
+        deduplicated: true,
+        error: None,
+    }))
 }
 
 /// Enrich instance input for storage (display/audit purposes):
@@ -471,6 +548,7 @@ pub async fn handle_start_instance(
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
+            deduplicated: false,
             error: Some("image_id is required".to_string()),
         });
     }
@@ -483,6 +561,7 @@ pub async fn handle_start_instance(
             return Ok(StartInstanceResponse {
                 success: false,
                 instance_id: String::new(),
+                deduplicated: false,
                 error: Some(format!("Image '{}' not found", request.image_id)),
             });
         }
@@ -491,6 +570,7 @@ pub async fn handle_start_instance(
             return Ok(StartInstanceResponse {
                 success: false,
                 instance_id: String::new(),
+                deduplicated: false,
                 error: Some(format!("Database error: {}", e)),
             });
         }
@@ -507,6 +587,7 @@ pub async fn handle_start_instance(
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
+            deduplicated: false,
             error: Some(format!("Image '{}' not found", request.image_id)),
         });
     }
@@ -520,6 +601,32 @@ pub async fn handle_start_instance(
         .instance_id
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // The trigger stream is intentionally at-least-once. A worker can lose its
+    // response or fail XACK after Environment has durably reserved the ID. The
+    // primary key is therefore an idempotency key, not a permanent start error.
+    if let Some(response) =
+        existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id).await?
+    {
+        return Ok(response);
+    }
+
+    // Validate the filesystem half of the image registration before writing
+    // any instance state. Otherwise a stale image row creates a failed instance
+    // and the trigger retry collides with that row after recompilation.
+    if !bundle_path.is_file() {
+        warn!(
+            image_id = %request.image_id,
+            binary_path = %bundle_path.display(),
+            "Registered image artifact is missing"
+        );
+        return Ok(StartInstanceResponse {
+            success: false,
+            instance_id: String::new(),
+            deduplicated: false,
+            error: Some(format!("Image '{}' artifact not found", request.image_id)),
+        });
+    }
 
     // Parse input for runner
     let input = request.input.unwrap_or(serde_json::json!({}));
@@ -541,10 +648,20 @@ pub async fn handle_start_instance(
         .register_instance(&instance_id, &request.tenant_id)
         .await
     {
+        // Close the check/insert race between concurrent retries. If another
+        // request reserved the same compatible ID, it owns the launch and this
+        // request is an idempotent replay.
+        if let Some(response) =
+            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
+                .await?
+        {
+            return Ok(response);
+        }
         error!(error = %e, "Failed to register instance via Persistence");
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
+            deduplicated: false,
             error: Some(format!("Failed to create instance: {}", e)),
         });
     }
@@ -583,6 +700,7 @@ pub async fn handle_start_instance(
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
+            deduplicated: false,
             error: Some(format!("Failed to create instance: {}", e)),
         });
     }
@@ -668,6 +786,7 @@ pub async fn handle_start_instance(
             Ok(StartInstanceResponse {
                 success: true,
                 instance_id,
+                deduplicated: false,
                 error: None,
             })
         }
@@ -684,6 +803,7 @@ pub async fn handle_start_instance(
             Ok(StartInstanceResponse {
                 success: false,
                 instance_id,
+                deduplicated: false,
                 error: Some(launch_error),
             })
         }

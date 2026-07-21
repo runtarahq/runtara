@@ -115,6 +115,8 @@ struct StartInstanceJsonResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deduplicated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1026,10 +1028,15 @@ async fn handle_start_instance(
         Ok(resp) => {
             if resp.success {
                 (
-                    StatusCode::CREATED,
+                    if resp.deduplicated {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    },
                     Json(StartInstanceJsonResponse {
                         success: true,
                         instance_id: Some(resp.instance_id),
+                        deduplicated: resp.deduplicated,
                         error: None,
                     }),
                 )
@@ -1044,6 +1051,7 @@ async fn handle_start_instance(
                         } else {
                             Some(resp.instance_id)
                         },
+                        deduplicated: false,
                         error: resp.error,
                     }),
                 )

@@ -10,7 +10,7 @@ use chrono::Utc;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use super::traits::*;
@@ -28,6 +28,7 @@ struct MockInstance {
 /// Mock runner for testing.
 pub struct MockRunner {
     instances: Arc<Mutex<HashMap<String, MockInstance>>>,
+    launch_count: Arc<AtomicU64>,
     /// Optional delay to simulate execution time (in milliseconds)
     pub execution_delay_ms: u64,
     /// If true, instances will fail by default
@@ -48,6 +49,7 @@ impl MockRunner {
     pub fn new() -> Self {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
+            launch_count: Arc::new(AtomicU64::new(0)),
             execution_delay_ms: 10,
             fail_by_default: false,
             never_complete: false,
@@ -58,6 +60,7 @@ impl MockRunner {
     pub fn failing() -> Self {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
+            launch_count: Arc::new(AtomicU64::new(0)),
             execution_delay_ms: 10,
             fail_by_default: true,
             never_complete: false,
@@ -70,10 +73,16 @@ impl MockRunner {
     pub fn never_completing() -> Self {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
+            launch_count: Arc::new(AtomicU64::new(0)),
             execution_delay_ms: 0,
             fail_by_default: false,
             never_complete: true,
         }
+    }
+
+    /// Number of detached launches accepted by this mock.
+    pub fn launch_count(&self) -> u64 {
+        self.launch_count.load(Ordering::SeqCst)
     }
 
     /// Mark an instance as completed with output.
@@ -149,6 +158,7 @@ impl Runner for MockRunner {
     }
 
     async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        self.launch_count.fetch_add(1, Ordering::SeqCst);
         let handle = RunnerHandle {
             handle_id: format!("mock_{}", &options.instance_id[..8]),
             instance_id: options.instance_id.clone(),

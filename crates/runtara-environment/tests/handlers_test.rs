@@ -62,6 +62,15 @@ fn create_test_state(pool: PgPool, data_dir: PathBuf) -> EnvironmentHandlerState
     )
 }
 
+/// A real, cross-platform file for MockRunner image records. Start preflight
+/// validates that the registered artifact exists before reserving an ID.
+fn test_artifact_path() -> String {
+    std::env::current_exe()
+        .expect("the running test binary must have a path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Clean up test data
 async fn cleanup(pool: &PgPool, instance_id: Option<&str>, image_id: Option<&str>) {
     if let Some(inst_id) = instance_id {
@@ -321,11 +330,12 @@ async fn test_start_instance_success() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -370,11 +380,12 @@ async fn test_start_instance_with_custom_id() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -396,6 +407,162 @@ async fn test_start_instance_with_custom_id() {
     assert_eq!(response.instance_id, custom_instance_id);
 
     cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
+}
+
+#[tokio::test]
+async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-idempotent-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'mock')
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("idempotent-{}", Uuid::new_v4());
+    let request = || StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: Some(instance_id.clone()),
+        input: Some(serde_json::json!({"attempt": 1})),
+        timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
+    };
+
+    let first = handle_start_instance(&state, request()).await.unwrap();
+    assert!(first.success, "first start failed: {:?}", first.error);
+    assert!(!first.deduplicated);
+
+    let replay = handle_start_instance(&state, request()).await.unwrap();
+    assert!(replay.success, "replay failed: {:?}", replay.error);
+    assert!(replay.deduplicated);
+    assert_eq!(replay.instance_id, instance_id);
+    assert_eq!(runner.launch_count(), 1, "replay launched a second process");
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+#[tokio::test]
+async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-missing-artifact-{image_id}");
+    let missing_binary = temp_dir.path().join("missing-image/binary");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'wasm')
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(missing_binary.to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("missing-artifact-{}", Uuid::new_v4());
+    let response = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image_id.clone(),
+            tenant_id: "test-tenant".to_string(),
+            instance_id: Some(instance_id.clone()),
+            input: None,
+            timeout_seconds: None,
+            env: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.success);
+    assert!(!response.deduplicated);
+    assert!(response.error.unwrap().contains("artifact not found"));
+    assert!(
+        db::get_instance(&pool, &instance_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a missing artifact must fail before the instance id is reserved"
+    );
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+#[tokio::test]
+async fn test_start_instance_rejects_same_id_for_different_image() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+    let first_image_id = Uuid::new_v4().to_string();
+    let second_image_id = Uuid::new_v4().to_string();
+    for image_id in [&first_image_id, &second_image_id] {
+        sqlx::query(
+            r#"
+            INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
+            VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'mock')
+            "#,
+        )
+        .bind(image_id)
+        .bind(format!("test-image-conflict-{image_id}"))
+        .bind(test_artifact_path())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let instance_id = format!("image-conflict-{}", Uuid::new_v4());
+    let start = |image_id: String| StartInstanceRequest {
+        image_id,
+        tenant_id: "test-tenant".to_string(),
+        instance_id: Some(instance_id.clone()),
+        input: None,
+        timeout_seconds: None,
+        env: std::collections::HashMap::new(),
+    };
+
+    let first = handle_start_instance(&state, start(first_image_id.clone()))
+        .await
+        .unwrap();
+    assert!(first.success);
+
+    let conflict = handle_start_instance(&state, start(second_image_id.clone()))
+        .await
+        .unwrap();
+    assert!(!conflict.success);
+    assert!(!conflict.deduplicated);
+    assert!(conflict.error.unwrap().contains("already exists"));
+
+    cleanup(&pool, Some(&instance_id), Some(&first_image_id)).await;
+    cleanup(&pool, None, Some(&second_image_id)).await;
 }
 
 #[tokio::test]
@@ -490,11 +657,12 @@ async fn test_stop_instance_with_registered_container() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -575,11 +743,12 @@ async fn test_resume_instance_wrong_status() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -621,11 +790,12 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -661,11 +831,12 @@ async fn test_resume_instance_success() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -735,11 +906,12 @@ async fn test_start_instance_tenant_isolation() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -784,11 +956,12 @@ async fn test_start_instance_same_tenant_allowed() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -998,11 +1171,12 @@ async fn test_start_instance_stores_env() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();
@@ -1056,11 +1230,12 @@ async fn test_start_instance_empty_env() {
     sqlx::query(
         r#"
         INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
         "#,
     )
     .bind(&image_id)
     .bind(&image_name)
+    .bind(test_artifact_path())
     .execute(&pool)
     .await
     .unwrap();

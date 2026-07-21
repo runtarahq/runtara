@@ -4912,6 +4912,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "sysinfo",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 1.0.69",

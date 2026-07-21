@@ -224,6 +224,7 @@ fn test_start_instance_result_serialize_deserialize() {
     let result = StartInstanceResult {
         success: true,
         instance_id: "inst-123".to_string(),
+        deduplicated: false,
         error: None,
     };
 
@@ -232,7 +233,16 @@ fn test_start_instance_result_serialize_deserialize() {
 
     assert_eq!(parsed.success, result.success);
     assert_eq!(parsed.instance_id, result.instance_id);
+    assert_eq!(parsed.deduplicated, result.deduplicated);
     assert_eq!(parsed.error, result.error);
+}
+
+#[test]
+fn test_start_instance_result_defaults_deduplicated_for_older_servers() {
+    let parsed: StartInstanceResult =
+        serde_json::from_str(r#"{"success":true,"instance_id":"inst-old","error":null}"#).unwrap();
+
+    assert!(!parsed.deduplicated);
 }
 
 #[test]

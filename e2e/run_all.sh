@@ -67,6 +67,7 @@ run_test "SMO FTS Match + TS_RANK (Tier 2)" "${SCRIPT_DIR}/test_smo_fts_match.sh
 run_test "SMO pgvector + Levenshtein (Tier 3)" "${SCRIPT_DIR}/test_smo_vector_search.sh"
 run_test "Object-model raw SQL (query-sql / execute-sql)" "${SCRIPT_DIR}/test_obm_sql_workflow.sh"
 run_test "Negative duration on suspend/relaunch (regression)" "${SCRIPT_DIR}/test_negative_duration_on_resume.sh"
+run_test "Stale artifact + trigger replay idempotency (regression)" "${SCRIPT_DIR}/test_trigger_replay_idempotency.sh"
 
 # Summary
 echo "=========================================="

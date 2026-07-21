@@ -111,6 +111,8 @@ struct StartInstanceJson {
     #[serde(default)]
     instance_id: Option<String>,
     #[serde(default)]
+    deduplicated: bool,
+    #[serde(default)]
     error: Option<String>,
 }
 
@@ -677,7 +679,8 @@ impl ManagementSdk {
             .send()
             .await?;
 
-        // Server returns 201 on success, 400 on failure — both have JSON body
+        // Server returns 201 for a new start, 200 for an idempotent replay,
+        // and 400 on failure — all have a JSON body.
         let json: StartInstanceJson = if resp.status().is_success() || resp.status().as_u16() == 400
         {
             resp.json().await?
@@ -695,6 +698,7 @@ impl ManagementSdk {
         Ok(StartInstanceResult {
             success: json.success,
             instance_id: json.instance_id.unwrap_or_default(),
+            deduplicated: json.deduplicated,
             error: json.error,
         })
     }

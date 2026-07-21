@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_metadata;
+
 const VALIDATION_WASM_FINGERPRINT_VERSION: &str = "runtara-validation-wasm-v1";
 
 fn main() {
@@ -52,9 +54,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=BUILD_NUMBER");
     println!("cargo:rerun-if-env-changed=GITHUB_RUN_NUMBER");
-    let git_head = workspace_root.join(".git/HEAD");
-    if git_head.exists() {
-        println!("cargo:rerun-if-changed={}", git_head.display());
+    for git_path in build_metadata::git_rerun_paths(workspace_root) {
+        println!("cargo:rerun-if-changed={}", git_path.display());
     }
 
     // When the `embed-ui` feature is on, rust_embed needs frontend/dist to exist at
