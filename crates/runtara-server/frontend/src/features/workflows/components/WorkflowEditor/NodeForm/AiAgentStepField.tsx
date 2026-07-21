@@ -39,6 +39,7 @@ import {
   SchemaFieldsEditor,
   type SchemaField as EditorSchemaField,
 } from '../EditorSidebar/SchemaFieldsEditor';
+import { findModelResourceName } from './connection-resources';
 
 const AI_AGENT_FIELD_TYPE_HINTS: Record<string, string> = {
   model: 'string',
@@ -60,6 +61,7 @@ interface ConnectionResourcePage {
 
 async function getConnectionModels(token: string | undefined, context?: any) {
   const connectionId = String(context?.queryKey?.[1] || '');
+  const resourceName = String(context?.queryKey?.[2] || '');
   const response = await fetch(
     `${getRuntimeBaseUrl()}/connections/${encodeURIComponent(
       connectionId
@@ -70,7 +72,7 @@ async function getConnectionModels(token: string | undefined, context?: any) {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ resource: 'llm.models', arguments: {} }),
+      body: JSON.stringify({ resourceName }),
     }
   );
   if (!response.ok) {
@@ -133,10 +135,8 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
   const llmConnections = useMemo(() => {
     const allConnections = connectionsQuery.data ?? [];
-    return allConnections.filter(
-      (conn: any) =>
-        Array.isArray(conn.features) &&
-        conn.features.some((feature: any) => feature.key === 'ai.chat')
+    return allConnections.filter((conn: any) =>
+      Boolean(findModelResourceName(conn.resources))
     );
   }, [connectionsQuery.data]);
 
@@ -145,12 +145,14 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       label: 'None',
       value: '__none__',
       integrationId: null as string | null,
+      modelResourceName: null as string | null,
     };
 
     const options = llmConnections.map((conn: any) => ({
       label: conn.title || conn.id,
       value: conn.id,
       integrationId: conn.integrationId,
+      modelResourceName: findModelResourceName(conn.resources),
     }));
 
     return [noneOption, ...options];
@@ -165,14 +167,22 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     return selected?.integrationId ?? null;
   }, [connectionId, connectionOptions]);
 
+  const selectedModelResourceName = useMemo(() => {
+    if (!connectionId) return null;
+    const selected = connectionOptions.find(
+      (opt) => opt.value === connectionId
+    );
+    return selected?.modelResourceName ?? null;
+  }, [connectionId, connectionOptions]);
+
   const modelsQuery = useCustomQuery<ModelOption[]>({
     queryKey: queryKeys.connectionResources.byConnection(
       connectionId || '',
-      'llm.models'
+      selectedModelResourceName || ''
     ),
     queryFn: getConnectionModels,
     placeholderData: [],
-    enabled: Boolean(connectionId),
+    enabled: Boolean(connectionId && selectedModelResourceName),
   });
 
   const modelOptions = modelsQuery.data ?? [];

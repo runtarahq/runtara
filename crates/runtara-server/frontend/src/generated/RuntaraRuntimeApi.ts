@@ -1518,13 +1518,14 @@ export interface ConnectionCategoryDto {
 export interface ConnectionDescriptor {
   connectionId: string;
   connectionSubtype?: string | null;
-  features?: ConnectionFeature[];
   integrationId: string;
   /**
    * Explicitly safe, integration-owned metadata. It must never contain
    * connection parameters, credentials, tokens, or resolved auth headers.
    */
   metadata?: any;
+  /** Connection-local resource names advertised by the owning extractor. */
+  resources?: ConnectionResourceDefinition[];
   status: ConnectionStatus;
 }
 
@@ -1539,8 +1540,6 @@ export interface ConnectionDto {
   defaultFor?: string[];
   /** Safe edit projection. Present only on the single-connection endpoint. */
   editProjection?: null | ConnectionEditProjection;
-  /** Safe semantic capabilities derived from the integration registry. */
-  features?: ConnectionFeature[];
   /**
    * OAuth grant health. Present only for interactive-OAuth types on the
    * single-connection endpoint. Booleans + timestamps only — never secrets.
@@ -1553,6 +1552,8 @@ export interface ConnectionDto {
   rateLimitConfig?: null | RateLimitConfigDto;
   /** Rate limit statistics for the requested time period (only included when requested) */
   rateLimitStats?: null | PeriodStatsDto;
+  /** Dynamic resources advertised by the connection-specific extractor. */
+  resources?: ConnectionResourceDefinition[];
   status: ConnectionStatus;
   tenantId: string;
   title: string;
@@ -1568,16 +1569,6 @@ export interface ConnectionEditProjection {
   values: any;
   /** Optimistic concurrency token. This is the connection's `updatedAt` value. */
   version: string;
-}
-
-/** A semantic operation supported by a connection type. */
-export interface ConnectionFeature {
-  /** Runtime implementation selected by this connection, when applicable. */
-  driver?: string | null;
-  /** Domain-neutral key, for example `ai.chat` or `messaging.queues`. */
-  key: string;
-  /** Registered read-only resolver used to enumerate resources. */
-  resourceResolver?: string | null;
 }
 
 /**
@@ -1621,7 +1612,14 @@ export interface ConnectionParameterPatch {
   write?: Partial<Record<string, any>>;
 }
 
-/** One normalized option returned by a connection-backed resolver. */
+/** One resource catalog exposed by a connection-specific extractor. */
+export interface ConnectionResourceDefinition {
+  description: string;
+  /** Connection-local name, for example `models` or `sqs.queues`. */
+  name: string;
+}
+
+/** One normalized option returned by a connection-backed extractor. */
 export interface ConnectionResourceItem {
   description?: string | null;
   label: string;
@@ -1640,15 +1638,18 @@ export interface ConnectionResourcePage {
 
 /** Generic request for connection-backed resources. */
 export interface ConnectionResourceRequest {
-  arguments?: any;
   cursor?: string | null;
   /**
    * @format int32
    * @min 0
    */
   limit?: number | null;
-  refresh?: boolean;
-  resource: string;
+  resourceName: string;
+  /**
+   * Optional free-text narrowing. The connection extractor translates it
+   * to the provider's native search/prefix behavior.
+   */
+  search?: string | null;
 }
 
 /** Response for single connection operations */

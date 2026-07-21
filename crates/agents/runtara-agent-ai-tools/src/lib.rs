@@ -133,19 +133,8 @@ pub struct RawConnection {
     pub connection_subtype: Option<String>,
     pub integration_id: String,
     pub parameters: Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub features: Vec<RawConnectionFeature>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_config: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawConnectionFeature {
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_resolver: Option<String>,
 }
 
 // ============================================================================
@@ -185,21 +174,12 @@ fn require_provider(provider: &str) -> Result<&str, AgentError> {
 }
 
 fn require_provider_for_connection(connection: &RawConnection) -> Result<&str, AgentError> {
-    let provider = connection
-        .features
-        .iter()
-        .find(|feature| feature.key == "ai.chat")
-        .and_then(|feature| feature.driver.as_deref())
-        .or(match connection.integration_id.as_str() {
-            "openai_api_key" => Some(PROVIDER_OPENAI),
-            "aws_credentials" => Some(PROVIDER_BEDROCK),
-            _ => None,
-        })
+    let provider = runtara_ai::provider::provider_for_integration(&connection.integration_id)
         .ok_or_else(|| {
             AgentError::permanent(
                 "AI_TOOLS_UNSUPPORTED_CONNECTION",
                 format!(
-                    "connection integration '{}' does not provide the ai.chat feature",
+                    "connection integration '{}' is not AI-compatible",
                     connection.integration_id
                 ),
             )
@@ -2681,7 +2661,6 @@ mod tests {
             connection_subtype: None,
             integration_id: integration_id.into(),
             parameters: serde_json::Value::Null,
-            features: Vec::new(),
             rate_limit_config: None,
         }
     }
@@ -2736,21 +2715,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_feature_metadata_is_authoritative_for_provider_routing() {
-        let mut connection = fake_connection("future_llm_connection");
-        connection.features.push(RawConnectionFeature {
-            key: "ai.chat".into(),
-            driver: Some(PROVIDER_OPENAI.into()),
-            resource_resolver: Some("future.models".into()),
-        });
-        assert_eq!(
-            require_provider_for_connection(&connection).unwrap(),
-            PROVIDER_OPENAI
-        );
-    }
-
-    #[test]
-    fn connection_without_ai_chat_metadata_is_rejected() {
+    fn connection_without_registered_ai_integration_is_rejected() {
         let err = require_provider_for_connection(&fake_connection("sqs_credentials")).unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_UNSUPPORTED_CONNECTION");
     }

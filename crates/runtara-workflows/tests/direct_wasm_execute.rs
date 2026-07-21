@@ -618,8 +618,8 @@ fn route(
     }
 
     // Trusted connection-metadata endpoint used by the host resolver. The id
-    // controls the fixture's authoritative AI driver so tests can prove a
-    // legacy authored provider never wins over resolved connection metadata.
+    // controls the fixture's authoritative integration so tests can prove a
+    // legacy authored provider never wins over the referenced connection.
     if method == "GET" && path.ends_with("/metadata") {
         let connection_id = path.split('/').rev().nth(1).unwrap_or_default().to_string();
         server_state
@@ -627,10 +627,21 @@ fn route(
             .lock()
             .expect("connection metadata requests lock")
             .push(connection_id.clone());
-        let (integration_id, driver, resolver) = if connection_id == "conn-bedrock" {
-            ("aws_credentials", "bedrock", "aws.bedrock.models")
+        let (integration_id, resources) = if connection_id == "conn-bedrock" {
+            (
+                "aws_credentials",
+                serde_json::json!([
+                    {"name": "bedrock.models", "description": "Available Amazon Bedrock models"},
+                    {"name": "sqs.queues", "description": "Available Amazon SQS queues"}
+                ]),
+            )
         } else {
-            ("openai_api_key", "openai", "openai.models")
+            (
+                "openai_api_key",
+                serde_json::json!([
+                    {"name": "models", "description": "Available OpenAI models"}
+                ]),
+            )
         };
         return (
             200,
@@ -638,10 +649,7 @@ fn route(
                 "connectionId": connection_id,
                 "integrationId": integration_id,
                 "status": "ACTIVE",
-                "features": [
-                    {"key": "ai.chat", "driver": driver},
-                    {"key": "llm.models", "resourceResolver": resolver}
-                ],
+                "resources": resources,
                 "metadata": null
             }),
         );

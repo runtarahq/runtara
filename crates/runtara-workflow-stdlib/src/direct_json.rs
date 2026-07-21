@@ -2392,19 +2392,6 @@ impl DirectJsonManifest {
                 descriptor_object.insert(snake_case.to_string(), value);
             }
         }
-        if let Some(features) = descriptor_object
-            .get_mut("features")
-            .and_then(Value::as_array_mut)
-        {
-            for feature in features {
-                if let Some(feature) = feature.as_object_mut()
-                    && !feature.contains_key("resource_resolver")
-                    && let Some(value) = feature.remove("resourceResolver")
-                {
-                    feature.insert("resource_resolver".to_string(), value);
-                }
-            }
-        }
         let connection_id = descriptor_object
             .get("connection_id")
             .and_then(Value::as_str)
@@ -11037,7 +11024,7 @@ mod tests {
                     "integrationId":"shopify_oauth",
                     "connectionSubtype":null,
                     "status":"ACTIVE",
-                    "features":[{"key":"commerce.orders","driver":"shopify","resourceResolver":null}],
+                    "resources":[{"name":"orders","description":"Available orders"}],
                     "metadata":{"account":"store.example"},
                     "parameters":{"must_not":"survive"}
                 }"#,
@@ -11053,10 +11040,9 @@ mod tests {
                 "integration_id": "shopify_oauth",
                 "connection_subtype": null,
                 "status": "ACTIVE",
-                "features": [{
-                    "key": "commerce.orders",
-                    "driver": "shopify",
-                    "resource_resolver": null
+                "resources": [{
+                    "name": "orders",
+                    "description": "Available orders"
                 }],
                 "metadata": {"account": "store.example"},
                 "parameters": {}
