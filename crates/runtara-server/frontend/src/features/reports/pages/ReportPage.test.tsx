@@ -327,5 +327,12 @@ describe('ReportPage existing-report load', () => {
         '?view=stage_c'
       )
     );
+    await waitFor(() =>
+      expect(useReportRenderMock).toHaveBeenLastCalledWith(
+        stagedReport.id,
+        expect.objectContaining({ viewId: 'stage_c' }),
+        true
+      )
+    );
   });
 });
