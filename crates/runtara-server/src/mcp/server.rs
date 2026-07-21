@@ -72,7 +72,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Get the canonical workflow authoring schema for MCP agents, including mapping values, condition expressions, object_model bulk-update examples, and validation/deploy hints."
+        description = "Get the canonical workflow authoring schema for MCP agents, including step-specific shapes (notably Error), mapping values, condition expressions, object_model bulk-update examples, and validation/deploy hints."
     )]
     async fn get_workflow_authoring_schema(
         &self,
@@ -90,7 +90,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Note: steps is a map keyed by step ID, not an array."
+        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Steps is a map keyed by step ID, not an array. inputMapping is not universal: Error uses top-level code/message/category/severity and mapping-capable context, and rejects inputMapping."
     )]
     async fn update_workflow(
         &self,
@@ -1225,15 +1225,16 @@ impl ServerHandler for SmoMcpServer {
                 ## DSL Reference Quick Guide\n\n\
                 **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables. A mistyped tail into a known-shape output (e.g. indexing an array output by a name) now fails at preflight_compile and at runtime — it no longer silently resolves to null — so bad references surface instead of producing a green-but-wrong run.\n\
                 **Step output shapes** (each step type's `outputShape` is in get_step_type_schema / list_step_types): Split `outputs` is the collected ARRAY of per-item results (index it as `steps.s.outputs.0`, NOT `.result`; with `dontStopOnFailed` also `steps.s.data.{success,error,...}`, `.stats.*`, `.hasFailures`); Filter `outputs` is `{items, count}` (NOT a bare array — the filtered array is `steps.f.outputs.items`); While `outputs` is `{iterations, outputs}`; Conditional `outputs` is `{result}`; Agent/AiAgent/GroupBy/Switch/EmbedWorkflow outputs are shaped by the capability/data (see get_capability).\n\
-                **inputMapping** (SINGULAR, not inputMappings): `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`.\n\
+                **inputMapping** (SINGULAR, not inputMappings): Use it only on step types whose schema declares it: `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`. Call get_step_type_schema for built-in step fields.\n\
                 **Condition expressions**: `{\"type\": \"operation\", \"op\": \"LT\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.rng.outputs.value\"}, {\"valueType\": \"immediate\", \"value\": 0.5}]}`.\n\
                 **Edge fields**: Use `fromStep` and `toStep` (not `fromStepId`/`toStepId`) in executionPlan edges.\n\
                 **Conditional routing**: Put the predicate in the Conditional step's `condition` field, then connect outgoing edges with labels `\"true\"` and `\"false\"`. Do not put `condition` on edges from a Conditional step, and do not route those edges via `steps.<conditionalId>.outputs.result`; that boolean is for inspection/later mappings only.\n\
                 **Agent steps**: Must have `agentId` and `capabilityId` (not `agent`/`capability`). Use get_agent to discover IDs. capabilityId uses the hyphenated `id` (e.g., 'http-request'), NOT the underscored `name`.\n\
                 **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
-                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to the handler's inputMapping and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.attributes`. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
+                **Error step authoring**: Error does NOT accept `inputMapping`. Author static `code`, `message`, `category`, and `severity` directly on the step; `message` is a literal string with no reference/template interpolation. Put dynamic mappings in `context`, for example `{\"id\":\"fail\",\"stepType\":\"Error\",\"code\":\"PREP_FAILED\",\"message\":\"Preparation failed after cleanup\",\"category\":\"permanent\",\"context\":{\"original_error\":{\"valueType\":\"reference\",\"value\":\"steps.__error\"}}}`. This emits a new static error envelope and preserves the captured error as context/attributes; it is not a literal rethrow.\n\
+                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to mapping-capable fields (such as Agent/Finish `inputMapping` and Error/Log `context`) and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.severity`, `steps.__error.attributes`, and `steps.__error.stepId`; referencing `steps.__error` preserves the full envelope. The envelope survives successful handler steps, but a later handled failure replaces it, so persist/snapshot the original before cleanup if it must survive cleanup failures. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
                 ## Execution Graph Shape\n\n\
-                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), edges go in `executionPlan` (not `edges`).",
+                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), fields depend on `stepType`, and edges go in `executionPlan` (not `edges`).",
             )
     }
 }
@@ -1316,6 +1317,29 @@ mod tests {
             step_schema.get("type").and_then(|v| v.as_str()),
             Some("object"),
         );
+    }
+
+    #[test]
+    fn workflow_tools_advertise_error_step_specific_authoring() {
+        let router = SmoMcpServer::tool_router();
+
+        let authoring = router
+            .get("get_workflow_authoring_schema")
+            .expect("get_workflow_authoring_schema tool is registered");
+        assert!(
+            authoring
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("step-specific shapes"))
+        );
+
+        let update = router
+            .get("update_workflow")
+            .expect("update_workflow tool is registered");
+        let description = update.description.as_deref().expect("tool description");
+        assert!(description.contains("inputMapping is not universal"));
+        assert!(description.contains("Error uses top-level code/message/category/severity"));
+        assert!(description.contains("rejects inputMapping"));
     }
 
     #[test]

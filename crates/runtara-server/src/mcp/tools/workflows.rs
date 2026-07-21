@@ -298,7 +298,9 @@ pub struct SetWorkflowSlugParams {
 pub struct UpdateWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
-    #[schemars(description = "Complete execution graph JSON definition")]
+    #[schemars(
+        description = "Complete execution graph JSON definition. Step fields are step-type-specific: Error steps use top-level code/message/category/severity plus mapping-capable context, and do not accept inputMapping."
+    )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
 }
@@ -377,7 +379,9 @@ pub struct ListWorkflowFoldersParams {}
 pub struct DeployWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
-    #[schemars(description = "Complete execution graph JSON definition")]
+    #[schemars(
+        description = "Complete execution graph JSON definition. Step fields are step-type-specific: Error steps use top-level code/message/category/severity plus mapping-capable context, and do not accept inputMapping."
+    )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
 }
@@ -449,7 +453,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                         "id": "stepId",
                         "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal",
                         "name": "Human label",
-                        "inputMapping": {}
+                        "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
                 },
                 "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}],
@@ -460,10 +464,46 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             },
             "notes": [
                 "steps is a map keyed by step ID, not an array",
-                "use inputMapping, not inputMappings",
+                "For step types that declare it, use inputMapping, not inputMappings",
+                "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
                 "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges"
             ]
+        },
+        "stepShapes": {
+            "inputMapping": {
+                "appliesOnlyWhenDeclaredByStepSchema": true,
+                "shape": {
+                    "fieldName": {"valueType": "reference", "value": "data.foo"}
+                },
+                "discovery": "Call get_step_type_schema for the exact fields accepted by a built-in step type."
+            },
+            "Error": {
+                "required": ["id", "stepType", "code", "message"],
+                "doesNotAccept": ["inputMapping"],
+                "staticTopLevelFields": ["code", "message", "category", "severity"],
+                "messageSemantics": "message must be a literal JSON string; reference objects and template interpolation are not supported",
+                "dynamicField": "context is an input mapping whose values may be reference, immediate, composite, or template mappings",
+                "example": {
+                    "id": "fail",
+                    "stepType": "Error",
+                    "code": "PROSPECT_PREP_FAILED",
+                    "message": "Prospect preparation failed after safe shadow-run cleanup",
+                    "category": "permanent",
+                    "context": {
+                        "original_error": {
+                            "valueType": "reference",
+                            "value": "steps.__error"
+                        }
+                    }
+                },
+                "onErrorContext": {
+                    "canonicalReference": "steps.__error",
+                    "fields": ["code", "message", "category", "severity", "attributes", "stepId"],
+                    "lifetime": "The captured envelope remains available through successful handler steps. If a later handled step fails, steps.__error is replaced by that newer error; persist or snapshot the original first when it must survive cleanup failures.",
+                    "rethrowSemantics": "An Error step emits a new error envelope. Referencing steps.__error from context preserves the original as metadata; it does not replace the new error's top-level static code or message."
+                }
+            }
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},
@@ -471,7 +511,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             "template": {"valueType": "template", "value": "Hello {{data.name}}"},
             "compositeObject": {"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "data.foo"}}},
             "compositeArray": {"valueType": "composite", "value": [{"valueType": "reference", "value": "data.foo"}]},
-            "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "__error.<field> on onError edges"],
+            "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "steps.__error.<field> on onError paths"],
             "conditionalOutput": {
                 "reference": "steps.<conditionalStepId>.outputs.result",
                 "type": "boolean",
@@ -1651,6 +1691,32 @@ mod tests {
     use super::*;
     use schemars::JsonSchema;
 
+    #[test]
+    fn authoring_schema_describes_error_step_without_input_mapping() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let generic_step = &schema["graphShape"]["shape"]["steps"]["stepId"];
+        let error = &schema["stepShapes"]["Error"];
+
+        assert!(
+            generic_step.get("inputMapping").is_none(),
+            "generic step shape must not advertise inputMapping as universal: {generic_step:#}"
+        );
+        assert_eq!(error["doesNotAccept"], serde_json::json!(["inputMapping"]));
+        assert!(
+            error["messageSemantics"]
+                .as_str()
+                .is_some_and(|text| text.contains("literal JSON string")),
+            "Error message guidance must state that mappings are unsupported: {error:#}"
+        );
+        assert_eq!(
+            error["example"]["context"]["original_error"]["value"],
+            "steps.__error"
+        );
+
+        serde_json::from_value::<runtara_dsl::Step>(error["example"].clone())
+            .expect("advertised Error example must parse as a real Error step");
+    }
+
     /// SYN-451: the authoring schema's advertised condition `op` enum must list
     /// every workflow-valid `ConditionOperator`, must not advertise the query-only
     /// operators in the main list, and every advertised name must deserialize to a
@@ -1949,6 +2015,13 @@ mod tests {
 
         assert_eq!(update_graph["type"], "object");
         assert_eq!(deploy_graph["type"], "object");
+        for graph in [&update_graph, &deploy_graph] {
+            let description = graph["description"]
+                .as_str()
+                .expect("execution_graph description");
+            assert!(description.contains("Error steps use top-level"));
+            assert!(description.contains("do not accept inputMapping"));
+        }
     }
 
     #[test]
