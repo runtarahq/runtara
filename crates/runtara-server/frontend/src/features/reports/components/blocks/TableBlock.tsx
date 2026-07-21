@@ -279,8 +279,7 @@ export function TableBlock({
     (
       writebackContext: WritebackContext | null,
       field: string,
-      value: unknown,
-      refreshAfterCommit: boolean
+      value: unknown
     ) => {
       if (writebackContext) {
         writebackMutate(
@@ -292,9 +291,7 @@ export function TableBlock({
           },
           {
             onSuccess: () => {
-              if (refreshAfterCommit) {
-                void onRefresh?.();
-              }
+              void onRefresh?.();
             },
           }
         );

@@ -195,14 +195,8 @@ export function ReportBlockHost({
   // `!result` so a block that already has data keeps showing it when a
   // refetch fails, rather than blanking out.
   const showFetchError = Boolean(fetchError) && !result;
-  const refreshAfterActionSubmit = () => {
-    void refetch();
-    void onReportRefresh?.();
-
-    window.setTimeout(() => {
-      void refetch();
-      void onReportRefresh?.();
-    }, 1250);
+  const refreshAfterActionSubmit = async () => {
+    await Promise.allSettled([refetch(), onReportRefresh?.()]);
   };
   const runInteractionActions = (
     actions: ReportInteractionAction[],

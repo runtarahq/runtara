@@ -2072,6 +2072,12 @@ pub struct ReportRenderMetadata {
 pub struct ReportViewNavigationState {
     #[serde(
         default,
+        rename = "requestedViewId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub requested_view_id: Option<String>,
+    #[serde(
+        default,
         rename = "activeViewId",
         skip_serializing_if = "Option::is_none"
     )]

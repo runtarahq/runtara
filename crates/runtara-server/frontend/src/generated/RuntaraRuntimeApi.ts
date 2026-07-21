@@ -4488,6 +4488,7 @@ export interface ReportViewGroupState {
 export interface ReportViewNavigationState {
   activeViewId?: string | null;
   group?: null | ReportViewGroupState;
+  requestedViewId?: string | null;
 }
 
 export interface ReportViewStageDefinition {

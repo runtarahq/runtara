@@ -1,5 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -85,6 +87,7 @@ const stagedReport: ReportDto = {
         ],
         currentFrom: { type: 'filter', filterId: 'stage' },
         access: 'through_current',
+        followCurrentOnAdvance: true,
       },
     ],
   },
@@ -241,6 +244,7 @@ describe('ReportPage existing-report load', () => {
         resolvedFilters: { stage: 'B' },
         blocks: {},
         navigation: {
+          requestedViewId: 'stage_c',
           activeViewId: 'stage_b',
           group: {
             id: 'approval',
@@ -266,6 +270,62 @@ describe('ReportPage existing-report load', () => {
       stagedReport.id,
       expect.objectContaining({ viewId: 'stage_c' }),
       true
+    );
+  });
+
+  it('follows a newly persisted current stage when refreshing from the old current view', async () => {
+    useReportRenderMock.mockImplementation(function useMockReportRender(
+      _reportId: string,
+      request: { viewId?: string }
+    ) {
+      const [currentStage, setCurrentStage] = useState<'B' | 'C'>('B');
+      const responseFor = (stage: 'B' | 'C') => ({
+        success: true,
+        report: { id: stagedReport.id, definitionVersion: 1 },
+        resolvedFilters: { stage },
+        blocks: {},
+        navigation: {
+          requestedViewId: request.viewId,
+          activeViewId:
+            stage === 'C' && request.viewId === 'stage_c'
+              ? 'stage_c'
+              : 'stage_b',
+          group: {
+            id: 'approval',
+            mode: 'stages' as const,
+            currentViewId: stage === 'B' ? 'stage_b' : 'stage_c',
+            accessibleViewIds:
+              stage === 'B'
+                ? ['stage_a', 'stage_b']
+                : ['stage_a', 'stage_b', 'stage_c'],
+          },
+        },
+        errors: [],
+      });
+      return {
+        data: responseFor(currentStage),
+        isFetching: false,
+        refetch: async () => {
+          const next = responseFor('C');
+          setCurrentStage('C');
+          return { data: next };
+        },
+      };
+    });
+
+    renderAt(`/reports/${stagedReport.id}?view=stage_b`);
+    await waitFor(() =>
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        '?view=stage_b'
+      )
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        '?view=stage_c'
+      )
     );
   });
 });
