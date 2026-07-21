@@ -341,9 +341,7 @@ fn validate_ai_agent_connection(
                     .integration_id
                     .as_deref()
                     .is_some_and(|integration_id| {
-                        runtara_connections::features_for_integration(integration_id)
-                            .iter()
-                            .any(|feature| feature.key == "ai.chat")
+                        runtara_ai::provider::provider_for_integration(integration_id).is_some()
                     })
             })
             .collect();
@@ -354,8 +352,7 @@ fn validate_ai_agent_connection(
                 format_candidates(&candidates)
             )
         } else {
-            ". No connection exposing the 'ai.chat' feature is configured for this tenant"
-                .to_string()
+            ". No AI-compatible connection is configured for this tenant".to_string()
         };
 
         let message = if let Some(parent) = parent_context {
@@ -397,16 +394,13 @@ fn validate_ai_agent_connection(
         return;
     };
 
-    let supports_ai_chat = runtara_connections::features_for_integration(integration_id)
-        .iter()
-        .any(|feature| feature.key == "ai.chat" && feature.driver.is_some());
-    if !supports_ai_chat {
+    if runtara_ai::provider::provider_for_integration(integration_id).is_none() {
         issues.push(
             ValidationIssue::error(
                 IssueCategory::MissingConnection,
                 &ai_step.id,
                 format!(
-                    "Connection '{}' integrationId '{}' does not expose the 'ai.chat' feature required by an AI Agent",
+                    "Connection '{}' integrationId '{}' is not compatible with an AI Agent",
                     conn_id, integration_id
                 ),
             )
@@ -839,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_agent_openai_connection_is_valid_when_it_exposes_ai_chat() {
+    fn ai_agent_openai_connection_is_valid_when_integration_is_ai_compatible() {
         let workflow = ai_agent_workflow("openai", "conn-openai");
         let tenant = vec![ConnectionRef {
             id: "conn-openai".to_string(),
@@ -868,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_agent_rejects_connection_without_ai_chat_metadata() {
+    fn ai_agent_rejects_non_ai_connection_integration() {
         let workflow = ai_agent_workflow("openai", "conn-db");
         let tenant = vec![ConnectionRef {
             id: "conn-db".to_string(),
@@ -879,9 +873,9 @@ mod tests {
         let issues = validate_connections_with_candidates(&workflow, &tenant, &AgentCatalog::new());
         assert_eq!(issues.len(), 1);
         assert!(
-            issues[0].message.contains("ai.chat"),
-            "{}",
-            issues[0].message
+            issues[0]
+                .message
+                .contains("not compatible with an AI Agent")
         );
     }
 

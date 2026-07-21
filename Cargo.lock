@@ -4664,6 +4664,7 @@ name = "runtara-connections"
 version = "8.6.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "axum",
  "base64",
  "chrono",

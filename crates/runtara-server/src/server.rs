@@ -301,7 +301,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ErrorResponse,
             runtara_connections::types::ConnectionDto,
             runtara_connections::ConnectionDescriptor,
-            runtara_connections::ConnectionFeature,
+            runtara_connections::ConnectionResourceDefinition,
             runtara_connections::ConnectionResourceRequest,
             runtara_connections::ConnectionResourceItem,
             runtara_connections::ConnectionResourcePage,

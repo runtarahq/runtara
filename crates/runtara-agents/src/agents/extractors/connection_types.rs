@@ -335,6 +335,7 @@ pub struct AwsCredentialsParams {
         description = "AWS Access Key ID",
         placeholder = "AKIAIOSFODNN7EXAMPLE"
     )]
+    #[serde(alias = "access_key_id")]
     pub aws_access_key_id: String,
 
     /// AWS Secret Access Key
@@ -343,6 +344,7 @@ pub struct AwsCredentialsParams {
         description = "AWS Secret Access Key",
         secret
     )]
+    #[serde(alias = "secret_access_key")]
     pub aws_secret_access_key: String,
 
     /// AWS Region
@@ -352,11 +354,11 @@ pub struct AwsCredentialsParams {
         placeholder = "us-east-1",
         default = "us-east-1"
     )]
-    #[serde(default = "default_aws_region")]
+    #[serde(default = "default_aws_region", alias = "region")]
     pub aws_region: String,
 
     /// Optional session token for temporary credentials
-    #[serde(default)]
+    #[serde(default, alias = "session_token")]
     #[field(
         display_name = "Session Token",
         description = "Optional AWS session token for temporary credentials",
@@ -376,6 +378,13 @@ pub struct AwsCredentialsParams {
     )]
     pub endpoint: Option<String>,
 }
+
+/// Connection-specific extractor marker for AWS credentials.
+///
+/// AWS does not implement [`HttpConnectionExtractor`] because its requests
+/// require service-aware SigV4 signing. Host-side connection facilities use
+/// this same marker to attach AWS-specific resource extraction and routing.
+pub struct AwsCredentialsExtractor;
 
 fn default_aws_region() -> String {
     "us-east-1".to_string()

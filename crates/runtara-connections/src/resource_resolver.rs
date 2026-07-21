@@ -1,46 +1,125 @@
 //! Read-only, connection-backed resource discovery.
 //!
-//! The semantic resource key (`llm.models`, `messaging.queues`, …) is mapped
-//! to a resolver by the connection descriptor. This module owns the resolver
-//! registry and provider-specific wire protocols; callers only deal in the
-//! generic request/page contracts from [`crate::resolution`].
+//! Resource declarations and provider behavior are owned by connection-specific
+//! extractors. The facade dispatches only by the connection's authoritative
+//! `integration_id`; it does not know provider names or resolver identifiers.
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
+use runtara_agents::extractors::connection_types::{
+    AwsCredentialsExtractor, AwsCredentialsParams, OpenAiApiKeyParams, OpenAiExtractor,
+};
 use serde_json::{Map, Value, json};
 
 use crate::auth::aws_signing::sign_request_v4;
 use crate::error::ConnectionsError;
 use crate::resolution::{
-    ConnectionResourceItem, ConnectionResourcePage, ConnectionResourceRequest,
+    ConnectionResourceDefinition, ConnectionResourceItem, ConnectionResourcePage,
+    ConnectionResourceRequest,
 };
 
-const OPENAI_MODELS_RESOLVER: &str = "openai.models";
-const BEDROCK_MODELS_RESOLVER: &str = "aws.bedrock.models";
-const SQS_QUEUES_RESOLVER: &str = "aws.sqs.queues";
 const MAX_RESOURCE_LIMIT: usize = 1_000;
 
-/// Dispatch one registered resource resolver.
-///
-/// Resolver ids are declared by connection features, rather than inferred
-/// from a workflow step. Adding another connection-backed resource therefore
-/// only requires a feature declaration and one registry implementation here.
+#[derive(Debug, Clone, Copy)]
+struct ResourceSpec {
+    name: &'static str,
+    description: &'static str,
+}
+
+const OPENAI_RESOURCES: &[ResourceSpec] = &[ResourceSpec {
+    name: "models",
+    description: "Available OpenAI models",
+}];
+
+const AWS_RESOURCES: &[ResourceSpec] = &[
+    ResourceSpec {
+        name: "bedrock.models",
+        description: "Available Amazon Bedrock models",
+    },
+    ResourceSpec {
+        name: "sqs.queues",
+        description: "Available Amazon SQS queues",
+    },
+];
+
+#[async_trait]
+trait ConnectionResourceExtractor: Send + Sync {
+    fn integration_id(&self) -> &'static str;
+    fn resources(&self) -> &'static [ResourceSpec];
+
+    async fn resolve(
+        &self,
+        client: &reqwest::Client,
+        parameters: &Value,
+        request: &ConnectionResourceRequest,
+    ) -> Result<ConnectionResourcePage, ConnectionsError>;
+}
+
+static RESOURCE_EXTRACTORS: &[&dyn ConnectionResourceExtractor] =
+    &[&OpenAiExtractor, &AwsCredentialsExtractor];
+
+fn extractor_for_integration(
+    integration_id: &str,
+) -> Option<&'static dyn ConnectionResourceExtractor> {
+    RESOURCE_EXTRACTORS
+        .iter()
+        .copied()
+        .find(|extractor| extractor.integration_id() == integration_id)
+}
+
+/// Resources advertised by the connection-specific extractor.
+pub fn resources_for_integration(integration_id: &str) -> Vec<ConnectionResourceDefinition> {
+    extractor_for_integration(integration_id)
+        .map(|extractor| {
+            extractor
+                .resources()
+                .iter()
+                .map(|resource| ConnectionResourceDefinition {
+                    name: resource.name.to_string(),
+                    description: resource.description.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve one resource through the owning connection-specific extractor.
 pub async fn resolve_resource(
     client: &reqwest::Client,
-    resolver_id: &str,
+    integration_id: &str,
     parameters: &Value,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
-    match resolver_id {
-        OPENAI_MODELS_RESOLVER => resolve_openai_models(client, parameters, request).await,
-        BEDROCK_MODELS_RESOLVER => resolve_bedrock_models(client, parameters, request).await,
-        SQS_QUEUES_RESOLVER => resolve_sqs_queues(client, parameters, request).await,
-        other => Err(ConnectionsError::Validation(format!(
-            "Connection resource resolver '{other}' is not registered"
-        ))),
+    let extractor = extractor_for_integration(integration_id).ok_or_else(|| {
+        ConnectionsError::Validation(format!(
+            "Connection integration '{integration_id}' does not expose resources"
+        ))
+    })?;
+    if !extractor
+        .resources()
+        .iter()
+        .any(|resource| resource.name == request.resource_name)
+    {
+        return Err(ConnectionsError::Validation(format!(
+            "Connection integration '{integration_id}' does not expose resource '{}'",
+            request.resource_name
+        )));
     }
+    extractor.resolve(client, parameters, request).await
+}
+
+fn parse_parameters<T: serde::de::DeserializeOwned>(
+    integration_id: &str,
+    parameters: &Value,
+) -> Result<T, ConnectionsError> {
+    serde_json::from_value(parameters.clone()).map_err(|error| {
+        ConnectionsError::AuthResolution(format!(
+            "Invalid {integration_id} connection parameters: {error}"
+        ))
+    })
 }
 
 fn resource_page(
@@ -62,36 +141,16 @@ fn request_limit(request: &ConnectionResourceRequest) -> usize {
         .limit
         .map(|limit| limit as usize)
         .unwrap_or(MAX_RESOURCE_LIMIT)
-        .min(MAX_RESOURCE_LIMIT)
+        .clamp(1, MAX_RESOURCE_LIMIT)
 }
 
-fn string_argument<'a>(request: &'a ConnectionResourceRequest, key: &str) -> Option<&'a str> {
-    request
-        .arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn parameter<'a>(parameters: &'a Value, names: &[&str]) -> Option<&'a str> {
-    names
+fn contains_search(request: &ConnectionResourceRequest, values: &[&str]) -> bool {
+    let Some(search) = request.search().map(str::to_ascii_lowercase) else {
+        return true;
+    };
+    values
         .iter()
-        .find_map(|name| parameters.get(*name).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn require_parameter<'a>(
-    parameters: &'a Value,
-    names: &[&str],
-    display_name: &str,
-) -> Result<&'a str, ConnectionsError> {
-    parameter(parameters, names).ok_or_else(|| {
-        ConnectionsError::AuthResolution(format!(
-            "Connection is missing required {display_name} credentials"
-        ))
-    })
+        .any(|value| value.to_ascii_lowercase().contains(&search))
 }
 
 fn append_path(base_url: &str, segment: &str) -> Result<reqwest::Url, ConnectionsError> {
@@ -129,26 +188,52 @@ async fn response_json(
     })
 }
 
+#[async_trait]
+impl ConnectionResourceExtractor for OpenAiExtractor {
+    fn integration_id(&self) -> &'static str {
+        "openai_api_key"
+    }
+
+    fn resources(&self) -> &'static [ResourceSpec] {
+        OPENAI_RESOURCES
+    }
+
+    async fn resolve(
+        &self,
+        client: &reqwest::Client,
+        parameters: &Value,
+        request: &ConnectionResourceRequest,
+    ) -> Result<ConnectionResourcePage, ConnectionsError> {
+        let parameters: OpenAiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
+        match request.resource_name.as_str() {
+            "models" => resolve_openai_models(client, &parameters, request).await,
+            _ => unreachable!("resource name was validated against OpenAI extractor metadata"),
+        }
+    }
+}
+
 async fn resolve_openai_models(
     client: &reqwest::Client,
-    parameters: &Value,
+    parameters: &OpenAiApiKeyParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
-    let api_key = require_parameter(parameters, &["api_key"], "OpenAI API key")?;
-    let base_url = parameter(parameters, &["base_url"]).unwrap_or("https://api.openai.com/v1");
-    let url = append_path(base_url, "models")?;
+    let url = append_path(&parameters.base_url, "models")?;
     let mut builder = client
         .get(url)
-        .header(AUTHORIZATION, format!("Bearer {api_key}"))
+        .header(AUTHORIZATION, format!("Bearer {}", parameters.api_key))
         .header(ACCEPT, "application/json");
-    if let Some(organization_id) = parameter(parameters, &["organization_id"]) {
+    if let Some(organization_id) = parameters
+        .organization_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         builder = builder.header("OpenAI-Organization", organization_id);
     }
     let response = builder.send().await.map_err(|error| {
         ConnectionsError::AuthResolution(format!("OpenAI model discovery failed: {error}"))
     })?;
     let body = response_json(response, "OpenAI").await?;
-    let query = string_argument(request, "query").map(str::to_ascii_lowercase);
     let mut models: Vec<&Value> = body
         .get("data")
         .and_then(Value::as_array)
@@ -160,9 +245,11 @@ async fn resolve_openai_models(
         .iter()
         .filter(|model| {
             let id = model.get("id").and_then(Value::as_str).unwrap_or_default();
-            query
-                .as_ref()
-                .is_none_or(|query| id.to_ascii_lowercase().contains(query))
+            let owner = model
+                .get("owned_by")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            contains_search(request, &[id, owner])
         })
         .collect();
     models.sort_by_key(|model| model.get("id").and_then(Value::as_str).unwrap_or_default());
@@ -185,30 +272,29 @@ async fn resolve_openai_models(
     Ok(resource_page(items, None))
 }
 
-struct AwsCredentials<'a> {
-    access_key_id: &'a str,
-    secret_access_key: &'a str,
-    session_token: Option<&'a str>,
-    region: &'a str,
-    endpoint: Option<&'a str>,
-}
+#[async_trait]
+impl ConnectionResourceExtractor for AwsCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "aws_credentials"
+    }
 
-fn aws_credentials(parameters: &Value) -> Result<AwsCredentials<'_>, ConnectionsError> {
-    Ok(AwsCredentials {
-        access_key_id: require_parameter(
-            parameters,
-            &["access_key_id", "aws_access_key_id"],
-            "AWS access key id",
-        )?,
-        secret_access_key: require_parameter(
-            parameters,
-            &["secret_access_key", "aws_secret_access_key"],
-            "AWS secret access key",
-        )?,
-        session_token: parameter(parameters, &["session_token", "aws_session_token"]),
-        region: parameter(parameters, &["region", "aws_region"]).unwrap_or("us-east-1"),
-        endpoint: parameter(parameters, &["endpoint"]),
-    })
+    fn resources(&self) -> &'static [ResourceSpec] {
+        AWS_RESOURCES
+    }
+
+    async fn resolve(
+        &self,
+        client: &reqwest::Client,
+        parameters: &Value,
+        request: &ConnectionResourceRequest,
+    ) -> Result<ConnectionResourcePage, ConnectionsError> {
+        let parameters: AwsCredentialsParams = parse_parameters(self.integration_id(), parameters)?;
+        match request.resource_name.as_str() {
+            "bedrock.models" => resolve_bedrock_models(client, &parameters, request).await,
+            "sqs.queues" => resolve_sqs_queues(client, &parameters, request).await,
+            _ => unreachable!("resource name was validated against AWS extractor metadata"),
+        }
+    }
 }
 
 async fn signed_aws_json(
@@ -216,7 +302,7 @@ async fn signed_aws_json(
     method: reqwest::Method,
     url: reqwest::Url,
     service: &str,
-    credentials: &AwsCredentials<'_>,
+    credentials: &AwsCredentialsParams,
     body: &[u8],
     additional_headers: &[(&str, &str)],
 ) -> Result<Value, ConnectionsError> {
@@ -230,11 +316,11 @@ async fn signed_aws_json(
         &url,
         &mut headers,
         body,
-        credentials.access_key_id,
-        credentials.secret_access_key,
-        credentials.region,
+        &credentials.aws_access_key_id,
+        &credentials.aws_secret_access_key,
+        &credentials.aws_region,
         service,
-        credentials.session_token,
+        credentials.aws_session_token.as_deref(),
     );
 
     let mut builder = client.request(method, url).body(body.to_vec());
@@ -249,34 +335,23 @@ async fn signed_aws_json(
 
 async fn resolve_bedrock_models(
     client: &reqwest::Client,
-    parameters: &Value,
+    credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
-    let credentials = aws_credentials(parameters)?;
     let base_url = credentials
         .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("https://bedrock.{}.amazonaws.com", credentials.region));
-    let mut url = append_path(&base_url, "foundation-models")?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (argument, provider_field) in [
-            ("provider", "byProvider"),
-            ("outputModality", "byOutputModality"),
-            ("inferenceType", "byInferenceType"),
-            ("customizationType", "byCustomizationType"),
-        ] {
-            if let Some(value) = string_argument(request, argument) {
-                query.append_pair(provider_field, value);
-            }
-        }
-    }
+        .unwrap_or_else(|| format!("https://bedrock.{}.amazonaws.com", credentials.aws_region));
+    let url = append_path(&base_url, "foundation-models")?;
     let body = signed_aws_json(
         client,
         reqwest::Method::GET,
         url,
         "bedrock",
-        &credentials,
+        credentials,
         &[],
         &[],
     )
@@ -290,6 +365,21 @@ async fn resolve_bedrock_models(
             )
         })?
         .iter()
+        .filter(|model| {
+            let id = model
+                .get("modelId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let name = model
+                .get("modelName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let provider = model
+                .get("providerName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            contains_search(request, &[id, name, provider])
+        })
         .collect();
     models.sort_by_key(|model| {
         model
@@ -324,28 +414,27 @@ async fn resolve_bedrock_models(
 
 async fn resolve_sqs_queues(
     client: &reqwest::Client,
-    parameters: &Value,
+    credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
-    let credentials = aws_credentials(parameters)?;
     let endpoint = credentials
         .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("https://sqs.{}.amazonaws.com", credentials.region));
+        .unwrap_or_else(|| format!("https://sqs.{}.amazonaws.com", credentials.aws_region));
     let url = reqwest::Url::parse(&endpoint).map_err(|error| {
         ConnectionsError::Validation(format!("Connection endpoint is invalid: {error}"))
     })?;
     let mut payload = Map::new();
-    if let Some(prefix) = string_argument(request, "queueNamePrefix") {
+    if let Some(prefix) = request.search() {
         payload.insert("QueueNamePrefix".into(), Value::String(prefix.to_string()));
     }
     if let Some(cursor) = request.cursor.as_deref() {
         payload.insert("NextToken".into(), Value::String(cursor.to_string()));
     }
-    payload.insert(
-        "MaxResults".into(),
-        json!(request_limit(request).clamp(1, MAX_RESOURCE_LIMIT)),
-    );
+    payload.insert("MaxResults".into(), json!(request_limit(request)));
     let payload = serde_json::to_vec(&Value::Object(payload)).map_err(|error| {
         ConnectionsError::Internal(format!("Failed to encode SQS request: {error}"))
     })?;
@@ -354,7 +443,7 @@ async fn resolve_sqs_queues(
         reqwest::Method::POST,
         url,
         "sqs",
-        &credentials,
+        credentials,
         &payload,
         &[
             ("Content-Type", "application/x-amz-json-1.0"),
@@ -393,21 +482,39 @@ async fn resolve_sqs_queues(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
+    use wiremock::matchers::{body_json, header, header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn request(resource: &str) -> ConnectionResourceRequest {
+    fn request(resource_name: &str) -> ConnectionResourceRequest {
         ConnectionResourceRequest {
-            resource: resource.to_string(),
-            arguments: Value::Null,
+            resource_name: resource_name.to_string(),
+            search: None,
             cursor: None,
             limit: None,
-            refresh: false,
         }
     }
 
+    #[test]
+    fn resources_are_owned_by_connection_extractors() {
+        assert_eq!(
+            resources_for_integration("openai_api_key"),
+            vec![ConnectionResourceDefinition {
+                name: "models".into(),
+                description: "Available OpenAI models".into(),
+            }]
+        );
+        assert_eq!(
+            resources_for_integration("aws_credentials")
+                .into_iter()
+                .map(|resource| resource.name)
+                .collect::<Vec<_>>(),
+            vec!["bedrock.models", "sqs.queues"]
+        );
+        assert!(resources_for_integration("custom").is_empty());
+    }
+
     #[tokio::test]
-    async fn openai_models_are_normalized_and_filtered() {
+    async fn openai_models_are_normalized_and_searched() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
@@ -420,12 +527,12 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let mut request = request("llm.models");
-        request.arguments = json!({"query": "gpt"});
+        let mut request = request("models");
+        request.search = Some("gpt".into());
 
         let page = resolve_resource(
             &reqwest::Client::new(),
-            OPENAI_MODELS_RESOLVER,
+            "openai_api_key",
             &json!({"api_key": "secret", "base_url": format!("{}/v1", server.uri())}),
             &request,
         )
@@ -439,27 +546,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bedrock_models_use_control_plane_and_normalize_ids() {
+    async fn bedrock_searches_name_id_and_provider_without_public_filters() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/foundation-models"))
-            .and(query_param("byProvider", "Anthropic"))
             .and(header_exists("authorization"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "modelSummaries": [{
-                    "modelId": "anthropic.claude-3-haiku",
-                    "modelName": "Claude 3 Haiku",
-                    "providerName": "Anthropic"
-                }]
+                "modelSummaries": [
+                    {
+                        "modelId": "anthropic.claude-3-haiku",
+                        "modelName": "Claude 3 Haiku",
+                        "providerName": "Anthropic"
+                    },
+                    {
+                        "modelId": "amazon.titan-text",
+                        "modelName": "Titan Text",
+                        "providerName": "Amazon"
+                    }
+                ]
             })))
             .mount(&server)
             .await;
-        let mut request = request("llm.models");
-        request.arguments = json!({"provider": "Anthropic"});
+        let mut request = request("bedrock.models");
+        request.search = Some("anthropic".into());
 
         let page = resolve_resource(
             &reqwest::Client::new(),
-            BEDROCK_MODELS_RESOLVER,
+            "aws_credentials",
             &json!({
                 "aws_access_key_id": "key",
                 "aws_secret_access_key": "secret",
@@ -471,39 +584,41 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].value, "anthropic.claude-3-haiku");
         assert_eq!(page.items[0].label, "Claude 3 Haiku");
     }
 
     #[tokio::test]
-    async fn sqs_queues_preserve_pagination_and_normalize_labels() {
+    async fn sqs_maps_generic_search_to_prefix_and_preserves_cursor() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
             .and(header("x-amz-target", "AmazonSQS.ListQueues"))
+            .and(header_exists("authorization"))
             .and(body_json(json!({
-                "QueueNamePrefix": "jobs-",
-                "NextToken": "before",
-                "MaxResults": 25
+                "QueueNamePrefix": "orders",
+                "NextToken": "cursor-1",
+                "MaxResults": 20
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "QueueUrls": ["https://sqs.us-east-1.amazonaws.com/123/jobs-main"],
-                "NextToken": "after"
+                "QueueUrls": ["https://sqs.test/123/orders-created"],
+                "NextToken": "cursor-2"
             })))
             .mount(&server)
             .await;
-        let mut request = request("messaging.queues");
-        request.arguments = json!({"queueNamePrefix": "jobs-"});
-        request.cursor = Some("before".into());
-        request.limit = Some(25);
+        let mut request = request("sqs.queues");
+        request.search = Some("orders".into());
+        request.cursor = Some("cursor-1".into());
+        request.limit = Some(20);
 
         let page = resolve_resource(
             &reqwest::Client::new(),
-            SQS_QUEUES_RESOLVER,
+            "aws_credentials",
             &json!({
-                "aws_access_key_id": "key",
-                "aws_secret_access_key": "secret",
-                "aws_region": "us-east-1",
+                "access_key_id": "key",
+                "secret_access_key": "secret",
+                "region": "us-east-1",
                 "endpoint": server.uri()
             }),
             &request,
@@ -511,20 +626,25 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(page.items[0].label, "jobs-main");
-        assert_eq!(page.next_cursor.as_deref(), Some("after"));
+        assert_eq!(page.items[0].label, "orders-created");
+        assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
     }
 
     #[tokio::test]
-    async fn unknown_resolver_is_rejected_before_egress() {
+    async fn rejects_resource_not_advertised_by_the_connection() {
         let error = resolve_resource(
             &reqwest::Client::new(),
-            "custom.missing",
-            &json!({}),
-            &request("custom.resources"),
+            "openai_api_key",
+            &json!({"api_key": "secret"}),
+            &request("sqs.queues"),
         )
         .await
         .unwrap_err();
-        assert!(matches!(error, ConnectionsError::Validation(_)));
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not expose resource 'sqs.queues'")
+        );
     }
 }

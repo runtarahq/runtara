@@ -51,6 +51,7 @@ zeroize = "1.8"
 
 # Error handling
 thiserror = "2"
+async-trait = "0.1"
 
 # Logging / metrics
 tracing = "0.1"

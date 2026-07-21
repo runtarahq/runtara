@@ -18,10 +18,8 @@ use crate::error::ConnectionsError;
 use crate::facade::ConnectionsFacade;
 use crate::integration_compatibility::IntegrationCompatibility;
 use crate::repository::connections::ConnectionRepository;
-use crate::resolution::{
-    ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest,
-    features_for_integration,
-};
+use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
+use crate::resource_resolver::resources_for_integration;
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
@@ -801,7 +799,7 @@ async fn describe_connection(
         integration_id: integration_id.clone(),
         connection_subtype: connection.connection_subtype,
         status: connection.status,
-        features: features_for_integration(&integration_id),
+        resources: resources_for_integration(&integration_id),
         metadata: Value::Null,
     }))
 }

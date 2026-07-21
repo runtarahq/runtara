@@ -346,7 +346,7 @@ impl ConnectionRepository {
                         updated_at: updated_at.to_rfc3339(),
                         title,
                         connection_subtype,
-                        features: crate::resolution::features_for_integration(
+                        resources: crate::resource_resolver::resources_for_integration(
                             integration_id.as_deref().unwrap_or_default(),
                         ),
                         integration_id,
@@ -425,7 +425,7 @@ impl ConnectionRepository {
                     updated_at: updated_at.to_rfc3339(),
                     title,
                     connection_subtype,
-                    features: crate::resolution::features_for_integration(
+                    resources: crate::resource_resolver::resources_for_integration(
                         integration_id.as_deref().unwrap_or_default(),
                     ),
                     integration_id,
@@ -734,7 +734,7 @@ impl ConnectionRepository {
                         updated_at: updated_at.to_rfc3339(),
                         title,
                         connection_subtype,
-                        features: crate::resolution::features_for_integration(
+                        resources: crate::resource_resolver::resources_for_integration(
                             integration_id.as_deref().unwrap_or_default(),
                         ),
                         integration_id,

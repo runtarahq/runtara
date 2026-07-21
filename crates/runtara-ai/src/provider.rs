@@ -41,6 +41,20 @@ pub fn provider_supports_integration(provider: &str, integration_id: &str) -> bo
         .unwrap_or(false)
 }
 
+/// Infer the internal AI implementation from a connection integration id.
+///
+/// This mapping is intentionally AI-internal. Connection descriptors never
+/// expose provider or driver strings, and non-AI resources do not participate.
+pub fn provider_for_integration(integration_id: &str) -> Option<&'static str> {
+    if OPENAI_COMPATIBLE_INTEGRATIONS.contains(&integration_id) {
+        Some(PROVIDER_OPENAI)
+    } else if BEDROCK_COMPATIBLE_INTEGRATIONS.contains(&integration_id) {
+        Some(PROVIDER_BEDROCK)
+    } else {
+        None
+    }
+}
+
 /// Create an OpenAI completion model from connection parameters.
 ///
 /// Supports two modes:
@@ -204,5 +218,18 @@ mod tests {
             "aws_credentials"
         ));
         assert!(compatible_integration_ids_for_provider("unknown").is_none());
+    }
+
+    #[test]
+    fn provider_is_inferred_only_from_registered_ai_integrations() {
+        assert_eq!(
+            provider_for_integration("openai_api_key"),
+            Some(PROVIDER_OPENAI)
+        );
+        assert_eq!(
+            provider_for_integration("aws_credentials"),
+            Some(PROVIDER_BEDROCK)
+        );
+        assert_eq!(provider_for_integration("sqs_credentials"), None);
     }
 }

@@ -17,10 +17,8 @@ use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredential
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
-use crate::resolution::{
-    ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest,
-    features_for_integration,
-};
+use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
+use crate::resource_resolver::resources_for_integration;
 use crate::service::rate_limits::RateLimitService;
 use crate::types::{ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitEventType};
 
@@ -136,7 +134,7 @@ impl ConnectionsFacade {
 
     /// Resolve an opaque connection id to its authoritative, non-secret
     /// descriptor. This is the runtime/editor metadata boundary: callers get
-    /// integration routing and discovery features, never credential material.
+    /// integration routing and extractor-owned resources, never credential material.
     pub async fn describe_connection(
         &self,
         id: &str,
@@ -151,14 +149,14 @@ impl ConnectionsFacade {
             integration_id: integration_id.clone(),
             connection_subtype: connection.connection_subtype,
             status: connection.status,
-            features: features_for_integration(&integration_id),
+            resources: resources_for_integration(&integration_id),
             metadata: Value::Null,
         }))
     }
 
     /// Resolve a read-only resource advertised by a tenant-owned connection.
-    /// The semantic resource key is validated against the connection's safe
-    /// descriptor before its registered resolver receives decrypted parameters.
+    /// The connection-specific extractor validates the connection-local name,
+    /// parses typed parameters, and performs provider-specific discovery.
     pub async fn resolve_connection_resource(
         &self,
         id: &str,
@@ -174,25 +172,10 @@ impl ConnectionsFacade {
                 "Connection '{id}' has no integrationId and cannot resolve resources"
             ))
         })?;
-        let feature = features_for_integration(integration_id)
-            .into_iter()
-            .find(|feature| feature.key == request.resource)
-            .ok_or_else(|| {
-                ConnectionsError::Validation(format!(
-                    "Connection '{id}' does not expose resource '{}'",
-                    request.resource
-                ))
-            })?;
-        let resolver_id = feature.resource_resolver.ok_or_else(|| {
-            ConnectionsError::Validation(format!(
-                "Connection resource '{}' is not enumerable",
-                request.resource
-            ))
-        })?;
         let empty_parameters = Value::Null;
         crate::resource_resolver::resolve_resource(
             &self.state.http_client,
-            &resolver_id,
+            integration_id,
             connection
                 .connection_parameters
                 .as_ref()

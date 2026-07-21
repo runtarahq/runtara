@@ -30,8 +30,8 @@ pub use facade::ConnectionsFacade;
 pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};
 pub use resolution::{
-    ConnectionDescriptor, ConnectionFeature, ConnectionResourceItem, ConnectionResourcePage,
-    ConnectionResourceRequest, features_for_integration,
+    ConnectionDescriptor, ConnectionResourceDefinition, ConnectionResourceItem,
+    ConnectionResourcePage, ConnectionResourceRequest,
 };
 pub use router::{admin_router, connections_router, oauth_callback_router, runtime_router};
 pub use tenant::TenantId;

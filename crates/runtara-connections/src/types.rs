@@ -398,9 +398,9 @@ pub struct ConnectionDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "integrationId")]
     pub integration_id: Option<String>,
-    /// Safe semantic capabilities derived from the integration registry.
+    /// Dynamic resources advertised by the connection-specific extractor.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub features: Vec<crate::resolution::ConnectionFeature>,
+    pub resources: Vec<crate::resolution::ConnectionResourceDefinition>,
     pub status: ConnectionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "rateLimitConfig")]
