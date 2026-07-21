@@ -2,7 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { WorkflowActionEditor } from './tableActionEditors';
+import {
+  createDefaultTableAction,
+  createDefaultWorkflowAction,
+  WorkflowActionEditor,
+} from './tableActionEditors';
 import type { ReportWorkflowActionConfig } from '../../../types';
 
 vi.mock('react-oidc-context', () => ({
@@ -28,6 +32,14 @@ function renderEditor(
 }
 
 describe('WorkflowActionEditor condition and context controls', () => {
+  it('assigns stable IDs to new workflow launchers', () => {
+    const action = createDefaultWorkflowAction('row', 'advance_stage');
+    const tableAction = createDefaultTableAction();
+
+    expect(action.id).toBe('advance_stage');
+    expect(tableAction.workflowAction.id).toBe(tableAction.id);
+  });
+
   it('renders a Select populated by row fields when fields are provided', () => {
     renderEditor(
       {

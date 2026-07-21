@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
 import {
+  executeReportWorkflowAction,
   getReportWorkflowInstanceStatus,
   runReportWorkflow,
 } from '../../queries';
 import {
   ReportWorkflowActionConfig,
   ReportWorkflowInstanceStatus,
+  ReportRenderResponse,
 } from '../../types';
 
 const POLL_DELAYS_MS = [100, 200, 400, 800, 1500] as const;
@@ -19,14 +21,21 @@ const TERMINAL_STATUSES = new Set([
   'cancelled',
 ]);
 
-export type ReportWorkflowActionPhase =
-  | 'submitting'
-  | 'running'
-  | 'refreshing';
+export type ReportWorkflowActionPhase = 'submitting' | 'running' | 'refreshing';
 
 export type ReportWorkflowActionResult = ReportWorkflowInstanceStatus & {
   workflowId: string;
   instanceId: string;
+  render?: ReportRenderResponse;
+  canonicalViewId?: string | null;
+  completedWithinWait?: boolean;
+};
+
+type ReportWorkflowActionScope = {
+  reportId: string;
+  blockId: string;
+  viewId?: string | null;
+  filters: Record<string, unknown>;
 };
 
 export type RunWorkflowActionArgs = {
@@ -40,11 +49,13 @@ export type RunWorkflowActionArgs = {
 
 export function useReportWorkflowAction({
   onCompleted,
+  report,
 }: {
   onCompleted?: (
     result: ReportWorkflowActionResult,
     action: ReportWorkflowActionConfig
   ) => void | Promise<void>;
+  report?: ReportWorkflowActionScope;
 } = {}) {
   const auth = useAuth();
   const token = auth.user?.access_token;
@@ -85,11 +96,38 @@ export function useReportWorkflowAction({
           fallbackField,
           selectedRows
         );
-        const scheduled = await runReportWorkflow(token ?? '', {
-          workflowId: action.workflowId,
-          version: action.version ?? undefined,
-          context,
-        });
+        const endpoint = report
+          ? await executeReportWorkflowAction(token ?? '', {
+              reportId: report.reportId,
+              blockId: report.blockId,
+              actionId: action.id ?? fallbackField,
+              idempotencyKey: createIdempotencyKey(),
+              body: {
+                trigger: {
+                  row,
+                  value,
+                  field: fallbackField,
+                  selectedRows,
+                },
+                render: {
+                  filters: report.filters,
+                  viewId: report.viewId ?? undefined,
+                  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                },
+                waitMs: 2000,
+              },
+            })
+          : undefined;
+        const scheduled = endpoint
+          ? {
+              instanceId: endpoint.execution.instanceId,
+              status: endpoint.execution.status,
+            }
+          : await runReportWorkflow(token ?? '', {
+              workflowId: action.workflowId,
+              version: action.version ?? undefined,
+              context,
+            });
         throwIfAborted(controller.signal);
         setActionPhase(setPhases, key, 'running');
         const terminal = isTerminalStatus(scheduled.status)
@@ -107,12 +145,24 @@ export function useReportWorkflowAction({
           ...terminal,
           workflowId: action.workflowId,
           instanceId: scheduled.instanceId,
+          outputs: endpoint?.execution.output ?? terminal.outputs,
+          error: endpoint?.execution.error ?? terminal.error,
+          usedVersion: endpoint?.execution.version ?? terminal.usedVersion,
+          executionDurationSeconds:
+            endpoint?.execution.durationMs != null
+              ? endpoint.execution.durationMs / 1000
+              : terminal.executionDurationSeconds,
+          render: endpoint?.render ?? undefined,
+          canonicalViewId: endpoint?.canonicalViewId,
+          completedWithinWait: endpoint?.completedWithinWait,
         };
 
-        if (result.status === 'completed') {
+        if (result.status === 'completed' || result.render) {
           setActionPhase(setPhases, key, 'refreshing');
           await onCompleted?.(result, action);
           throwIfAborted(controller.signal);
+        }
+        if (result.status === 'completed') {
           toast.success(action.successMessage ?? 'Workflow completed');
           return;
         }
@@ -129,13 +179,10 @@ export function useReportWorkflowAction({
         }
       }
     },
-    [onCompleted, token]
+    [onCompleted, report, token]
   );
 
-  const isRunning = useCallback(
-    (key: string) => phases.has(key),
-    [phases]
-  );
+  const isRunning = useCallback((key: string) => phases.has(key), [phases]);
   const phase = useCallback((key: string) => phases.get(key), [phases]);
 
   return { run, isRunning, phase };
@@ -253,5 +300,12 @@ function errorMessage(error: unknown): string | null {
     maybeAxios.response?.data?.message ??
     maybeAxios.message ??
     null
+  );
+}
+
+function createIdempotencyKey(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `report-action-${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
 }

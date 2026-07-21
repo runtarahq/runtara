@@ -354,6 +354,7 @@ export function ReportBlockHost({
       ) : (
         <RenderedBlock
           reportId={reportId}
+          activeViewId={activeViewId}
           block={block}
           result={result}
           sort={sort}
@@ -375,6 +376,7 @@ export function ReportBlockHost({
 
 function RenderedBlock({
   reportId,
+  activeViewId,
   block,
   result,
   sort,
@@ -387,6 +389,7 @@ function RenderedBlock({
   onRefresh,
 }: {
   reportId: string;
+  activeViewId?: string | null;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   sort: ReportOrderBy[];
@@ -411,6 +414,7 @@ function RenderedBlock({
     return (
       <TableBlock
         reportId={reportId}
+        activeViewId={activeViewId}
         block={block}
         result={result}
         sort={sort}
@@ -460,6 +464,7 @@ function RenderedBlock({
     return (
       <CardBlock
         reportId={reportId}
+        activeViewId={activeViewId}
         block={block}
         result={result}
         filters={filters}

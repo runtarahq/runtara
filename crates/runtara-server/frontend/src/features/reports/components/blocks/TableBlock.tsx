@@ -136,6 +136,7 @@ type TableRowEntry = {
 
 type TableBlockProps = {
   reportId: string;
+  activeViewId?: string | null;
   block: ReportBlockDefinition;
   result: ReportBlockResult;
   sort: ReportOrderBy[];
@@ -162,6 +163,7 @@ const EMPTY_DIAGNOSTICS: NonNullable<TableData['diagnostics']> = [];
 
 export function TableBlock({
   reportId,
+  activeViewId,
   block,
   result,
   sort,
@@ -182,6 +184,12 @@ export function TableBlock({
     onCompleted: async (result, action) => {
       setSelectedRowKeys(new Set());
       await onRefresh?.(result, action);
+    },
+    report: {
+      reportId,
+      blockId: block.id,
+      viewId: activeViewId,
+      filters,
     },
   });
   const [editingCell, setEditingCell] = useState<{
@@ -335,230 +343,237 @@ export function TableBlock({
   return (
     <TooltipProvider delayDuration={150} skipDelayDuration={0}>
       <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
-      {tableActions.length > 0 && (
-        <TableActionsToolbar
-          blockId={block.id}
-          actions={tableActions}
-          selectedRows={selectedRows}
-          workflowAction={workflowAction}
-        />
-      )}
-      <Table className={tableClassName || undefined}>
-        <colgroup>
-          {selectable && (
-            <col
-              className="report-print-hidden"
-              style={{ width: '2.5rem' }}
-            />
-          )}
-          {columns.map((column, idx) => (
-            <col key={column.key} style={columnLayouts[idx]?.style} />
-          ))}
-          {hasFlexibleFillerColumn && <col aria-hidden="true" />}
-        </colgroup>
-        <TableHeader className="sticky top-0 z-10 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
-          <TableRow className="group/header border-b-0 bg-muted/30 hover:bg-muted/30">
+        {tableActions.length > 0 && (
+          <TableActionsToolbar
+            blockId={block.id}
+            actions={tableActions}
+            selectedRows={selectedRows}
+            workflowAction={workflowAction}
+          />
+        )}
+        <Table className={tableClassName || undefined}>
+          <colgroup>
             {selectable && (
-              <TableHead className="report-print-hidden h-9 w-10">
-                <Checkbox
-                  aria-label="Select all rows"
-                  checked={
-                    allRowsSelected
-                      ? true
-                      : someRowsSelected
-                        ? 'indeterminate'
-                        : false
-                  }
-                  disabled={rowEntries.length === 0}
-                  onCheckedChange={toggleAllRows}
-                />
-              </TableHead>
+              <col
+                className="report-print-hidden"
+                style={{ width: '2.5rem' }}
+              />
             )}
-            {columns.map((column, idx) => {
-              const sortDirection = getColumnSortDirection(column.key, sort);
-              const isSortable = !isNonSortableColumn(column);
-              const layout = columnLayouts[idx];
-              const effectiveAlign = column.align ?? undefined;
-              return (
-                <TableHead
-                  key={column.key}
-                  aria-sort={getAriaSort(sortDirection)}
-                  style={layout?.style}
-                  className={cn(
-                    'h-9 whitespace-nowrap',
-                    isActionColumn(column) && 'report-print-hidden',
-                    effectiveAlign === 'right' && 'text-right'
-                  )}
-                >
-                  {isSortable ? (
-                    <button
-                      type="button"
-                      className={cn(
-                        'group/h flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
-                        effectiveAlign === 'right' && 'justify-end'
-                      )}
-                      onClick={() =>
-                        onSortChange(nextSortForColumn(column.key, sort))
-                      }
-                    >
-                      <span className="truncate">
+            {columns.map((column, idx) => (
+              <col key={column.key} style={columnLayouts[idx]?.style} />
+            ))}
+            {hasFlexibleFillerColumn && <col aria-hidden="true" />}
+          </colgroup>
+          <TableHeader className="sticky top-0 z-10 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border))]">
+            <TableRow className="group/header border-b-0 bg-muted/30 hover:bg-muted/30">
+              {selectable && (
+                <TableHead className="report-print-hidden h-9 w-10">
+                  <Checkbox
+                    aria-label="Select all rows"
+                    checked={
+                      allRowsSelected
+                        ? true
+                        : someRowsSelected
+                          ? 'indeterminate'
+                          : false
+                    }
+                    disabled={rowEntries.length === 0}
+                    onCheckedChange={toggleAllRows}
+                  />
+                </TableHead>
+              )}
+              {columns.map((column, idx) => {
+                const sortDirection = getColumnSortDirection(column.key, sort);
+                const isSortable = !isNonSortableColumn(column);
+                const layout = columnLayouts[idx];
+                const effectiveAlign = column.align ?? undefined;
+                return (
+                  <TableHead
+                    key={column.key}
+                    aria-sort={getAriaSort(sortDirection)}
+                    style={layout?.style}
+                    className={cn(
+                      'h-9 whitespace-nowrap',
+                      isActionColumn(column) && 'report-print-hidden',
+                      effectiveAlign === 'right' && 'text-right'
+                    )}
+                  >
+                    {isSortable ? (
+                      <button
+                        type="button"
+                        className={cn(
+                          'group/h flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
+                          effectiveAlign === 'right' && 'justify-end'
+                        )}
+                        onClick={() =>
+                          onSortChange(nextSortForColumn(column.key, sort))
+                        }
+                      >
+                        <span className="truncate">
+                          {column.label ?? humanizeFieldName(column.key)}
+                        </span>
+                        <SortIcon direction={sortDirection} />
+                      </button>
+                    ) : (
+                      <span
+                        className={cn(
+                          'block truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground',
+                          effectiveAlign === 'right'
+                            ? 'text-right'
+                            : 'text-left'
+                        )}
+                      >
                         {column.label ?? humanizeFieldName(column.key)}
                       </span>
-                      <SortIcon direction={sortDirection} />
-                    </button>
-                  ) : (
-                    <span
-                      className={cn(
-                        'block truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground',
-                        effectiveAlign === 'right' ? 'text-right' : 'text-left'
-                      )}
-                    >
-                      {column.label ?? humanizeFieldName(column.key)}
-                    </span>
-                  )}
-                </TableHead>
-              );
-            })}
-            {hasFlexibleFillerColumn && (
-              <TableHead aria-hidden="true" className="h-9 p-0" />
-            )}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
-            <TableRow>
-              <TableCell
-                colSpan={
-                  columns.length +
-                  (selectable ? 1 : 0) +
-                  (hasFlexibleFillerColumn ? 1 : 0)
-                }
-                className="py-12 text-center text-sm text-muted-foreground"
-              >
-                No rows match the current filters.
-              </TableCell>
+                    )}
+                  </TableHead>
+                );
+              })}
+              {hasFlexibleFillerColumn && (
+                <TableHead aria-hidden="true" className="h-9 p-0" />
+              )}
             </TableRow>
-          ) : (
-            rowEntries.map(({ row, rowKey, rowObject }) => {
-              return (
-                <MemoizedTableBodyRow
-                  key={rowKey}
-                  reportId={reportId}
-                  blockId={block.id}
-                  row={row}
-                  rowKey={rowKey}
-                  rowObject={rowObject}
-                  columns={columns}
-                  columnLayouts={columnLayouts}
-                  hasFlexibleFillerColumn={hasFlexibleFillerColumn}
-                  selectable={selectable}
-                  selected={selectedRowKeys.has(rowKey)}
-                  editingField={
-                    editingCell?.rowKey === rowKey ? editingCell.field : null
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={
+                    columns.length +
+                    (selectable ? 1 : 0) +
+                    (hasFlexibleFillerColumn ? 1 : 0)
                   }
-                  filters={filters}
-                  blockFilters={blockFilters}
-                  writebackPending={writebackPending}
-                  onToggleSelected={toggleRowSelected}
-                  onEditCell={editCell}
-                  onCommitCell={commitCell}
-                  onCancelCell={cancelCell}
-                  onRowClick={onRowClick}
-                  onCellClick={onCellClick}
-                  onInteractionButtonClick={onInteractionButtonClick}
-                  onRunWorkflow={workflowAction.run}
-                  workflowActionPhase={workflowAction.phase}
-                />
-              );
-            })
-          )}
-        </TableBody>
-      </Table>
-      {showPagination && (
-        <div className="report-print-hidden flex flex-col gap-3 border-t px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <span>{formatPageRange(page)}</span>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            {pageSizeOptions.length > 1 && (
-              <div className="flex items-center gap-2">
-                <span>Rows</span>
-                <Select
-                  value={String(page.size)}
-                  onValueChange={(value) => onPageChange(0, Number(value))}
+                  className="py-12 text-center text-sm text-muted-foreground"
                 >
-                  <SelectTrigger className="h-8 w-24">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {pageSizeOptions.map((size) => (
-                      <SelectItem key={size} value={String(size)}>
-                        {size}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+                  No rows match the current filters.
+                </TableCell>
+              </TableRow>
+            ) : (
+              rowEntries.map(({ row, rowKey, rowObject }) => {
+                return (
+                  <MemoizedTableBodyRow
+                    key={rowKey}
+                    reportId={reportId}
+                    blockId={block.id}
+                    row={row}
+                    rowKey={rowKey}
+                    rowObject={rowObject}
+                    columns={columns}
+                    columnLayouts={columnLayouts}
+                    hasFlexibleFillerColumn={hasFlexibleFillerColumn}
+                    selectable={selectable}
+                    selected={selectedRowKeys.has(rowKey)}
+                    editingField={
+                      editingCell?.rowKey === rowKey ? editingCell.field : null
+                    }
+                    filters={filters}
+                    blockFilters={blockFilters}
+                    writebackPending={writebackPending}
+                    onToggleSelected={toggleRowSelected}
+                    onEditCell={editCell}
+                    onCommitCell={commitCell}
+                    onCancelCell={cancelCell}
+                    onRowClick={onRowClick}
+                    onCellClick={onCellClick}
+                    onInteractionButtonClick={onInteractionButtonClick}
+                    onRunWorkflow={workflowAction.run}
+                    workflowActionPhase={workflowAction.phase}
+                  />
+                );
+              })
             )}
-            <div className="flex items-center gap-2">
-              {lastPageOffset !== undefined ? (
+          </TableBody>
+        </Table>
+        {showPagination && (
+          <div className="report-print-hidden flex flex-col gap-3 border-t px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+            <span>{formatPageRange(page)}</span>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              {pageSizeOptions.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <span>Rows</span>
+                  <Select
+                    value={String(page.size)}
+                    onValueChange={(value) => onPageChange(0, Number(value))}
+                  >
+                    <SelectTrigger className="h-8 w-24">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {pageSizeOptions.map((size) => (
+                        <SelectItem key={size} value={String(size)}>
+                          {size}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                {lastPageOffset !== undefined ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page.offset <= 0}
+                    onClick={() => onPageChange(0, page.size)}
+                  >
+                    <ChevronsLeft className="mr-1 h-4 w-4" />
+                    First
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   size="sm"
                   disabled={page.offset <= 0}
-                  onClick={() => onPageChange(0, page.size)}
+                  onClick={() =>
+                    onPageChange(
+                      Math.max(0, page.offset - page.size),
+                      page.size
+                    )
+                  }
                 >
-                  <ChevronsLeft className="mr-1 h-4 w-4" />
-                  First
+                  <ChevronLeft className="mr-1 h-4 w-4" />
+                  Previous
                 </Button>
-              ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page.offset <= 0}
-                onClick={() =>
-                  onPageChange(Math.max(0, page.offset - page.size), page.size)
-                }
-              >
-                <ChevronLeft className="mr-1 h-4 w-4" />
-                Previous
-              </Button>
-              {currentPage !== undefined && totalPages !== undefined ? (
-                <span className="whitespace-nowrap px-1 text-xs text-muted-foreground">
-                  Page {currentPage} of {totalPages}
-                </span>
-              ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!page.hasNextPage}
-                onClick={() => onPageChange(page.offset + page.size, page.size)}
-              >
-                Next
-                <ChevronRight className="ml-1 h-4 w-4" />
-              </Button>
-              {lastPageOffset !== undefined ? (
+                {currentPage !== undefined && totalPages !== undefined ? (
+                  <span className="whitespace-nowrap px-1 text-xs text-muted-foreground">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                ) : null}
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page.offset >= lastPageOffset}
-                  onClick={() => onPageChange(lastPageOffset, page.size)}
+                  disabled={!page.hasNextPage}
+                  onClick={() =>
+                    onPageChange(page.offset + page.size, page.size)
+                  }
                 >
-                  Last
-                  <ChevronsRight className="ml-1 h-4 w-4" />
+                  Next
+                  <ChevronRight className="ml-1 h-4 w-4" />
                 </Button>
-              ) : null}
+                {lastPageOffset !== undefined ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page.offset >= lastPageOffset}
+                    onClick={() => onPageChange(lastPageOffset, page.size)}
+                  >
+                    Last
+                    <ChevronsRight className="ml-1 h-4 w-4" />
+                  </Button>
+                ) : null}
+              </div>
             </div>
           </div>
-        </div>
-      )}
-      {diagnostics.length > 0 && (
-        <div className="border-t bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-          {diagnostics.map((diagnostic, index) => (
-            <p key={`${diagnostic.code ?? 'diagnostic'}-${index}`}>
-              {diagnostic.message}
-            </p>
-          ))}
-        </div>
-      )}
+        )}
+        {diagnostics.length > 0 && (
+          <div className="border-t bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+            {diagnostics.map((diagnostic, index) => (
+              <p key={`${diagnostic.code ?? 'diagnostic'}-${index}`}>
+                {diagnostic.message}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
     </TooltipProvider>
   );
@@ -605,9 +620,7 @@ type TableBodyRowProps = {
     fallbackField?: string;
     selectedRows?: Record<string, unknown>[];
   }) => void | Promise<void>;
-  workflowActionPhase: (
-    key: string
-  ) => ReportWorkflowActionPhase | undefined;
+  workflowActionPhase: (key: string) => ReportWorkflowActionPhase | undefined;
 };
 
 const MemoizedTableBodyRow = memo(TableBodyRow, areTableBodyRowPropsEqual);
@@ -1510,7 +1523,9 @@ function AvatarLabelCell({
   const initials = initialsFromValue(display);
   const colorClass = colorClassForKey(raw);
   const fullText =
-    typeof tooltipValue === 'string' ? tooltipValue : displayText.title ?? raw;
+    typeof tooltipValue === 'string'
+      ? tooltipValue
+      : (displayText.title ?? raw);
   return (
     <div className="flex min-w-0 items-center gap-2">
       <span
@@ -1676,7 +1691,12 @@ function InlineTableChart({
   // Scatter is a full-block visualization; a bubble cloud in a ~44px sparkline
   // cell is unreadable, so render nothing rather than silently falling through
   // to the line-chart default branch below.
-  if (!chart || rows.length === 0 || series.length === 0 || chart.kind === 'scatter') {
+  if (
+    !chart ||
+    rows.length === 0 ||
+    series.length === 0 ||
+    chart.kind === 'scatter'
+  ) {
     return <EmptyCellPlaceholder />;
   }
 

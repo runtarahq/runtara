@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   AlertTriangle,
@@ -45,6 +46,7 @@ import {
   ReportDefinition,
   ReportInteractionOptions,
 } from '../types';
+import type { ReportWorkflowActionResult } from '../components/blocks/useReportWorkflowAction';
 import {
   decodeFilterValue,
   encodeFilterValue,
@@ -55,6 +57,7 @@ import {
   getReportLayoutBlockIds,
   slugify,
 } from '../utils';
+import { cacheReportActionRender } from '../reportActionRender';
 
 // Wizard v2 — operates on ReportDefinition directly, no WizardState
 // intermediate model. Default authoring surface as of Phase 7 cutover.
@@ -83,6 +86,7 @@ export function ReportPage() {
   const { reportId } = useParams();
   const isExisting = Boolean(reportId);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const editing = searchParams.get('edit') === '1' || !isExisting;
   const { selectedConnectionId, connections: objectModelConnections } =
@@ -239,41 +243,76 @@ export function ReportPage() {
     setSearchParams,
   ]);
 
-  const handleReportActionRefresh = useCallback(async () => {
-    const startingNavigation = renderQuery.data?.navigation;
-    const startingGroup = startingNavigation?.group;
-    const group = (definition.viewGroups ?? []).find(
-      (candidate) => candidate.id === startingGroup?.id
-    );
-    const startingCurrentViewId = startingGroup?.currentViewId;
-    const shouldPoll = Boolean(
-      group?.mode === 'stages' &&
-        group.followCurrentOnAdvance &&
-        startingCurrentViewId &&
-        startingNavigation?.activeViewId === startingCurrentViewId
-    );
-    const delays = shouldPoll ? [0, 100, 250, 500, 1000] : [0];
-    let result: Awaited<ReturnType<typeof renderQuery.refetch>> | undefined;
-
-    for (const delay of delays) {
-      if (delay > 0) await waitForReportState(delay);
-      result = await renderQuery.refetch();
-      const nextCurrentViewId = result.data?.navigation?.group?.currentViewId;
-      if (!shouldPoll) break;
-      if (nextCurrentViewId && nextCurrentViewId !== startingCurrentViewId) {
-        setSearchParams(
-          (current) => {
-            const next = new URLSearchParams(current);
-            next.set('view', nextCurrentViewId);
-            return next;
-          },
-          { replace: true }
+  const handleReportActionRefresh = useCallback(
+    async (actionResult?: ReportWorkflowActionResult) => {
+      if (actionResult?.render && renderRequest && reportId) {
+        const cached = cacheReportActionRender(
+          queryClient,
+          reportId,
+          renderRequest,
+          actionResult
         );
-        break;
+        if (cached?.canonicalViewId) {
+          const canonicalViewId = cached.canonicalViewId;
+          if (requestedViewId !== canonicalViewId) {
+            setSearchParams(
+              (current) => {
+                const next = new URLSearchParams(current);
+                next.set('view', canonicalViewId);
+                return next;
+              },
+              { replace: true }
+            );
+          }
+          return { data: cached.render };
+        }
+        return { data: cached?.render ?? actionResult.render };
       }
-    }
-    return result;
-  }, [definition.viewGroups, renderQuery, setSearchParams]);
+
+      const startingNavigation = renderQuery.data?.navigation;
+      const startingGroup = startingNavigation?.group;
+      const group = (definition.viewGroups ?? []).find(
+        (candidate) => candidate.id === startingGroup?.id
+      );
+      const startingCurrentViewId = startingGroup?.currentViewId;
+      const shouldPoll = Boolean(
+        group?.mode === 'stages' &&
+          group.followCurrentOnAdvance &&
+          startingCurrentViewId &&
+          startingNavigation?.activeViewId === startingCurrentViewId
+      );
+      const delays = shouldPoll ? [0, 100, 250, 500, 1000] : [0];
+      let result: Awaited<ReturnType<typeof renderQuery.refetch>> | undefined;
+
+      for (const delay of delays) {
+        if (delay > 0) await waitForReportState(delay);
+        result = await renderQuery.refetch();
+        const nextCurrentViewId = result.data?.navigation?.group?.currentViewId;
+        if (!shouldPoll) break;
+        if (nextCurrentViewId && nextCurrentViewId !== startingCurrentViewId) {
+          setSearchParams(
+            (current) => {
+              const next = new URLSearchParams(current);
+              next.set('view', nextCurrentViewId);
+              return next;
+            },
+            { replace: true }
+          );
+          break;
+        }
+      }
+      return result;
+    },
+    [
+      definition.viewGroups,
+      queryClient,
+      renderQuery,
+      renderRequest,
+      reportId,
+      requestedViewId,
+      setSearchParams,
+    ]
+  );
 
   // Phase 9: in-place block preview for the wizard. Debounced from the
   // live definition so live edits don't pummel the preview API.

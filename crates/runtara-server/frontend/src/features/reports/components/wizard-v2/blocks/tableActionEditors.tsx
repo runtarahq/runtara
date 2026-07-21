@@ -82,9 +82,11 @@ function useWorkflowOptions() {
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function createDefaultWorkflowAction(
-  mode: ReportWorkflowActionContextMode = 'row'
+  mode: ReportWorkflowActionContextMode = 'row',
+  id = `action_${Math.random().toString(36).slice(2, 7)}`
 ): ReportWorkflowActionConfig {
   return {
+    id,
     workflowId: '',
     label: 'Run workflow',
     reloadBlock: true,
@@ -104,10 +106,11 @@ export function createDefaultInteractionButton(): ReportTableInteractionButtonCo
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function createDefaultTableAction(): ReportTableActionConfig {
+  const id = `bulk_${Math.random().toString(36).slice(2, 7)}`;
   return {
-    id: `bulk_${Math.random().toString(36).slice(2, 7)}`,
+    id,
     label: 'Run on selection',
-    workflowAction: createDefaultWorkflowAction('selection'),
+    workflowAction: createDefaultWorkflowAction('selection', id),
   };
 }
 

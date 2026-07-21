@@ -2,6 +2,8 @@ import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 import {
   CreateReportRequest,
+  ExecuteReportWorkflowActionRequest,
+  ExecuteReportWorkflowActionResponse,
   ReportBlockDataRequest,
   ReportBlockResult,
   ReportDatasetQueryRequest,
@@ -23,6 +25,33 @@ import {
   ValidateReportRequest,
   ValidateReportResponse,
 } from '../types';
+
+export async function executeReportWorkflowAction(
+  token: string,
+  request: {
+    reportId: string;
+    blockId: string;
+    actionId: string;
+    idempotencyKey: string;
+    body: ExecuteReportWorkflowActionRequest;
+  }
+): Promise<ExecuteReportWorkflowActionResponse> {
+  const auth = createAuthHeaders(token);
+  const result = await RuntimeREST.api.executeReportWorkflowAction(
+    request.reportId,
+    request.blockId,
+    request.actionId,
+    request.body,
+    {
+      ...auth,
+      headers: {
+        ...auth.headers,
+        'Idempotency-Key': request.idempotencyKey,
+      },
+    }
+  );
+  return result.data;
+}
 
 export async function listReports(token: string): Promise<ReportSummary[]> {
   const result = await RuntimeREST.instance.get(
@@ -325,8 +354,8 @@ export async function getReportWorkflowInstanceStatus(
     id?: string;
     status?: string;
   };
-  const instance: Partial<ReportWorkflowInstanceStatus> =
-    wrapped.data?.instance ?? {
+  const instance: Partial<ReportWorkflowInstanceStatus> = wrapped.data
+    ?.instance ?? {
     id: wrapped.id,
     status: wrapped.status,
   };

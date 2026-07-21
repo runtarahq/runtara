@@ -116,6 +116,10 @@ export type {
   ReportWorkflowActionConfig,
   ReportWorkflowActionContext,
   ReportWorkflowActionContextMode,
+  ReportWorkflowActionExecution,
+  ExecuteReportWorkflowActionRequest,
+  ExecuteReportWorkflowActionResponse,
+  ExecuteReportWorkflowActionTrigger,
   SubmitReportWorkflowActionRequest,
   // Interactions (definition is tightened below)
   ReportInteractionTrigger,
