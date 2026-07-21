@@ -47,6 +47,8 @@ export type {
   ReportViewGroupAccess,
   ReportViewStageDefinition,
   ReportViewStageSource,
+  ReportViewNavigationState,
+  ReportViewGroupState,
   // Filters
   ReportFilterDefinition,
   ReportFilterType,

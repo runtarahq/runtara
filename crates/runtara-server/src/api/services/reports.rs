@@ -512,6 +512,7 @@ impl ReportService {
             tenant_id,
             &report.definition,
             request.filters,
+            request.view_id.as_deref(),
             request.blocks,
             metadata,
         )
@@ -535,6 +536,7 @@ impl ReportService {
             tenant_id,
             &request.definition,
             request.filters,
+            request.view_id.as_deref(),
             request.blocks,
             metadata,
         )
@@ -551,16 +553,51 @@ impl ReportService {
         tenant_id: &str,
         definition: &ReportDefinition,
         filters: HashMap<String, Value>,
+        requested_view_id: Option<&str>,
         block_requests: Option<Vec<ReportBlockDataRequest>>,
         metadata: ReportRenderMetadata,
     ) -> Result<ReportRenderResponse, ReportServiceError> {
         let resolved_filters = resolve_filters(definition, &filters);
-        let requested_blocks = requested_blocks(definition, block_requests.as_deref());
         let request_by_id: HashMap<_, _> = block_requests
+            .clone()
             .unwrap_or_default()
             .into_iter()
             .map(|block| (block.id.clone(), block))
             .collect();
+        let preliminary_navigation =
+            resolve_report_view_navigation(definition, requested_view_id, &resolved_filters, None);
+        let mut pre_rendered = HashMap::new();
+        let mut block_stage_value = None;
+        if let Some((block_id, field)) =
+            navigation_stage_block_source(definition, preliminary_navigation.group.as_ref())
+            && let Some(block) = definition.blocks.iter().find(|block| block.id == block_id)
+        {
+            let rendered = self
+                .render_block_captured(
+                    tenant_id,
+                    definition,
+                    block,
+                    &resolved_filters,
+                    request_by_id.get(&block.id),
+                )
+                .await;
+            block_stage_value = resolve_navigation_block_value(&rendered.0, field);
+            pre_rendered.insert(block.id.clone(), rendered);
+        }
+
+        let navigation = resolve_report_view_navigation(
+            definition,
+            requested_view_id,
+            &resolved_filters,
+            block_stage_value.as_ref(),
+        );
+        let navigation_block_ids = report_navigation_block_ids(definition, &navigation);
+        let requested_blocks = requested_blocks(
+            definition,
+            block_requests.as_deref(),
+            navigation.active_view_id.as_deref(),
+            &navigation_block_ids,
+        );
 
         // Render blocks concurrently (bounded) instead of serially. Each block
         // is an independent DB/runtime fan-out, so against a high-RTT object
@@ -580,44 +617,21 @@ impl ReportService {
         // no closure HRTB) and drive them with bounded concurrency.
         let mut block_futures = Vec::with_capacity(requested_blocks.len());
         for block in requested_blocks.iter().copied() {
+            if pre_rendered.contains_key(&block.id) {
+                continue;
+            }
             let block_request = request_by_id_ref.get(&block.id);
             block_futures.push(async move {
-                match self
-                    .render_block(
+                let (result, error) = self
+                    .render_block_captured(
                         tenant_id,
                         definition,
                         block,
                         resolved_filters_ref,
                         block_request,
                     )
-                    .await
-                {
-                    Ok(mut rendered) => {
-                        // Report-agnostic safety net: drop oversized values in
-                        // undisplayed object-model columns from the response,
-                        // regardless of which render path produced the rows
-                        // (covers joined-filter, which the SQL projection skips).
-                        if let Some(data) = rendered.data.as_mut() {
-                            providers::object_model::elide_undisplayed_row_blobs(block, data);
-                        }
-                        (block.id.clone(), rendered, None)
-                    }
-                    Err(error) => {
-                        let block_error = ReportBlockError {
-                            code: "BLOCK_RENDER_FAILED".to_string(),
-                            message: error.to_string(),
-                            block_id: Some(block.id.clone()),
-                        };
-                        let result = ReportBlockRenderResult {
-                            block_type: block.block_type,
-                            status: ReportBlockStatus::Error,
-                            title: block.title.clone(),
-                            data: None,
-                            error: Some(block_error.clone()),
-                        };
-                        (block.id.clone(), result, Some(block_error))
-                    }
-                }
+                    .await;
+                (block.id.clone(), result, error)
             });
         }
 
@@ -635,6 +649,7 @@ impl ReportService {
                 .into_iter()
                 .map(|(id, result, err)| (id, (result, err)))
                 .collect();
+        by_id.extend(pre_rendered);
 
         let mut blocks = HashMap::new();
         let mut errors = Vec::new();
@@ -652,8 +667,56 @@ impl ReportService {
             report: metadata,
             resolved_filters,
             blocks,
+            navigation: Some(navigation),
             errors,
         })
+    }
+
+    async fn render_block_captured(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> (ReportBlockRenderResult, Option<ReportBlockError>) {
+        match self
+            .render_block(
+                tenant_id,
+                definition,
+                block,
+                resolved_filters,
+                block_request,
+            )
+            .await
+        {
+            Ok(mut rendered) => {
+                // Report-agnostic safety net: drop oversized values in
+                // undisplayed object-model columns from the response,
+                // regardless of which render path produced the rows.
+                if let Some(data) = rendered.data.as_mut() {
+                    providers::object_model::elide_undisplayed_row_blobs(block, data);
+                }
+                (rendered, None)
+            }
+            Err(error) => {
+                let block_error = ReportBlockError {
+                    code: "BLOCK_RENDER_FAILED".to_string(),
+                    message: error.to_string(),
+                    block_id: Some(block.id.clone()),
+                };
+                (
+                    ReportBlockRenderResult {
+                        block_type: block.block_type,
+                        status: ReportBlockStatus::Error,
+                        title: block.title.clone(),
+                        data: None,
+                        error: Some(block_error.clone()),
+                    },
+                    Some(block_error),
+                )
+            }
+        }
     }
 
     pub async fn render_report_block(
@@ -664,6 +727,50 @@ impl ReportService {
         request: ReportBlockOnlyDataRequest,
     ) -> Result<ReportBlockRenderResult, ReportServiceError> {
         let report = self.get_report(tenant_id, id_or_slug).await?;
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let preliminary_navigation = resolve_report_view_navigation(
+            &report.definition,
+            request.view_id.as_deref(),
+            &resolved_filters,
+            None,
+        );
+        let mut block_stage_value = None;
+        if let Some((stage_block_id, field)) =
+            navigation_stage_block_source(&report.definition, preliminary_navigation.group.as_ref())
+            && let Some(stage_block) = report
+                .definition
+                .blocks
+                .iter()
+                .find(|block| block.id == stage_block_id)
+        {
+            let (rendered, _) = self
+                .render_block_captured(
+                    tenant_id,
+                    &report.definition,
+                    stage_block,
+                    &resolved_filters,
+                    None,
+                )
+                .await;
+            block_stage_value = resolve_navigation_block_value(&rendered, field);
+        }
+        let navigation = resolve_report_view_navigation(
+            &report.definition,
+            request.view_id.as_deref(),
+            &resolved_filters,
+            block_stage_value.as_ref(),
+        );
+        let scoped_block_ids = report_navigation_block_ids(&report.definition, &navigation);
+        if !report.definition.views.is_empty()
+            && navigation.active_view_id.is_some()
+            && !scoped_block_ids.contains(block_id)
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' is not available in report view '{}'",
+                block_id,
+                navigation.active_view_id.as_deref().unwrap_or_default()
+            )));
+        }
         let block = report
             .definition
             .blocks
@@ -673,7 +780,6 @@ impl ReportService {
                 ReportServiceError::Validation(format!("Unknown block '{}'", block_id))
             })?;
 
-        let resolved_filters = resolve_filters(&report.definition, &request.filters);
         let block_request = ReportBlockDataRequest {
             id: block_id.to_string(),
             page: request.page,
@@ -1249,6 +1355,8 @@ impl ReportService {
             &filter_ids,
             &definition.blocks,
         )?;
+        let mut navigation_target_ids = view_ids.clone();
+        navigation_target_ids.extend(definition.view_groups.iter().map(|group| group.id.clone()));
 
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
@@ -1308,7 +1416,7 @@ impl ReportService {
                     block,
                     &markdown_placeholders,
                 )?;
-                validate_block_interactions(block, &filter_ids, &view_ids)?;
+                validate_block_interactions(block, &filter_ids, &navigation_target_ids)?;
                 continue;
             }
             if let Some(dataset_query) = &block.dataset {
@@ -1352,7 +1460,7 @@ impl ReportService {
                     validate_report_table_interaction_button_columns(
                         table,
                         &filter_ids,
-                        &view_ids,
+                        &navigation_target_ids,
                         &|field| dataset_output_field_known(&compiled.source, field),
                         &format!("block '{}'", block.id),
                     )?;
@@ -1360,7 +1468,7 @@ impl ReportService {
                 validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
                     dataset_output_field_known(&compiled.source, field)
                 })?;
-                validate_block_interactions(block, &filter_ids, &view_ids)?;
+                validate_block_interactions(block, &filter_ids, &navigation_target_ids)?;
                 continue;
             }
             if matches!(
@@ -1371,7 +1479,7 @@ impl ReportService {
                 provider.validate_block(
                     block,
                     &filter_ids,
-                    &view_ids,
+                    &navigation_target_ids,
                     &block_condition_filter_defs,
                 )?;
                 validate_report_markdown_placeholders(block, &markdown_placeholders, &|field| {
@@ -1515,7 +1623,7 @@ impl ReportService {
                         validate_report_interaction_buttons(
                             &column.interaction_buttons,
                             &filter_ids,
-                            &view_ids,
+                            &navigation_target_ids,
                             &is_table_value_field,
                             &format!(
                                 "Block '{}' interaction button column '{}'",
@@ -1716,7 +1824,7 @@ impl ReportService {
                 }
             }
 
-            validate_block_interactions(block, &filter_ids, &view_ids)?;
+            validate_block_interactions(block, &filter_ids, &navigation_target_ids)?;
         }
 
         let mut layout_node_ids = HashSet::new();
@@ -4296,6 +4404,12 @@ fn validate_report_view_groups(
                 group.id
             )));
         }
+        if view_ids.contains(&group.id) {
+            return Err(ReportServiceError::Validation(format!(
+                "Report view group ID '{}' conflicts with a report view ID",
+                group.id
+            )));
+        }
 
         let members = match group.mode {
             ReportViewNavigationMode::Tabs => {
@@ -5124,23 +5238,246 @@ fn validate_layout_block_ref(
     }
 }
 
+fn resolve_report_view_navigation(
+    definition: &ReportDefinition,
+    requested_view_id: Option<&str>,
+    resolved_filters: &HashMap<String, Value>,
+    block_stage_value: Option<&Value>,
+) -> ReportViewNavigationState {
+    let requested_group = requested_view_id.and_then(|requested| {
+        definition
+            .view_groups
+            .iter()
+            .find(|group| group.id == requested)
+    });
+    let requested_view = requested_view_id
+        .and_then(|requested| definition.views.iter().find(|view| view.id == requested));
+    let fallback_view = definition
+        .views
+        .iter()
+        .find(|view| view.id == "list")
+        .or_else(|| definition.views.first());
+    let selected_view_id = requested_group
+        .and_then(|group| report_view_group_members(group).first().copied())
+        .or_else(|| requested_view.map(|view| view.id.as_str()))
+        .or_else(|| fallback_view.map(|view| view.id.as_str()));
+
+    let Some(selected_view_id) = selected_view_id else {
+        return ReportViewNavigationState {
+            active_view_id: None,
+            group: None,
+        };
+    };
+    let active_group = requested_group.or_else(|| {
+        definition
+            .view_groups
+            .iter()
+            .find(|group| report_view_group_members(group).contains(&selected_view_id))
+    });
+
+    let Some(group) = active_group else {
+        return ReportViewNavigationState {
+            active_view_id: Some(selected_view_id.to_string()),
+            group: None,
+        };
+    };
+    let members = report_view_group_members(group);
+
+    match group.mode {
+        ReportViewNavigationMode::Tabs => ReportViewNavigationState {
+            active_view_id: Some(selected_view_id.to_string()),
+            group: Some(ReportViewGroupState {
+                id: group.id.clone(),
+                mode: group.mode,
+                current_view_id: None,
+                accessible_view_ids: members.iter().map(|id| (*id).to_string()).collect(),
+            }),
+        },
+        ReportViewNavigationMode::Stages => {
+            let source_value = match group.current_from.as_ref() {
+                Some(ReportViewStageSource::Filter { filter_id }) => {
+                    resolved_filters.get(filter_id)
+                }
+                Some(ReportViewStageSource::Block { .. }) => block_stage_value,
+                None => None,
+            };
+            let current_index = source_value
+                .and_then(report_navigation_value_string)
+                .and_then(|value| group.stages.iter().position(|stage| stage.value == value))
+                .unwrap_or(0);
+            let current_view_id = group.stages[current_index].view_id.clone();
+            let accessible_view_ids = if group.access == ReportViewGroupAccess::ThroughCurrent {
+                group.stages[..=current_index]
+                    .iter()
+                    .map(|stage| stage.view_id.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                members.iter().map(|id| (*id).to_string()).collect()
+            };
+            let explicitly_requested_member =
+                requested_view.is_some_and(|view| members.contains(&view.id.as_str()));
+            let active_view_id = if explicitly_requested_member
+                && accessible_view_ids.iter().any(|id| id == selected_view_id)
+            {
+                selected_view_id.to_string()
+            } else {
+                current_view_id.clone()
+            };
+
+            ReportViewNavigationState {
+                active_view_id: Some(active_view_id),
+                group: Some(ReportViewGroupState {
+                    id: group.id.clone(),
+                    mode: group.mode,
+                    current_view_id: Some(current_view_id),
+                    accessible_view_ids,
+                }),
+            }
+        }
+    }
+}
+
+fn report_view_group_members(group: &ReportViewGroupDefinition) -> Vec<&str> {
+    match group.mode {
+        ReportViewNavigationMode::Tabs => group.view_ids.iter().map(String::as_str).collect(),
+        ReportViewNavigationMode::Stages => group
+            .stages
+            .iter()
+            .map(|stage| stage.view_id.as_str())
+            .collect(),
+    }
+}
+
+fn report_navigation_value_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn navigation_stage_block_source<'a>(
+    definition: &'a ReportDefinition,
+    group_state: Option<&ReportViewGroupState>,
+) -> Option<(&'a str, &'a str)> {
+    let group = definition
+        .view_groups
+        .iter()
+        .find(|group| Some(group.id.as_str()) == group_state.map(|state| state.id.as_str()))?;
+    match group.current_from.as_ref()? {
+        ReportViewStageSource::Block { block_id, field } => {
+            Some((block_id.as_str(), field.as_str()))
+        }
+        ReportViewStageSource::Filter { .. } => None,
+    }
+}
+
+fn resolve_navigation_block_value(result: &ReportBlockRenderResult, field: &str) -> Option<Value> {
+    let data = result.data.as_ref()?.as_object()?;
+    let first_row = data.get("rows")?.as_array()?.first()?;
+    if let Some(row) = first_row.as_object() {
+        return row.get(field).cloned();
+    }
+
+    let row = first_row.as_array()?;
+    let columns = data.get("columns")?.as_array()?;
+    let index = columns.iter().position(|column| {
+        column.as_str() == Some(field)
+            || column
+                .as_object()
+                .and_then(|column| column.get("key"))
+                .and_then(Value::as_str)
+                == Some(field)
+    })?;
+    row.get(index).cloned()
+}
+
+fn report_navigation_block_ids(
+    definition: &ReportDefinition,
+    navigation: &ReportViewNavigationState,
+) -> HashSet<String> {
+    let mut block_ids = HashSet::new();
+    if let Some(active_view_id) = navigation.active_view_id.as_deref() {
+        if let Some(view) = definition
+            .views
+            .iter()
+            .find(|view| view.id == active_view_id)
+        {
+            collect_grid_block_ids(&view.layout, &mut block_ids);
+            collect_view_title_block_ids(definition, view, &mut block_ids);
+        }
+    } else {
+        collect_grid_block_ids(&definition.layout, &mut block_ids);
+    }
+    if let Some((block_id, _)) =
+        navigation_stage_block_source(definition, navigation.group.as_ref())
+    {
+        block_ids.insert(block_id.to_string());
+    }
+    block_ids
+}
+
+fn collect_grid_block_ids(grid: &ReportGridLayoutNode, block_ids: &mut HashSet<String>) {
+    for item in &grid.items {
+        match item.child.as_ref() {
+            ReportLayoutNode::Block(block) => {
+                block_ids.insert(block.block_id.clone());
+            }
+            ReportLayoutNode::Grid(grid) => collect_grid_block_ids(grid, block_ids),
+        }
+    }
+}
+
+fn collect_view_title_block_ids(
+    definition: &ReportDefinition,
+    view: &ReportViewDefinition,
+    block_ids: &mut HashSet<String>,
+) {
+    let views_by_id = definition
+        .views
+        .iter()
+        .map(|view| (view.id.as_str(), view))
+        .collect::<HashMap<_, _>>();
+    let mut current = Some(view);
+    let mut seen = HashSet::new();
+    while let Some(view) = current {
+        if !seen.insert(view.id.as_str()) {
+            break;
+        }
+        if let Some(title_from_block) = &view.title_from_block {
+            block_ids.insert(title_from_block.block.clone());
+        }
+        current = view
+            .parent_view_id
+            .as_deref()
+            .and_then(|parent| views_by_id.get(parent).copied());
+    }
+}
+
 fn requested_blocks<'a>(
     definition: &'a ReportDefinition,
     requested: Option<&[ReportBlockDataRequest]>,
+    active_view_id: Option<&str>,
+    scoped_block_ids: &HashSet<String>,
 ) -> Vec<&'a ReportBlockDefinition> {
+    let scope_to_view = !definition.views.is_empty() && active_view_id.is_some();
     match requested {
         Some(requested) if !requested.is_empty() => {
             let ids: HashSet<_> = requested.iter().map(|block| block.id.as_str()).collect();
             definition
                 .blocks
                 .iter()
-                .filter(|block| ids.contains(block.id.as_str()))
+                .filter(|block| {
+                    ids.contains(block.id.as_str())
+                        && (!scope_to_view || scoped_block_ids.contains(&block.id))
+                })
                 .collect()
         }
         _ => definition
             .blocks
             .iter()
-            .filter(|block| !block.lazy)
+            .filter(|block| !block.lazy && (!scope_to_view || scoped_block_ids.contains(&block.id)))
             .collect(),
     }
 }
@@ -8470,6 +8807,37 @@ mod tests {
         }
     }
 
+    fn staged_navigation_definition() -> ReportDefinition {
+        serde_json::from_value(json!({
+            "definitionVersion": 1,
+            "filters": [{"id": "stage", "label": "Stage", "type": "text"}],
+            "blocks": [
+                {"id": "a_block", "type": "markdown", "markdown": {"content": "A"}},
+                {"id": "b_block", "type": "markdown", "markdown": {"content": "B"}},
+                {"id": "c_block", "type": "markdown", "markdown": {"content": "C"}}
+            ],
+            "views": [
+                {"id": "stage_a", "layout": {"id": "a_root", "items": [{"id": "a_item", "child": {"id": "a_node", "type": "block", "blockId": "a_block"}}]}},
+                {"id": "stage_b", "layout": {"id": "b_root", "items": [{"id": "b_item", "child": {"id": "b_node", "type": "block", "blockId": "b_block"}}]}},
+                {"id": "stage_c", "layout": {"id": "c_root", "items": [{"id": "c_item", "child": {"id": "c_node", "type": "block", "blockId": "c_block"}}]}}
+            ],
+            "viewGroups": [{
+                "id": "approval",
+                "mode": "stages",
+                "stages": [
+                    {"viewId": "stage_a", "value": "A"},
+                    {"viewId": "stage_b", "value": "B"},
+                    {"viewId": "stage_c", "value": "C"}
+                ],
+                "currentFrom": {"type": "filter", "filterId": "stage"},
+                "access": "through_current",
+                "showPreviousNext": true,
+                "followCurrentOnAdvance": true
+            }]
+        }))
+        .unwrap()
+    }
+
     fn test_dataset() -> ReportDatasetDefinition {
         ReportDatasetDefinition {
             id: "stock_snapshots".to_string(),
@@ -8837,6 +9205,85 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("cannot be lazy"));
+    }
+
+    #[test]
+    fn report_stage_navigation_enters_group_at_persisted_current_stage() {
+        let definition = staged_navigation_definition();
+        let filters = HashMap::from([("stage".to_string(), json!("B"))]);
+
+        let navigation =
+            resolve_report_view_navigation(&definition, Some("approval"), &filters, None);
+
+        assert_eq!(navigation.active_view_id.as_deref(), Some("stage_b"));
+        let group = navigation.group.unwrap();
+        assert_eq!(group.current_view_id.as_deref(), Some("stage_b"));
+        assert_eq!(
+            group.accessible_view_ids,
+            vec!["stage_a".to_string(), "stage_b".to_string()]
+        );
+    }
+
+    #[test]
+    fn report_stage_navigation_allows_history_and_rejects_future_deep_links() {
+        let definition = staged_navigation_definition();
+        let filters = HashMap::from([("stage".to_string(), json!("B"))]);
+
+        let historical =
+            resolve_report_view_navigation(&definition, Some("stage_a"), &filters, None);
+        let future = resolve_report_view_navigation(&definition, Some("stage_c"), &filters, None);
+
+        assert_eq!(historical.active_view_id.as_deref(), Some("stage_a"));
+        assert_eq!(future.active_view_id.as_deref(), Some("stage_b"));
+    }
+
+    #[test]
+    fn report_stage_navigation_resolves_block_backed_stage_values() {
+        let mut definition = staged_navigation_definition();
+        definition.view_groups[0].current_from = Some(ReportViewStageSource::Block {
+            block_id: "a_block".to_string(),
+            field: "stage".to_string(),
+        });
+
+        let navigation = resolve_report_view_navigation(
+            &definition,
+            Some("approval"),
+            &HashMap::new(),
+            Some(&json!("C")),
+        );
+
+        assert_eq!(navigation.active_view_id.as_deref(), Some("stage_c"));
+        assert_eq!(
+            navigation.group.unwrap().accessible_view_ids,
+            vec![
+                "stage_a".to_string(),
+                "stage_b".to_string(),
+                "stage_c".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn report_render_scope_contains_only_active_view_blocks() {
+        let definition = staged_navigation_definition();
+        let filters = HashMap::from([("stage".to_string(), json!("B"))]);
+        let navigation =
+            resolve_report_view_navigation(&definition, Some("approval"), &filters, None);
+        let scoped_ids = report_navigation_block_ids(&definition, &navigation);
+        let blocks = requested_blocks(
+            &definition,
+            None,
+            navigation.active_view_id.as_deref(),
+            &scoped_ids,
+        );
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b_block"]
+        );
     }
 
     // Position-index resolution lives in `runtara-report-dsl::edit_ops`

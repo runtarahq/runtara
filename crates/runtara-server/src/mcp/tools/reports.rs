@@ -117,6 +117,10 @@ pub struct RenderReportParams {
     #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub filters: Option<Value>,
     #[schemars(
+        description = "Named view id or view-group id. Stage-group ids resolve to the persisted current stage; inaccessible future view ids resolve to the current stage."
+    )]
+    pub view_id: Option<String>,
+    #[schemars(
         description = "Optional array of block data requests: [{id, page?, sort?, search?, blockFilters?}]. Omit to render non-lazy blocks."
     )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
@@ -134,6 +138,10 @@ pub struct GetReportBlockDataParams {
     #[schemars(description = "Global report filter values keyed by filter id.")]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub filters: Option<Value>,
+    #[schemars(
+        description = "Active named view id or view-group id used to enforce view-scoped block access."
+    )]
+    pub view_id: Option<String>,
     #[schemars(description = "Pagination request: {offset, size}.")]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub page: Option<Value>,
@@ -381,6 +389,9 @@ pub async fn render_report(
     if let Some(filters) = params.filters {
         body["filters"] = normalize_json_object_arg(filters, "filters")?;
     }
+    if let Some(view_id) = params.view_id {
+        body["viewId"] = Value::String(view_id);
+    }
     if let Some(blocks) = params.blocks {
         body["blocks"] = normalize_json_array_arg(blocks, "blocks")?;
     }
@@ -407,6 +418,9 @@ pub async fn get_report_block_data(
     let mut body = json!({});
     if let Some(filters) = params.filters {
         body["filters"] = normalize_json_object_arg(filters, "filters")?;
+    }
+    if let Some(view_id) = params.view_id {
+        body["viewId"] = Value::String(view_id);
     }
     if let Some(page) = params.page {
         body["page"] = normalize_json_object_arg(page, "page")?;

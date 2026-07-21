@@ -467,6 +467,8 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ReportPageRequest,
             runtara_report_dsl::ReportRenderResponse,
             runtara_report_dsl::ReportRenderMetadata,
+            runtara_report_dsl::ReportViewNavigationState,
+            runtara_report_dsl::ReportViewGroupState,
             runtara_report_dsl::ReportBlockRenderResult,
             runtara_report_dsl::ReportBlockStatus,
             runtara_report_dsl::ReportBlockError,
