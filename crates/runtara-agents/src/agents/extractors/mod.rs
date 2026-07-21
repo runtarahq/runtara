@@ -73,6 +73,53 @@ pub fn get_http_extractor_ids() -> Vec<&'static str> {
         .collect()
 }
 
+/// The one agent whose integration list is defined by the host extractor
+/// registry above rather than by its own component metadata: the generic HTTP
+/// client accepts any integration that has a registered
+/// [`HttpConnectionExtractor`], and a wasm component cannot see that registry.
+/// Its `meta.json` therefore declares an empty list — see the module docs on
+/// `runtara-agent-http`.
+const HOST_DYNAMIC_HTTP_AGENT: &str = "http";
+
+/// Host-resolved integration ids for `agent_id`.
+///
+/// Every agent with a static list declared in its component metadata gets
+/// `declared` back unchanged; only the host-dynamic agent is resolved against
+/// the extractor registry. This is the single place the platform decides what
+/// an agent's integration ids really are — callers must not re-derive it.
+pub fn resolve_integration_ids(agent_id: &str, declared: &[String]) -> Vec<String> {
+    if runtara_dsl::agent_meta::canonical_agent_id(agent_id)
+        == runtara_dsl::agent_meta::canonical_agent_id(HOST_DYNAMIC_HTTP_AGENT)
+    {
+        return get_http_extractor_ids()
+            .into_iter()
+            .map(String::from)
+            .collect();
+    }
+    declared.to_vec()
+}
+
+/// Rebuild `catalog` with host-resolved integration ids.
+///
+/// Call once at boot, on the raw catalog the component dispatcher parses from
+/// the `meta.json` sidecars, and hand the result to every consumer: the
+/// connection-picker endpoint, `IntegrationCompatibility`, graph validation and
+/// the agents API all read `integration_ids` and must see the same answer.
+pub fn augment_catalog(
+    catalog: &runtara_dsl::agent_meta::AgentCatalog,
+) -> runtara_dsl::agent_meta::AgentCatalog {
+    let agents = catalog
+        .agents()
+        .iter()
+        .map(|agent| {
+            let mut agent = agent.clone();
+            agent.integration_ids = resolve_integration_ids(&agent.id, &agent.integration_ids);
+            agent
+        })
+        .collect();
+    runtara_dsl::agent_meta::AgentCatalog::from_agents(agents)
+}
+
 /// Extract HTTP connection config from a raw connection
 ///
 /// Looks up the appropriate extractor based on `integration_id` and applies it.

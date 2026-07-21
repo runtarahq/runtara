@@ -435,6 +435,7 @@ pub async fn delete_connection_handler(
     ),
     responses(
         (status = 200, description = "List of connections for the operator (without sensitive connection_parameters)", body = ListConnectionsResponse),
+        (status = 404, description = "No such agent in the runtime catalog", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "connections-controller"
@@ -448,8 +449,23 @@ pub async fn get_connections_by_operator_handler(
     Path(operator_name): Path<String>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
-    // Translate the agent id (operator name) to its declared integration
-    // ids using the runtime catalog. The service stays agent-agnostic.
+    // An unknown agent is a caller error, not an agent with zero connections —
+    // say so, rather than returning an empty list that reads as "you have none".
+    if !catalog.has_agent(&operator_name) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": "Agent not found",
+                "message": format!("No agent '{}' in the runtime catalog", operator_name)
+            })),
+        ));
+    }
+
+    // Translate the agent id (operator name) to its integration ids using the
+    // runtime catalog — already host-augmented at boot, so agents whose list is
+    // dynamic (the generic http client) resolve here like any other. The
+    // service stays agent-agnostic.
     let integration_ids = catalog.integration_ids_for(&operator_name);
 
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));

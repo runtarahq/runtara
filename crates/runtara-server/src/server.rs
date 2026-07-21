@@ -969,9 +969,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // the statically-linked agent registry. The dispatcher is guaranteed
     // present here: startup hard-fails above when it can't be built or loads
     // zero agents.
+    //
+    // `augment_catalog` resolves the integration ids a component can't declare
+    // for itself (the generic http agent's list IS the host's extractor
+    // registry). Doing it here, at the one place the catalog is snapshotted,
+    // is what keeps the connection picker, `IntegrationCompatibility`, graph
+    // validation and the agents API answering the same question the same way.
     let agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog> = component_dispatcher
         .as_ref()
-        .map(|d| d.catalog())
+        .map(|d| Arc::new(runtara_agents::extractors::augment_catalog(&d.catalog())))
         .expect("component dispatcher present after startup hard-fail");
 
     // Derive the connection-defaults compatibility map from the runtime
@@ -1398,7 +1404,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let compilation_pool = pool.clone();
         let compilation_runtime_client = runtime_client.clone();
         let compilation_shutdown = shutdown_signal.clone();
-        let compilation_agent_catalog = component_dispatcher.as_ref().map(|d| d.catalog());
+        let compilation_agent_catalog = Some(agent_catalog.clone());
         let compilation_events = product_event_sink.clone();
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
@@ -1489,10 +1495,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build the AgentsService once with the component dispatcher attached so
-    // every handler reads the same component-backed metadata view.
+    // every handler reads the same component-backed metadata view. The catalog
+    // rides along for the integration ids the components don't declare
+    // themselves — same snapshot every other consumer sees.
     let agents_service = {
         use crate::api::services::operators::AgentsService;
-        AgentsService::new().with_component_dispatcher(component_dispatcher.clone())
+        AgentsService::new()
+            .with_component_dispatcher(component_dispatcher.clone())
+            .with_agent_catalog(agent_catalog.clone())
     };
 
     // Build the unified execution engine shared by handlers and workers.

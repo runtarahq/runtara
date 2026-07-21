@@ -25,6 +25,73 @@ fn test_get_http_extractor_ids() {
 }
 
 // ============================================================================
+// Host-resolved integration ids
+// ============================================================================
+
+fn agent_info(id: &str, integration_ids: &[&str]) -> runtara_dsl::agent_meta::AgentInfo {
+    runtara_dsl::agent_meta::AgentInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: String::new(),
+        has_side_effects: true,
+        supports_connections: true,
+        integration_ids: integration_ids.iter().map(|s| s.to_string()).collect(),
+        capabilities: vec![],
+    }
+}
+
+#[test]
+fn resolve_integration_ids_fills_http_from_the_extractor_registry() {
+    let resolved = resolve_integration_ids("http", &[]);
+
+    let expected: Vec<String> = get_http_extractor_ids()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(resolved, expected);
+    assert!(resolved.iter().any(|id| id == "http_api_key"));
+}
+
+#[test]
+fn resolve_integration_ids_folds_the_agent_id_canonically() {
+    let canonical = resolve_integration_ids("http", &[]);
+    for spelling in ["HTTP", "hTtP"] {
+        assert_eq!(
+            resolve_integration_ids(spelling, &[]),
+            canonical,
+            "`{spelling}` should resolve like `http`"
+        );
+    }
+}
+
+#[test]
+fn resolve_integration_ids_passes_static_agents_through() {
+    let declared = vec!["sftp".to_string()];
+    assert_eq!(resolve_integration_ids("sftp", &declared), declared);
+    assert!(resolve_integration_ids("crypto", &[]).is_empty());
+}
+
+#[test]
+fn augment_catalog_only_rewrites_the_host_dynamic_agent() {
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        agent_info("http", &[]),
+        agent_info("sftp", &["sftp"]),
+    ]);
+
+    let augmented = augment_catalog(&catalog);
+
+    assert!(
+        augmented
+            .integration_ids_for("http")
+            .contains(&"http_api_key".to_string()),
+        "http should pick up the registered extractors, got: {:?}",
+        augmented.integration_ids_for("http")
+    );
+    assert_eq!(augmented.integration_ids_for("sftp"), vec!["sftp"]);
+    assert_eq!(augmented.agents().len(), catalog.agents().len());
+}
+
+// ============================================================================
 // HttpBearerExtractor Tests
 // ============================================================================
 

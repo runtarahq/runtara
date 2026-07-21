@@ -31,6 +31,7 @@ impl std::fmt::Display for ServiceError {
 #[derive(Clone, Default)]
 pub struct AgentsService {
     component_dispatcher: Option<Arc<ComponentDispatcherService>>,
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 impl AgentsService {
@@ -44,6 +45,28 @@ impl AgentsService {
     ) -> Self {
         self.component_dispatcher = dispatcher;
         self
+    }
+
+    /// Attach the boot-time agent catalog. It is the authority on
+    /// `integration_ids`: components whose integration list is host-resolved
+    /// (the generic http agent) declare an empty one in their `meta.json`, and
+    /// the catalog snapshot has already been augmented at boot. Without a
+    /// catalog the service reports the raw declared ids — fine for tests, but
+    /// the server always injects one.
+    pub fn with_agent_catalog(
+        mut self,
+        catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
+        self.agent_catalog = Some(catalog);
+        self
+    }
+
+    /// The authoritative integration ids for an agent, per the catalog.
+    fn integration_ids_of(&self, info: &AgentInfo) -> Vec<String> {
+        match self.agent_catalog.as_deref() {
+            Some(catalog) => catalog.integration_ids_for(&info.id),
+            None => info.integration_ids.clone(),
+        }
     }
 
     /// Build the canonical AgentInfo for a given id. Returns
@@ -66,11 +89,7 @@ impl AgentsService {
             }
         })?;
         let mut info = info.clone();
-        // The http agent's integration list is dynamic (any registered
-        // HttpConnectionExtractor counts).
-        if info.id == "http" {
-            info.integration_ids = http_integration_ids();
-        }
+        info.integration_ids = self.integration_ids_of(&info);
         Some((info, true))
     }
 
@@ -88,11 +107,7 @@ impl AgentsService {
             .agent_ids()
             .filter_map(|agent_id| d.agent_info_of(agent_id))
             .map(|info| {
-                let integration_ids = if info.id == "http" {
-                    http_integration_ids()
-                } else {
-                    info.integration_ids.clone()
-                };
+                let integration_ids = self.integration_ids_of(info);
                 AgentSummary {
                     component_backed: true,
                     id: info.id.clone(),
@@ -150,9 +165,46 @@ impl AgentsService {
     }
 }
 
-fn http_integration_ids() -> Vec<String> {
-    runtara_agents::extractors::get_http_extractor_ids()
-        .into_iter()
-        .map(String::from)
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str, integration_ids: &[&str]) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            has_side_effects: true,
+            supports_connections: true,
+            integration_ids: integration_ids.iter().map(|s| s.to_string()).collect(),
+            capabilities: vec![],
+        }
+    }
+
+    /// The catalog is the authority, not the component's own declaration:
+    /// agents whose integration list is host-resolved ship an empty one in
+    /// their `meta.json`, and the boot catalog has already filled it in. This
+    /// service must not re-derive that itself.
+    #[test]
+    fn catalog_integration_ids_win_over_the_declared_ones() {
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+            agent("http", &["http_api_key", "http_bearer"]),
+        ]));
+        let service = AgentsService::new().with_agent_catalog(catalog);
+
+        assert_eq!(
+            service.integration_ids_of(&agent("http", &[])),
+            vec!["http_api_key".to_string(), "http_bearer".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_integration_ids_are_used_without_a_catalog() {
+        let service = AgentsService::new();
+
+        assert_eq!(
+            service.integration_ids_of(&agent("sftp", &["sftp"])),
+            vec!["sftp".to_string()]
+        );
+    }
 }

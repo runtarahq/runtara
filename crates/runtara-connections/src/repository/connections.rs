@@ -606,13 +606,37 @@ impl ConnectionRepository {
     /// Get connections by operator name
     /// Searches by integration_id (matching operator's supported integration_ids)
     /// SECURITY: Explicitly excludes connection_parameters from SELECT
+    ///
+    /// An empty `integration_ids` means "this agent accepts no integration" and
+    /// always yields an empty list — never the tenant's whole connection set.
+    /// The filter is the only thing scoping the result to the caller's agent,
+    /// so dropping it (for any combination of the other filters) would leak
+    /// every integration's connections into an unrelated agent's picker.
     pub async fn list_by_operator(
         &self,
         tenant_id: &str,
         integration_ids: &[String],
         status: Option<&str>,
     ) -> Result<Vec<ConnectionDto>, sqlx::Error> {
-        // Build query with integration_id filter
+        // Fail closed before touching the DB: no ids, no rows.
+        if integration_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        type Row = (
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<serde_json::Value>,
+            bool,
+        );
+
         // SECURITY: Explicitly exclude connection_parameters from SELECT
         let mut query = String::from(
             r#"
@@ -620,94 +644,30 @@ impl ConnectionRepository {
                    connection_subtype, integration_id, status, rate_limit_config,
                    is_default_file_storage
             FROM connection_data_entity
-            WHERE tenant_id = $1
+            WHERE tenant_id = $1 AND integration_id = ANY($2)
             "#,
         );
 
-        // Add integration_id filter if operator specifies integration_ids
-        if !integration_ids.is_empty() {
-            query.push_str(" AND integration_id = ANY($2)");
-        }
-
         // Add optional status filter
         if status.is_some() {
-            let param_idx = if integration_ids.is_empty() { 2 } else { 3 };
-            query.push_str(&format!(" AND status = ${}", param_idx));
+            query.push_str(" AND status = $3");
         }
 
         query.push_str(" ORDER BY created_at DESC");
 
-        // Execute query with dynamic parameter binding
-        let rows = if let (false, Some(status_val)) = (integration_ids.is_empty(), status) {
-            // Has integration_ids AND status filter
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    String,
-                    chrono::DateTime<chrono::Utc>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                    chrono::DateTime<chrono::Utc>,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    String,
-                    Option<serde_json::Value>,
-                    bool,
-                ),
-            >(&query)
-            .bind(tenant_id)
-            .bind(integration_ids)
-            .bind(status_val)
-            .fetch_all(&self.pool)
-            .await?
-        } else if !integration_ids.is_empty() {
-            // Has integration_ids, no status filter
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    String,
-                    chrono::DateTime<chrono::Utc>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                    chrono::DateTime<chrono::Utc>,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    String,
-                    Option<serde_json::Value>,
-                    bool,
-                ),
-            >(&query)
-            .bind(tenant_id)
-            .bind(integration_ids)
-            .fetch_all(&self.pool)
-            .await?
-        } else if let Some(status_val) = status {
-            // No integration_ids, has status filter
-            sqlx::query_as::<
-                _,
-                (
-                    String,
-                    String,
-                    chrono::DateTime<chrono::Utc>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                    chrono::DateTime<chrono::Utc>,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    String,
-                    Option<serde_json::Value>,
-                    bool,
-                ),
-            >(&query)
-            .bind(tenant_id)
-            .bind(status_val)
-            .fetch_all(&self.pool)
-            .await?
+        let rows = if let Some(status_val) = status {
+            sqlx::query_as::<_, Row>(&query)
+                .bind(tenant_id)
+                .bind(integration_ids)
+                .bind(status_val)
+                .fetch_all(&self.pool)
+                .await?
         } else {
-            // No integration_ids, no status filter - return empty vec
-            return Ok(vec![]);
+            sqlx::query_as::<_, Row>(&query)
+                .bind(tenant_id)
+                .bind(integration_ids)
+                .fetch_all(&self.pool)
+                .await?
         };
 
         let mut connections: Vec<ConnectionDto> = rows
