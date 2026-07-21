@@ -11,6 +11,7 @@ import {
   ReportInteractionAction,
   ReportInteractionOptions,
   ReportOrderBy,
+  ReportWorkflowActionConfig,
 } from '../types';
 import { useReportBlockData } from '../hooks/useReports';
 import { getFilterDefaultValue } from '../utils';
@@ -21,6 +22,7 @@ import { ActionsBlock } from './blocks/ActionsBlock';
 import { CardBlock } from './blocks/CardBlock';
 import { ReportFilterBar } from './ReportFilterBar';
 import { encodeFilterValue } from '../utils';
+import type { ReportWorkflowActionResult } from './blocks/useReportWorkflowAction';
 
 type ReportBlockHostProps = {
   reportId: string;
@@ -38,7 +40,10 @@ type ReportBlockHostProps = {
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
-  onReportRefresh?: () => void | Promise<unknown>;
+  onReportRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<unknown>;
 };
 
 export function ReportBlockHost({
@@ -195,8 +200,17 @@ export function ReportBlockHost({
   // `!result` so a block that already has data keeps showing it when a
   // refetch fails, rather than blanking out.
   const showFetchError = Boolean(fetchError) && !result;
-  const refreshAfterActionSubmit = async () => {
-    await Promise.allSettled([refetch(), onReportRefresh?.()]);
+  const refreshAfterActionSubmit = async (
+    actionResult?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => {
+    const refreshes: Promise<unknown>[] = [
+      Promise.resolve(onReportRefresh?.(actionResult, action)),
+    ];
+    if ((!action || action.reloadBlock) && needsBlockFetch) {
+      refreshes.push(refetch());
+    }
+    await Promise.allSettled(refreshes);
   };
   const runInteractionActions = (
     actions: ReportInteractionAction[],
@@ -388,7 +402,10 @@ function RenderedBlock({
     actions: ReportInteractionAction[],
     row: Record<string, unknown>
   ) => boolean;
-  onRefresh: () => void | Promise<void>;
+  onRefresh: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<void>;
 }) {
   if (block.type === 'table') {
     return (

@@ -1,13 +1,16 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
 import {
   getReportWorkflowInstanceStatus,
   runReportWorkflow,
 } from '../../queries';
-import { ReportWorkflowActionConfig } from '../../types';
+import {
+  ReportWorkflowActionConfig,
+  ReportWorkflowInstanceStatus,
+} from '../../types';
 
-const POLL_INTERVAL_MS = 1500;
+const POLL_DELAYS_MS = [100, 200, 400, 800, 1500] as const;
 const WORKFLOW_ACTION_TIMEOUT_MS = 10 * 60 * 1000;
 const TERMINAL_STATUSES = new Set([
   'completed',
@@ -16,7 +19,17 @@ const TERMINAL_STATUSES = new Set([
   'cancelled',
 ]);
 
-type RunWorkflowActionArgs = {
+export type ReportWorkflowActionPhase =
+  | 'submitting'
+  | 'running'
+  | 'refreshing';
+
+export type ReportWorkflowActionResult = ReportWorkflowInstanceStatus & {
+  workflowId: string;
+  instanceId: string;
+};
+
+export type RunWorkflowActionArgs = {
   key: string;
   action: ReportWorkflowActionConfig;
   row?: Record<string, unknown>;
@@ -28,11 +41,27 @@ type RunWorkflowActionArgs = {
 export function useReportWorkflowAction({
   onCompleted,
 }: {
-  onCompleted?: () => void | Promise<void>;
+  onCompleted?: (
+    result: ReportWorkflowActionResult,
+    action: ReportWorkflowActionConfig
+  ) => void | Promise<void>;
 } = {}) {
   const auth = useAuth();
   const token = auth.user?.access_token;
-  const [runningKeys, setRunningKeys] = useState<Set<string>>(() => new Set());
+  const [phases, setPhases] = useState<Map<string, ReportWorkflowActionPhase>>(
+    () => new Map()
+  );
+  const controllers = useRef(new Map<string, AbortController>());
+
+  useEffect(
+    () => () => {
+      for (const controller of controllers.current.values()) {
+        controller.abort();
+      }
+      controllers.current.clear();
+    },
+    []
+  );
 
   const run = useCallback(
     async ({
@@ -43,11 +72,10 @@ export function useReportWorkflowAction({
       fallbackField = '',
       selectedRows,
     }: RunWorkflowActionArgs) => {
-      setRunningKeys((current) => {
-        const next = new Set(current);
-        next.add(key);
-        return next;
-      });
+      controllers.current.get(key)?.abort();
+      const controller = new AbortController();
+      controllers.current.set(key, controller);
+      setActionPhase(setPhases, key, 'submitting');
 
       try {
         const context = resolveWorkflowActionContext(
@@ -62,40 +90,55 @@ export function useReportWorkflowAction({
           version: action.version ?? undefined,
           context,
         });
-        const finalStatus = isTerminalStatus(scheduled.status)
-          ? scheduled.status
-          : await waitForTerminalStatus(
+        throwIfAborted(controller.signal);
+        setActionPhase(setPhases, key, 'running');
+        const terminal = isTerminalStatus(scheduled.status)
+          ? {
+              id: scheduled.instanceId,
+              status: scheduled.status.toLowerCase(),
+            }
+          : await waitForTerminalInstance(
               token ?? '',
               action.workflowId,
-              scheduled.instanceId
+              scheduled.instanceId,
+              controller.signal
             );
+        const result: ReportWorkflowActionResult = {
+          ...terminal,
+          workflowId: action.workflowId,
+          instanceId: scheduled.instanceId,
+        };
 
-        if (finalStatus === 'completed') {
+        if (result.status === 'completed') {
+          setActionPhase(setPhases, key, 'refreshing');
+          await onCompleted?.(result, action);
+          throwIfAborted(controller.signal);
           toast.success(action.successMessage ?? 'Workflow completed');
-          await onCompleted?.();
           return;
         }
 
-        toast.error(`Workflow finished with status ${finalStatus}`);
+        toast.error(`Workflow finished with status ${result.status}`);
+        return;
       } catch (error) {
+        if (isAbortError(error)) return;
         toast.error(errorMessage(error) ?? 'Failed to run workflow');
       } finally {
-        setRunningKeys((current) => {
-          const next = new Set(current);
-          next.delete(key);
-          return next;
-        });
+        if (controllers.current.get(key) === controller) {
+          controllers.current.delete(key);
+          setActionPhase(setPhases, key);
+        }
       }
     },
     [onCompleted, token]
   );
 
   const isRunning = useCallback(
-    (key: string) => runningKeys.has(key),
-    [runningKeys]
+    (key: string) => phases.has(key),
+    [phases]
   );
+  const phase = useCallback((key: string) => phases.get(key), [phases]);
 
-  return { run, isRunning };
+  return { run, isRunning, phase };
 }
 
 export function resolveWorkflowActionContext(
@@ -130,15 +173,20 @@ function isTerminalStatus(status: string | undefined): boolean {
   return TERMINAL_STATUSES.has(String(status ?? '').toLowerCase());
 }
 
-async function waitForTerminalStatus(
+async function waitForTerminalInstance(
   token: string,
   workflowId: string,
-  instanceId: string
-): Promise<string> {
+  instanceId: string,
+  signal: AbortSignal
+): Promise<ReportWorkflowInstanceStatus> {
   const deadline = Date.now() + WORKFLOW_ACTION_TIMEOUT_MS;
+  let pollIndex = 0;
 
   while (Date.now() < deadline) {
-    await delay(POLL_INTERVAL_MS);
+    const delayMs =
+      POLL_DELAYS_MS[Math.min(pollIndex, POLL_DELAYS_MS.length - 1)];
+    await delay(delayMs, signal);
+    pollIndex += 1;
     const instance = await getReportWorkflowInstanceStatus(
       token,
       workflowId,
@@ -146,7 +194,7 @@ async function waitForTerminalStatus(
     );
     const status = instance.status.toLowerCase();
     if (isTerminalStatus(status)) {
-      return status;
+      return { ...instance, status };
     }
   }
 
@@ -155,8 +203,43 @@ async function waitForTerminalStatus(
   );
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const handle = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(handle);
+      reject(new DOMException('Workflow observation cancelled', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw new DOMException('Workflow observation cancelled', 'AbortError');
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function setActionPhase(
+  setPhases: React.Dispatch<
+    React.SetStateAction<Map<string, ReportWorkflowActionPhase>>
+  >,
+  key: string,
+  phase?: ReportWorkflowActionPhase
+): void {
+  setPhases((current) => {
+    const next = new Map(current);
+    if (phase) next.set(key, phase);
+    else next.delete(key);
+    return next;
+  });
 }
 
 function errorMessage(error: unknown): string | null {

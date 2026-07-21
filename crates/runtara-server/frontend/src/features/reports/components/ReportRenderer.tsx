@@ -4,9 +4,11 @@ import {
   ReportInteractionOptions,
   ReportLayoutNode,
   ReportRenderResponse,
+  ReportWorkflowActionConfig,
   ReportViewBreadcrumb,
   ReportViewDefinition,
 } from '../types';
+import type { ReportWorkflowActionResult } from './blocks/useReportWorkflowAction';
 import {
   getActiveReportLayout,
   getActiveReportView,
@@ -33,7 +35,10 @@ type ReportRendererProps = {
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
-  onRefresh?: () => void | Promise<unknown>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<unknown>;
 };
 
 export function ReportRenderer(props: ReportRendererProps) {
@@ -174,7 +179,10 @@ function LayoutNodes({
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
-  onRefresh?: () => void | Promise<unknown>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<unknown>;
 }) {
   return (
     <>
@@ -229,7 +237,10 @@ function LayoutNode({
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
-  onRefresh?: () => void | Promise<unknown>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<unknown>;
 }) {
   if (node.type === 'block') {
     return (
@@ -365,7 +376,10 @@ function ReportBlockById({
     viewId: string | null,
     options?: Omit<ReportInteractionOptions, 'viewId'>
   ) => void;
-  onRefresh?: () => void | Promise<unknown>;
+  onRefresh?: (
+    result?: ReportWorkflowActionResult,
+    action?: ReportWorkflowActionConfig
+  ) => void | Promise<unknown>;
 }) {
   const block = getBlockById(definition, blockId);
   if (!block) {
