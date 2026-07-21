@@ -100,10 +100,27 @@ describe('report view authoring', () => {
       access: 'through_current',
       currentFrom: { type: 'filter', filterId: 'stage' },
       followCurrentOnAdvance: true,
+      showPrevious: true,
+      showNext: true,
       stages: [
         { viewId: 'overview', value: 'overview' },
         { viewId: 'review', value: 'review' },
       ],
+    });
+
+    fireEvent.change(screen.getByLabelText('Previous label'), {
+      target: { value: 'Back' },
+    });
+    fireEvent.change(screen.getByLabelText('Next label'), {
+      target: { value: 'Continue' },
+    });
+    fireEvent.click(screen.getByLabelText('Show Next button'));
+    next = onChange.mock.lastCall?.[0] as ReportDefinition;
+    expect(next.viewGroups?.[0]).toMatchObject({
+      showPrevious: true,
+      showNext: false,
+      previousLabel: 'Back',
+      nextLabel: 'Continue',
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Add member' }));
@@ -114,6 +131,41 @@ describe('report view authoring', () => {
       'complete',
       'review',
     ]);
+  });
+
+  it('authors a field-controlled stage group and hides switching controls', () => {
+    const onChange = vi.fn();
+    const definition = makeDefinition();
+    definition.blocks = [
+      {
+        id: 'case_state',
+        type: 'markdown',
+        source: { schema: '' },
+      },
+    ];
+    render(<ViewsHarness initial={definition} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add stage group' }));
+    fireEvent.change(screen.getByLabelText('Accessible views'), {
+      target: { value: 'current_only' },
+    });
+
+    const next = onChange.mock.lastCall?.[0] as ReportDefinition;
+    expect(next.viewGroups?.[0]).toMatchObject({
+      access: 'current_only',
+      currentFrom: {
+        type: 'block',
+        blockId: 'case_state',
+        field: 'status',
+      },
+      showPrevious: false,
+      showNext: false,
+    });
+    expect(
+      screen.getByText(
+        'The current stage comes from the configured field. Viewers cannot switch stages.'
+      )
+    ).toBeInTheDocument();
   });
 
   it('updates parent and navigation references when a view id changes', () => {

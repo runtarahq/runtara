@@ -198,6 +198,7 @@ pub enum ReportViewGroupAccess {
     #[default]
     All,
     ThroughCurrent,
+    CurrentOnly,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -248,6 +249,26 @@ pub struct ReportViewGroupDefinition {
     pub access: ReportViewGroupAccess,
     #[serde(default, rename = "showPreviousNext", skip_serializing_if = "is_false")]
     pub show_previous_next: bool,
+    /// Independently controls the Previous button. When omitted, the legacy
+    /// `showPreviousNext` value is used for backwards compatibility.
+    #[serde(
+        default,
+        rename = "showPrevious",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub show_previous: Option<bool>,
+    /// Independently controls the Next button. When omitted, the legacy
+    /// `showPreviousNext` value is used for backwards compatibility.
+    #[serde(default, rename = "showNext", skip_serializing_if = "Option::is_none")]
+    pub show_next: Option<bool>,
+    #[serde(
+        default,
+        rename = "previousLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub previous_label: Option<String>,
+    #[serde(default, rename = "nextLabel", skip_serializing_if = "Option::is_none")]
+    pub next_label: Option<String>,
     #[serde(
         default,
         rename = "followCurrentOnAdvance",

@@ -4456,6 +4456,14 @@ fn validate_report_view_groups(
                         group.id
                     )));
                 };
+                if group.access == ReportViewGroupAccess::CurrentOnly
+                    && !matches!(source, ReportViewStageSource::Block { .. })
+                {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Report stage group '{}' with access='current_only' must use a block field for currentFrom",
+                        group.id
+                    )));
+                }
                 validate_report_stage_source(&group.id, source, filter_ids, &blocks_by_id)?;
 
                 let mut values = HashSet::new();
@@ -5309,13 +5317,13 @@ fn resolve_report_view_navigation(
                 .and_then(|value| group.stages.iter().position(|stage| stage.value == value))
                 .unwrap_or(0);
             let current_view_id = group.stages[current_index].view_id.clone();
-            let accessible_view_ids = if group.access == ReportViewGroupAccess::ThroughCurrent {
-                group.stages[..=current_index]
+            let accessible_view_ids = match group.access {
+                ReportViewGroupAccess::CurrentOnly => vec![current_view_id.clone()],
+                ReportViewGroupAccess::ThroughCurrent => group.stages[..=current_index]
                     .iter()
                     .map(|stage| stage.view_id.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                members.iter().map(|id| (*id).to_string()).collect()
+                    .collect::<Vec<_>>(),
+                ReportViewGroupAccess::All => members.iter().map(|id| (*id).to_string()).collect(),
             };
             let explicitly_requested_member =
                 requested_view.is_some_and(|view| members.contains(&view.id.as_str()));
@@ -8807,6 +8815,10 @@ mod tests {
             current_from: None,
             access: ReportViewGroupAccess::All,
             show_previous_next: false,
+            show_previous: None,
+            show_next: None,
+            previous_label: None,
+            next_label: None,
             follow_current_on_advance: false,
         }
     }
@@ -9141,6 +9153,10 @@ mod tests {
                 }),
                 access: ReportViewGroupAccess::ThroughCurrent,
                 show_previous_next: true,
+                show_previous: None,
+                show_next: None,
+                previous_label: None,
+                next_label: None,
                 follow_current_on_advance: true,
             },
         ];
@@ -9196,6 +9212,10 @@ mod tests {
             }),
             access: ReportViewGroupAccess::ThroughCurrent,
             show_previous_next: true,
+            show_previous: None,
+            show_next: None,
+            previous_label: None,
+            next_label: None,
             follow_current_on_advance: true,
         }];
 
@@ -9209,6 +9229,51 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("cannot be lazy"));
+    }
+
+    #[test]
+    fn report_view_groups_require_block_field_for_current_only_access() {
+        let views = vec![
+            test_view("stage_a", Some("list")),
+            test_view("stage_b", Some("list")),
+        ];
+        let view_ids = views.iter().map(|view| view.id.clone()).collect();
+        let groups = vec![ReportViewGroupDefinition {
+            id: "approval".to_string(),
+            mode: ReportViewNavigationMode::Stages,
+            view_ids: vec![],
+            stages: vec![
+                ReportViewStageDefinition {
+                    view_id: "stage_a".to_string(),
+                    value: "A".to_string(),
+                },
+                ReportViewStageDefinition {
+                    view_id: "stage_b".to_string(),
+                    value: "B".to_string(),
+                },
+            ],
+            current_from: Some(ReportViewStageSource::Filter {
+                filter_id: "stage".to_string(),
+            }),
+            access: ReportViewGroupAccess::CurrentOnly,
+            show_previous_next: false,
+            show_previous: Some(false),
+            show_next: Some(false),
+            previous_label: None,
+            next_label: None,
+            follow_current_on_advance: true,
+        }];
+
+        let err = validate_report_view_groups(
+            &groups,
+            &views,
+            &view_ids,
+            &HashSet::from(["stage".to_string()]),
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must use a block field"));
     }
 
     #[test]
@@ -9239,6 +9304,36 @@ mod tests {
 
         assert_eq!(historical.active_view_id.as_deref(), Some("stage_a"));
         assert_eq!(future.active_view_id.as_deref(), Some("stage_b"));
+    }
+
+    #[test]
+    fn report_stage_navigation_current_only_rejects_all_non_current_deep_links() {
+        let mut definition = staged_navigation_definition();
+        definition.view_groups[0].access = ReportViewGroupAccess::CurrentOnly;
+        definition.view_groups[0].current_from = Some(ReportViewStageSource::Block {
+            block_id: "a_block".to_string(),
+            field: "stage".to_string(),
+        });
+
+        let historical = resolve_report_view_navigation(
+            &definition,
+            Some("stage_a"),
+            &HashMap::new(),
+            Some(&json!("B")),
+        );
+        let future = resolve_report_view_navigation(
+            &definition,
+            Some("stage_c"),
+            &HashMap::new(),
+            Some(&json!("B")),
+        );
+
+        assert_eq!(historical.active_view_id.as_deref(), Some("stage_b"));
+        assert_eq!(future.active_view_id.as_deref(), Some("stage_b"));
+        assert_eq!(
+            historical.group.unwrap().accessible_view_ids,
+            vec!["stage_b".to_string()]
+        );
     }
 
     #[test]
