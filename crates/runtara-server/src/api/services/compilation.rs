@@ -21,7 +21,7 @@ use runtara_workflows::direct_wasm::{
 };
 use runtara_workflows::{
     ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
-    WorkflowCompilerMode, compile_workflow_direct,
+    ValidationError, WorkflowCompilerMode, compile_workflow_direct,
 };
 
 /// Global semaphore limiting concurrent compilations across all code paths.
@@ -397,6 +397,15 @@ impl CompilationService {
             duration_ms = step_start.elapsed().as_millis(),
             "compile: step 2 completed - execution graph parsed"
         );
+
+        // A workflow with no steps cannot compile, and the downstream planner
+        // would report it as a missing entry step rather than as the authoring
+        // mistake it is. Fail with the validation error users are meant to see.
+        if execution_graph.steps.is_empty() {
+            return Err(ServiceError::WorkflowAuthoringError(
+                ValidationError::EmptyWorkflow.to_string(),
+            ));
+        }
 
         // 3. Load child workflows from database
         let step_start = std::time::Instant::now();
@@ -1054,6 +1063,10 @@ pub enum ServiceError {
     NotFound(String),
     DatabaseError(String),
     CompilationError(String),
+    /// The workflow cannot compile as authored - no steps, an unreachable
+    /// entry point, and so on. The system is behaving correctly; the graph is
+    /// the problem, so this is reported to the author rather than alerted on.
+    WorkflowAuthoringError(String),
     RegistrationError(String),
 }
 
@@ -1063,6 +1076,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::NotFound(msg) => write!(f, "Not found: {}", msg),
             ServiceError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ServiceError::CompilationError(msg) => write!(f, "Compilation error: {}", msg),
+            ServiceError::WorkflowAuthoringError(msg) => write!(f, "{}", msg),
             ServiceError::RegistrationError(msg) => write!(f, "Registration error: {}", msg),
         }
     }

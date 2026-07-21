@@ -1430,6 +1430,24 @@ pub async fn compile_workflow_handler(
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
+        Err(crate::api::services::compilation::ServiceError::WorkflowAuthoringError(msg)) => {
+            // The graph itself is the problem, so this is the author's to fix -
+            // a 4xx with the validation message, not a server error.
+            events.emit(
+                ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
+                    .resource(&workflow_id, "workflow")
+                    .source(source)
+                    .properties(json!({ "success": false })),
+            );
+            let error_response = json!({
+                "success": false,
+                "error": "Workflow cannot be compiled as authored",
+                "message": msg,
+                "workflowId": workflow_id,
+                "version": version
+            });
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(error_response))
+        }
         Err(crate::api::services::compilation::ServiceError::DatabaseError(msg)) => {
             let error_response = json!({
                 "success": false,

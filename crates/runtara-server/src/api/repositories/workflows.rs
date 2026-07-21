@@ -2015,9 +2015,11 @@ impl WorkflowRepository {
     /// synchronous execution path used to duplicate. Behaviour:
     /// - If the compilation row is `success` AND has a registered image id, returns
     ///   `CompilationStatus::Ready { translated_path, registered_image_id }`.
-    /// - If the row is `failed`, logs the stored error message at `error`, deletes
-    ///   the stale record so the next request can retry, and returns
-    ///   `CompilationStatus::Failed { error }`.
+    /// - If the row is `failed`, logs the stored error message at `error` and
+    ///   returns `CompilationStatus::Failed`. When the recorded
+    ///   `source_checksum` still matches the stored definition the failure is
+    ///   `terminal` and the record is kept; otherwise the stale record is
+    ///   deleted so the next request can retry.
     /// - Otherwise (no row, `pending`, or `success` without a registered image)
     ///   returns `CompilationStatus::NotReady`.
     pub async fn ensure_compilation_ready(
@@ -2074,6 +2076,40 @@ impl WorkflowRepository {
                 if compilation_status.as_deref() == Some("failed") {
                     let error_msg =
                         error_message.unwrap_or_else(|| "Unknown compilation error".to_string());
+
+                    // The failure was recorded against the definition still
+                    // stored, so recompiling it would fail identically. Keep
+                    // the record and report the failure as terminal, otherwise
+                    // every execution attempt requeues the same doomed build.
+                    if source_checksum.as_deref() == Some(current_checksum.as_str()) {
+                        let authoring = is_workflow_authoring_error(&error_msg);
+                        // An unrunnable graph is reported to its author, not
+                        // alerted on, and this is read on every attempt to run
+                        // it - logging at ERROR would be a standing false alarm.
+                        if authoring {
+                            tracing::warn!(
+                                tenant_id = %tenant_id,
+                                workflow_id = %workflow_id,
+                                version = version,
+                                compilation_error = %error_msg,
+                                "Workflow cannot be compiled as authored, not retrying"
+                            );
+                        } else {
+                            tracing::error!(
+                                tenant_id = %tenant_id,
+                                workflow_id = %workflow_id,
+                                version = version,
+                                compilation_error = %error_msg,
+                                "COMPILATION FAILED - definition unchanged, not retrying"
+                            );
+                        }
+                        return Ok(CompilationStatus::Failed {
+                            error: error_msg,
+                            terminal: true,
+                            authoring,
+                        });
+                    }
+
                     // Log at ERROR level so it's visible in logs
                     tracing::error!(
                         tenant_id = %tenant_id,
@@ -2091,13 +2127,36 @@ impl WorkflowRepository {
                     .bind(version)
                     .execute(&self.pool)
                     .await;
-                    return Ok(CompilationStatus::Failed { error: error_msg });
+                    let authoring = is_workflow_authoring_error(&error_msg);
+                    return Ok(CompilationStatus::Failed {
+                        error: error_msg,
+                        terminal: false,
+                        authoring,
+                    });
                 }
 
                 Ok(CompilationStatus::NotReady)
             }
             _ => Ok(CompilationStatus::NotReady),
         }
+    }
+}
+
+/// Whether a recorded compilation error describes a graph that cannot compile
+/// as authored, rather than a fault in the system compiling it.
+///
+/// Only the message survives in `workflow_compilations`, so the classification
+/// keys on the `[Ennn]` code that `ValidationError` renders — an empty graph,
+/// an unreachable entry point, and the rest of the authoring diagnostics all
+/// carry one. Anything without a code (a panic, an I/O failure, a toolchain
+/// error) stays a system failure and keeps alerting.
+pub fn is_workflow_authoring_error(error_message: &str) -> bool {
+    let Some(rest) = error_message.strip_prefix("[E") else {
+        return false;
+    };
+    match rest.split_once(']') {
+        Some((code, _)) => !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()),
+        None => false,
     }
 }
 
@@ -2112,10 +2171,80 @@ pub enum CompilationStatus {
         /// Image id registered in runtara-environment.
         registered_image_id: String,
     },
-    /// Previous compilation attempt recorded a failure. The stale record has
-    /// been deleted so the caller may queue a retry.
-    Failed { error: String },
+    /// Previous compilation attempt recorded a failure.
+    Failed {
+        error: String,
+        /// `true` when the failure belongs to the definition currently stored,
+        /// so a retry would fail the same way and the record has been kept.
+        /// `false` when the definition changed since — the stale record has
+        /// been deleted and the caller may queue a fresh compilation.
+        terminal: bool,
+        /// `true` when the graph cannot compile as authored (see
+        /// [`is_workflow_authoring_error`]). Such failures are surfaced to the
+        /// author rather than logged as system faults.
+        authoring: bool,
+    },
     /// No successful compilation is available yet (no record, pending, or
     /// partially recorded).
     NotReady,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stepless_workflow_diagnostic_is_an_authoring_error() {
+        // What a user running an unfinished workflow produces. It describes the
+        // graph, not a fault in the system, so it must not raise alerts.
+        assert!(is_workflow_authoring_error(
+            "[E004] Workflow has no steps defined"
+        ));
+    }
+
+    #[test]
+    fn other_validation_codes_are_authoring_errors_too() {
+        // The classification follows the code convention, not one hardcoded
+        // message, so new diagnostics are covered as they are added.
+        assert!(is_workflow_authoring_error(
+            "[E003] Finish step 'x' is defined but not reachable from entry point 'y'"
+        ));
+        assert!(is_workflow_authoring_error(
+            "[E117] Finish step 'x' has an output with no name"
+        ));
+    }
+
+    #[test]
+    fn system_failures_keep_alerting() {
+        for message in [
+            "Failed to parse execution graph: invalid type: null, expected a string",
+            "wasm component build failed: linker exited with status 1",
+            "Database error: connection reset by peer",
+            "Unknown compilation error",
+            "",
+        ] {
+            assert!(
+                !is_workflow_authoring_error(message),
+                "{message:?} must stay a system failure"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_code_is_not_mistaken_for_one() {
+        // Guards the prefix check against swallowing real failures whose text
+        // happens to start with a bracket.
+        for message in [
+            "[E] missing code",
+            "[Exyz] not a numeric code",
+            "[E004 no closing bracket",
+            "[E-1] negative",
+            "prefixed [E004] not at the start",
+        ] {
+            assert!(
+                !is_workflow_authoring_error(message),
+                "{message:?} must not be read as a validation code"
+            );
+        }
+    }
 }

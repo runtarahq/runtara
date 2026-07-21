@@ -42,6 +42,11 @@ path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "compilation_failure_terminality"
+path = "tests/compilation_failure_terminality.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "invocation_cleanup_test"
 path = "tests/invocation_cleanup_test.rs"
 required-features = ["db-integration-tests"]

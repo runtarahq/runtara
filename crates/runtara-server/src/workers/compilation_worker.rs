@@ -10,9 +10,10 @@ use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
 
-use crate::api::repositories::workflows::WorkflowRepository;
+use crate::api::repositories::workflows::{WorkflowRepository, workflow_definition_checksum};
 use crate::api::services::compilation::{
-    CompilationService, direct_compilation_settings_from_config,
+    CompilationService, ServiceError as CompilationServiceError,
+    direct_compilation_settings_from_config,
 };
 use crate::observability::metrics;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
@@ -235,14 +236,28 @@ pub async fn run(
                             );
                         }
                         Err(e) => {
-                            error!(
-                                tenant_id = %request.tenant_id,
-                                workflow_id = %request.workflow_id,
-                                version = request.version,
-                                error = %e,
-                                duration_secs = duration,
-                                "Compilation failed"
-                            );
+                            // A graph that cannot compile as authored is the
+                            // author's problem, not a fault to alert on, so it
+                            // is recorded at a lower level than a real failure.
+                            if matches!(e, CompilationServiceError::WorkflowAuthoringError(_)) {
+                                warn!(
+                                    tenant_id = %request.tenant_id,
+                                    workflow_id = %request.workflow_id,
+                                    version = request.version,
+                                    error = %e,
+                                    duration_secs = duration,
+                                    "Workflow cannot be compiled as authored"
+                                );
+                            } else {
+                                error!(
+                                    tenant_id = %request.tenant_id,
+                                    workflow_id = %request.workflow_id,
+                                    version = request.version,
+                                    error = %e,
+                                    duration_secs = duration,
+                                    "Compilation failed"
+                                );
+                            }
                             // Record the failure in database
                             if let Err(db_err) = record_compilation_failure(
                                 &pool,
@@ -303,24 +318,44 @@ async fn record_compilation_failure(
     version: i32,
     error_message: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
+    // Stamp the checksum of the definition that failed. Readers compare it
+    // against the definition currently stored to tell a failure that will
+    // recur (source unchanged) from a stale one worth retrying.
+    let source_checksum: Option<String> = sqlx::query_scalar::<_, serde_json::Value>(
+        r#"
+        SELECT definition
+        FROM workflow_definitions
+        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?
+    .as_ref()
+    .map(workflow_definition_checksum);
+
+    sqlx::query(
         r#"
         INSERT INTO workflow_compilations
-            (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version)
-        VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5)
+            (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum)
+        VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6)
         ON CONFLICT (tenant_id, workflow_id, version)
         DO UPDATE SET
             compilation_status = 'failed',
             compiled_at = NOW(),
             error_message = $4,
-            runtara_version = $5
+            runtara_version = $5,
+            source_checksum = $6
         "#,
-        tenant_id,
-        workflow_id,
-        version,
-        error_message,
-        env!("BUILD_VERSION")
     )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(version)
+    .bind(error_message)
+    .bind(env!("BUILD_VERSION"))
+    .bind(source_checksum.as_deref())
     .execute(pool)
     .await?;
 
