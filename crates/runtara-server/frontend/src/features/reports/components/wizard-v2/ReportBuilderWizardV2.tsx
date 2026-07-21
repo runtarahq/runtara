@@ -1,4 +1,6 @@
 import { Schema } from '@/generated/RuntaraRuntimeApi';
+import { Label } from '@/shared/components/ui/label';
+import { useEffect, useMemo, useState } from 'react';
 import { ReportBlockResult, ReportDefinition } from '../../types';
 import { FiltersEditorV2 } from './FiltersEditorV2';
 import { DatasetsEditorV2 } from './DatasetsEditorV2';
@@ -32,6 +34,44 @@ export function ReportBuilderWizardV2({
   reportId,
   onChange,
 }: ReportBuilderWizardV2Props) {
+  const [layoutViewId, setLayoutViewId] = useState<string | null>(null);
+  const selectedView = (definition.views ?? []).find(
+    (view) => view.id === layoutViewId
+  );
+  const layoutDefinition = useMemo(
+    () =>
+      selectedView
+        ? {
+            ...definition,
+            layout: selectedView.layout ?? {
+              id: `${selectedView.id}_root`,
+              columns: 1,
+              rows: 1,
+              items: [],
+            },
+          }
+        : definition,
+    [definition, selectedView]
+  );
+
+  useEffect(() => {
+    if (layoutViewId && !selectedView) setLayoutViewId(null);
+  }, [layoutViewId, selectedView]);
+
+  const handleLayoutChange = (next: ReportDefinition) => {
+    if (!selectedView) {
+      onChange(next);
+      return;
+    }
+    onChange({
+      ...next,
+      layout: definition.layout,
+      views: (next.views ?? definition.views ?? []).map((view) =>
+        view.id === selectedView.id ? { ...view, layout: next.layout } : view
+      ),
+    });
+  };
+
   if (!editing) {
     // View mode: the ReportRenderer renders the saved report directly. The
     // wizard only mounts in edit mode in ReportPage, so this branch is a
@@ -45,17 +85,38 @@ export function ReportBuilderWizardV2({
         <header className="mb-3">
           <h2 className="text-sm font-semibold">Layout</h2>
           <p className="text-xs text-muted-foreground">
-            Arrange blocks inside grids. A "section" is a 1-column grid; a
-            row of metric blocks is a 1×N grid; everything is a grid.
+            Arrange blocks inside grids. A "section" is a 1-column grid; a row
+            of metric blocks is a 1×N grid; everything is a grid.
           </p>
         </header>
+        {(definition.views?.length ?? 0) > 0 ? (
+          <div className="mb-3 grid max-w-sm gap-1.5">
+            <Label htmlFor="report-layout-target" className="text-xs">
+              Layout to edit
+            </Label>
+            <select
+              id="report-layout-target"
+              value={layoutViewId ?? ''}
+              onChange={(event) => setLayoutViewId(event.target.value || null)}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="">Main report</option>
+              {(definition.views ?? []).map((view) => (
+                <option key={view.id} value={view.id}>
+                  {view.title || view.id}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
         <GridContainer
-          definition={definition}
+          key={layoutViewId ?? 'main'}
+          definition={layoutDefinition}
           schemas={schemas}
           blockResults={blockResults}
           reportId={reportId}
           filters={filters ?? {}}
-          onChange={onChange}
+          onChange={handleLayoutChange}
         />
       </section>
 

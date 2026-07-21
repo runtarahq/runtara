@@ -26,7 +26,10 @@ const definition = {
   ],
 } as unknown as ReportDefinition;
 
-function renderBar(values: Record<string, unknown>) {
+function renderBar(
+  values: Record<string, unknown>,
+  visibleBlockIds: Set<string> | null = null
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -37,6 +40,7 @@ function renderBar(values: Record<string, unknown>) {
         definition={definition}
         values={values}
         onChange={vi.fn()}
+        visibleBlockIds={visibleBlockIds}
       />
     </QueryClientProvider>
   );
@@ -92,6 +96,19 @@ describe('ReportFilterBar dynamic options', () => {
     fireEvent.click(screen.getByRole('button', { name: /Status:/i }));
     expect(
       await screen.findByText('Option provider unavailable')
+    ).toBeInTheDocument();
+  });
+
+  it('hides filters that do not apply to blocks in the active view', () => {
+    const hidden = renderBar({ status: 'open' }, new Set(['detail-card']));
+    expect(
+      screen.queryByRole('button', { name: /Status:/i })
+    ).not.toBeInTheDocument();
+    hidden.unmount();
+
+    renderBar({ status: 'open' }, new Set(['table']));
+    expect(
+      screen.getByRole('button', { name: /Status:/i })
     ).toBeInTheDocument();
   });
 });

@@ -107,6 +107,24 @@ export function getActiveReportLayout(
   return view?.layout ?? definition.layout;
 }
 
+export function getReportLayoutBlockIds(
+  definition: ReportDefinition,
+  viewId?: string | null
+): Set<string> {
+  const blockIds = new Set<string>();
+  const visitGrid = (grid: ReportGridLayoutNode) => {
+    for (const item of grid.items ?? []) {
+      if (item.child.type === 'block') {
+        blockIds.add(item.child.blockId);
+      } else {
+        visitGrid(item.child);
+      }
+    }
+  };
+  visitGrid(getActiveReportLayout(definition, viewId));
+  return blockIds;
+}
+
 export function getDefaultReportViewId(
   definition: ReportDefinition
 ): string | null {

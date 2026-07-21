@@ -52,6 +52,7 @@ import {
   getFilterDefaultValue,
   getDefaultReportViewId,
   getDefaultReportViewTarget,
+  getReportLayoutBlockIds,
   slugify,
 } from '../utils';
 
@@ -178,6 +179,13 @@ export function ReportPage() {
       : undefined) ??
     requestedViewId ??
     getDefaultReportViewId(definition);
+  const visibleBlockIds = useMemo(
+    () =>
+      editing
+        ? null
+        : getReportLayoutBlockIds(definition, resolvedActiveViewId),
+    [definition, editing, resolvedActiveViewId]
+  );
   const previousStageRef = useRef<{
     reportId?: string;
     groupId?: string;
@@ -458,6 +466,7 @@ export function ReportPage() {
           definition={definition}
           values={filterValues}
           onChange={handleFilterChange}
+          visibleBlockIds={visibleBlockIds}
         />
       ) : null}
       {editing ? (
