@@ -11,6 +11,7 @@ import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react';
 import {
   ReportDefinition,
   ReportViewDefinition,
+  ReportViewGroupAccess,
   ReportViewGroupDefinition,
   ReportViewNavigationMode,
   ReportViewStageSource,
@@ -66,7 +67,8 @@ function newGroup(
     })),
     currentFrom: defaultStageSource(definition),
     access: 'through_current',
-    showPreviousNext: true,
+    showPrevious: true,
+    showNext: true,
     followCurrentOnAdvance: true,
   };
 }
@@ -330,6 +332,9 @@ function NavigationGroupEditor({
   const views = definition.views ?? [];
   const memberIds = groupViewIds(group);
   const unusedView = views.find((view) => !memberIds.includes(view.id));
+  const firstStageBlock = definition.blocks.find((block) => !block.lazy);
+  const showPrevious = group.showPrevious ?? group.showPreviousNext ?? false;
+  const showNext = group.showNext ?? group.showPreviousNext ?? false;
   const moveMember = (index: number, direction: -1 | 1) => {
     if (group.mode === 'stages') {
       const stages = [...(group.stages ?? [])];
@@ -406,17 +411,45 @@ function NavigationGroupEditor({
             <select
               id={`group-access-${group.id}`}
               value={group.access ?? 'all'}
-              onChange={(event) =>
+              onChange={(event) => {
+                const access = event.target.value as ReportViewGroupAccess;
                 onChange((current) => ({
                   ...current,
-                  access: event.target.value as 'all' | 'through_current',
-                }))
-              }
+                  access,
+                  ...(access === 'current_only'
+                    ? {
+                        currentFrom:
+                          current.currentFrom?.type === 'block'
+                            ? current.currentFrom
+                            : {
+                                type: 'block',
+                                blockId: firstStageBlock?.id ?? '',
+                                field: 'status',
+                              },
+                        showPrevious: false,
+                        showNext: false,
+                      }
+                    : {}),
+                }));
+              }}
               className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="all">All views</option>
-              <option value="through_current">Prior + current only</option>
+              {group.mode === 'stages' ? (
+                <>
+                  <option value="through_current">Prior + current only</option>
+                  <option value="current_only">
+                    Current only (field controlled)
+                  </option>
+                </>
+              ) : null}
             </select>
+            {group.access === 'current_only' ? (
+              <p className="text-xs text-muted-foreground">
+                The current stage comes from the configured field. Viewers
+                cannot switch stages.
+              </p>
+            ) : null}
           </div>
         </div>
 
@@ -535,27 +568,90 @@ function NavigationGroupEditor({
             definition={definition}
             groupId={group.id}
             source={group.currentFrom ?? defaultStageSource(definition)}
+            requireBlock={group.access === 'current_only'}
             onChange={(currentFrom) =>
               onChange((current) => ({ ...current, currentFrom }))
             }
           />
         ) : null}
 
-        <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={group.showPreviousNext ?? false}
-              onChange={(event) =>
-                onChange((current) => ({
-                  ...current,
-                  showPreviousNext: event.target.checked,
-                }))
-              }
-            />
-            Show Previous / Next
-          </label>
-          {group.mode === 'stages' ? (
+        {group.mode === 'stages' ? (
+          <div className="grid gap-3">
+            <div className="grid gap-2">
+              <Label className="text-xs">Navigation buttons</Label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-2 rounded-md border p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={showPrevious}
+                      onChange={(event) =>
+                        onChange((current) => ({
+                          ...current,
+                          showPrevious: event.target.checked,
+                        }))
+                      }
+                    />
+                    Show Previous button
+                  </label>
+                  <div className="grid gap-1.5">
+                    <Label
+                      htmlFor={`previous-label-${group.id}`}
+                      className="text-xs"
+                    >
+                      Previous label
+                    </Label>
+                    <Input
+                      id={`previous-label-${group.id}`}
+                      value={group.previousLabel ?? ''}
+                      placeholder="Previous"
+                      disabled={!showPrevious}
+                      onChange={(event) =>
+                        onChange((current) => ({
+                          ...current,
+                          previousLabel: event.target.value || undefined,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="grid gap-2 rounded-md border p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={showNext}
+                      onChange={(event) =>
+                        onChange((current) => ({
+                          ...current,
+                          showNext: event.target.checked,
+                        }))
+                      }
+                    />
+                    Show Next button
+                  </label>
+                  <div className="grid gap-1.5">
+                    <Label
+                      htmlFor={`next-label-${group.id}`}
+                      className="text-xs"
+                    >
+                      Next label
+                    </Label>
+                    <Input
+                      id={`next-label-${group.id}`}
+                      value={group.nextLabel ?? ''}
+                      placeholder="Next"
+                      disabled={!showNext}
+                      onChange={(event) =>
+                        onChange((current) => ({
+                          ...current,
+                          nextLabel: event.target.value || undefined,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -569,8 +665,8 @@ function NavigationGroupEditor({
               />
               Follow current stage after save/action
             </label>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -626,6 +722,7 @@ interface StageSourceEditorProps {
   definition: ReportDefinition;
   groupId: string;
   source: ReportViewStageSource;
+  requireBlock?: boolean;
   onChange: (source: ReportViewStageSource) => void;
 }
 
@@ -633,6 +730,7 @@ function StageSourceEditor({
   definition,
   groupId,
   source,
+  requireBlock = false,
   onChange,
 }: StageSourceEditorProps) {
   const availableBlocks = definition.blocks.filter((block) => !block.lazy);
@@ -665,7 +763,7 @@ function StageSourceEditor({
           }
           className="h-9 rounded-md border border-input bg-background px-3 text-sm"
         >
-          <option value="filter">Filter value</option>
+          {!requireBlock ? <option value="filter">Filter value</option> : null}
           <option value="block">Rendered block field</option>
         </select>
       </div>

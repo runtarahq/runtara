@@ -125,7 +125,7 @@ export type ReportWorkflowActionContextMode =
 
 export type ReportViewNavigationMode = "tabs" | "stages";
 
-export type ReportViewGroupAccess = "all" | "through_current";
+export type ReportViewGroupAccess = "all" | "through_current" | "current_only";
 
 export type ReportTableColumnType =
   | "value"
@@ -4471,6 +4471,18 @@ export interface ReportViewGroupDefinition {
   followCurrentOnAdvance?: boolean;
   id: string;
   mode: ReportViewNavigationMode;
+  nextLabel?: string | null;
+  previousLabel?: string | null;
+  /**
+   * Independently controls the Next button. When omitted, the legacy
+   * `showPreviousNext` value is used for backwards compatibility.
+   */
+  showNext?: boolean | null;
+  /**
+   * Independently controls the Previous button. When omitted, the legacy
+   * `showPreviousNext` value is used for backwards compatibility.
+   */
+  showPrevious?: boolean | null;
   showPreviousNext?: boolean;
   /** Ordered persisted-value/view pairs for `mode=stages`. */
   stages?: ReportViewStageDefinition[];
