@@ -76,8 +76,16 @@ pub async fn teams_webhook(
     let activity_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match activity_type {
         "message" => handle_message_activity(&router, &connection_id, &payload).await,
-        // Authenticated but not yet handled (conversationUpdate,
-        // installationUpdate, messageReaction, invoke, ...): acknowledge.
+        // Installation / membership events: capture the conversation's
+        // serviceUrl so a proactive target is warm even before the first
+        // message. No session is started. (Proactive send itself is a later
+        // slice; this only persists the reference.)
+        "conversationUpdate" | "installationUpdate" => {
+            capture_conversation_reference(&router, &connection_id, &payload);
+            StatusCode::OK.into_response()
+        }
+        // Authenticated but not yet handled (messageReaction, invoke,
+        // messageUpdate/Delete, ...): acknowledge. These are post-MVP.
         other => {
             debug!(
                 connection_id = %connection_id,
@@ -86,6 +94,27 @@ pub async fn teams_webhook(
             );
             StatusCode::OK.into_response()
         }
+    }
+}
+
+/// Persist the serviceUrl from an authenticated installation/membership event
+/// so a later proactive send has a warm conversation reference. Bot-added is
+/// the canonical capture moment (membersAdded contains the bot's recipient id),
+/// but we capture on any such event since all are authenticated.
+fn capture_conversation_reference(
+    router: &Arc<ChannelRouter>,
+    connection_id: &str,
+    payload: &Value,
+) {
+    let conversation_id = payload.pointer("/conversation/id").and_then(|v| v.as_str());
+    let service_url = payload.get("serviceUrl").and_then(|v| v.as_str());
+    if let (Some(conversation_id), Some(service_url)) = (conversation_id, service_url) {
+        router.set_teams_service_url(conversation_id, service_url);
+        debug!(
+            connection_id = %connection_id,
+            conversation = %conversation_id,
+            "Captured Teams conversation reference from installation/membership event"
+        );
     }
 }
 
