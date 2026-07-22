@@ -50,6 +50,9 @@ pub fn build_cors_layer() -> CorsLayer {
         HeaderName::from_static("origin"),
         HeaderName::from_static("x-requested-with"),
         HeaderName::from_static("cache-control"),
+        // Report workflow-action executes are idempotency-keyed; without this
+        // the preflight silently strips the header path for cross-origin UIs.
+        HeaderName::from_static("idempotency-key"),
     ];
 
     let expose_headers: Vec<HeaderName> = vec![
