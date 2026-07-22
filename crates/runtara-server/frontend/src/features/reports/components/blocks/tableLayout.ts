@@ -54,13 +54,16 @@ export type ColumnSpec = {
 };
 
 // Average glyph advance at cell font (text-sm / 14px Inter). Character-count
-// heuristics only need to be close: overshoot is corrected by the fit pass,
-// undershoot by truncate-with-tooltip.
-const CH_PX = 7.7;
-// Header glyphs render uppercase text-xs tracking-wide semibold.
-const HEADER_GLYPH_PX = 8;
-// Header px-3 padding (24) + sort caret and gap (20).
-const HEADER_EXTRA_PX = 44;
+// heuristics only need to be close, and should err high: overshoot is
+// corrected by the fit pass, undershoot ellipsizes values a couple of
+// characters early (Inter digits run ~8.4px, so digit-heavy codes dominate).
+const CH_PX = 8;
+// Header glyphs render uppercase text-xs tracking-wide semibold — wide
+// capitals (M, O, C, K) push the average well past the lowercase body text.
+const HEADER_GLYPH_PX = 8.5;
+// Header px-3 padding (24) + sort caret and gap (20) + a few px of slack so
+// a column sitting exactly at its header floor doesn't ellipsize its label.
+const HEADER_EXTRA_PX = 48;
 // Cell px-3 padding (24) + rounding slack.
 const CELL_PADDING_PX = 28;
 
@@ -273,21 +276,30 @@ function inferColumnSpec(
   const maxLen = maxGlyphLength(samples);
 
   // Pills and avatars render decorated content; their widths come from the
-  // decorated sample (humanized label / derived display name).
+  // decorated sample (humanized label / derived display name). Pills are
+  // rigid (a Badge doesn't truncate); avatar and bar-indicator cells render
+  // their labels through truncate-with-tooltip, so they can lend width under
+  // compression like any text column.
   if (formatName === 'pill') {
     const pillPx = clampPx(maxLen * 6.5 + 58, 96, 200);
     return rigid(Math.max(pillPx, header));
   }
   if (formatName === 'avatar_label') {
-    const avatarPx = clampPx(maxLen * 7 + 64, 140, 240);
-    return rigid(Math.max(avatarPx, header));
+    const ideal = Math.max(clampPx(maxLen * 7 + 64, 140, 240), header);
+    const min = Math.min(Math.max(140, header), ideal);
+    return { idealPx: ideal, minPx: min, flexible: true };
   }
   if (formatName === 'bar_indicator') {
     const measured =
       maxLen > 0
         ? textWidthPx(maxLen) + 32
         : FORMAT_FALLBACK_WIDTHS.bar_indicator;
-    return rigid(Math.max(measured, header));
+    const ideal = Math.max(measured, header);
+    // Short level labels ("Low", "Medium") keep their width — compressing
+    // them buys a handful of px at a large legibility cost. Only labels
+    // beyond ~120px lend width under compression.
+    const min = Math.min(Math.max(120, header), ideal);
+    return { idealPx: ideal, minPx: min, flexible: true };
   }
 
   if (RIGID_VALUE_FORMATS.has(formatName) && !hasPositiveMaxChars(column.maxChars)) {
@@ -313,13 +325,21 @@ function inferColumnSpec(
   };
 }
 
+// Under compression, a flexible column may dip this far below its minimum to
+// absorb a sliver of residual deficit. The min floors carry built-in slack
+// (padding and caret allowances round up), so a few px cost nothing visible —
+// while without this, a mostly-rigid table can end up with a 3–10px
+// scrollbar that scrolls nothing useful.
+const GRACE_PX = 6;
+
 /**
  * Reconcile ideal column widths against the container. When the ideals fit,
  * every column gets its ideal (the filler col absorbs the slack). When they
  * don't, flexible columns shrink in proportion to their headroom
  * (`ideal - min`); proportional-to-headroom cuts can never push a column
- * below its min in a single pass. If every flexible column is at its min and
- * the total still exceeds the container, the table legitimately scrolls.
+ * below its min in a single pass. A residual sliver (≤ GRACE_PX per flexible
+ * column) is shaved below the mins; beyond that, the table legitimately
+ * scrolls.
  *
  * `availablePx === null` means the container width is unknown (first paint,
  * jsdom) — return the ideals unchanged.
@@ -343,14 +363,37 @@ export function fitColumnWidths(
     spec.flexible ? Math.max(0, spec.idealPx - spec.minPx) : 0
   );
   const totalHeadroom = headrooms.reduce((acc, h) => acc + h, 0);
-  if (totalHeadroom <= 0) {
+  if (totalHeadroom <= 0 && deficit > countFlexible(specs) * GRACE_PX) {
     return ideals;
   }
 
   const shrink = Math.min(deficit, totalHeadroom);
-  return specs.map((spec, index) => {
+  const widths = specs.map((spec, index) => {
     if (headrooms[index] <= 0) return spec.idealPx;
     const cut = (shrink * headrooms[index]) / totalHeadroom;
     return Math.max(spec.minPx, Math.floor(spec.idealPx - cut));
   });
+
+  // Grace pass: if only a sliver of deficit remains once every flexible
+  // column sits at its min, spread it below the mins (bounded per column)
+  // instead of rendering a near-useless horizontal scrollbar.
+  let residual = widths.reduce((acc, w) => acc + w, 0) - availablePx;
+  const flexibleCount = countFlexible(specs);
+  if (
+    residual > 0 &&
+    flexibleCount > 0 &&
+    residual <= flexibleCount * GRACE_PX
+  ) {
+    for (let i = 0; i < widths.length && residual > 0; i += 1) {
+      if (!specs[i].flexible) continue;
+      const dip = Math.min(GRACE_PX, residual);
+      widths[i] -= dip;
+      residual -= dip;
+    }
+  }
+  return widths;
+}
+
+function countFlexible(specs: ColumnSpec[]): number {
+  return specs.reduce((acc, spec) => acc + (spec.flexible ? 1 : 0), 0);
 }

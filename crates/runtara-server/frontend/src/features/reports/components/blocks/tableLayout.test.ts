@@ -105,6 +105,16 @@ describe('inferColumnSpecs', () => {
     expect(spec.idealPx).toBeLessThanOrEqual(200);
   });
 
+  it('keeps avatar columns flexible with a 140px floor (labels truncate gracefully)', () => {
+    const [spec] = inferColumnSpecs(
+      [{ key: 'owner', label: 'Owner', format: 'avatar_label' }],
+      [{ owner: 'alexandra.montgomery@example.com' }]
+    );
+    expect(spec.flexible).toBe(true);
+    expect(spec.minPx).toBeGreaterThanOrEqual(140);
+    expect(spec.idealPx).toBeGreaterThanOrEqual(spec.minPx);
+  });
+
   it('gives action and chart columns fixed widths', () => {
     const specs = inferColumnSpecs(
       [
@@ -171,5 +181,20 @@ describe('fitColumnWidths', () => {
     const widths = fitColumnWidths([flex(400, 100), flex(200, 100)], 500);
     expect(widths).toEqual([325, 175]);
     expect(sum(widths)).toBeLessThanOrEqual(500);
+  });
+
+  it('shaves a sliver of residual deficit below the mins instead of scrolling', () => {
+    // Both columns are already at their min; a 5px residual is absorbed by
+    // the grace dip rather than rendering a 5px scrollbar.
+    const widths = fitColumnWidths([flex(100, 100), flex(100, 100)], 195);
+    expect(sum(widths)).toBeLessThanOrEqual(195);
+    for (const width of widths) {
+      expect(width).toBeGreaterThanOrEqual(94);
+    }
+  });
+
+  it('does not dip below mins for a real deficit — that must scroll', () => {
+    const widths = fitColumnWidths([flex(100, 100), flex(100, 100)], 150);
+    expect(widths).toEqual([100, 100]);
   });
 });
