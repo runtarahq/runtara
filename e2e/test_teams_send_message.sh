@@ -68,6 +68,8 @@ TENANT="teams_e2e"
 ENDPOINT_REF_SECRET="teams-e2e-endpoint-ref-secret-$$"
 MOCK_BASE="http://127.0.0.1:${MOCK_PORT}"
 CONV_ID='19:abcDEF@thread.tacv2;messageid=1700000000001'
+# Exported for the python heredocs that mint refs / build payloads.
+export TENANT ENDPOINT_REF_SECRET MOCK_BASE
 
 RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${PROJECT_ROOT}/target/debug/runtara-server}"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
@@ -226,6 +228,7 @@ RUST_LOG="warn,runtara_server=info" \
 AUTH_PROVIDER=local \
 SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
 RUNTARA_ENDPOINT_REF_SECRET="${ENDPOINT_REF_SECRET}" \
+RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
 RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
 RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 \
 VALKEY_HOST=127.0.0.1 \
@@ -265,7 +268,7 @@ print(json.dumps({
 PY
 )
 RESP=$(api_post /connections "${CONN_PAYLOAD}")
-CONN_ID=$(echo "${RESP}" | jq -r '.data.id // .id // empty')
+CONN_ID=$(echo "${RESP}" | jq -r '.connectionId // .data.id // .id // empty')
 if [ -z "${CONN_ID}" ]; then
     print_error "Connection create failed: ${RESP}"; tail -30 "${TEST_LOG}"; exit 1
 fi
@@ -367,8 +370,16 @@ case "${REC_PATH}" in
     /v3/conversations/19%3AabcDEF*/activities) : ;;
     *) print_error "Bot Connector path not percent-encoded/joined as expected: ${REC_PATH}"; exit 1 ;;
 esac
-ACTIVITY_ID=$(echo "${RUN_RESP}" | jq -r '.data.result.result.activity_id // .data.output.result.activity_id // empty')
-echo "  Send reached Bot Connector: path=${REC_PATH}, auth ok, activityId=${ACTIVITY_ID:-<unread>} ✓"
+# The returned Bot Connector activity id (mock-activity-123) surfaces somewhere
+# in the instance output; find it recursively so the assertion is robust to the
+# exact output-envelope shape.
+ACTIVITY_ID=$(echo "${RUN_RESP}" | jq -r '[.. | .activity_id? // empty] | map(select(. != null)) | first // empty')
+if [ "${ACTIVITY_ID}" != "mock-activity-123" ]; then
+    print_error "Expected returned activity id 'mock-activity-123', got '${ACTIVITY_ID:-<none>}'"
+    echo "${RUN_RESP}" | jq '.data // .' | head -40
+    exit 1
+fi
+echo "  Send reached Bot Connector: path=${REC_PATH}, auth ok, activityId=${ACTIVITY_ID} ✓"
 
 # --- Assertion 2: ref for a DIFFERENT connection → fail closed ------------
 print_step "Case 2: ref bound to a different connection → proxy fail-closes..."
