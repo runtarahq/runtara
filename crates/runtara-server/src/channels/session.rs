@@ -36,6 +36,13 @@ pub struct InboundMessage {
     pub attachments: Vec<Attachment>,
     /// Raw platform-specific payload (email headers, Slack event, etc.).
     pub original_message: Value,
+    /// Curated, credential-free reply target exposed to the workflow as
+    /// `data.target` (Teams: opaque endpoint ref + conversation identifiers).
+    /// `None` for channels that don't produce one.
+    pub target: Option<Value>,
+    /// Provider activity/message id, used as the idempotency key for the
+    /// deterministic instance id (redelivery dedup). `None` when unavailable.
+    pub activity_id: Option<String>,
 }
 
 /// A normalized attachment from any channel.
@@ -81,6 +88,9 @@ pub struct ChannelRouter {
     engine: Arc<ExecutionEngine>,
     valkey: ConnectionManager,
     http_client: reqwest::Client,
+    /// Hardened egress client (no redirects + DNS guard) for credentialed
+    /// channel replies (Teams).
+    hardened_client: reqwest::Client,
     /// Shared service URL map for Teams (conversation_id → serviceUrl).
     teams_service_urls: Arc<DashMap<String, String>>,
 }
@@ -101,6 +111,7 @@ impl ChannelRouter {
             engine,
             valkey,
             http_client: reqwest::Client::new(),
+            hardened_client: runtara_connections::net::build_hardened_client(),
             teams_service_urls: Arc::new(DashMap::new()),
         }
     }
@@ -124,6 +135,21 @@ impl ChannelRouter {
     pub fn set_teams_service_url(&self, conversation_id: &str, service_url: &str) {
         self.teams_service_urls
             .insert(conversation_id.to_string(), service_url.to_string());
+    }
+
+    /// Reserve an inbound activity for processing, deduplicating at-least-once
+    /// redeliveries. Returns `true` when this delivery is fresh and should be
+    /// processed, `false` when it is a duplicate. Fails open on Valkey errors.
+    pub async fn reserve_activity(&self, connection_id: &str, activity_id: &str) -> bool {
+        // 10-minute window comfortably covers Teams' ~15s retry and a valid
+        // Bot Framework token's ~1h life for genuine redeliveries.
+        const DEDUP_TTL_SECS: i64 = 600;
+        let identity = format!(
+            "{}:{connection_id}:{activity_id}",
+            crate::config::tenant_id()
+        );
+        let mut valkey = self.valkey.clone();
+        session_queue::reserve_activity_dedup(&mut valkey, &identity, DEDUP_TTL_SECS).await
     }
 
     /// Validate the webhook secret from the request header against the
@@ -281,16 +307,15 @@ impl ChannelRouter {
                 ))
             }
             "teams_bot" => {
-                let app_id = params["app_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing app_id in connection"))?;
-                let app_password = params["app_password"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing app_password in connection"))?;
+                // The adapter mints its token through the facade (correct
+                // single-tenant authority + shared token cache) and egresses
+                // via the hardened client — no raw secret handling here.
                 let teams = Arc::new(super::channel::TeamsChannel::new(
-                    app_id.to_string(),
-                    app_password.to_string(),
-                    self.http_client.clone(),
+                    tenant_id.clone(),
+                    connection_id.to_string(),
+                    params.clone(),
+                    self.connections.clone(),
+                    self.hardened_client.clone(),
                 ));
                 for entry in self.teams_service_urls.iter() {
                     teams.set_service_url(entry.key(), entry.value());
@@ -394,15 +419,26 @@ async fn session_loop(
         .map(|a| serde_json::to_value(a).unwrap_or_default())
         .collect();
 
-    let inputs = json!({
-        "data": {
-            "sessionId": &session_id,
-            "channel": &initial_message.channel,
-            "userMessage": &initial_message.text,
-            "attachments": attachments_json,
-            "originalMessage": &initial_message.original_message,
-        },
-        "variables": {},
+    let mut data = json!({
+        "sessionId": &session_id,
+        "channel": &initial_message.channel,
+        "userMessage": &initial_message.text,
+        "attachments": attachments_json,
+        "originalMessage": &initial_message.original_message,
+    });
+    if let Some(target) = &initial_message.target {
+        data["target"] = target.clone();
+    }
+    let inputs = json!({ "data": data, "variables": {} });
+
+    // Deterministic instance id from the provider activity id: if the same
+    // activity is redelivered after the Valkey dedup window is lost, the
+    // environment dedups the start by instance id and won't double-fire.
+    let deterministic_instance_id = initial_message.activity_id.as_deref().map(|activity_id| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("teams-activity:{org_id}:{activity_id}").as_bytes(),
+        )
     });
 
     let result = engine
@@ -414,7 +450,7 @@ async fn session_loop(
             debug: false,
             correlation_id: None,
             trigger_source: TriggerSource::Webhook,
-            instance_id: None,
+            instance_id: deterministic_instance_id,
         })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to queue execution: {:?}", e))?;
@@ -452,6 +488,9 @@ async fn session_loop(
         "attachments": &attachments_json,
         "originalMessage": &initial_message.original_message,
     });
+    if let Some(target) = &initial_message.target {
+        pending_signal_payload["target"] = target.clone();
+    }
 
     while !session_ended && start_time.elapsed() < max_duration {
         // === INSTANCE LOOP ===
@@ -578,11 +617,14 @@ async fn session_loop(
                     let attachments_json: Vec<Value> = inbound.attachments.iter()
                         .map(|a| serde_json::to_value(a).unwrap_or_default())
                         .collect();
-                    let event = json!({
+                    let mut event = json!({
                         "message": inbound.text,
                         "attachments": attachments_json,
                         "originalMessage": inbound.original_message,
                     });
+                    if let Some(target) = &inbound.target {
+                        event["target"] = target.clone();
+                    }
                     if let Err(e) = session_queue::push_event(&mut valkey, org_id, &session_id, &event).await {
                         warn!(error = %e, "Failed to push user message to queue");
                     }
@@ -626,16 +668,20 @@ async fn session_loop(
                                 .and_then(|m| m.get("originalMessage"))
                                 .cloned()
                                 .unwrap_or(Value::Null);
-                            let inputs = json!({
-                                "data": {
-                                    "sessionId": &session_id,
-                                    "channel": &initial_message.channel,
-                                    "userMessage": user_message,
-                                    "attachments": queued_attachments,
-                                    "originalMessage": queued_original,
-                                },
-                                "variables": {},
+                            let queued_target = queued_msg.as_ref()
+                                .and_then(|m| m.get("target"))
+                                .cloned();
+                            let mut requeue_data = json!({
+                                "sessionId": &session_id,
+                                "channel": &initial_message.channel,
+                                "userMessage": user_message,
+                                "attachments": queued_attachments,
+                                "originalMessage": queued_original,
                             });
+                            if let Some(target) = queued_target {
+                                requeue_data["target"] = target;
+                            }
+                            let inputs = json!({ "data": requeue_data, "variables": {} });
                             match engine.queue(QueueRequest {
                                 tenant_id: org_id,
                                 workflow_id,
@@ -675,11 +721,14 @@ async fn session_loop(
                         let attachments_json: Vec<Value> = inbound.attachments.iter()
                             .map(|a| serde_json::to_value(a).unwrap_or_default())
                             .collect();
-                        let event = json!({
+                        let mut event = json!({
                             "message": inbound.text,
                             "attachments": attachments_json,
                             "originalMessage": inbound.original_message,
                         });
+                        if let Some(target) = &inbound.target {
+                            event["target"] = target.clone();
+                        }
                         let _ = session_queue::push_event(&mut valkey, org_id, &session_id, &event).await;
                     }
                 }

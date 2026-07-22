@@ -140,6 +140,8 @@ fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage
         channel: "slack".into(),
         attachments: extract_slack_files(event),
         original_message: payload.clone(),
+        target: None,
+        activity_id: None,
     })
 }
 
@@ -174,6 +176,8 @@ fn normalize_reaction_event(payload: &Value, event: &Value) -> Option<InboundMes
         channel: "slack".into(),
         attachments: vec![],
         original_message: payload.clone(),
+        target: None,
+        activity_id: None,
     })
 }
 

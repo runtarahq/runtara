@@ -13,6 +13,35 @@ fn meta_key(org_id: &str, session_id: &str) -> String {
     format!("session_meta:{}:{}", org_id, session_id)
 }
 
+/// Reserve a one-time dedup key for an inbound activity (SET NX EX).
+///
+/// Returns `true` when the key was newly reserved (process this delivery) and
+/// `false` when it already existed (a duplicate — Teams redelivers at-least-once
+/// if the endpoint takes >~15s). Fails open (`true`) when Valkey is unreachable,
+/// so a backend blip never drops real messages; the deterministic-instance-id
+/// backstop still prevents a double execution in that window.
+pub async fn reserve_activity_dedup(
+    conn: &mut ConnectionManager,
+    identity: &str,
+    ttl_secs: i64,
+) -> bool {
+    let key = format!("channel_activity_dedup:{identity}");
+    let set: redis::RedisResult<Option<String>> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs)
+        .query_async(conn)
+        .await;
+    match set {
+        // "OK" means the key was set (fresh); nil means it already existed.
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
 /// Push an event to the session queue (RPUSH + EXPIRE).
 pub async fn push_event(
     conn: &mut ConnectionManager,

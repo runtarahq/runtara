@@ -145,28 +145,43 @@ fn split_slack_conversation_id(conversation_id: &str) -> (&str, Option<&str>) {
 // Microsoft Teams
 // ---------------------------------------------------------------------------
 
-/// Teams Bot Framework adapter with OAuth2 token caching.
+/// Teams Bot Framework adapter for session replies.
 ///
-/// The `service_url` is extracted from inbound activities and stored per
-/// conversation. Outbound messages require a bearer token obtained by
-/// exchanging `app_id` + `app_password` with Azure AD.
+/// Unlike the prototype, the bearer token is minted through the shared
+/// connection-auth path (`ConnectionsFacade::resolve_connection_auth`, the
+/// `teams_bot` arm), which uses the correct single-tenant authority and the
+/// process-wide token cache — no hand-rolled multi-tenant token endpoint. The
+/// activity POST goes through a hardened client (no redirects, DNS-guarded),
+/// and the inbound-derived `serviceUrl` is re-validated (https, non-private)
+/// before a token-bearing request is sent to it. Non-success responses
+/// propagate as errors.
 pub struct TeamsChannel {
-    app_id: String,
-    app_password: String,
+    tenant_id: String,
+    connection_id: String,
+    /// Connection parameters (app_id/app_password/azure_tenant_id/app_type),
+    /// consumed by the facade to mint the Bot Connector token.
+    params: serde_json::Value,
+    facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
+    /// Hardened egress client (no redirects + DNS guard).
     client: reqwest::Client,
-    /// Cached bearer token + expiry.
-    token_cache: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
-    /// Per-conversation service URL (set from inbound activity).
+    /// Per-conversation service URL (set from authenticated inbound activities).
     service_urls: dashmap::DashMap<String, String>,
 }
 
 impl TeamsChannel {
-    pub fn new(app_id: String, app_password: String, client: reqwest::Client) -> Self {
+    pub fn new(
+        tenant_id: String,
+        connection_id: String,
+        params: serde_json::Value,
+        facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
-            app_id,
-            app_password,
+            tenant_id,
+            connection_id,
+            params,
+            facade,
             client,
-            token_cache: tokio::sync::RwLock::new(None),
             service_urls: dashmap::DashMap::new(),
         }
     }
@@ -175,55 +190,6 @@ impl TeamsChannel {
     pub fn set_service_url(&self, conversation_id: &str, service_url: &str) {
         self.service_urls
             .insert(conversation_id.to_string(), service_url.to_string());
-    }
-
-    /// Get a valid bearer token, refreshing if expired.
-    async fn get_token(&self) -> anyhow::Result<String> {
-        // Check cache.
-        {
-            let cache = self.token_cache.read().await;
-            if let Some((ref token, expiry)) = *cache
-                && std::time::Instant::now() < expiry
-            {
-                return Ok(token.clone());
-            }
-        }
-
-        // Fetch new token.
-        let token_url = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
-
-        let resp = self
-            .client
-            .post(token_url)
-            .form(&[
-                ("grant_type", "client_credentials"),
-                ("client_id", &self.app_id),
-                ("client_secret", &self.app_password),
-                ("scope", "https://api.botframework.com/.default"),
-            ])
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await?;
-        if !status.is_success() {
-            anyhow::bail!("Teams token acquisition failed ({status}): {body}");
-        }
-        let access_token = body["access_token"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No access_token in response: {}", body))?
-            .to_string();
-        let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
-
-        // Cache with 5-minute safety margin.
-        let expiry = std::time::Instant::now()
-            + std::time::Duration::from_secs(expires_in.saturating_sub(300));
-        {
-            let mut cache = self.token_cache.write().await;
-            *cache = Some((access_token.clone(), expiry));
-        }
-
-        Ok(access_token)
     }
 }
 
@@ -248,11 +214,36 @@ impl Channel for TeamsChannel {
                     anyhow::anyhow!("No service URL for conversation {}", conversation_id)
                 })?;
 
-            let token = self.get_token().await?;
+            // Defense in depth: the serviceUrl arrived in an authenticated
+            // activity, but re-validate before sending a bearer token to it.
+            runtara_connections::net::validate_public_url(
+                &service_url,
+                runtara_connections::net::host_is_allowlisted_for_egress,
+            )
+            .map_err(|e| anyhow::anyhow!("Refusing to send to serviceUrl: {e}"))?;
+
+            // Mint the Bot Connector token through the shared connection-auth
+            // path (correct single-tenant authority + process token cache).
+            let mut headers = std::collections::HashMap::new();
+            self.facade
+                .resolve_connection_auth(
+                    &self.connection_id,
+                    &self.tenant_id,
+                    "teams_bot",
+                    &self.params,
+                    &mut headers,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Teams auth resolution failed: {e}"))?;
+            let authorization = headers
+                .get("Authorization")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Teams auth did not yield a bearer token"))?;
+
             let url = format!(
                 "{}/v3/conversations/{}/activities",
                 service_url.trim_end_matches('/'),
-                conversation_id
+                urlencoding::encode(&conversation_id)
             );
 
             // Teams has a ~28KB message limit. Split at 4000 chars for safety.
@@ -260,7 +251,7 @@ impl Channel for TeamsChannel {
                 let resp = self
                     .client
                     .post(&url)
-                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Authorization", &authorization)
                     .json(&json!({
                         "type": "message",
                         "text": chunk,

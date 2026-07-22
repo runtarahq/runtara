@@ -199,6 +199,8 @@ pub async fn mailgun_webhook(
         channel: "mailgun".into(),
         attachments,
         original_message: Value::Object(original),
+        target: None,
+        activity_id: None,
     };
 
     debug!(

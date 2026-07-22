@@ -72,6 +72,8 @@ pub async fn telegram_webhook(
         channel: "telegram".into(),
         attachments: vec![],
         original_message: update.clone(),
+        target: None,
+        activity_id: None,
     };
 
     debug!(connection_id = %connection_id, chat_id = %msg.conv_id, "Telegram message received");

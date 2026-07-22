@@ -106,6 +106,28 @@ async fn handle_message_activity(
         return StatusCode::OK.into_response();
     };
 
+    // Loop prevention: drop activities the bot itself authored.
+    let from_id = payload.pointer("/from/id").and_then(|v| v.as_str());
+    let recipient_id = payload.pointer("/recipient/id").and_then(|v| v.as_str());
+    if from_id.is_some() && from_id == recipient_id {
+        return StatusCode::OK.into_response();
+    }
+
+    // Deduplicate at-least-once redeliveries by activity id. Teams retries the
+    // webhook if processing exceeds ~15s; a genuine redelivery within the Bot
+    // Framework token lifetime would otherwise start a second session.
+    let activity_id = payload.get("id").and_then(|v| v.as_str());
+    if let Some(activity_id) = activity_id
+        && !router.reserve_activity(connection_id, activity_id).await
+    {
+        debug!(
+            connection_id = %connection_id,
+            activity_id = %activity_id,
+            "Dropping duplicate Teams activity"
+        );
+        return StatusCode::OK.into_response();
+    }
+
     // The serviceUrl is stored only now: after full JWT validation, which
     // includes the serviceurl-claim cross-check where the token carries one.
     if let Some(svc_url) = service_url {
@@ -119,11 +141,13 @@ async fn handle_message_activity(
         return StatusCode::OK.into_response();
     }
 
-    let sender_id = payload
-        .pointer("/from/id")
-        .and_then(|id| id.as_str())
-        .unwrap_or(conversation_id)
-        .to_string();
+    let sender_id = from_id.unwrap_or(conversation_id).to_string();
+
+    // Build the curated, credential-free reply target (an opaque signed
+    // endpoint ref + conversation identifiers) for the workflow's data.target.
+    let target = service_url.and_then(|svc_url| {
+        build_conversation_target(connection_id, conversation_id, svc_url, payload)
+    });
 
     let msg = InboundMessage {
         text: clean_text.to_string(),
@@ -132,6 +156,8 @@ async fn handle_message_activity(
         channel: "teams".into(),
         attachments: vec![],
         original_message: payload.clone(),
+        target,
+        activity_id: activity_id.map(str::to_string),
     };
 
     debug!(
@@ -149,6 +175,54 @@ async fn handle_message_activity(
     }
 
     StatusCode::OK.into_response()
+}
+
+/// Mint the opaque endpoint ref and assemble the workflow-visible `data.target`
+/// block. Returns `None` if the ref key is unconfigured (the target is optional;
+/// server-side session replies still work via the in-process serviceUrl map).
+fn build_conversation_target(
+    connection_id: &str,
+    conversation_id: &str,
+    service_url: &str,
+    payload: &Value,
+) -> Option<Value> {
+    use crate::api::services::endpoint_ref::{EndpointBinding, EndpointRefKeyring, sign};
+
+    let ms_tenant_id = payload
+        .pointer("/channelData/tenant/id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let conversation_type = payload
+        .pointer("/conversation/conversationType")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let reply_to_activity_id = payload
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let keyring = EndpointRefKeyring::from_env().ok()?;
+    let binding = EndpointBinding {
+        v: EndpointBinding::CURRENT_VERSION,
+        tenant_id: crate::config::tenant_id().to_string(),
+        connection_id: connection_id.to_string(),
+        base_url: service_url.trim_end_matches('/').to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        conversation_type: conversation_type.clone(),
+        ms_tenant_id: ms_tenant_id.clone(),
+        iat: chrono::Utc::now().timestamp(),
+    };
+    let reference = sign(keyring, &binding);
+
+    Some(serde_json::json!({
+        "ref": reference,
+        "conversationId": conversation_id,
+        "conversationType": conversation_type,
+        "replyToActivityId": reply_to_activity_id,
+        "teamId": payload.pointer("/channelData/team/id").and_then(|v| v.as_str()),
+        "channelId": payload.pointer("/channelData/channel/id").and_then(|v| v.as_str()),
+        "msTenantId": ms_tenant_id,
+    }))
 }
 
 /// Auth-relevant fields of a teams_bot connection.
