@@ -4,6 +4,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { ReportBlockDefinition, ReportBlockResult } from '../../types';
 import { TableBlock } from './TableBlock';
+import { MAX_TEXT_PX, MIN_TEXT_PX } from './tableLayout';
+
+function colWidthPx(col: Element): number {
+  const style = (col as HTMLElement).getAttribute('style') ?? '';
+  const match = style.match(/width:\s*(\d+(?:\.\d+)?)px/);
+  expect(match, `expected a px width, got "${style}"`).not.toBeNull();
+  return Number(match![1]);
+}
 
 vi.mock('react-oidc-context', () => ({
   useAuth: () => ({ user: { access_token: 'test-token' } }),
@@ -37,7 +45,7 @@ function renderTableBlock(
 }
 
 describe('TableBlock maxChars sizing', () => {
-  it('uses maxChars as both a text cutoff and a table column width hint', () => {
+  it('uses maxChars as a text cutoff and a width cap', () => {
     const block: ReportBlockDefinition = {
       id: 'records',
       type: 'table',
@@ -71,10 +79,11 @@ describe('TableBlock maxChars sizing', () => {
     expect(screen.getByText('Recalculate...')).toBeInTheDocument();
     expect(container.querySelector('table')).toHaveClass('table-fixed');
     expect(container.querySelector('colgroup')).not.toBeNull();
-    expect(container.querySelectorAll('col')[1]).toHaveStyle({
-      width: 'calc(15ch + 1rem)',
-      maxWidth: 'calc(15ch + 1rem)',
-    });
+    // maxChars 12 caps the width at ~15 glyphs (cutoff + ellipsis) — the
+    // column is sized to its truncated content, never wider than the cap.
+    const width = colWidthPx(container.querySelectorAll('col')[1]);
+    expect(width).toBeLessThanOrEqual(160);
+    expect(width).toBeGreaterThanOrEqual(MIN_TEXT_PX);
   });
 
   it('fills the table with a spacer instead of stretching cutoff columns', () => {
@@ -107,10 +116,7 @@ describe('TableBlock maxChars sizing', () => {
     expect(table).not.toHaveClass('w-max');
     const columns = container.querySelectorAll('col');
     expect(columns).toHaveLength(2);
-    expect(columns[0]).toHaveStyle({
-      width: 'calc(15ch + 1rem)',
-      maxWidth: 'calc(15ch + 1rem)',
-    });
+    expect(colWidthPx(columns[0])).toBeLessThanOrEqual(160);
     expect(columns[1]).toHaveAttribute('aria-hidden', 'true');
 
     const headerCells = container.querySelectorAll('th');
@@ -156,10 +162,10 @@ describe('TableBlock default sizing without explicit config', () => {
     const cols = container.querySelectorAll('col');
     // 3 data columns + a trailing filler col that absorbs slack.
     expect(cols.length).toBe(4);
-    // Each data column gets a bounded ch-based width.
-    expect((cols[0] as HTMLElement).getAttribute('style')).toMatch(/ch/);
-    expect((cols[1] as HTMLElement).getAttribute('style')).toMatch(/ch/);
-    expect((cols[2] as HTMLElement).getAttribute('style')).toMatch(/ch/);
+    // Each data column gets a bounded px width.
+    expect(colWidthPx(cols[0])).toBeGreaterThan(0);
+    expect(colWidthPx(cols[1])).toBeGreaterThan(0);
+    expect(colWidthPx(cols[2])).toBeGreaterThan(0);
     // The last col is the aria-hidden filler (no width).
     expect((cols[3] as HTMLElement).getAttribute('aria-hidden')).toBe('true');
   });
@@ -201,8 +207,7 @@ describe('TableBlock default sizing without explicit config', () => {
     expect(cols.length).toBe(6);
     // The 4 data columns (indices 1..4) each carry a concrete bounded width.
     for (const idx of [1, 2, 3, 4]) {
-      const style = (cols[idx] as HTMLElement).getAttribute('style') ?? '';
-      expect(style).toMatch(/width:\s*\d+(\.\d+)?ch/);
+      expect(colWidthPx(cols[idx])).toBeLessThanOrEqual(MAX_TEXT_PX);
     }
     // None of the data columns is left auto/flex (the regression cause).
     const flexCols = cols
@@ -240,10 +245,10 @@ describe('TableBlock default sizing without explicit config', () => {
 
     const { container } = renderTableBlock(block, result);
     const cols = container.querySelectorAll('col');
+    // Sized to a real (header-derived) width, never the old fragile 1%.
+    expect(colWidthPx(cols[1])).toBeGreaterThanOrEqual(MIN_TEXT_PX);
     const emptyColStyle =
       (cols[1] as HTMLElement).getAttribute('style') ?? '';
-    // Sized to a real (header-derived) ch width, never the old fragile 1%.
-    expect(emptyColStyle).toMatch(/width:\s*\d+ch/);
     expect(emptyColStyle).not.toMatch(/1%/);
   });
 
@@ -272,11 +277,8 @@ describe('TableBlock default sizing without explicit config', () => {
 
     const { container } = renderTableBlock(block, result);
     const cols = container.querySelectorAll('col');
-    const style = (cols[0] as HTMLElement).getAttribute('style') ?? '';
-    const match = style.match(/width:\s*(\d+)ch/);
-    expect(match).not.toBeNull();
-    // MAX_TEXT_CH cap — keeps one long column from monopolizing the table.
-    expect(Number(match![1])).toBeLessThanOrEqual(30);
+    // MAX_TEXT_PX cap — keeps one long column from monopolizing the table.
+    expect(colWidthPx(cols[0])).toBeLessThanOrEqual(MAX_TEXT_PX);
   });
 
   it('renders an em-dash placeholder for null cell values', () => {
@@ -303,6 +305,100 @@ describe('TableBlock default sizing without explicit config', () => {
     expect(placeholders.length).toBe(1);
     expect(placeholders[0].textContent).toBe('—');
     expect(screen.getByText('Acme')).toBeInTheDocument();
+  });
+});
+
+describe('TableBlock container fitting', () => {
+  it('compresses flexible columns to the container width instead of overflowing', () => {
+    // jsdom has no ResizeObserver; stub one that reports a narrow container
+    // synchronously on observe so the fit pass runs.
+    class ImmediateResizeObserver {
+      private readonly callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+      observe() {
+        this.callback(
+          [{ contentRect: { width: 400 } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver
+        );
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', ImmediateResizeObserver);
+
+    try {
+      const longText =
+        'A long descriptive sentence that would push this column to its cap';
+      const block: ReportBlockDefinition = {
+        id: 'records',
+        type: 'table',
+        source: { schema: 'WorkflowButtonDemoItem', mode: 'filter' },
+        table: {
+          columns: [
+            { field: 'a', label: 'A' },
+            { field: 'b', label: 'B' },
+            { field: 'c', label: 'C' },
+          ],
+        },
+      };
+      const result: ReportBlockResult = {
+        type: 'table',
+        status: 'ready',
+        data: {
+          columns: [
+            { key: 'a', label: 'A' },
+            { key: 'b', label: 'B' },
+            { key: 'c', label: 'C' },
+          ],
+          rows: [{ a: longText, b: longText, c: longText }],
+        },
+      };
+
+      const { container } = renderTableBlock(block, result);
+      const cols = Array.from(container.querySelectorAll('col')).slice(0, 3);
+      const widths = cols.map(colWidthPx);
+      // Uncompressed the three columns would want ~3 × MAX_TEXT_PX; the fit
+      // pass shrinks them so the table fits the 400px container.
+      const total = widths.reduce((acc, w) => acc + w, 0);
+      expect(total).toBeLessThanOrEqual(400);
+      // Compression respects the per-column floor.
+      for (const width of widths) {
+        expect(width).toBeGreaterThanOrEqual(MIN_TEXT_PX);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps ideal widths when the container width is unknown', () => {
+    // Without a ResizeObserver (jsdom default) the table renders ideal
+    // widths — the pre-fit behavior.
+    const block: ReportBlockDefinition = {
+      id: 'records',
+      type: 'table',
+      source: { schema: 'WorkflowButtonDemoItem', mode: 'filter' },
+      table: {
+        columns: [{ field: 'a', label: 'A' }],
+      },
+    };
+    const result: ReportBlockResult = {
+      type: 'table',
+      status: 'ready',
+      data: {
+        columns: [{ key: 'a', label: 'A' }],
+        rows: [
+          {
+            a: 'A long descriptive sentence that would push this column to its cap',
+          },
+        ],
+      },
+    };
+
+    const { container } = renderTableBlock(block, result);
+    const cols = container.querySelectorAll('col');
+    expect(colWidthPx(cols[0])).toBe(MAX_TEXT_PX);
   });
 });
 

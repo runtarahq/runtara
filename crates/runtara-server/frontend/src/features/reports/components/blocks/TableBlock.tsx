@@ -1,11 +1,4 @@
-import {
-  memo,
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -60,7 +53,6 @@ import { cn } from '@/lib/utils';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
-  ReportEditorConfig,
   ReportInteractionAction,
   ReportOrderBy,
   ReportTableActionConfig,
@@ -75,9 +67,20 @@ import {
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   matchesReportRowCondition,
-  renderDisplayTemplate,
   truncateCellText,
 } from '../../utils';
+import { useContainerWidth } from '../../hooks/useContainerWidth';
+import {
+  CHECKBOX_COLUMN_PX,
+  defaultAlign,
+  displayNameFromValue,
+  fitColumnWidths,
+  getCellDisplayValue,
+  inferColumnSpecs,
+  isActionColumn,
+  isInteractionButtonsColumn,
+  type TableColumn,
+} from './tableLayout';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
 import {
@@ -85,27 +88,6 @@ import {
   ReportWorkflowActionResult,
   useReportWorkflowAction,
 } from './useReportWorkflowAction';
-
-type TableColumn = {
-  key: string;
-  label?: string | null;
-  displayField?: string | null;
-  displayTemplate?: string | null;
-  format?: string | null;
-  type?: 'value' | 'chart' | 'workflow_button' | 'interaction_buttons' | null;
-  chart?: ReportTableColumn['chart'];
-  secondaryField?: string | null;
-  linkField?: string | null;
-  tooltipField?: string | null;
-  pillVariants?: ReportTableColumn['pillVariants'];
-  levels?: string[] | null;
-  align?: 'left' | 'right' | 'center' | string | null;
-  maxChars?: number | null;
-  editable?: boolean | null;
-  editor?: ReportEditorConfig | null;
-  workflowAction?: ReportWorkflowActionConfig | null;
-  interactionButtons?: ReportTableInteractionButtonConfig[];
-};
 
 type TableData = {
   columns?: Array<string | TableColumn>;
@@ -241,9 +223,27 @@ export function TableBlock({
       : undefined;
   const lastPageOffset =
     totalPages && totalPages > 0 ? (totalPages - 1) * page.size : undefined;
-  const columnLayouts = useMemo(
-    () => columns.map((column, idx) => inferColumnLayout(column, rows, idx)),
-    [columns, rows]
+  const [containerRef, containerWidth] = useContainerWidth<HTMLDivElement>();
+  const rowObjects = useMemo(
+    () => rowEntries.map((entry) => entry.rowObject),
+    [rowEntries]
+  );
+  const columnSpecs = useMemo(
+    () => inferColumnSpecs(columns, rowObjects),
+    [columns, rowObjects]
+  );
+  // Fit the ideal widths to the measured container: flexible text columns
+  // compress toward their min (truncate-with-tooltip absorbs the difference)
+  // before the table overflows into horizontal scroll.
+  const columnWidths = useMemo(
+    () =>
+      fitColumnWidths(
+        columnSpecs,
+        containerWidth === null
+          ? null
+          : containerWidth - (selectable ? CHECKBOX_COLUMN_PX : 0)
+      ),
+    [columnSpecs, containerWidth, selectable]
   );
   // Every column carries a concrete width, so a trailing filler column always
   // absorbs leftover space (keeping columns at their natural size instead of
@@ -342,7 +342,10 @@ export function TableBlock({
 
   return (
     <TooltipProvider delayDuration={150} skipDelayDuration={0}>
-      <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
+      <div
+        ref={containerRef}
+        className="overflow-x-auto rounded-lg border bg-card shadow-sm"
+      >
         {tableActions.length > 0 && (
           <TableActionsToolbar
             blockId={block.id}
@@ -360,7 +363,10 @@ export function TableBlock({
               />
             )}
             {columns.map((column, idx) => (
-              <col key={column.key} style={columnLayouts[idx]?.style} />
+              <col
+                key={column.key}
+                style={{ width: `${columnWidths[idx]}px` }}
+              />
             ))}
             {hasFlexibleFillerColumn && <col aria-hidden="true" />}
           </colgroup>
@@ -382,16 +388,14 @@ export function TableBlock({
                   />
                 </TableHead>
               )}
-              {columns.map((column, idx) => {
+              {columns.map((column) => {
                 const sortDirection = getColumnSortDirection(column.key, sort);
                 const isSortable = !isNonSortableColumn(column);
-                const layout = columnLayouts[idx];
                 const effectiveAlign = column.align ?? undefined;
                 return (
                   <TableHead
                     key={column.key}
                     aria-sort={getAriaSort(sortDirection)}
-                    style={layout?.style}
                     className={cn(
                       'h-9 whitespace-nowrap',
                       isActionColumn(column) && 'report-print-hidden',
@@ -459,7 +463,6 @@ export function TableBlock({
                     rowKey={rowKey}
                     rowObject={rowObject}
                     columns={columns}
-                    columnLayouts={columnLayouts}
                     hasFlexibleFillerColumn={hasFlexibleFillerColumn}
                     selectable={selectable}
                     selected={selectedRowKeys.has(rowKey)}
@@ -586,7 +589,6 @@ type TableBodyRowProps = {
   rowKey: string;
   rowObject: Record<string, unknown>;
   columns: TableColumn[];
-  columnLayouts: ColumnLayout[];
   hasFlexibleFillerColumn: boolean;
   selectable: boolean;
   selected: boolean;
@@ -632,7 +634,6 @@ function TableBodyRow({
   rowKey,
   rowObject,
   columns,
-  columnLayouts,
   hasFlexibleFillerColumn,
   selectable,
   selected,
@@ -670,7 +671,6 @@ function TableBodyRow({
         </TableCell>
       )}
       {columns.map((column, columnIndex) => {
-        const layout = columnLayouts[columnIndex];
         const value = getCellValue(row, column, columnIndex);
         const displayValue = getCellDisplayValue(rowObject, column, value);
         const writebackContext = getWritebackContext(column, rowObject);
@@ -690,7 +690,6 @@ function TableBodyRow({
         return (
           <TableCell
             key={column.key}
-            style={layout?.style}
             className={cn(
               'group/cell relative py-2 align-middle',
               effectiveAlign === 'right' && 'text-right tabular-nums',
@@ -810,7 +809,6 @@ function areTableBodyRowPropsEqual(
     previous.row === next.row &&
     previous.rowObject === next.rowObject &&
     previous.columns === next.columns &&
-    previous.columnLayouts === next.columnLayouts &&
     previous.hasFlexibleFillerColumn === next.hasFlexibleFillerColumn &&
     previous.selectable === next.selectable &&
     previous.selected === next.selected &&
@@ -879,203 +877,6 @@ function isNonSortableColumn(column: TableColumn): boolean {
   return column.type === 'chart' || isActionColumn(column);
 }
 
-function isWorkflowButtonColumn(column: TableColumn): boolean {
-  return (
-    column.type === 'workflow_button' || column.workflowAction !== undefined
-  );
-}
-
-function isInteractionButtonsColumn(column: TableColumn): boolean {
-  return (
-    column.type === 'interaction_buttons' ||
-    (column.interactionButtons?.length ?? 0) > 0
-  );
-}
-
-function isActionColumn(column: TableColumn): boolean {
-  return isWorkflowButtonColumn(column) || isInteractionButtonsColumn(column);
-}
-
-function hasPositiveMaxChars(
-  maxChars: number | null | undefined
-): maxChars is number {
-  return (
-    typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
-  );
-}
-
-function getColumnWidthStyle(column: TableColumn): CSSProperties | undefined {
-  const configuredMaxChars = column.maxChars;
-  if (!hasPositiveMaxChars(configuredMaxChars)) return undefined;
-
-  const label = column.label ?? humanizeFieldName(column.key);
-  const maxChars = Math.trunc(configuredMaxChars);
-  const contentChars = maxChars + 3;
-  const headerChars = Array.from(label).length + 4;
-  const widthChars = Math.max(contentChars, headerChars, 6);
-  const width = `calc(${widthChars}ch + 1rem)`;
-  return { width, maxWidth: width };
-}
-
-const SAMPLE_LIMIT = 100;
-
-const FORMAT_WIDTHS: Record<string, number> = {
-  date: 116,
-  datetime: 184,
-  bytes: 110,
-  percent: 96,
-  currency: 128,
-  currency_compact: 110,
-  number: 104,
-  number_compact: 96,
-  decimal: 110,
-  bar_indicator: 140,
-};
-
-type ColumnLayout = {
-  style?: CSSProperties;
-};
-
-// Width bounds for inferred text columns, expressed in `ch`. The lower bound
-// keeps short columns from collapsing; the upper bound keeps a single long
-// column (descriptions, AI rationales) from monopolizing the table — the rest
-// of the value is reachable via the hover tooltip on the truncated cell.
-const MIN_TEXT_CH = 9;
-const MAX_TEXT_CH = 30;
-
-// Every column resolves to a concrete width. Critically, no column is left
-// auto/flex: with `table-layout: fixed` + the table primitive's
-// `min-w-max`, an auto column with `white-space: nowrap` content expands to
-// its full intrinsic width, and several such columns blow the table up to
-// thousands of px wide (the "only one column visible, rest scrolled off"
-// regression). Bounded widths + the trailing filler col (which has no
-// content, so it contributes 0 to max-content) keep the table predictable:
-// it fills the container when there's slack and scrolls when there isn't.
-function inferColumnLayout(
-  column: TableColumn,
-  rows: NonNullable<TableData['rows']>,
-  columnIndex: number
-): ColumnLayout {
-  // Explicit author config wins.
-  if (hasPositiveMaxChars(column.maxChars)) {
-    return { style: getColumnWidthStyle(column) };
-  }
-
-  if (isActionColumn(column)) {
-    return { style: { width: '160px' } };
-  }
-
-  if (column.type === 'chart') {
-    return { style: { width: '160px' } };
-  }
-
-  const labelLen = Array.from(
-    column.label ?? humanizeFieldName(column.key)
-  ).length;
-  // Uppercase text-xs + tracking-wide glyphs run ~8px, and the header also
-  // holds the sort caret and cell padding. Every width below floors on this
-  // so a fixed-format column can never truncate its own header
-  // ("CREDIT SC…" over a 120px number column).
-  const headerPx = Math.ceil(labelLen * 8) + 48;
-
-  const formatName = (column.format ?? '').split(':', 1)[0];
-
-  // Pills and avatar cells render decorated content, so their width comes
-  // from the decorated sample (humanized label / derived display name), not
-  // from raw value length.
-  if (formatName === 'pill') {
-    const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
-    const longest = sample.reduce(
-      (acc, value) => Math.max(acc, humanizeFieldName(value).length),
-      0
-    );
-    const pillPx = clampPx(longest * 6.5 + 58, 96, 200);
-    return { style: { width: `${Math.max(pillPx, headerPx)}px` } };
-  }
-
-  if (formatName === 'avatar_label') {
-    const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
-    const longest = sample.reduce(
-      (acc, value) => Math.max(acc, displayNameFromValue(value).length),
-      0
-    );
-    const avatarPx = clampPx(longest * 7 + 64, 140, 240);
-    return { style: { width: `${Math.max(avatarPx, headerPx)}px` } };
-  }
-
-  const formatWidth = FORMAT_WIDTHS[formatName];
-  if (formatWidth) {
-    return { style: { width: `${Math.max(formatWidth, headerPx)}px` } };
-  }
-
-  const sample = sampleColumnValues(rows, column, columnIndex, SAMPLE_LIMIT);
-  const maxLen = sample.reduce((acc, value) => Math.max(acc, value.length), 0);
-
-  // Header glyphs render uppercase + tracking-wide + semibold next to a sort
-  // caret, so budget ~1.1× per glyph plus padding/icon allowance — otherwise
-  // a header like "DTI" truncates to "D..." in a column sized for its data.
-  const headerChars = Math.ceil(labelLen * 1.1) + 8;
-  // Data side: longest sampled value plus slack for the ellipsis. An empty
-  // column (maxLen 0) sizes purely to its header rather than collapsing.
-  const dataChars = maxLen > 0 ? maxLen + 3 : 0;
-
-  const widthChars = Math.min(
-    MAX_TEXT_CH,
-    Math.max(headerChars, dataChars, MIN_TEXT_CH)
-  );
-  return { style: { width: `${widthChars}ch` } };
-}
-
-function clampPx(value: number, min: number, max: number): number {
-  return Math.round(Math.min(Math.max(value, min), max));
-}
-
-function sampleColumnValues(
-  rows: NonNullable<TableData['rows']>,
-  column: TableColumn,
-  columnIndex: number,
-  limit: number
-): string[] {
-  const result: string[] = [];
-  const count = Math.min(rows.length, limit);
-  for (let i = 0; i < count; i += 1) {
-    const value = getCellValue(rows[i], column, columnIndex);
-    if (value === null || value === undefined) {
-      result.push('');
-      continue;
-    }
-    if (typeof value === 'string') {
-      result.push(value);
-    } else if (typeof value === 'number' || typeof value === 'boolean') {
-      result.push(String(value));
-    } else {
-      try {
-        result.push(JSON.stringify(value));
-      } catch {
-        result.push(String(value));
-      }
-    }
-  }
-  return result;
-}
-
-function defaultAlign(format?: string | null): TableColumn['align'] {
-  if (!format) return undefined;
-  const formatName = format.split(':', 1)[0];
-  if (
-    formatName === 'currency' ||
-    formatName === 'currency_compact' ||
-    formatName === 'number' ||
-    formatName === 'number_compact' ||
-    formatName === 'decimal' ||
-    formatName === 'percent' ||
-    formatName === 'bytes'
-  ) {
-    return 'right';
-  }
-  return undefined;
-}
-
 function getCellValue(
   row: Record<string, unknown> | unknown[],
   column: TableColumn,
@@ -1085,26 +886,6 @@ function getCellValue(
     return row[columnIndex];
   }
   return row[column.key];
-}
-
-function getCellDisplayValue(
-  row: Record<string, unknown>,
-  column: TableColumn,
-  value: unknown
-) {
-  if (column.displayTemplate) {
-    const displayValue = renderDisplayTemplate(row, column.displayTemplate);
-    if (displayValue.trim().length > 0) return displayValue;
-  }
-  if (column.displayField) {
-    const displayValue = getReportRowValue(row, column.displayField);
-    if (displayValue === null || displayValue === undefined) return value;
-    if (typeof displayValue === 'string' && displayValue.trim().length === 0) {
-      return value;
-    }
-    return displayValue;
-  }
-  return value;
 }
 
 function getWritebackContext(
@@ -1540,16 +1321,6 @@ function AvatarLabelCell({
       <OverflowText text={displayText.text} fullText={fullText} />
     </div>
   );
-}
-
-function displayNameFromValue(raw: string): string {
-  if (!raw) return '—';
-  const local = raw.includes('@') ? raw.split('@')[0] : raw;
-  return local
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
 }
 
 function initialsFromValue(display: string): string {
