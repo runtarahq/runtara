@@ -151,6 +151,8 @@ export type ReportFilterType =
   | "text"
   | "search";
 
+export type ReportFileUploadTrigger = "automatic" | "button";
+
 export type ReportEditorKind =
   | "text"
   | "textarea"
@@ -202,7 +204,8 @@ export type ReportBlockType =
   | "metric"
   | "actions"
   | "markdown"
-  | "card";
+  | "card"
+  | "file_upload";
 
 export type ReportBlockStatus = "ready" | "loading" | "empty" | "error";
 
@@ -3497,6 +3500,7 @@ export interface ReportBlockDefinition {
   card?: null | ReportCardConfig;
   chart?: null | ReportChartConfig;
   dataset?: null | ReportBlockDatasetQuery;
+  file_upload?: null | ReportFileUploadConfig;
   filters?: ReportFilterDefinition[];
   /**
    * When true, the renderer drops the entire block (title bar included) if
@@ -3961,6 +3965,32 @@ export interface ReportEditorConfig {
 export interface ReportEditorOption {
   label: string;
   value: any;
+}
+
+/**
+ * File-upload block configuration. Renders a drop zone / file picker that
+ * launches a workflow with the selected file as input. The workflow receives
+ * the canonical file shape `{content: base64, filename, mimeType}` under
+ * `workflowAction.context.inputKey` (`context.mode` must be `value`).
+ */
+export interface ReportFileUploadConfig {
+  /**
+   * Accepted file types (extensions like ".csv" or MIME types like
+   * "text/csv"). Empty accepts any file.
+   */
+  accept?: string[];
+  /** Helper text rendered inside the drop zone. */
+  description?: string | null;
+  /**
+   * Per-file size cap in bytes; clamped to the platform's 50 MB limit.
+   * @format int64
+   * @min 0
+   */
+  maxSizeBytes?: number | null;
+  title?: string | null;
+  /** How the workflow is started once a file is chosen. */
+  trigger?: ReportFileUploadTrigger;
+  workflowAction: ReportWorkflowActionConfig;
 }
 
 export interface ReportFilterDefinition {

@@ -21,6 +21,7 @@ const TYPE_SPECIFIC_FIELDS: Record<ReportBlockType, keyof ReportBlockDefinition>
   metric: 'metric',
   card: 'card',
   actions: 'actions',
+  file_upload: 'file_upload',
 };
 
 /** Build a fresh block of `newType` while preserving the cross-cutting
@@ -57,7 +58,10 @@ export function changeBlockType(
       workflowId: '',
       mode: 'filter',
     };
-  } else if (block.type === 'actions') {
+  } else if (newType === 'file_upload') {
+    // File-upload blocks reject any source; reset to the empty default.
+    source = { kind: 'object_model', schema: '', mode: 'filter' };
+  } else if (block.type === 'actions' || block.type === 'file_upload') {
     source = { kind: 'object_model', schema: '', mode: 'filter' };
   }
   if (newType === 'chart' || newType === 'metric') {
@@ -113,6 +117,19 @@ function defaultConfigFor(
       return { card: { groups: [] } };
     case 'actions':
       return { actions: { submit: {} } };
+    case 'file_upload':
+      return {
+        file_upload: {
+          trigger: 'button',
+          workflowAction: {
+            id: 'upload',
+            workflowId: '',
+            label: 'Run workflow',
+            reloadBlock: true,
+            context: { mode: 'value', inputKey: 'file' },
+          },
+        },
+      };
   }
 }
 
@@ -150,6 +167,11 @@ export function hasMeaningfulTypeConfig(
       // Any non-empty workflowId on the source counts as meaningful.
       return Boolean(block.source?.workflowId);
     }
+    case 'file_upload': {
+      const action = (config as { workflowAction?: { workflowId?: unknown } })
+        .workflowAction;
+      return Boolean(action?.workflowId);
+    }
     default:
       return false;
   }
@@ -170,6 +192,8 @@ export function blockTypeLabel(type: ReportBlockType): string {
       return 'Card';
     case 'actions':
       return 'Actions';
+    case 'file_upload':
+      return 'File upload';
   }
 }
 
@@ -180,4 +204,5 @@ export const BLOCK_TYPES: ReportBlockType[] = [
   'metric',
   'card',
   'actions',
+  'file_upload',
 ];

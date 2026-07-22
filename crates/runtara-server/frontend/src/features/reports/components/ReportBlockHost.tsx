@@ -20,6 +20,7 @@ import { MetricBlock } from './blocks/MetricBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { ActionsBlock } from './blocks/ActionsBlock';
 import { CardBlock } from './blocks/CardBlock';
+import { FileUploadBlock } from './blocks/FileUploadBlock';
 import { ReportFilterBar } from './ReportFilterBar';
 import { encodeFilterValue } from '../utils';
 import type { ReportWorkflowActionResult } from './blocks/useReportWorkflowAction';
@@ -343,7 +344,17 @@ export function ReportBlockHost({
           />
         </div>
       )}
-      {!isVisible || (!result && isFetching) ? (
+      {block.type === 'file_upload' ? (
+        // File-upload blocks are pure controls: no data source, no fetch, no
+        // skeleton — they render straight from the definition.
+        <FileUploadBlock
+          reportId={reportId}
+          activeViewId={activeViewId}
+          block={block}
+          filters={filters}
+          onRefresh={refreshAfterActionSubmit}
+        />
+      ) : !isVisible || (!result && isFetching) ? (
         <BlockSkeleton block={block} />
       ) : showFetchError ? (
         <BlockError message={fetchError?.message} onRetry={() => refetch()} />

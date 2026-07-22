@@ -138,6 +138,31 @@ describe('changeBlockType', () => {
     expect(cast.actions).toBeUndefined();
     expect(cast.markdown).toEqual({ content: '' });
   });
+
+  it('switching TO file_upload resets the source and seeds a value-mode action', () => {
+    const before = tableBlock();
+    const after = changeBlockType(before, 'file_upload') as ReportBlockDefinition & {
+      table?: unknown;
+    };
+    expect(after.type).toBe('file_upload');
+    expect(after.table).toBeUndefined();
+    // file_upload blocks reject any source — the switch must clear it.
+    expect(after.source).toEqual({
+      kind: 'object_model',
+      schema: '',
+      mode: 'filter',
+    });
+    expect(after.file_upload).toEqual({
+      trigger: 'button',
+      workflowAction: {
+        id: 'upload',
+        workflowId: '',
+        label: 'Run workflow',
+        reloadBlock: true,
+        context: { mode: 'value', inputKey: 'file' },
+      },
+    });
+  });
 });
 
 describe('hasMeaningfulTypeConfig', () => {
@@ -167,5 +192,33 @@ describe('hasMeaningfulTypeConfig', () => {
 
   it('returns true for an actions block with a workflowId on the source', () => {
     expect(hasMeaningfulTypeConfig(actionsBlock())).toBe(true);
+  });
+
+  it('file_upload is meaningful only once a workflow is picked', () => {
+    const fresh: ReportBlockDefinition = {
+      id: 'b1',
+      type: 'file_upload',
+      source: { schema: '' },
+      file_upload: {
+        workflowAction: {
+          id: 'upload',
+          workflowId: '',
+          context: { mode: 'value', inputKey: 'file' },
+        },
+      },
+    } as ReportBlockDefinition;
+    expect(hasMeaningfulTypeConfig(fresh)).toBe(false);
+
+    const configured = {
+      ...fresh,
+      file_upload: {
+        workflowAction: {
+          id: 'upload',
+          workflowId: 'import_prices',
+          context: { mode: 'value', inputKey: 'file' },
+        },
+      },
+    } as ReportBlockDefinition;
+    expect(hasMeaningfulTypeConfig(configured)).toBe(true);
   });
 });

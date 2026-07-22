@@ -26,6 +26,7 @@ import { MetricBlockEditor } from './MetricBlockEditor';
 import { ChartBlockEditor } from './ChartBlockEditor';
 import { CardBlockEditor } from './CardBlockEditor';
 import { ActionsBlockEditor } from './ActionsBlockEditor';
+import { FileUploadBlockEditor } from './FileUploadBlockEditor';
 import { SourceEditor } from './SourceEditor';
 import { VisibilityEditor } from './VisibilityEditor';
 import { DatasetReconcileButton } from './DatasetReconcileButton';
@@ -54,7 +55,8 @@ export function BlockEditor({
     ? datasets.find((d) => d.id === block.dataset?.id)
     : undefined;
 
-  const showSourceEditor = block.type !== 'markdown' && !hasDataset;
+  const showSourceEditor =
+    block.type !== 'markdown' && block.type !== 'file_upload' && !hasDataset;
 
   const handleTypeChange = (nextType: ReportBlockType) => {
     if (nextType === block.type) return;
@@ -154,6 +156,9 @@ export function BlockEditor({
       ) : null}
       {block.type === 'actions' ? (
         <ActionsBlockEditor block={block} onChange={onChange} />
+      ) : null}
+      {block.type === 'file_upload' ? (
+        <FileUploadBlockEditor block={block} onChange={onChange} />
       ) : null}
 
       <VisibilityEditor

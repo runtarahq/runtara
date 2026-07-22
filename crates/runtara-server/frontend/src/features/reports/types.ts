@@ -72,6 +72,8 @@ export type {
   ReportMarkdownConfig,
   ReportActionsConfig,
   ReportActionSubmitConfig,
+  ReportFileUploadConfig,
+  ReportFileUploadTrigger,
   ReportTableConfig,
   ReportTableActionConfig,
   ReportTableColumn,
