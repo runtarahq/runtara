@@ -38,6 +38,12 @@ import {
   ValidateReportResponse,
 } from '../types';
 
+// Report definitions and rendered results can change while the user is on a
+// different route (for example, after a workflow run or an external edit).
+// Do not let the app-wide five-minute stale window suppress the fetch when a
+// report screen is opened again.
+const refetchWhenReopened = { refetchOnMount: 'always' as const };
+
 export function useReports() {
   return useCustomQuery<ReportSummary[]>({
     queryKey: queryKeys.reports.lists(),
@@ -50,6 +56,7 @@ export function useReport(reportId: string | undefined) {
     queryKey: queryKeys.reports.byId(reportId ?? ''),
     queryFn: (token, context) => getReport(token, context),
     enabled: Boolean(reportId),
+    ...refetchWhenReopened,
   });
 }
 
@@ -62,6 +69,7 @@ export function useReportRender(
     queryKey: queryKeys.reports.render(reportId ?? '', request ?? {}),
     queryFn: (token, context) => renderReport(token, context),
     enabled: Boolean(reportId && request && enabled),
+    ...refetchWhenReopened,
   });
 }
 
@@ -73,6 +81,7 @@ export function useReportPreview(
     queryKey: queryKeys.reports.preview(request ?? {}),
     queryFn: (token, context) => previewReport(token, context),
     enabled: Boolean(request && enabled),
+    ...refetchWhenReopened,
   });
 }
 
@@ -109,6 +118,7 @@ export function useReportBlockData(
     ),
     queryFn: (token, context) => getReportBlockData(token, context),
     enabled: Boolean(reportId && blockId && request && enabled),
+    ...refetchWhenReopened,
     // Every tile fetches independently, so one dropped connection strands one
     // tile with no other signal that anything went wrong. Retry the transient
     // shapes past the global `retry: 1` so a blip self-heals; `ReportBlockHost`
@@ -155,6 +165,7 @@ export function useReportDatasetQuery(
     ),
     queryFn: (token, context) => queryReportDataset(token, context),
     enabled: Boolean(reportId && datasetId && request && enabled),
+    ...refetchWhenReopened,
   });
 }
 
