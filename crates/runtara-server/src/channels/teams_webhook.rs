@@ -1,3 +1,13 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Microsoft Teams Bot Framework webhook handler.
+//!
+//! Receives Activity objects from the Bot Framework. EVERY activity type is
+//! authenticated (JWT validation per `teams_auth`) before it is acknowledged
+//! — an unauthenticated caller learns nothing and changes nothing, and no
+//! field of an unauthenticated activity (notably `serviceUrl`) is ever
+//! stored. Rejections use HTTP 403 per the Bot Connector spec.
+
 use std::sync::Arc;
 
 use axum::{
@@ -5,50 +15,12 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
-use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use super::session::{ChannelRouter, InboundMessage};
+use super::teams_auth::{TeamsAuthEndpoints, TeamsTokenContext, validate_teams_request};
 
-/// Cached JWKS keys for Bot Framework JWT validation.
-struct JwksCache {
-    keys: Vec<JwkKey>,
-    fetched_at: std::time::Instant,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JwkKey {
-    kid: String,
-    n: String,
-    e: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct JwksResponse {
-    keys: Vec<JwkKey>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenIdConfig {
-    jwks_uri: String,
-}
-
-/// Global JWKS cache (refreshed every 6 hours).
-static JWKS_CACHE: std::sync::LazyLock<RwLock<Option<JwksCache>>> =
-    std::sync::LazyLock::new(|| RwLock::new(None));
-
-const JWKS_REFRESH_SECS: u64 = 6 * 3600;
-const OPENID_CONFIG_URL: &str =
-    "https://login.botframework.com/v1/.well-known/openid-configuration";
-
-/// Microsoft Teams Bot Framework webhook handler.
-///
-/// Receives Activity objects from the Bot Framework. Validates the JWT
-/// bearer token in the Authorization header against Microsoft's JWKS.
-///
 /// POST /api/runtime/events/webhook/teams/{connection_id}
 pub async fn teams_webhook(
     State(router): State<Arc<ChannelRouter>>,
@@ -61,36 +33,71 @@ pub async fn teams_webhook(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let activity_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-    // Ignore non-message activities (conversationUpdate, typing, etc.)
-    if activity_type != "message" {
-        return StatusCode::OK.into_response();
-    }
-
-    // Load connection to get app_id for JWT validation.
-    let app_id = match load_app_id(&router, &connection_id).await {
-        Ok(id) => id,
+    // Load the connection's auth material first: validation applies to every
+    // activity type, before any acknowledgement or processing.
+    let conn = match load_teams_connection(&router, &connection_id).await {
+        Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "Failed to load Teams connection");
-            return StatusCode::UNAUTHORIZED.into_response();
+            warn!(connection_id = %connection_id, error = %e, "Failed to load Teams connection");
+            return StatusCode::FORBIDDEN.into_response();
         }
     };
 
-    // Validate JWT bearer token.
-    if let Err(e) = validate_teams_jwt(&headers, &app_id).await {
-        warn!(
-            connection_id = %connection_id,
-            error = %e,
-            "Teams JWT validation failed"
-        );
-        return StatusCode::UNAUTHORIZED.into_response();
+    let activity_service_url = payload.get("serviceUrl").and_then(|s| s.as_str());
+    let token_ctx = TeamsTokenContext {
+        app_id: &conn.app_id,
+        azure_tenant_id: conn.azure_tenant_id.as_deref(),
+        activity_service_url,
+    };
+    if let Err(e) =
+        validate_teams_request(&headers, &token_ctx, TeamsAuthEndpoints::from_env()).await
+    {
+        warn!(connection_id = %connection_id, error = %e, "Teams JWT validation failed");
+        return StatusCode::FORBIDDEN.into_response();
     }
 
-    // Extract message fields.
+    // Single-tenant connections only accept activities from their own
+    // Microsoft tenant.
+    if let Some(expected_tenant) = conn.enforced_activity_tenant() {
+        let activity_tenant = payload
+            .pointer("/channelData/tenant/id")
+            .or_else(|| payload.pointer("/conversation/tenantId"))
+            .and_then(|v| v.as_str());
+        if activity_tenant != Some(expected_tenant) {
+            warn!(
+                connection_id = %connection_id,
+                activity_tenant = activity_tenant.unwrap_or("<none>"),
+                "Teams activity tenant does not match the connection's tenant"
+            );
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
+    let activity_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match activity_type {
+        "message" => handle_message_activity(&router, &connection_id, &payload).await,
+        // Authenticated but not yet handled (conversationUpdate,
+        // installationUpdate, messageReaction, invoke, ...): acknowledge.
+        other => {
+            debug!(
+                connection_id = %connection_id,
+                activity_type = %other,
+                "Ignoring unhandled Teams activity type"
+            );
+            StatusCode::OK.into_response()
+        }
+    }
+}
+
+/// Handle an authenticated `message` activity: normalize and route it into
+/// the channel-session machinery.
+async fn handle_message_activity(
+    router: &Arc<ChannelRouter>,
+    connection_id: &str,
+    payload: &Value,
+) -> Response {
     let conversation_id = payload
-        .get("conversation")
-        .and_then(|c| c.get("id"))
+        .pointer("/conversation/id")
         .and_then(|id| id.as_str());
     let text = payload.get("text").and_then(|t| t.as_str());
     let service_url = payload.get("serviceUrl").and_then(|s| s.as_str());
@@ -99,7 +106,8 @@ pub async fn teams_webhook(
         return StatusCode::OK.into_response();
     };
 
-    // Store the service URL so the channel adapter can send replies.
+    // The serviceUrl is stored only now: after full JWT validation, which
+    // includes the serviceurl-claim cross-check where the token carries one.
     if let Some(svc_url) = service_url {
         router.set_teams_service_url(conversation_id, svc_url);
     }
@@ -112,8 +120,7 @@ pub async fn teams_webhook(
     }
 
     let sender_id = payload
-        .get("from")
-        .and_then(|f| f.get("id"))
+        .pointer("/from/id")
         .and_then(|id| id.as_str())
         .unwrap_or(conversation_id)
         .to_string();
@@ -133,7 +140,7 @@ pub async fn teams_webhook(
         "Teams message received"
     );
 
-    if let Err(e) = router.handle_message(&connection_id, &msg).await {
+    if let Err(e) = router.handle_message(connection_id, &msg).await {
         warn!(
             connection_id = %connection_id,
             error = %e,
@@ -144,84 +151,31 @@ pub async fn teams_webhook(
     StatusCode::OK.into_response()
 }
 
-/// Validate the JWT bearer token from the Authorization header.
-async fn validate_teams_jwt(headers: &HeaderMap, app_id: &str) -> anyhow::Result<()> {
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| anyhow::anyhow!("Missing Authorization header"))?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| anyhow::anyhow!("Invalid Authorization header format"))?;
-
-    // Decode the JWT header to get the key ID.
-    let header = decode_header(token).map_err(|e| anyhow::anyhow!("Invalid JWT header: {}", e))?;
-    let kid = header
-        .kid
-        .ok_or_else(|| anyhow::anyhow!("JWT has no kid"))?;
-
-    // Get the matching JWK.
-    let jwk = get_jwk(&kid).await?;
-    let decoding_key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
-        .map_err(|e| anyhow::anyhow!("Invalid RSA key: {}", e))?;
-
-    // Validate the JWT.
-    let mut validation = Validation::new(header.alg);
-    validation.set_audience(&[app_id]);
-    // Bot Framework tokens can have multiple issuers.
-    validation.set_issuer(&[
-        "https://api.botframework.com",
-        "https://sts.windows.net/d6d49420-f39b-4df7-a1dc-d59a935871db/",
-        "https://login.microsoftonline.com/d6d49420-f39b-4df7-a1dc-d59a935871db/v2.0",
-    ]);
-
-    decode::<Value>(token, &decoding_key, &validation)
-        .map_err(|e| anyhow::anyhow!("JWT validation failed: {}", e))?;
-
-    Ok(())
+/// Auth-relevant fields of a teams_bot connection.
+struct TeamsConnectionAuth {
+    app_id: String,
+    /// Configured Microsoft tenant, when present and non-empty.
+    azure_tenant_id: Option<String>,
+    /// Explicit legacy multi-tenant registration.
+    multi_tenant: bool,
 }
 
-/// Get a JWK by key ID, fetching/refreshing the JWKS cache as needed.
-async fn get_jwk(kid: &str) -> anyhow::Result<JwkKey> {
-    // Try cache first.
-    {
-        let cache = JWKS_CACHE.read().await;
-        if let Some(ref c) = *cache
-            && c.fetched_at.elapsed().as_secs() < JWKS_REFRESH_SECS
-            && let Some(key) = c.keys.iter().find(|k| k.kid == kid)
-        {
-            return Ok(key.clone());
+impl TeamsConnectionAuth {
+    /// The tenant every inbound activity must belong to, when the connection
+    /// is single-tenant. Legacy multi-tenant connections accept any tenant.
+    fn enforced_activity_tenant(&self) -> Option<&str> {
+        if self.multi_tenant {
+            return None;
         }
+        self.azure_tenant_id.as_deref()
     }
-
-    // Refresh cache.
-    let client = reqwest::Client::new();
-
-    let openid: OpenIdConfig = client.get(OPENID_CONFIG_URL).send().await?.json().await?;
-
-    let jwks: JwksResponse = client.get(&openid.jwks_uri).send().await?.json().await?;
-
-    let key = jwks
-        .keys
-        .iter()
-        .find(|k| k.kid == kid)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("JWK not found for kid: {}", kid))?;
-
-    {
-        let mut cache = JWKS_CACHE.write().await;
-        *cache = Some(JwksCache {
-            keys: jwks.keys,
-            fetched_at: std::time::Instant::now(),
-        });
-    }
-
-    Ok(key)
 }
 
-/// Load the app_id from the Teams connection.
-async fn load_app_id(router: &ChannelRouter, connection_id: &str) -> anyhow::Result<String> {
+/// Load the connection's auth material (tenant-scoped lookup).
+async fn load_teams_connection(
+    router: &ChannelRouter,
+    connection_id: &str,
+) -> anyhow::Result<TeamsConnectionAuth> {
     let expected_tenant = crate::config::tenant_id();
     let conn = router
         .connections()
@@ -235,10 +189,22 @@ async fn load_app_id(router: &ChannelRouter, connection_id: &str) -> anyhow::Res
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Connection has no parameters"))?;
 
-    params["app_id"]
+    let app_id = params["app_id"]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Missing app_id"))
+        .ok_or_else(|| anyhow::anyhow!("Missing app_id"))?;
+    let azure_tenant_id = params["azure_tenant_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let multi_tenant = params["app_type"].as_str() == Some("multi_tenant");
+
+    Ok(TeamsConnectionAuth {
+        app_id,
+        azure_tenant_id,
+        multi_tenant,
+    })
 }
 
 /// Strip Teams @mention markup (`<at>BotName</at>`) from message text.
@@ -283,4 +249,46 @@ fn strip_teams_mentions(text: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_at_mentions() {
+        assert_eq!(
+            strip_teams_mentions("<at>Bot</at> hello there").trim(),
+            "hello there"
+        );
+        assert_eq!(strip_teams_mentions("no mentions"), "no mentions");
+        assert_eq!(
+            strip_teams_mentions("a <b>bold</b> claim"),
+            "a <b>bold</b> claim"
+        );
+    }
+
+    #[test]
+    fn enforced_tenant_only_for_single_tenant_connections() {
+        let single = TeamsConnectionAuth {
+            app_id: "app".into(),
+            azure_tenant_id: Some("tid".into()),
+            multi_tenant: false,
+        };
+        assert_eq!(single.enforced_activity_tenant(), Some("tid"));
+
+        let multi = TeamsConnectionAuth {
+            app_id: "app".into(),
+            azure_tenant_id: Some("tid".into()),
+            multi_tenant: true,
+        };
+        assert_eq!(multi.enforced_activity_tenant(), None);
+
+        let legacy = TeamsConnectionAuth {
+            app_id: "app".into(),
+            azure_tenant_id: None,
+            multi_tenant: false,
+        };
+        assert_eq!(legacy.enforced_activity_tenant(), None);
+    }
 }
