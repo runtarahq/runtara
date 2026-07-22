@@ -42,6 +42,7 @@ members = [
     "crates/agents/runtara-agent-http",
     "crates/agents/runtara-agent-mailgun",
     "crates/agents/runtara-agent-slack",
+    "crates/agents/runtara-agent-teams",
     "crates/agents/runtara-agent-openai",
     "crates/agents/runtara-agent-ai-tools",
     "crates/agents/runtara-agent-bedrock",

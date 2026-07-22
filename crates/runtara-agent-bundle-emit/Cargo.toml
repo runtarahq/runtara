@@ -34,6 +34,7 @@ runtara-agent-sftp = { path = "../agents/runtara-agent-sftp" }
 runtara-agent-sharepoint = { path = "../agents/runtara-agent-sharepoint" }
 runtara-agent-shopify = { path = "../agents/runtara-agent-shopify" }
 runtara-agent-slack = { path = "../agents/runtara-agent-slack" }
+runtara-agent-teams = { path = "../agents/runtara-agent-teams" }
 runtara-agent-stripe = { path = "../agents/runtara-agent-stripe" }
 runtara-agent-text = { path = "../agents/runtara-agent-text" }
 runtara-agent-transform = { path = "../agents/runtara-agent-transform" }

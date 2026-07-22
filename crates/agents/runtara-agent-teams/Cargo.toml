@@ -1,0 +1,33 @@
+[package]
+name = "runtara-agent-teams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Microsoft Teams Bot agent — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "teams"]
+categories = ["wasm", "web-programming::http-client"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = "0.58"
+serde = { workspace = true }
+serde_json = { workspace = true }
+# runtara-http compiles host-side (ureq) and wasm-side (wasi); the wasm build
+# routes Bot Connector calls through the proxy via the `X-Runtara-Connection-Id`
+# header (token injection) plus `X-Runtara-Endpoint-Ref` (per-conversation
+# serviceUrl binding), so the app secret and serviceUrl never enter the .wasm.
+# Capability metadata stays beside the code: `#[capability_input]`,
+# `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
+# `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
+# `agent_info()` fn collects them into a `runtara_dsl::agent_meta::AgentInfo`.
+runtara-agent-macro = { path = "../../runtara-agent-macro" }
+runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+runtara-http = { path = "../../runtara-http", default-features = false, features = ["native"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }

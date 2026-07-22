@@ -4260,6 +4260,7 @@ dependencies = [
  "runtara-agent-slack",
  "runtara-agent-sqs",
  "runtara-agent-stripe",
+ "runtara-agent-teams",
  "runtara-agent-text",
  "runtara-agent-transform",
  "runtara-agent-utils",
@@ -4517,6 +4518,18 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
+version = "8.6.3"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-teams"
 version = "8.6.3"
 dependencies = [
  "runtara-agent-macro",

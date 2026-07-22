@@ -44,6 +44,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("sharepoint", runtara_agent_sharepoint::agent_info()),
         ("shopify", runtara_agent_shopify::agent_info()),
         ("slack", runtara_agent_slack::agent_info()),
+        ("teams", runtara_agent_teams::agent_info()),
         ("stripe", runtara_agent_stripe::agent_info()),
         ("text", runtara_agent_text::agent_info()),
         ("transform", runtara_agent_transform::agent_info()),
