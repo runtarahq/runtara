@@ -687,7 +687,7 @@ fn report_authoring_schema() -> Value {
         "blockShape": {
             "common": {
                 "id": "Stable id, unique within the report. Layout block nodes reference this as blockId.",
-                "type": "table | chart | metric | actions | markdown | card",
+                "type": "table | chart | metric | actions | markdown | card | file_upload",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
                 "showWhen": "Optional visibility condition gating this block on a filter's value: {filter: <filterId>, exists?: bool, equals?: any, notEquals?: any}. The filter clauses are optional; unknown keys are rejected. Use this for inline dependent content.",
@@ -784,6 +784,22 @@ fn report_authoring_schema() -> Value {
                     "editor": "Optional explicit editor config: {kind, lookup?, options?, min?, max?, step?, regex?, placeholder?}. kind is one of text | textarea | number | select | toggle | date | datetime | lookup. For lookup, set editor.lookup={schema, valueField, labelField, searchFields?, connectionId?, condition?, filterMappings?}. The editor searches the lookup schema, automatically using generated tsvector fields when present, displays labelField, and writes valueField into the edited row field."
                 },
                 "note": "Cards are the right primitive for single-row dossier-style presentation: case headers, AI/Human decision recaps, raw L1 source rows. Use kind=subtable for arrays-of-objects (timelines, line items) and kind=subcard for nested object summaries (applicant_summary, financial_summary). Pair format=pill + pillVariants on enum fields to color-code status, severity, decision, etc."
+            },
+            "file_upload": {
+                "type": "file_upload",
+                "configKey": "file_upload",
+                "required": {
+                    "file_upload.workflowAction": "{id?, workflowId, version?, label?, runningLabel?, successMessage?, reloadBlock?, context}. context.mode MUST be 'value'; set context.inputKey (default it to 'file') to the workflow input-schema field of type 'file' that receives the upload. Row conditions (visibleWhen/hiddenWhen/disabledWhen) are rejected — there is no row context. When id is omitted the action id defaults to 'upload'."
+                },
+                "optional": {
+                    "file_upload.trigger": "automatic | button (default button). 'automatic' starts the workflow as soon as a file is selected/dropped; 'button' waits for the user to press the button labeled workflowAction.label.",
+                    "file_upload.title": "Heading shown above the drop zone.",
+                    "file_upload.description": "Helper text rendered inside the drop zone.",
+                    "file_upload.accept": "Array of accepted extensions ('.csv') or MIME types ('text/csv'). Empty accepts any file.",
+                    "file_upload.maxSizeBytes": "Per-file cap in bytes, at most 52428800 (50 MB, the platform limit)."
+                },
+                "example": {"id": "csv_import", "type": "file_upload", "file_upload": {"title": "Import price list", "description": "Drop a CSV here — rows are upserted into Products.", "accept": [".csv", "text/csv"], "trigger": "button", "workflowAction": {"id": "upload", "workflowId": "import_prices", "label": "Import", "runningLabel": "Importing...", "successMessage": "Price list imported.", "context": {"mode": "value", "inputKey": "file"}}}},
+                "note": "File-upload blocks take no source or dataset. The selected file is sent as the canonical file object {content: <base64>, filename, mimeType} in the workflow-action trigger value, so the workflow receives {data: {<inputKey>: {content, filename, mimeType}}}. Declare the target workflow input-schema field with type 'file'. After the workflow completes the report re-renders in place, so data blocks reflecting the upload refresh automatically."
             }
         },
         "sourceShape": {

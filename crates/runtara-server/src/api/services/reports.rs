@@ -1633,6 +1633,11 @@ impl ReportService {
                     block.id
                 )));
             }
+            if block.block_type == ReportBlockType::FileUpload {
+                validate_report_file_upload_block(block)?;
+                validate_block_interactions(block, &filter_ids, &navigation_target_ids)?;
+                continue;
+            }
             if block.block_type == ReportBlockType::Markdown
                 && block.dataset.is_none()
                 && block.source.is_empty()
@@ -3163,6 +3168,37 @@ impl ReportService {
             );
         }
         Ok(Value::Object(data))
+    }
+
+    /// File-upload blocks carry no data source; the render payload is a static
+    /// echo of the display config plus the resolved action id the frontend
+    /// posts back to the workflow-action execute route.
+    pub(super) fn render_file_upload_block(
+        &self,
+        block: &ReportBlockDefinition,
+    ) -> Result<Value, ReportServiceError> {
+        let config = block.file_upload.as_ref().ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' file_upload block must define file_upload config",
+                block.id
+            ))
+        })?;
+        let action = &config.workflow_action;
+        Ok(json!({
+            "title": config.title,
+            "description": config.description,
+            "accept": config.accept,
+            "maxSizeBytes": config.max_size_bytes,
+            "trigger": config.trigger,
+            "action": {
+                "id": action.id.as_deref().unwrap_or(FILE_UPLOAD_ACTION_FALLBACK_ID),
+                "label": action.label,
+                "runningLabel": action.running_label,
+                "successMessage": action.success_message,
+                "reloadBlock": action.reload_block,
+                "inputKey": action.context.input_key,
+            }
+        }))
     }
 
     fn require_execution_engine(&self) -> Result<&ExecutionEngine, ReportServiceError> {
@@ -5169,6 +5205,62 @@ pub(crate) fn validate_report_workflow_action_config(
     Ok(())
 }
 
+/// Action id used when a file_upload block's `workflowAction.id` is unset.
+/// Every file_upload block carries exactly one launcher, so a stable default
+/// keeps the execute URL well-known.
+const FILE_UPLOAD_ACTION_FALLBACK_ID: &str = "upload";
+
+/// Frontend per-file cap (`MAX_FILE_SIZE_BYTES`); the 96 MB tenant body limit
+/// is sized to the base64 encoding of this.
+const FILE_UPLOAD_MAX_SIZE_BYTES: u64 = 50 * 1024 * 1024;
+
+fn validate_report_file_upload_block(
+    block: &ReportBlockDefinition,
+) -> Result<(), ReportServiceError> {
+    let config = block.file_upload.as_ref().ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' file_upload block must define file_upload config",
+            block.id
+        ))
+    })?;
+    if block.dataset.is_some() || !block.source.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' file_upload block does not take a source or dataset",
+            block.id
+        )));
+    }
+    let context = format!("block '{}' file_upload", block.id);
+    validate_report_workflow_action_config(&config.workflow_action, &context)?;
+    if config.workflow_action.context.mode != ReportWorkflowActionContextMode::Value {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction.context.mode must be 'value'"
+        )));
+    }
+    if config.workflow_action.visible_when.is_some()
+        || config.workflow_action.hidden_when.is_some()
+        || config.workflow_action.disabled_when.is_some()
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} workflowAction row conditions (visibleWhen/hiddenWhen/disabledWhen) are not supported: the block has no row context"
+        )));
+    }
+    for entry in &config.accept {
+        if entry.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "{context} accept entries must not be empty"
+            )));
+        }
+    }
+    if let Some(max) = config.max_size_bytes
+        && (max == 0 || max > FILE_UPLOAD_MAX_SIZE_BYTES)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{context} maxSizeBytes must be between 1 and {FILE_UPLOAD_MAX_SIZE_BYTES} (50 MB)"
+        )));
+    }
+    Ok(())
+}
+
 struct LocatedReportWorkflowAction<'a> {
     action: &'a ReportWorkflowActionConfig,
     fallback_field: &'a str,
@@ -5203,6 +5295,19 @@ fn locate_report_workflow_action<'a>(
             }
         }
     }
+    if let Some(upload) = &block.file_upload
+        && upload
+            .workflow_action
+            .id
+            .as_deref()
+            .unwrap_or(FILE_UPLOAD_ACTION_FALLBACK_ID)
+            == action_id
+    {
+        return Some(LocatedReportWorkflowAction {
+            action: &upload.workflow_action,
+            fallback_field: FILE_UPLOAD_ACTION_FALLBACK_ID,
+        });
+    }
     block
         .card
         .as_ref()
@@ -5230,6 +5335,15 @@ fn validate_report_block_workflow_action_ids(
     }
     if let Some(card) = &block.card {
         collect_card_workflow_action_ids(card, &mut ids);
+    }
+    if let Some(upload) = &block.file_upload {
+        ids.push(
+            upload
+                .workflow_action
+                .id
+                .as_deref()
+                .unwrap_or(FILE_UPLOAD_ACTION_FALLBACK_ID),
+        );
     }
     let mut unique = HashSet::new();
     for id in ids {
@@ -8947,6 +9061,7 @@ mod tests {
             actions: None,
             card: None,
             markdown: None,
+            file_upload: None,
             filters: vec![],
             interactions: vec![],
             show_when: None,
@@ -10806,6 +10921,134 @@ mod tests {
                 .to_string()
                 .contains("duplicate workflow action ID 'advance'")
         );
+    }
+
+    #[test]
+    fn file_upload_workflow_action_locates_by_fallback_id_and_wraps_file_value() {
+        let mut block = test_block("csv_import");
+        block.block_type = ReportBlockType::FileUpload;
+        block.file_upload = Some(
+            serde_json::from_value(json!({
+                "workflowAction": {
+                    "workflowId": "import_prices",
+                    "context": {"mode": "value", "inputKey": "file"}
+                }
+            }))
+            .unwrap(),
+        );
+
+        let located = locate_report_workflow_action(&block, "upload").unwrap();
+        assert_eq!(located.action.workflow_id, "import_prices");
+        let file = json!({"content": "aGVsbG8=", "filename": "prices.csv", "mimeType": "text/csv"});
+        let context = resolve_report_workflow_action_context(
+            located.action,
+            located.fallback_field,
+            &ExecuteReportWorkflowActionTrigger {
+                row: Value::Null,
+                value: Some(file.clone()),
+                field: None,
+                selected_rows: vec![],
+            },
+        );
+        assert_eq!(context, json!({"file": file}));
+    }
+
+    #[test]
+    fn file_upload_action_id_participates_in_block_uniqueness() {
+        let mut block = test_block("csv_import");
+        block.table = Some(
+            serde_json::from_value(json!({
+                "columns": [
+                    {"field": "upload", "workflowAction": {"id": "upload", "workflowId": "one"}}
+                ]
+            }))
+            .unwrap(),
+        );
+        block.file_upload = Some(
+            serde_json::from_value(json!({
+                "workflowAction": {"workflowId": "two", "context": {"mode": "value"}}
+            }))
+            .unwrap(),
+        );
+
+        let error = validate_report_block_workflow_action_ids(&block).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate workflow action ID 'upload'")
+        );
+    }
+
+    fn file_upload_block(config: Value) -> ReportBlockDefinition {
+        serde_json::from_value(json!({
+            "id": "csv_import",
+            "type": "file_upload",
+            "file_upload": config
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn file_upload_block_validation_enforces_value_mode() {
+        let block = file_upload_block(json!({
+            "workflowAction": {"workflowId": "import", "context": {"mode": "row"}}
+        }));
+        let error = validate_report_file_upload_block(&block).unwrap_err();
+        assert!(error.to_string().contains("context.mode must be 'value'"));
+    }
+
+    #[test]
+    fn file_upload_block_validation_rejects_row_conditions_and_oversize_cap() {
+        let block = file_upload_block(json!({
+            "workflowAction": {
+                "workflowId": "import",
+                "context": {"mode": "value", "inputKey": "file"},
+                "disabledWhen": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        {"valueType": "reference", "value": "status"},
+                        {"valueType": "immediate", "value": "done"}
+                    ]
+                }
+            }
+        }));
+        let error = validate_report_file_upload_block(&block).unwrap_err();
+        assert!(error.to_string().contains("row conditions"));
+
+        let block = file_upload_block(json!({
+            "workflowAction": {"workflowId": "import", "context": {"mode": "value", "inputKey": "file"}},
+            "maxSizeBytes": 99_000_000u64
+        }));
+        let error = validate_report_file_upload_block(&block).unwrap_err();
+        assert!(error.to_string().contains("maxSizeBytes"));
+    }
+
+    #[test]
+    fn file_upload_block_validation_rejects_sources_and_accepts_valid_config() {
+        let mut block = file_upload_block(json!({
+            "workflowAction": {"workflowId": "import", "context": {"mode": "value", "inputKey": "file"}}
+        }));
+        block.source = test_block("ignored").source;
+        let error = validate_report_file_upload_block(&block).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not take a source or dataset")
+        );
+
+        let block = file_upload_block(json!({
+            "workflowAction": {
+                "id": "upload",
+                "workflowId": "import",
+                "label": "Import",
+                "context": {"mode": "value", "inputKey": "file"}
+            },
+            "accept": [".csv", "text/csv"],
+            "trigger": "automatic",
+            "maxSizeBytes": 1_048_576u64
+        }));
+        validate_report_file_upload_block(&block).unwrap();
     }
 
     #[test]

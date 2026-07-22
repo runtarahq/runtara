@@ -76,6 +76,7 @@ const ALLOWED_BLOCK_KEYS: &[&str] = &[
     "showWhen",
     "lazy",
     "actions",
+    "file_upload",
     "hideWhenEmpty",
 ];
 
@@ -241,6 +242,26 @@ mod tests {
             "definitionVersion": 1,
             "blocks": [
                 { "id": "b1", "type": "table" }
+            ]
+        }));
+        assert!(issues.is_empty(), "expected no lints, got: {issues:?}");
+    }
+
+    #[test]
+    fn lint_accepts_file_upload_block_key() {
+        let issues = lint(&json!({
+            "definitionVersion": 1,
+            "blocks": [
+                {
+                    "id": "csv_import",
+                    "type": "file_upload",
+                    "file_upload": {
+                        "workflowAction": {
+                            "workflowId": "import_prices",
+                            "context": {"mode": "value", "inputKey": "file"}
+                        }
+                    }
+                }
             ]
         }));
         assert!(issues.is_empty(), "expected no lints, got: {issues:?}");

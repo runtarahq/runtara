@@ -38,6 +38,7 @@ pub(super) struct MetricRenderer;
 pub(super) struct ActionsRenderer;
 pub(super) struct MarkdownRenderer;
 pub(super) struct CardRenderer;
+pub(super) struct FileUploadRenderer;
 
 #[async_trait]
 impl BlockRenderer for TableRenderer {
@@ -159,6 +160,21 @@ impl BlockRenderer for CardRenderer {
     }
 }
 
+#[async_trait]
+impl BlockRenderer for FileUploadRenderer {
+    async fn render(
+        &self,
+        service: &ReportService,
+        _tenant_id: &str,
+        _definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        _resolved_filters: &HashMap<String, Value>,
+        _block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        service.render_file_upload_block(block)
+    }
+}
+
 /// Look up the renderer for a given block type. Adding a new block type
 /// requires a new [`BlockRenderer`] impl + a new branch here.
 pub(super) fn renderer_for(block_type: ReportBlockType) -> &'static dyn BlockRenderer {
@@ -169,5 +185,6 @@ pub(super) fn renderer_for(block_type: ReportBlockType) -> &'static dyn BlockRen
         ReportBlockType::Actions => &ActionsRenderer,
         ReportBlockType::Markdown => &MarkdownRenderer,
         ReportBlockType::Card => &CardRenderer,
+        ReportBlockType::FileUpload => &FileUploadRenderer,
     }
 }

@@ -1,0 +1,53 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_import", "type": "block", "blockId": "csv_import" }
+      },
+      {
+        "id": "root_i1",
+        "child": { "id": "n_receipts", "type": "block", "blockId": "receipts" }
+      }
+    ]
+  },
+  "filters": [],
+  "blocks": [
+    {
+      "id": "csv_import",
+      "type": "file_upload",
+      "title": "Import price list",
+      "file_upload": {
+        "title": "Import price list",
+        "description": "Drop a CSV here — rows are upserted into Products.",
+        "accept": [".csv", "text/csv"],
+        "maxSizeBytes": 10485760,
+        "trigger": "button",
+        "workflowAction": {
+          "id": "upload",
+          "workflowId": "import_prices",
+          "label": "Import",
+          "runningLabel": "Importing…",
+          "successMessage": "Price list imported.",
+          "reloadBlock": true,
+          "context": { "mode": "value", "inputKey": "file" }
+        }
+      }
+    },
+    {
+      "id": "receipts",
+      "type": "file_upload",
+      "file_upload": {
+        "description": "Receipts are processed as soon as they are dropped.",
+        "trigger": "automatic",
+        "workflowAction": {
+          "workflowId": "process_receipt",
+          "context": { "mode": "value", "inputKey": "file" }
+        }
+      }
+    }
+  ]
+}

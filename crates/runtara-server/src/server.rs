@@ -399,6 +399,8 @@ use runtime_client::RuntimeClient;
             runtara_report_dsl::ReportMarkdownConfig,
             runtara_report_dsl::ReportActionsConfig,
             runtara_report_dsl::ReportActionSubmitConfig,
+            runtara_report_dsl::ReportFileUploadConfig,
+            runtara_report_dsl::ReportFileUploadTrigger,
             runtara_report_dsl::ReportWorkflowActionConfig,
             runtara_report_dsl::ReportWorkflowActionContext,
             runtara_report_dsl::ReportWorkflowActionContextMode,

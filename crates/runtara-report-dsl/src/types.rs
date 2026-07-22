@@ -633,6 +633,8 @@ pub struct ReportBlockDefinition {
     pub card: Option<ReportCardConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub markdown: Option<ReportMarkdownConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_upload: Option<ReportFileUploadConfig>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
@@ -661,6 +663,47 @@ fn is_false_block(value: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportMarkdownConfig {
     pub content: String,
+}
+
+/// File-upload block configuration. Renders a drop zone / file picker that
+/// launches a workflow with the selected file as input. The workflow receives
+/// the canonical file shape `{content: base64, filename, mimeType}` under
+/// `workflowAction.context.inputKey` (`context.mode` must be `value`).
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportFileUploadConfig {
+    #[serde(rename = "workflowAction")]
+    pub workflow_action: ReportWorkflowActionConfig,
+    /// How the workflow is started once a file is chosen.
+    #[serde(default)]
+    pub trigger: ReportFileUploadTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Helper text rendered inside the drop zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Accepted file types (extensions like ".csv" or MIME types like
+    /// "text/csv"). Empty accepts any file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept: Vec<String>,
+    /// Per-file size cap in bytes; clamped to the platform's 50 MB limit.
+    #[serde(
+        default,
+        rename = "maxSizeBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_size_bytes: Option<u64>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFileUploadTrigger {
+    Automatic,
+    #[default]
+    Button,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -808,6 +851,7 @@ pub enum ReportBlockType {
     Actions,
     Markdown,
     Card,
+    FileUpload,
 }
 
 /// Card block configuration. A card renders a single record (the first row of
@@ -2340,6 +2384,63 @@ mod chart_config_tests {
         assert!(json.get("labelField").is_none());
         assert!(json.get("tooltipFields").is_none());
         assert!(json.get("groupByLabel").is_none());
+    }
+}
+
+#[cfg(test)]
+mod file_upload_config_tests {
+    use super::*;
+
+    #[test]
+    fn block_type_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ReportBlockType::FileUpload).unwrap(),
+            "\"file_upload\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ReportBlockType>("\"file_upload\"").unwrap(),
+            ReportBlockType::FileUpload
+        );
+    }
+
+    #[test]
+    fn config_round_trips_and_defaults_trigger_to_button() {
+        let json = serde_json::json!({
+            "workflowAction": {
+                "id": "upload",
+                "workflowId": "import_prices",
+                "label": "Import",
+                "context": {"mode": "value", "inputKey": "file"}
+            },
+            "title": "Import price list",
+            "accept": [".csv", "text/csv"],
+            "maxSizeBytes": 1048576
+        });
+        let config: ReportFileUploadConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.trigger, ReportFileUploadTrigger::Button);
+        assert_eq!(config.workflow_action.workflow_id, "import_prices");
+        assert_eq!(
+            config.workflow_action.context.mode,
+            ReportWorkflowActionContextMode::Value
+        );
+        assert_eq!(config.max_size_bytes, Some(1_048_576));
+
+        let wire = serde_json::to_value(&config).unwrap();
+        assert_eq!(wire["workflowAction"]["workflowId"], "import_prices");
+        assert_eq!(wire["maxSizeBytes"], 1_048_576);
+        assert_eq!(wire["trigger"], "button");
+        // Empty description must not leak into the wire form.
+        assert!(wire.get("description").is_none());
+    }
+
+    #[test]
+    fn automatic_trigger_round_trips() {
+        let config: ReportFileUploadConfig = serde_json::from_value(serde_json::json!({
+            "workflowAction": {"workflowId": "w", "context": {"mode": "value"}},
+            "trigger": "automatic"
+        }))
+        .unwrap();
+        assert_eq!(config.trigger, ReportFileUploadTrigger::Automatic);
     }
 }
 
