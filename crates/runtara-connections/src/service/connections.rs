@@ -83,6 +83,28 @@ fn validate_connection_parameters(
         let display = field.display_name.unwrap_or(field.name);
         validate_url_field(display, raw, field.is_required, field.is_url)?;
     }
+    // teams_bot: a single-tenant bot (the default, and the only kind Microsoft
+    // still lets you create) must name its Microsoft Entra tenant; legacy
+    // multi-tenant registrations must opt in explicitly via app_type. Runtime
+    // token resolution stays lenient for connections stored before app_type
+    // existed (accept-and-warn), so this gate applies only to new saves/edits.
+    if integration_id == "teams_bot" {
+        let get = |key: &str| {
+            params
+                .and_then(|p| p.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let app_type = get("app_type").unwrap_or("single_tenant");
+        if app_type != "multi_tenant" && get("azure_tenant_id").is_none() {
+            return Err(ServiceError::ValidationError(
+                "Tenant ID is required for a single-tenant Teams bot. Set App Type to \
+                 Multi Tenant only for a legacy multi-tenant Azure Bot registration"
+                    .to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 

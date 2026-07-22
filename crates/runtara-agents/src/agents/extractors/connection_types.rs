@@ -482,13 +482,35 @@ pub struct TeamsBotParams {
     )]
     pub app_password: String,
 
-    /// Azure AD Tenant ID (optional — leave empty for multi-tenant bots)
+    /// Microsoft Entra tenant ID (required for single-tenant bots)
     #[serde(default)]
     #[field(
         display_name = "Tenant ID",
-        description = "Azure AD tenant ID (leave empty for multi-tenant bots)"
+        description = "Microsoft Entra tenant ID of the Azure Bot registration (required for single-tenant bots)",
+        placeholder = "00000000-0000-0000-0000-000000000000"
     )]
     pub azure_tenant_id: Option<String>,
+
+    /// App registration type. Single-tenant is the default; Microsoft deprecated
+    /// creation of multi-tenant bots after 2025-07-31 (existing ones keep working).
+    #[serde(default)]
+    #[field(
+        display_name = "App Type",
+        description = "Azure Bot app registration type. Single Tenant requires the Tenant ID; Multi Tenant is legacy (creation deprecated by Microsoft in July 2025)",
+        enum_values = "single_tenant,multi_tenant",
+        default = "single_tenant"
+    )]
+    pub app_type: Option<String>,
+
+    /// Microsoft identity authority host.
+    #[serde(default = "default_microsoft_entra_authority_host")]
+    #[field(
+        display_name = "Authority Host",
+        description = "Microsoft identity authority host (must be https). Only change for testing against a mock authority",
+        default = "https://login.microsoftonline.com",
+        is_url
+    )]
+    pub authority_host: String,
 }
 
 // ============================================================================

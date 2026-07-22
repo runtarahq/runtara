@@ -121,9 +121,9 @@
   },
   {
     "integrationId": "teams_bot",
-    "fieldCount": 3,
-    "serializedBytes": 1147,
-    "fnv1a64": "06cfd1e92ef09f99"
+    "fieldCount": 5,
+    "serializedBytes": 2164,
+    "fnv1a64": "c20a6588110a2be2"
   },
   {
     "integrationId": "telegram_bot",

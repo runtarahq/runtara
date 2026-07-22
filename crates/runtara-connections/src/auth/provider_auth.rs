@@ -189,6 +189,18 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        // ── Microsoft Teams bot (Bot Framework Connector) ────────
+        // Deferred OAuth2 client-credentials against Microsoft Entra. There is
+        // deliberately no static base_url: the Bot Connector base is the
+        // per-conversation serviceUrl, supplied per request via a validated
+        // endpoint binding — a teams_bot credentialed request without one
+        // must fail closed at the proxy's pin step.
+        "teams_bot" => ConnectionAuthDescriptor {
+            base_url: None,
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: describe_teams_bot_auth(connection_id, params),
+        },
         "mailgun" => {
             if let Some(key) = params["api_key"].as_str() {
                 let encoded = BASE64.encode(format!("api:{}", key));
@@ -425,6 +437,62 @@ fn describe_microsoft_entra_client_credentials_auth(
             ("client_id".to_string(), client_id),
             ("client_secret".to_string(), client_secret),
             ("scope".to_string(), scope),
+        ]),
+        basic_auth: None,
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
+}
+
+/// Bot Framework scope is fixed by the protocol; it cannot be replaced with a
+/// custom scope.
+const BOT_FRAMEWORK_SCOPE: &str = "https://api.botframework.com/.default";
+
+/// Authority tenant used by legacy multi-tenant bots. Microsoft deprecated
+/// creation of multi-tenant bots after 2025-07-31; existing ones keep working.
+const BOT_FRAMEWORK_MULTI_TENANT_AUTHORITY: &str = "botframework.com";
+
+/// Authority tenant for a teams_bot connection. Single-tenant (the modern
+/// default) uses the configured Microsoft tenant; the legacy multi-tenant
+/// authority is used when the connection explicitly declares that app type or
+/// predates the app_type field and has no tenant configured (accept-and-warn:
+/// save-time validation rejects NEW tenant-less single-tenant connections).
+fn teams_bot_authority_tenant(params: &Value) -> String {
+    let app_type = params["app_type"].as_str().unwrap_or("single_tenant");
+    let tenant = first_string_param(params, &["azure_tenant_id"])
+        .map(|t| t.trim_matches('/').to_string())
+        .filter(|t| !t.is_empty());
+    match (app_type, tenant) {
+        ("multi_tenant", _) | (_, None) => BOT_FRAMEWORK_MULTI_TENANT_AUTHORITY.to_string(),
+        (_, Some(tenant)) => tenant,
+    }
+}
+
+fn describe_teams_bot_auth(connection_id: &str, params: &Value) -> Option<DeferredAuth> {
+    let app_id = first_string_param(params, &["app_id"])?;
+    let app_password = first_string_param(params, &["app_password"])?;
+    let tenant = teams_bot_authority_tenant(params);
+    let authority_host = first_string_param(params, &["authority_host"])
+        .unwrap_or_else(|| "https://login.microsoftonline.com".to_string())
+        .trim_end_matches('/')
+        .to_string();
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(&[
+            "teams_bot",
+            connection_id,
+            &authority_host,
+            &tenant,
+            &app_id,
+            BOT_FRAMEWORK_SCOPE,
+        ]),
+        token_url: format!("{authority_host}/{tenant}/oauth2/v2.0/token"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::FormUrlEncoded(vec![
+            ("grant_type".to_string(), "client_credentials".to_string()),
+            ("client_id".to_string(), app_id),
+            ("client_secret".to_string(), app_password),
+            ("scope".to_string(), BOT_FRAMEWORK_SCOPE.to_string()),
         ]),
         basic_auth: None,
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
@@ -906,6 +974,126 @@ mod tests {
         // Endpoint declared but no token on the connection → nothing to revoke.
         assert!(
             build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
+        );
+    }
+
+    fn teams_deferred(params: serde_json::Value) -> DeferredAuth {
+        describe_teams_bot_auth("conn-1", &params).expect("teams_bot deferred auth")
+    }
+
+    fn teams_token_url(params: serde_json::Value) -> String {
+        match teams_deferred(params) {
+            DeferredAuth::OAuth2ClientCredentials { token_url, .. } => token_url,
+            _ => panic!("expected client-credentials deferred auth"),
+        }
+    }
+
+    #[test]
+    fn teams_bot_single_tenant_uses_configured_tenant_authority() {
+        let url = teams_token_url(json!({
+            "app_id": "app-guid",
+            "app_password": "secret",
+            "azure_tenant_id": "tenant-guid",
+        }));
+        assert_eq!(
+            url,
+            "https://login.microsoftonline.com/tenant-guid/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn teams_bot_explicit_multi_tenant_uses_botframework_authority() {
+        let url = teams_token_url(json!({
+            "app_id": "app-guid",
+            "app_password": "secret",
+            "app_type": "multi_tenant",
+            // A stray tenant id must not override the explicit legacy app type.
+            "azure_tenant_id": "tenant-guid",
+        }));
+        assert_eq!(
+            url,
+            "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn teams_bot_legacy_tenantless_connection_falls_back_to_botframework() {
+        // Connections stored before app_type existed: accept-and-warn.
+        let url = teams_token_url(json!({
+            "app_id": "app-guid",
+            "app_password": "secret",
+        }));
+        assert_eq!(
+            url,
+            "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn teams_bot_authority_host_override_is_honored() {
+        let url = teams_token_url(json!({
+            "app_id": "app-guid",
+            "app_password": "secret",
+            "azure_tenant_id": "tenant-guid",
+            "authority_host": "https://mock-login.local:9443/",
+        }));
+        assert_eq!(
+            url,
+            "https://mock-login.local:9443/tenant-guid/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn teams_bot_mint_body_is_fixed_scope_client_credentials() {
+        match teams_deferred(json!({
+            "app_id": "app-guid",
+            "app_password": "secret",
+            "azure_tenant_id": "tenant-guid",
+        })) {
+            DeferredAuth::OAuth2ClientCredentials {
+                request_body: TokenRequestBody::FormUrlEncoded(pairs),
+                header_name,
+                header_value_prefix,
+                ..
+            } => {
+                assert_eq!(header_name, "Authorization");
+                assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+                let get = |k: &str| {
+                    pairs
+                        .iter()
+                        .find(|(name, _)| name == k)
+                        .map(|(_, v)| v.as_str())
+                };
+                assert_eq!(get("grant_type"), Some("client_credentials"));
+                assert_eq!(get("client_id"), Some("app-guid"));
+                assert_eq!(get("client_secret"), Some("secret"));
+                assert_eq!(get("scope"), Some("https://api.botframework.com/.default"));
+            }
+            _ => panic!("unexpected deferred auth shape"),
+        }
+    }
+
+    #[test]
+    fn teams_bot_descriptor_has_no_static_base_url() {
+        // The Bot Connector base is the per-conversation serviceUrl, bound at
+        // request time via a validated endpoint ref. A static base here would
+        // let credentialed requests egress without a binding.
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "teams_bot",
+            &json!({
+                "app_id": "app-guid",
+                "app_password": "secret",
+                "azure_tenant_id": "tenant-guid",
+            }),
+            &mut headers,
+        );
+        assert!(descriptor.base_url.is_none());
+        assert!(descriptor.deferred_auth.is_some());
+        assert!(
+            headers.is_empty(),
+            "no eager header injection for teams_bot"
         );
     }
 
