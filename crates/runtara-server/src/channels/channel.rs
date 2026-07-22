@@ -204,7 +204,11 @@ impl TeamsChannel {
             .send()
             .await?;
 
+        let status = resp.status();
         let body: serde_json::Value = resp.json().await?;
+        if !status.is_success() {
+            anyhow::bail!("Teams token acquisition failed ({status}): {body}");
+        }
         let access_token = body["access_token"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("No access_token in response: {}", body))?
@@ -273,6 +277,10 @@ impl Channel for TeamsChannel {
                         body = %body,
                         "Teams send activity failed"
                     );
+                    // Propagate the failure instead of reporting success: a
+                    // 401/403/404/429/5xx from the Bot Connector must not be
+                    // swallowed (the session loop can then surface it).
+                    anyhow::bail!("Teams send activity failed ({status}): {body}");
                 }
             }
 
